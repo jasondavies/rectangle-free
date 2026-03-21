@@ -167,14 +167,26 @@ These require:
 - OpenMP,
 - a vendored official nauty release under `third_party/nauty`.
 
-Recommended setup:
+The repository already vendors the nauty source in `third_party/nauty`. The
+top-level `make` does not build in place there; instead it creates a private
+configured copy in `third_party/nauty-build`, enables TLS there, and builds
+`nautyT.a`.
 
-- download an official nauty release tarball from the nauty distribution site,
-- unpack it into `third_party/nauty`,
-- run the top-level `make`, which creates a private configured copy in
-  `third_party/nauty-build`, enables TLS there, and builds `nautyT.a`.
+In the default layout:
 
-The default [Makefile](/Users/jason/src/rectangle-free/Makefile) assumes:
+- `third_party/nauty` is the checked-in nauty source tree,
+- `third_party/nauty-build` is a generated build directory.
+
+So the normal build is simply:
+
+```bash
+make
+```
+
+You only need to override the nauty path if you deliberately want to use a
+different source tree.
+
+The default `Makefile` assumes:
 
 ```text
 third_party/nauty
@@ -208,7 +220,7 @@ cc -O3 -march=native -fopenmp -I./third_party/nauty-build -I./third_party/nauty 
 ```
 
 On macOS with Apple clang, OpenMP usually also needs Homebrew `libomp`. The
-current [Makefile](/Users/jason/src/rectangle-free/Makefile) uses
+current `Makefile` uses
 `/opt/homebrew/opt/libomp` automatically on Darwin.
 
 For the self-contained 5-row solver, simply run:
@@ -217,7 +229,7 @@ For the self-contained 5-row solver, simply run:
 make 5xn
 ```
 
-To build everything once nauty is present:
+To build everything:
 
 ```bash
 make
