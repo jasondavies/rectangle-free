@@ -23,6 +23,14 @@ This repo contains a mix of:
 - state-space dynamic programs with symmetry reduction,
 - partition-based structure-graph solvers with nauty-backed canonical caching.
 
+The two partition-based C solvers in particular came out of a sequence of
+algorithmic experiments. The important distinction is:
+
+- `partition_poly.c` computes the full chromatic polynomial associated with a
+  column structure.
+- `partition_count4.c` keeps the same structure search, but specialises hard to
+  `k = 4` and turns the graph side into an exact branch-and-bound search.
+
 ## File guide
 
 ### Small-width Python scripts
@@ -36,14 +44,6 @@ This repo contains a mix of:
 
 - `4xn.py`
   Weighted set-packing DP on row-pair masks for `T_4(4, n)`.
-
-- `5xn.py`
-  Python implementation of the `5 x n`, `k = 4` solver using memoized DP with
-  canonicalization under row permutations and colour permutations.
-
-- `6xn.py`
-  Python implementation for `6 x n`, `k = 4` using a weighted set-packing DP on
-  60 pair-colour tokens, with optional row+colour canonicalization.
 
 ### 5-row C solver
 
@@ -87,6 +87,11 @@ These programs encode which row-pair / colour combinations are still available,
 then recurse with memoization. For `5 x n`, the important optimization is
 canonicalization under row permutations and colour permutations.
 
+For `6 x n`, the Python version uses the same basic bucket idea, but with 60
+pair-colour tokens. This is conceptually clean, but the state space gets large
+quickly, which is one reason the partition-based C solvers became the main path
+for wider `6 x n` computations.
+
 ### 2. Partition / structure-graph search
 
 Used by:
@@ -101,6 +106,40 @@ isomorphic graphs via canonical labeling.
 This is the reason the files were renamed from the old `solver.c` /
 `solver4.c`: they are meant to be distinguished from the `5xn` state-space DP
 solvers by method, not just by output format.
+
+At a high level, the partition solvers work like this:
+
+1. Enumerate multisets of column partitions in canonical order, quotienting out
+   column permutations and row symmetries.
+2. For each structure, build the conflict graph on the complex blocks
+   (non-singleton colour classes) induced by the chosen columns.
+3. Weight each structure by:
+   - the multinomial factor for repeated columns,
+   - the row-orbit factor from the surviving row stabilizer,
+   - the singleton-colour contribution coming from the partition type,
+   - and finally either the chromatic polynomial of the conflict graph or the
+     number of proper 4-colourings of that graph.
+
+This gives two related but different solvers:
+
+- `partition_poly.c`
+  treats the graph contribution symbolically and computes a chromatic
+  polynomial `P(x)` by deletion-contraction, with canonical graph caching via
+  nauty.
+
+- `partition_count4.c`
+  keeps the same canonical partition search, but replaces the symbolic graph
+  stage with a direct 4-colouring counter and adds monotone pruning:
+  incremental conflict graphs, pair-shadow capacity bounds, cheap `K5`
+  obstruction checks, and exact 4-colourability tests on the current prefix
+  graph.
+
+In practice, that division is useful:
+
+- the polynomial solver is the more general method and is the right tool when
+  you want `P(x)` itself or values for several numbers of colours,
+- the `k = 4` solver is much more aggressive and is the practical route for the
+  largest current `6 x n` runs.
 
 ## Running the Python scripts
 
@@ -285,3 +324,39 @@ the induced structure graphs.
 - Width `5` has a dedicated state-space DP solver in Python and C.
 - Width `6` has both a Python token-mask solver and partition-based C solvers.
 - `counts.txt` is the current in-repo table of known values.
+
+## Acknowledgements
+
+The partition-based solver line owes a lot to [Adam P. Goucher][adam]. In
+particular, the main ideas behind the polynomial/graph approach came out of
+discussions with him:
+
+- reframing the structure contribution in terms of chromatic polynomials of
+  conflict graphs,
+- using canonical graph labeling with nauty/traces so memoization works up to
+  graph isomorphism rather than on raw labelled graphs,
+- reducing graphs by peeling vertices whose neighbourhoods form cliques, which
+  only contributes a multiplicative factor to the chromatic polynomial,
+- and using bounded per-thread graph-to-polynomial caches rather than trying to
+  maintain one giant global symbolic state.
+
+Other useful suggestions from Adam that influenced the implementations and the
+way they were tested include:
+
+- using deletion-contraction with memoization as the basic graph-polynomial
+  engine,
+- treating the transpose identity `T_k(m, n) = T_k(n, m)` as an end-to-end
+  correctness check,
+- improving canonical-prefix logic by borrowing ideas from canonical Boolean
+  chain search rather than relying purely on a naive permutation loop,
+- and exploring lazy per-thread sums over canonical graphs as an alternative
+  way to organise the symbolic computation.
+
+More broadly, there are two Adam-inspired lines in this repository:
+
+- the obstruction-pattern / bucket-mask line, which led to the `5 x n` and
+  `6 x n` state-space solvers,
+- and the structures + graph-colouring + nauty line, which led to the
+  partition-based C solvers.
+
+[adam]: https://cp4space.hatsya.com/
