@@ -1778,6 +1778,9 @@ int main(int argc, char** argv) {
 
         total_leaf_canon_calls += local_leaf_canon_calls;
         nauty_workspace_free(&ws);
+        nauty_freedyn();
+        nautil_freedyn();
+        naugraph_freedyn();
     }
 
     GraphEvalMap global_terms;
@@ -1805,9 +1808,9 @@ int main(int argc, char** argv) {
                                                            "deferred_thread_evals");
     for (int i = 0; i < num_threads; i++) eval_zero(&deferred_thread_evals[i]);
 
+    #pragma omp parallel reduction(+:total_canon_calls, total_cache_hits, total_raw_cache_hits)
     {
-        // The deferred graph evaluator is kept serial: the recursive
-        // canonical-subgraph path undercounted in threaded runs for 7x3.
+        int tid = omp_get_thread_num();
         GraphEvalCache cache = {0};
         GraphEvalCache raw_cache = {0};
         NautyWorkspace ws;
@@ -1833,6 +1836,11 @@ int main(int argc, char** argv) {
         memset(cache.keys, 0, sizeof(CacheKey) * CACHE_SIZE);
         memset(raw_cache.keys, 0, sizeof(CacheKey) * RAW_CACHE_SIZE);
 
+        long long local_canon_calls = 0;
+        long long local_cache_hits = 0;
+        long long local_raw_cache_hits = 0;
+
+        #pragma omp for schedule(dynamic, 8)
         for (size_t slot = 0; slot < global_terms.cap; slot++) {
             if (!global_terms.keys[slot].used) continue;
             Graph g;
@@ -1840,13 +1848,20 @@ int main(int argc, char** argv) {
             graph_map_load_graph(&global_terms, slot, &g);
             graph_map_load_eval(&global_terms, slot, &weight);
             EvalVec graph_eval = solve_graph_eval(g, &cache, &raw_cache, &ws,
-                                                  &total_canon_calls, &total_cache_hits,
-                                                  &total_raw_cache_hits);
+                                                  &local_canon_calls, &local_cache_hits,
+                                                  &local_raw_cache_hits);
             EvalVec term = eval_pointwise_mul(weight, &graph_eval);
-            eval_add_inplace(&deferred_thread_evals[0], &term);
+            eval_add_inplace(&deferred_thread_evals[tid], &term);
         }
 
+        total_canon_calls += local_canon_calls;
+        total_cache_hits += local_cache_hits;
+        total_raw_cache_hits += local_raw_cache_hits;
+
         nauty_workspace_free(&ws);
+        nauty_freedyn();
+        nautil_freedyn();
+        naugraph_freedyn();
         free(cache.keys);
         free(cache.adj);
         free(cache.values);
