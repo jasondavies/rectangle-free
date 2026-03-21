@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <errno.h>
 #include <omp.h>
+#include "progress_util.h"
 
 // --- CONFIGURATION ---
 #define DEFAULT_ROWS 6
@@ -127,40 +128,16 @@ static Poly global_poly = {0};
 
 static int g_rows = DEFAULT_ROWS;
 static int g_cols = DEFAULT_COLS;
+static ProgressReporter progress_reporter;
 
 #define DEFAULT_PROGRESS_UPDATES 2000
 
-static void format_duration(double seconds, char* out, size_t out_size) {
-    if (seconds < 0.0) seconds = 0.0;
-    long long rounded = (long long)(seconds + 0.5);
-    long long hours = rounded / 3600;
-    long long minutes = (rounded % 3600) / 60;
-    long long secs = rounded % 60;
-    snprintf(out, out_size, "%lld:%02lld:%02lld", hours, minutes, secs);
-}
-
 static inline void maybe_report_progress(long long done, long long total_tasks, long long report_step,
                                          long long* last_reported, double start_time) {
-    if (done != total_tasks && (report_step <= 0 || (done % report_step) != 0)) return;
-
-    #pragma omp critical(progress_output)
-    {
-        if (done > *last_reported) {
-            *last_reported = done;
-
-            double elapsed = omp_get_wtime() - start_time;
-            double pct = total_tasks > 0 ? (100.0 * (double)done / (double)total_tasks) : 100.0;
-            double rate = elapsed > 0.0 ? ((double)done / elapsed) : 0.0;
-            double eta = (rate > 0.0 && total_tasks > done) ? ((double)(total_tasks - done) / rate) : 0.0;
-            char elapsed_str[32];
-            char eta_str[32];
-            format_duration(elapsed, elapsed_str, sizeof(elapsed_str));
-            format_duration(eta, eta_str, sizeof(eta_str));
-            printf("\rProgress: %lld/%lld (%.2f%%, %.1f tasks/s, elapsed %s, ETA %s)",
-                   done, total_tasks, pct, rate, elapsed_str, eta_str);
-            fflush(stdout);
-        }
-    }
+    progress_reporter.last_reported = *last_reported;
+    progress_reporter_maybe_report(&progress_reporter, done, total_tasks, report_step,
+                                   start_time, omp_get_wtime());
+    *last_reported = progress_reporter.last_reported;
 }
 
 static inline void complete_task_and_report(long long total_tasks, long long report_step,
@@ -1573,7 +1550,8 @@ int main(int argc, char** argv) {
         printf(" (target ~%lld updates)", progress_updates);
     }
     printf("\n");
-    printf("Progress: 0/%lld (0.00%%)\n", total_tasks);
+    progress_reporter_init(&progress_reporter, stdout);
+    progress_reporter_print_initial(&progress_reporter, total_tasks);
 
     double start_time = omp_get_wtime();
     
@@ -1867,11 +1845,13 @@ int main(int argc, char** argv) {
     free(prefix_k);
     free(prefix_l);
     
+    progress_reporter_finish(&progress_reporter);
+
     double end_time = omp_get_wtime();
     double worker_time = end_time - start_time;
     double total_elapsed = worker_time + prefix_generation_time;
     
-    printf("\n\nWorker Complete in %.2f seconds.\n", worker_time);
+    printf("\nWorker Complete in %.2f seconds.\n", worker_time);
     if (prefix_depth > 0) {
         printf("Total elapsed including prefix generation: %.2f seconds.\n", total_elapsed);
     }
