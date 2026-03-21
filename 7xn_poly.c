@@ -164,10 +164,9 @@ static ProgressReporter progress_reporter;
 
 static inline void maybe_report_progress(long long done, long long total_tasks, long long report_step,
                                          long long* last_reported, double start_time) {
-    progress_reporter.last_reported = *last_reported;
+    (void)last_reported;
     progress_reporter_maybe_report(&progress_reporter, done, total_tasks, report_step,
                                    start_time, omp_get_wtime());
-    *last_reported = progress_reporter.last_reported;
 }
 
 static inline void complete_task_and_report(long long total_tasks, long long report_step,
@@ -814,7 +813,7 @@ static void canon_state_commit_push(CanonState* st, int partition_id, const uint
                                     int next_stabilizer) {
     int depth = st->depth;
     int new_depth = depth + 1;
-    st->stack_vals[depth] = (uint8_t)partition_id;
+    st->stack_vals[depth] = (uint16_t)partition_id;
 
     for (int p = 0; p < st->limit; p++) {
         int j = next_insert_pos[p];
@@ -1806,9 +1805,9 @@ int main(int argc, char** argv) {
                                                            "deferred_thread_evals");
     for (int i = 0; i < num_threads; i++) eval_zero(&deferred_thread_evals[i]);
 
-    #pragma omp parallel reduction(+:total_canon_calls, total_cache_hits, total_raw_cache_hits)
     {
-        int tid = omp_get_thread_num();
+        // The deferred graph evaluator is kept serial: the recursive
+        // canonical-subgraph path undercounted in threaded runs for 7x3.
         GraphEvalCache cache = {0};
         GraphEvalCache raw_cache = {0};
         NautyWorkspace ws;
@@ -1834,11 +1833,6 @@ int main(int argc, char** argv) {
         memset(cache.keys, 0, sizeof(CacheKey) * CACHE_SIZE);
         memset(raw_cache.keys, 0, sizeof(CacheKey) * RAW_CACHE_SIZE);
 
-        long long local_canon_calls = 0;
-        long long local_cache_hits = 0;
-        long long local_raw_cache_hits = 0;
-
-        #pragma omp for schedule(dynamic, 8)
         for (size_t slot = 0; slot < global_terms.cap; slot++) {
             if (!global_terms.keys[slot].used) continue;
             Graph g;
@@ -1846,15 +1840,11 @@ int main(int argc, char** argv) {
             graph_map_load_graph(&global_terms, slot, &g);
             graph_map_load_eval(&global_terms, slot, &weight);
             EvalVec graph_eval = solve_graph_eval(g, &cache, &raw_cache, &ws,
-                                                  &local_canon_calls, &local_cache_hits,
-                                                  &local_raw_cache_hits);
+                                                  &total_canon_calls, &total_cache_hits,
+                                                  &total_raw_cache_hits);
             EvalVec term = eval_pointwise_mul(weight, &graph_eval);
-            eval_add_inplace(&deferred_thread_evals[tid], &term);
+            eval_add_inplace(&deferred_thread_evals[0], &term);
         }
-
-        total_canon_calls += local_canon_calls;
-        total_cache_hits += local_cache_hits;
-        total_raw_cache_hits += local_raw_cache_hits;
 
         nauty_workspace_free(&ws);
         free(cache.keys);
