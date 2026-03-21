@@ -9,6 +9,8 @@
 // Build: cc -O3 -march=native -std=c11 5xn.c -o 5xn
 // Run:   ./5xn
 
+#define _POSIX_C_SOURCE 200809L
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -65,9 +67,13 @@ static void big_set_u64(Big *a, uint64_t x) {
 }
 
 static void big_copy(Big *dst, const Big *src) {
+    if (src->len <= 0) {
+        dst->len = 0;
+        return;
+    }
     big_reserve(dst, src->len);
     dst->len = src->len;
-    if (src->len) memcpy(dst->d, src->d, (size_t)src->len * sizeof(uint32_t));
+    memcpy(dst->d, src->d, (size_t)src->len * sizeof(uint32_t));
 }
 
 static void big_add_inplace(Big *a, const Big *b) {
