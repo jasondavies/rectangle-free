@@ -21,7 +21,7 @@ This repo contains a mix of:
 
 - small-width closed forms / direct Python programs,
 - state-space dynamic programs with symmetry reduction,
-- partition-based structure-graph solvers with nauty-backed canonical caching.
+- partition-based structure-graph solvers with [nauty][nauty]-backed canonical caching.
 
 The two partition-based C solvers in particular came out of a sequence of
 algorithmic experiments. The important distinction is:
@@ -355,3 +355,4 @@ More broadly, there are two Adam-inspired lines in this repository:
   partition-based C solvers.
 
 [adam]: https://cp4space.hatsya.com/
+[nauty]: https://pallini.di.uniroma1.it/
