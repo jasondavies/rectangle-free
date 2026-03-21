@@ -1,6 +1,7 @@
 CC := gcc
 MAKE ?= make
 NAUTY_DIR ?= ./third_party/nauty
+NAUTY_BUILD_DIR ?= ./third_party/nauty-build
 NAUTY_CONFIGURE_FLAGS ?= --enable-tls
 NAUTY_BUILD_CFLAGS ?= -O3 -march=native
 UNAME_S := $(shell uname -s)
@@ -14,8 +15,8 @@ OPENMP_CFLAGS ?= -fopenmp
 OPENMP_LDFLAGS ?=
 endif
 
-PARTITION_CFLAGS ?= -O3 -march=native $(OPENMP_CFLAGS) -DUSE_TLS -I$(NAUTY_DIR)
-LDFLAGS ?= $(NAUTY_DIR)/nautyT.a -lm $(OPENMP_LDFLAGS)
+PARTITION_CFLAGS ?= -O3 -march=native $(OPENMP_CFLAGS) -DUSE_TLS -I$(NAUTY_BUILD_DIR) -I$(NAUTY_DIR)
+LDFLAGS ?= $(NAUTY_BUILD_DIR)/nautyT.a -lm $(OPENMP_LDFLAGS)
 
 NVCC ?= nvcc
 NVCCFLAGS ?= -O3 -arch=sm_89 -std=c++17 -I./inspiration/cpads/include
@@ -24,17 +25,22 @@ CFLAGS_5XN ?= -O3 -march=native -std=c11
 
 all: partition_poly partition_count4 5xn
 
-$(NAUTY_DIR)/.configured-tls:
-	cd $(NAUTY_DIR) && ./configure $(NAUTY_CONFIGURE_FLAGS) CC="$(CC)" CFLAGS="$(NAUTY_BUILD_CFLAGS)"
+$(NAUTY_BUILD_DIR)/.prepared:
+	rm -rf $(NAUTY_BUILD_DIR)
+	cp -R $(NAUTY_DIR) $(NAUTY_BUILD_DIR)
 	touch $@
 
-$(NAUTY_DIR)/nautyT.a: $(NAUTY_DIR)/.configured-tls
-	$(MAKE) -C $(NAUTY_DIR) nautyT.a
+$(NAUTY_BUILD_DIR)/.configured-tls: $(NAUTY_BUILD_DIR)/.prepared
+	cd $(NAUTY_BUILD_DIR) && ./configure $(NAUTY_CONFIGURE_FLAGS) CC="$(CC)" CFLAGS="$(NAUTY_BUILD_CFLAGS)"
+	touch $@
 
-partition_poly: partition_poly.c $(NAUTY_DIR)/nautyT.a
+$(NAUTY_BUILD_DIR)/nautyT.a: $(NAUTY_BUILD_DIR)/.configured-tls
+	$(MAKE) -C $(NAUTY_BUILD_DIR) nautyT.a
+
+partition_poly: partition_poly.c $(NAUTY_BUILD_DIR)/nautyT.a
 	$(CC) $(PARTITION_CFLAGS) -o $@ $< $(LDFLAGS)
 
-partition_count4: partition_count4.c $(NAUTY_DIR)/nautyT.a
+partition_count4: partition_count4.c $(NAUTY_BUILD_DIR)/nautyT.a
 	$(CC) $(PARTITION_CFLAGS) -o $@ $< $(LDFLAGS)
 
 5xn: 5xn.c
@@ -51,7 +57,6 @@ clean:
 	rm -f partition_poly partition_count4 5xn
 
 clean-nauty:
-	-$(MAKE) -C $(NAUTY_DIR) clean
-	rm -f $(NAUTY_DIR)/nautyT.a $(NAUTY_DIR)/.configured-tls
+	rm -rf $(NAUTY_BUILD_DIR)
 
 .PHONY: all clean clean-nauty solver solver4 solver_5xn

@@ -145,20 +145,23 @@ Recommended setup:
 
 - download an official nauty release tarball from the nauty distribution site,
 - unpack it into `third_party/nauty`,
-- run `./configure --enable-tls` inside that directory,
-- build `nautyT.a` inside that directory,
+- let the top-level build create a private configured copy in
+  `third_party/nauty-build`,
+- build with `make`,
 - then build this repo with `make`.
 
 The default [Makefile](/Users/jason/src/rectangle-free/Makefile) assumes:
 
 ```text
 third_party/nauty
+third_party/nauty-build
 ```
 
 and uses:
 
 ```make
 NAUTY_DIR ?= ./third_party/nauty
+NAUTY_BUILD_DIR ?= ./third_party/nauty-build
 ```
 
 You can override that path at build time if needed:
@@ -170,10 +173,16 @@ make NAUTY_DIR=/path/to/nauty
 If you want to compile manually, the command shape is:
 
 ```bash
-cc -O3 -march=native -fopenmp -I./third_party/nauty \
-  -DUSE_TLS -o partition_poly partition_poly.c ./third_party/nauty/nautyT.a -lm
-cc -O3 -march=native -fopenmp -I./third_party/nauty \
-  -DUSE_TLS -o partition_count4 partition_count4.c ./third_party/nauty/nautyT.a -lm
+rm -rf third_party/nauty-build
+cp -R third_party/nauty third_party/nauty-build
+cd third_party/nauty-build
+./configure --enable-tls
+make nautyT.a
+
+cc -O3 -march=native -fopenmp -I./third_party/nauty-build -I./third_party/nauty \
+  -DUSE_TLS -o partition_poly partition_poly.c ./third_party/nauty-build/nautyT.a -lm
+cc -O3 -march=native -fopenmp -I./third_party/nauty-build -I./third_party/nauty \
+  -DUSE_TLS -o partition_count4 partition_count4.c ./third_party/nauty-build/nautyT.a -lm
 ```
 
 On macOS with Apple clang, OpenMP usually also needs Homebrew `libomp`. The

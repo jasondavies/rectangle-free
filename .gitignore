@@ -10,3 +10,4 @@ third_party/nauty/config.status
 third_party/nauty/libnautyT.la
 third_party/nauty/*.lo
 third_party/nauty/*T.o
+third_party/nauty-build/
