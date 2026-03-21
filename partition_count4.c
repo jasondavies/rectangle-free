@@ -131,27 +131,27 @@ typedef struct {
 } ProfileStats;
 
 // --- GLOBALS ---
-int num_partitions = 0;
-Partition partitions[MAX_PARTITIONS];
-int perms[PERM_SIZE][MAX_ROWS];
-uint8_t perm_table[MAX_PARTITIONS][PERM_SIZE];
-uint64_t factorial[20];
-uint32_t overlap_mask[MAX_PARTITIONS][MAX_PARTITIONS][MAX_ROWS];
-uint32_t intra_mask[MAX_PARTITIONS][MAX_ROWS];
-uint16_t pair_shadow_mask[MAX_PARTITIONS];
-uint8_t pair_shadow_pairs[MAX_PARTITIONS];
-uint8_t suffix_min_pairs[MAX_PARTITIONS];
-uint8_t partition_weight4[MAX_PARTITIONS];
-int pair_index[MAX_ROWS][MAX_ROWS];
-int num_row_pairs = 0;
-int min_partition_pairs = 0;
+static int num_partitions = 0;
+static Partition partitions[MAX_PARTITIONS];
+static int perms[PERM_SIZE][MAX_ROWS];
+static uint8_t perm_table[MAX_PARTITIONS][PERM_SIZE];
+static uint64_t factorial[20];
+static uint32_t overlap_mask[MAX_PARTITIONS][MAX_PARTITIONS][MAX_ROWS];
+static uint32_t intra_mask[MAX_PARTITIONS][MAX_ROWS];
+static uint16_t pair_shadow_mask[MAX_PARTITIONS];
+static uint8_t pair_shadow_pairs[MAX_PARTITIONS];
+static uint8_t suffix_min_pairs[MAX_PARTITIONS];
+static uint8_t partition_weight4[MAX_PARTITIONS];
+static int pair_index[MAX_ROWS][MAX_ROWS];
+static int num_row_pairs = 0;
+static int min_partition_pairs = 0;
 
-volatile long long completed_tasks = 0;
-Count global_count = 0;
+static volatile long long completed_tasks = 0;
+static Count global_count = 0;
 
-int g_rows = DEFAULT_ROWS;
-int g_cols = DEFAULT_COLS;
-int g_profile_enabled = 0;
+static int g_rows = DEFAULT_ROWS;
+static int g_cols = DEFAULT_COLS;
+static int g_profile_enabled = 0;
 
 #define DEFAULT_PROGRESS_UPDATES 2000
 #define FULL_COLOUR_MASK ((uint8_t)((1U << K_COLOURS) - 1U))

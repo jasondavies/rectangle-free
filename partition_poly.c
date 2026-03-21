@@ -114,19 +114,19 @@ typedef struct {
 } GraphCache;
 
 // --- GLOBALS ---
-int num_partitions = 0;
-Partition partitions[MAX_PARTITIONS];
-int perms[PERM_SIZE][MAX_ROWS];
-uint8_t perm_table[MAX_PARTITIONS][PERM_SIZE];
-uint64_t factorial[20];
-uint32_t overlap_mask[MAX_PARTITIONS][MAX_PARTITIONS][MAX_ROWS];
-uint32_t intra_mask[MAX_PARTITIONS][MAX_ROWS];
+static int num_partitions = 0;
+static Partition partitions[MAX_PARTITIONS];
+static int perms[PERM_SIZE][MAX_ROWS];
+static uint8_t perm_table[MAX_PARTITIONS][PERM_SIZE];
+static uint64_t factorial[20];
+static uint32_t overlap_mask[MAX_PARTITIONS][MAX_PARTITIONS][MAX_ROWS];
+static uint32_t intra_mask[MAX_PARTITIONS][MAX_ROWS];
 
-volatile long long completed_tasks = 0;
-Poly global_poly = {0}; 
+static volatile long long completed_tasks = 0;
+static Poly global_poly = {0}; 
 
-int g_rows = DEFAULT_ROWS;
-int g_cols = DEFAULT_COLS;
+static int g_rows = DEFAULT_ROWS;
+static int g_cols = DEFAULT_COLS;
 
 #define DEFAULT_PROGRESS_UPDATES 2000
 
