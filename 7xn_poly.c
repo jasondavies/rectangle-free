@@ -48,6 +48,9 @@ typedef uint64_t AdjWord;
 
 #define DEFAULT_PROGRESS_UPDATES 2000
 #define TERM_MAP_INITIAL_BITS 12
+#define DEFAULT_TAIL_SPLIT_PROGRESS_PERCENT 0
+#define DEFAULT_TAIL_SPLIT_MIN_SPAN 768
+#define DEFAULT_TAIL_SPLIT_CHUNK 16
 
 typedef __int128_t Count;
 
@@ -160,6 +163,9 @@ static EvalVec global_eval = {0};
 static int g_rows = FIXED_ROWS;
 static int g_cols = DEFAULT_COLS;
 static int g_eval_len = 0;
+static int g_tail_split_progress_percent = DEFAULT_TAIL_SPLIT_PROGRESS_PERCENT;
+static int g_tail_split_min_span = DEFAULT_TAIL_SPLIT_MIN_SPAN;
+static int g_tail_split_chunk = DEFAULT_TAIL_SPLIT_CHUNK;
 static ProgressReporter progress_reporter;
 
 static inline void maybe_report_progress(long long done, long long total_tasks, long long report_step,
@@ -195,6 +201,17 @@ static long long parse_ll_or_die(const char* text, const char* label) {
         exit(1);
     }
     return value;
+}
+
+static int parse_env_int_or_default(const char* name, int fallback) {
+    const char* text = getenv(name);
+    if (!text || !*text) return fallback;
+
+    char* end = NULL;
+    errno = 0;
+    long value = strtol(text, &end, 10);
+    if (!end || *end != '\0' || errno != 0) return fallback;
+    return (int)value;
 }
 
 static Count parse_i128_or_die(const char* text, const char* label) {
@@ -1460,6 +1477,85 @@ static void dfs(int depth, int min_idx, int* stack, CanonState* canon_state,
     }
 }
 
+static int build_depth2_prefix_state(int i, int j, int* stack, CanonState* canon_state,
+                                     PartialGraphState* prefix_graph) {
+    uint8_t next_insert_pos[PERM_SIZE];
+    int next_stabilizer = 0;
+
+    canon_state_reset(canon_state, (int)factorial[g_rows]);
+    partial_graph_reset(prefix_graph);
+
+    stack[0] = i;
+    if (!canon_state_prepare_push(canon_state, i, next_insert_pos, &next_stabilizer)) return 0;
+    canon_state_commit_push(canon_state, i, next_insert_pos, next_stabilizer);
+    if (!partial_graph_append(prefix_graph, 0, i, stack)) {
+        canon_state_pop(canon_state);
+        return 0;
+    }
+
+    stack[1] = j;
+    if (!canon_state_prepare_push(canon_state, j, next_insert_pos, &next_stabilizer)) {
+        canon_state_pop(canon_state);
+        return 0;
+    }
+    canon_state_commit_push(canon_state, j, next_insert_pos, next_stabilizer);
+    if (!partial_graph_append(prefix_graph, 1, j, stack)) {
+        canon_state_pop(canon_state);
+        canon_state_pop(canon_state);
+        return 0;
+    }
+
+    return 1;
+}
+
+static int should_tail_split_depth2_prefix(int j, long long total_tasks, int num_threads) {
+    if (g_cols < 5 || num_threads < 2) return 0;
+    if (num_partitions - j < g_tail_split_min_span) return 0;
+    if (g_tail_split_chunk <= 0) return 0;
+    if (g_tail_split_progress_percent <= 0) return 1;
+    if (total_tasks <= 0) return 0;
+
+    long long done = 0;
+    #pragma omp atomic read
+    done = completed_tasks;
+
+    return done * 100 >= total_tasks * (long long)g_tail_split_progress_percent;
+}
+
+static void process_depth3_chunk(int i, int j, int k_begin, int k_end,
+                                 GraphEvalMap* thread_terms, long long* thread_leaf_canon_calls) {
+    int tid = omp_get_thread_num();
+    GraphEvalMap* term_map = &thread_terms[tid];
+    NautyWorkspace ws;
+    memset(&ws, 0, sizeof(ws));
+
+    int stack[MAX_COLS];
+    CanonState canon_state;
+    PartialGraphState prefix_graph;
+    long long local_leaf_canon_calls = 0;
+
+    if (build_depth2_prefix_state(i, j, stack, &canon_state, &prefix_graph)) {
+        for (int k = k_begin; k < k_end; k++) {
+            uint8_t next_insert_pos[PERM_SIZE];
+            int next_stabilizer = 0;
+
+            stack[2] = k;
+            if (!canon_state_prepare_push(&canon_state, k, next_insert_pos, &next_stabilizer)) continue;
+            canon_state_commit_push(&canon_state, k, next_insert_pos, next_stabilizer);
+
+            PartialGraphState next_graph = prefix_graph;
+            if (partial_graph_append(&next_graph, 2, k, stack)) {
+                dfs(3, k, stack, &canon_state, &next_graph, term_map, &ws,
+                    &local_leaf_canon_calls);
+            }
+            canon_state_pop(&canon_state);
+        }
+    }
+
+    thread_leaf_canon_calls[tid] += local_leaf_canon_calls;
+    nauty_workspace_free(&ws);
+}
+
 int main(int argc, char** argv) {
     long long task_start = 0;
     long long task_end = -1;
@@ -1565,6 +1661,17 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    g_tail_split_progress_percent = parse_env_int_or_default(
+        "RECT_TAIL_SPLIT_PROGRESS_PERCENT", DEFAULT_TAIL_SPLIT_PROGRESS_PERCENT);
+    if (g_tail_split_progress_percent < 0) g_tail_split_progress_percent = 0;
+    if (g_tail_split_progress_percent > 100) g_tail_split_progress_percent = 100;
+    g_tail_split_min_span = parse_env_int_or_default(
+        "RECT_TAIL_SPLIT_MIN_SPAN", DEFAULT_TAIL_SPLIT_MIN_SPAN);
+    if (g_tail_split_min_span < 1) g_tail_split_min_span = 1;
+    g_tail_split_chunk = parse_env_int_or_default(
+        "RECT_TAIL_SPLIT_CHUNK", DEFAULT_TAIL_SPLIT_CHUNK);
+    if (g_tail_split_chunk < 1) g_tail_split_chunk = 1;
+
     g_eval_len = g_rows * g_cols + 1;
 
     nauty_check(WORDSIZE, MAXN_NAUTY, MAXN_NAUTY, NAUTYVERSIONID);
@@ -1584,6 +1691,17 @@ int main(int argc, char** argv) {
     printf("Threads: %d\n", omp_get_max_threads());
     printf("Leaf backend: DSATUR counting in evaluation space\n");
     printf("Using nauty for canonical graph caching\n");
+    if (g_cols >= 5 && omp_get_max_threads() > 1) {
+        if (g_tail_split_progress_percent > 0) {
+            printf("Tail split: depth-2 prefixes may split at %d%% progress"
+                   " (min span %d, chunk %d)\n",
+                   g_tail_split_progress_percent, g_tail_split_min_span, g_tail_split_chunk);
+        } else {
+            printf("Tail split: wide depth-2 prefixes split eagerly"
+                   " (min span %d, chunk %d)\n",
+                   g_tail_split_min_span, g_tail_split_chunk);
+        }
+    }
 
     int prefix_depth = 0;
     if (prefix_depth_override != -1) prefix_depth = prefix_depth_override;
@@ -1692,9 +1810,14 @@ int main(int argc, char** argv) {
         fprintf(stderr, "Failed to allocate graph term maps\n");
         return 1;
     }
+    long long* thread_leaf_canon_calls = (long long*)calloc((size_t)num_threads, sizeof(long long));
+    if (!thread_leaf_canon_calls) {
+        fprintf(stderr, "Failed to allocate leaf canonicalisation counters\n");
+        free(thread_terms);
+        return 1;
+    }
 
-    long long total_leaf_canon_calls = 0;
-    #pragma omp parallel reduction(+:total_leaf_canon_calls)
+    #pragma omp parallel
     {
         int tid = omp_get_thread_num();
         GraphEvalMap* term_map = &thread_terms[tid];
@@ -1735,53 +1858,37 @@ int main(int argc, char** argv) {
             for (long long p = first_task; p < active_task_end; p += task_stride) {
                 int i = prefix_i[p];
                 int j = prefix_j[p];
-                uint8_t next_insert_pos[PERM_SIZE];
-                int next_stabilizer = 0;
-
-                canon_state_reset(&canon_state, (int)factorial[g_rows]);
-                partial_graph_reset(&partial_graph);
-
-                stack[0] = i;
-                if (!canon_state_prepare_push(&canon_state, i, next_insert_pos, &next_stabilizer)) {
-                    complete_task_and_report(total_tasks, progress_report_step,
-                                             &progress_last_reported, start_time);
-                    continue;
+                if (build_depth2_prefix_state(i, j, stack, &canon_state, &partial_graph)) {
+                    if (should_tail_split_depth2_prefix(j, total_tasks, num_threads)) {
+                        #pragma omp taskgroup
+                        {
+                            for (int k_begin = j; k_begin < num_partitions; k_begin += g_tail_split_chunk) {
+                                int k_end = k_begin + g_tail_split_chunk;
+                                if (k_end > num_partitions) k_end = num_partitions;
+                                #pragma omp task firstprivate(i, j, k_begin, k_end) shared(thread_terms, thread_leaf_canon_calls)
+                                process_depth3_chunk(i, j, k_begin, k_end, thread_terms,
+                                                     thread_leaf_canon_calls);
+                            }
+                        }
+                    } else {
+                        dfs(2, j, stack, &canon_state, &partial_graph, term_map, &ws,
+                            &local_leaf_canon_calls);
+                    }
                 }
-                canon_state_commit_push(&canon_state, i, next_insert_pos, next_stabilizer);
-                if (!partial_graph_append(&partial_graph, 0, i, stack)) {
-                    canon_state_pop(&canon_state);
-                    complete_task_and_report(total_tasks, progress_report_step,
-                                             &progress_last_reported, start_time);
-                    continue;
-                }
-
-                stack[1] = j;
-                if (!canon_state_prepare_push(&canon_state, j, next_insert_pos, &next_stabilizer)) {
-                    canon_state_pop(&canon_state);
-                    complete_task_and_report(total_tasks, progress_report_step,
-                                             &progress_last_reported, start_time);
-                    continue;
-                }
-                canon_state_commit_push(&canon_state, j, next_insert_pos, next_stabilizer);
-                PartialGraphState prefix_graph = partial_graph;
-                if (partial_graph_append(&prefix_graph, 1, j, stack)) {
-                    dfs(2, j, stack, &canon_state, &prefix_graph, term_map, &ws,
-                        &local_leaf_canon_calls);
-                }
-
-                canon_state_pop(&canon_state);
-                canon_state_pop(&canon_state);
                 complete_task_and_report(total_tasks, progress_report_step,
                                          &progress_last_reported, start_time);
             }
         }
 
-        total_leaf_canon_calls += local_leaf_canon_calls;
+        thread_leaf_canon_calls[tid] += local_leaf_canon_calls;
         nauty_workspace_free(&ws);
         nauty_freedyn();
         nautil_freedyn();
         naugraph_freedyn();
     }
+
+    long long total_leaf_canon_calls = 0;
+    for (int tid = 0; tid < num_threads; tid++) total_leaf_canon_calls += thread_leaf_canon_calls[tid];
 
     GraphEvalMap global_terms;
     graph_map_init(&global_terms, g_eval_len);
@@ -1797,6 +1904,7 @@ int main(int argc, char** argv) {
         }
         graph_map_free(term_map);
     }
+    free(thread_leaf_canon_calls);
     free(thread_terms);
 
     long long total_canon_calls = 0;
