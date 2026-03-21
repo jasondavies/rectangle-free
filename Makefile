@@ -23,7 +23,7 @@ NVCCFLAGS ?= -O3 -arch=sm_89 -std=c++17 -I./inspiration/cpads/include
 
 CFLAGS_5XN ?= -O3 -march=native -std=c11
 
-all: partition_poly partition_count4 5xn
+all: 5xn 6xn 6xn_poly
 
 $(NAUTY_BUILD_DIR)/.prepared:
 	rm -rf $(NAUTY_BUILD_DIR)
@@ -37,26 +37,19 @@ $(NAUTY_BUILD_DIR)/.configured-tls: $(NAUTY_BUILD_DIR)/.prepared
 $(NAUTY_BUILD_DIR)/nautyT.a: $(NAUTY_BUILD_DIR)/.configured-tls
 	$(MAKE) -C $(NAUTY_BUILD_DIR) nautyT.a
 
-partition_poly: partition_poly.c $(NAUTY_BUILD_DIR)/nautyT.a
-	$(CC) $(PARTITION_CFLAGS) -o $@ $< $(LDFLAGS)
-
-partition_count4: partition_count4.c $(NAUTY_BUILD_DIR)/nautyT.a
-	$(CC) $(PARTITION_CFLAGS) -o $@ $< $(LDFLAGS)
-
 5xn: 5xn.c
 	$(CC) $(CFLAGS_5XN) -o $@ $<
 
-# Backwards-compatible aliases for the old solver names.
-solver: partition_poly
+6xn: 6xn.c $(NAUTY_BUILD_DIR)/nautyT.a
+	$(CC) $(PARTITION_CFLAGS) -o $@ $< $(LDFLAGS)
 
-solver4: partition_count4
-
-solver_5xn: 5xn
+6xn_poly: 6xn_poly.c $(NAUTY_BUILD_DIR)/nautyT.a
+	$(CC) $(PARTITION_CFLAGS) -o $@ $< $(LDFLAGS)
 
 clean:
-	rm -f partition_poly partition_count4 5xn
+	rm -f 5xn 6xn 6xn_poly
 
 clean-nauty:
 	rm -rf $(NAUTY_BUILD_DIR)
 
-.PHONY: all clean clean-nauty solver solver4 solver_5xn
+.PHONY: all clean clean-nauty 5xn 6xn 6xn_poly
