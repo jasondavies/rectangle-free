@@ -1,0 +1,12 @@
+5xn
+partition_poly
+partition_count4
+
+third_party/nauty/.configured-tls
+third_party/nauty/nautyT.a
+third_party/nauty/.libs/
+third_party/nauty/config.log
+third_party/nauty/config.status
+third_party/nauty/libnautyT.la
+third_party/nauty/*.lo
+third_party/nauty/*T.o
