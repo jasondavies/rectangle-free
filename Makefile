@@ -23,7 +23,7 @@ NVCCFLAGS ?= -O3 -arch=sm_89 -std=c++17 -I./inspiration/cpads/include
 
 CFLAGS_5XN ?= -O3 -march=native -std=c11
 
-all: 5xn 6xn 6xn_poly
+all: 5xn 6xn 6xn_poly 7xn_poly
 
 $(NAUTY_BUILD_DIR)/.prepared:
 	rm -rf $(NAUTY_BUILD_DIR)
@@ -46,10 +46,13 @@ $(NAUTY_BUILD_DIR)/nautyT.a: $(NAUTY_BUILD_DIR)/.configured-tls
 6xn_poly: 6xn_poly.c $(NAUTY_BUILD_DIR)/nautyT.a
 	$(CC) $(PARTITION_CFLAGS) -o $@ $< $(LDFLAGS)
 
+7xn_poly: 7xn_poly.c $(NAUTY_BUILD_DIR)/nautyT.a
+	$(CC) $(PARTITION_CFLAGS) -o $@ $< $(LDFLAGS)
+
 clean:
-	rm -f 5xn 6xn 6xn_poly
+	rm -f 5xn 6xn 6xn_poly 7xn_poly
 
 clean-nauty:
 	rm -rf $(NAUTY_BUILD_DIR)
 
-.PHONY: all clean clean-nauty 5xn 6xn 6xn_poly
+.PHONY: all clean clean-nauty 5xn 6xn 6xn_poly 7xn_poly

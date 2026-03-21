@@ -64,6 +64,15 @@ algorithmic experiments. The important distinction is:
   pruning, 4-colourability checks, and prefix-task generation for parallel
   sharding.
 
+### 7-row C solver
+
+- `7xn_poly.c`
+  Partition/structure-graph solver specialised to 7 rows and currently up to
+  7 columns. It keeps the same canonical structure search, but switches the
+  leaf backend to DSATUR counting in evaluation space and prints the result in
+  Newton / binomial-basis form together with sampled values such as `P(4)` and
+  `P(5)`.
+
 ### Data
 
 - `counts.txt`
@@ -91,6 +100,7 @@ Used by:
 
 - `6xn_poly.c`
 - `6xn.c`
+- `7xn_poly.c`
 
 These programs enumerate column partitions, build a structure graph describing
 interactions between non-singleton colour classes, and use nauty to cache
@@ -122,6 +132,11 @@ This gives two related but different solvers:
   incremental conflict graphs, pair-shadow capacity bounds, cheap `K5`
   obstruction checks, and exact 4-colourability tests on the current prefix
   graph.
+
+- `7xn_poly.c`
+  keeps the partition search and graph canonicalisation, but accumulates
+  structure weights at evaluation points and computes each distinct leaf graph
+  with a DSATUR-based falling-factorial counter instead of deletion-contraction.
 
 In practice, that division is useful:
 
@@ -160,7 +175,7 @@ Run with:
 ./5xn
 ```
 
-### `6xn_poly.c` and `6xn.c`
+### `6xn_poly.c`, `6xn.c`, and `7xn_poly.c`
 
 These require:
 
@@ -217,6 +232,8 @@ cc -O3 -march=native -fopenmp -I./third_party/nauty-build -I./third_party/nauty 
   -DUSE_TLS -o 6xn_poly 6xn_poly.c ./third_party/nauty-build/nautyT.a -lm
 cc -O3 -march=native -fopenmp -I./third_party/nauty-build -I./third_party/nauty \
   -DUSE_TLS -o 6xn 6xn.c ./third_party/nauty-build/nautyT.a -lm
+cc -O3 -march=native -fopenmp -I./third_party/nauty-build -I./third_party/nauty \
+  -DUSE_TLS -o 7xn_poly 7xn_poly.c ./third_party/nauty-build/nautyT.a -lm
 ```
 
 On macOS with Apple clang, OpenMP usually also needs Homebrew `libomp`. The
@@ -303,12 +320,31 @@ The final line printed by the solver is:
 T_4(r,n) = ...
 ```
 
+## Using `7xn_poly`
+
+Default run:
+
+```bash
+./7xn_poly
+```
+
+Explicit size:
+
+```bash
+./7xn_poly 7
+```
+
+This solver is specialised to 7 rows. It currently supports up to 7 columns,
+prints the final result in Newton / binomial-basis form, and writes shard files
+with the header `RECT_EVAL_V1`.
+
 ## Notes on limits
 
 Current compile-time limits in the partition-based C solvers:
 
 - `6xn_poly.c`: up to 6 rows and 16 columns.
 - `6xn.c`: up to 6 rows and 8 columns.
+- `7xn_poly.c`: fixed at 7 rows and currently up to 7 columns.
 
 These limits come from the current fixed-size data structures and the size of
 the induced structure graphs.
@@ -318,6 +354,7 @@ the induced structure graphs.
 - Small widths `2, 3, 4` have compact direct scripts.
 - Width `5` has a dedicated state-space DP solver in C.
 - Width `6` currently has the partition-based C solvers in-tree.
+- Width `7` now has an evaluation-space polynomial prototype for `n <= 7`.
 - `counts.txt` is the current in-repo table of known values.
 
 ## Acknowledgements
