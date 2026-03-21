@@ -247,16 +247,43 @@ static void print_count(Count n) {
 static void usage(const char* prog) {
     fprintf(stderr,
             "Usage:\n"
-            "  %s [rows cols] [--profile] [--prefix-depth N] [--task-start N] [--task-end N] [--task-stride N] [--task-offset N] [--count-out FILE]\n"
+            "  %s [rows cols] [OPTIONS]\n"
             "  %s --merge [--count-out FILE] INPUT...\n"
             "\n"
-            "Notes:\n"
-            "  --profile prints prune counters and time split for key hot paths.\n"
-            "  --prefix-depth may be 2, 3, or 4; otherwise the solver picks a default.\n"
-            "  --task-start/--task-end define a half-open task range [start, end).\n"
-            "  --task-stride/--task-offset select interleaved tasks within that range.\n"
-            "  For prefix depth d, tasks correspond to sorted feasible d-column prefixes.\n",
-            prog, prog);
+            "Count T_4(rows, cols), the number of rectangle-free 4-colourings.\n"
+            "\n"
+            "Positional arguments:\n"
+            "  rows cols           Grid dimensions. Defaults to %d %d.\n"
+            "\n"
+            "Options:\n"
+            "  -h, --help          Show this help text.\n"
+            "  --profile           Print prune counters and timing for hot paths.\n"
+            "  --prefix-depth N    Use prefix depth 2, 3, or 4.\n"
+            "                      If omitted, the solver picks a default.\n"
+            "  --count-out FILE    Write this shard's count and metadata to FILE.\n"
+            "  --task-start N      Start of half-open task range [start, end).\n"
+            "  --task-end N        End of half-open task range [start, end).\n"
+            "  --task-stride N     Take every Nth task within the range.\n"
+            "  --task-offset N     Start at tasks congruent to offset mod stride.\n"
+            "  --merge             Merge shard files instead of solving.\n"
+            "\n"
+            "Examples:\n"
+            "  %s\n"
+            "  %s 6 8 --profile\n"
+            "  %s 6 8 --prefix-depth 4 --count-out part.count\n"
+            "  %s 6 8 --task-start 0 --task-end 100000 --count-out shard0.count\n"
+            "  %s --merge --count-out merged.count shard0.count shard1.count\n"
+            "\n"
+            "Task model:\n"
+            "  For prefix depth d, tasks correspond to sorted feasible d-column prefixes.\n"
+            "  --task-start/--task-end select a contiguous slice of that task list.\n"
+            "  --task-stride/--task-offset select an interleaved subset of the slice.\n"
+            "\n"
+            "Environment:\n"
+            "  RECT_PROGRESS_STEP     Force progress updates every N tasks.\n"
+            "  RECT_PROGRESS_UPDATES  Target roughly this many progress updates.\n",
+            prog, prog, DEFAULT_ROWS, DEFAULT_COLS,
+            prog, prog, prog, prog, prog);
 }
 
 static long long normalise_task_offset(long long task_stride, long long task_offset) {
@@ -1808,7 +1835,11 @@ int main(int argc, char** argv) {
     int positional_count = 0;
 
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--merge") == 0) {
+        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            usage(argv[0]);
+            free(merge_inputs);
+            return 0;
+        } else if (strcmp(argv[i], "--merge") == 0) {
             merge_mode = 1;
         } else if (strcmp(argv[i], "--profile") == 0) {
             g_profile_enabled = 1;
