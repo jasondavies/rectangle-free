@@ -96,9 +96,6 @@ These programs enumerate column partitions, build a structure graph describing
 interactions between non-singleton colour classes, and use nauty to cache
 isomorphic graphs via canonical labelling.
 
-The naming split is now width-first to match the Python scripts:
-`5xn.c`, `6xn.c`, and `6xn_poly.c`.
-
 At a high level, the partition solvers work like this:
 
 1. Enumerate multisets of column partitions in canonical order, quotienting out
