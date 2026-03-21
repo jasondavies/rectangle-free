@@ -49,17 +49,17 @@ algorithmic experiments. The important distinction is:
 
 - `5xn.c`
   Fast C version of the `5 x n`, `k = 4` state-space DP. This is the
-  row/colour-canonicalized token-mask solver.
+  row/colour-canonicalised token-mask solver.
 
 ### Partition-based C solvers
 
 - `partition_poly.c`
   Partition/structure-graph solver that computes the chromatic polynomial
   `P(x)` for the reduced graph induced by a column multiset. It uses nauty to
-  canonicalize graphs for caching and prints `P(4)` and `P(5)` at the end.
+  canonicalise graphs for caching and prints `P(4)` and `P(5)` at the end.
 
 - `partition_count4.c`
-  Partition/structure-graph solver specialized to `k = 4`. Instead of computing
+  Partition/structure-graph solver specialised to `k = 4`. Instead of computing
   the full polynomial, it counts 4-colourings directly. It adds stronger
   pruning, 4-colourability checks, and prefix-task generation for parallel
   sharding.
@@ -79,18 +79,11 @@ There are two main algorithm families in this repo.
 Used by:
 
 - `4xn.py`
-- `5xn.py`
 - `5xn.c`
-- `6xn.py`
 
 These programs encode which row-pair / colour combinations are still available,
-then recurse with memoization. For `5 x n`, the important optimization is
-canonicalization under row permutations and colour permutations.
-
-For `6 x n`, the Python version uses the same basic bucket idea, but with 60
-pair-colour tokens. This is conceptually clean, but the state space gets large
-quickly, which is one reason the partition-based C solvers became the main path
-for wider `6 x n` computations.
+then recurse with memoisation. For `5 x n`, the important optimisation is
+canonicalisation under row permutations and colour permutations.
 
 ### 2. Partition / structure-graph search
 
@@ -101,7 +94,7 @@ Used by:
 
 These programs enumerate column partitions, build a structure graph describing
 interactions between non-singleton colour classes, and use nauty to cache
-isomorphic graphs via canonical labeling.
+isomorphic graphs via canonical labelling.
 
 This is the reason the files were renamed from the old `solver.c` /
 `solver4.c`: they are meant to be distinguished from the `5xn` state-space DP
@@ -115,7 +108,7 @@ At a high level, the partition solvers work like this:
    (non-singleton colour classes) induced by the chosen columns.
 3. Weight each structure by:
    - the multinomial factor for repeated columns,
-   - the row-orbit factor from the surviving row stabilizer,
+   - the row-orbit factor from the surviving row stabiliser,
    - the singleton-colour contribution coming from the partition type,
    - and finally either the chromatic polynomial of the conflict graph or the
      number of proper 4-colourings of that graph.
@@ -149,8 +142,6 @@ Each Python file is a standalone script. Examples:
 python3 2xn.py
 python3 3xn.py
 python3 4xn.py
-python3 5xn.py
-python3 6xn.py
 ```
 
 The scripts print tables of exact counts.
@@ -184,10 +175,8 @@ Recommended setup:
 
 - download an official nauty release tarball from the nauty distribution site,
 - unpack it into `third_party/nauty`,
-- let the top-level build create a private configured copy in
-  `third_party/nauty-build`,
-- build with `make`,
-- then build this repo with `make`.
+- run the top-level `make`, which creates a private configured copy in
+  `third_party/nauty-build`, enables TLS there, and builds `nautyT.a`.
 
 The default [Makefile](/Users/jason/src/rectangle-free/Makefile) assumes:
 
@@ -214,9 +203,7 @@ If you want to compile manually, the command shape is:
 ```bash
 rm -rf third_party/nauty-build
 cp -R third_party/nauty third_party/nauty-build
-cd third_party/nauty-build
-./configure --enable-tls
-make nautyT.a
+(cd third_party/nauty-build && ./configure --enable-tls && make nautyT.a)
 
 cc -O3 -march=native -fopenmp -I./third_party/nauty-build -I./third_party/nauty \
   -DUSE_TLS -o partition_poly partition_poly.c ./third_party/nauty-build/nautyT.a -lm
@@ -320,9 +307,9 @@ the induced structure graphs.
 
 ## Current status
 
-- Small widths `2, 3, 4` have compact direct programs.
-- Width `5` has a dedicated state-space DP solver in Python and C.
-- Width `6` has both a Python token-mask solver and partition-based C solvers.
+- Small widths `2, 3, 4` have compact direct scripts.
+- Width `5` has a dedicated state-space DP solver in C.
+- Width `6` currently has the partition-based C solvers in-tree.
 - `counts.txt` is the current in-repo table of known values.
 
 ## Acknowledgements
@@ -333,7 +320,7 @@ discussions with him:
 
 - reframing the structure contribution in terms of chromatic polynomials of
   conflict graphs,
-- using canonical graph labeling with nauty/traces so memoization works up to
+- using canonical graph labelling with nauty/traces so memoisation works up to
   graph isomorphism rather than on raw labelled graphs,
 - reducing graphs by peeling vertices whose neighbourhoods form cliques, which
   only contributes a multiplicative factor to the chromatic polynomial,
@@ -343,7 +330,7 @@ discussions with him:
 Other useful suggestions from Adam that influenced the implementations and the
 way they were tested include:
 
-- using deletion-contraction with memoization as the basic graph-polynomial
+- using deletion-contraction with memoisation as the basic graph-polynomial
   engine,
 - treating the transpose identity `T_k(m, n) = T_k(n, m)` as an end-to-end
   correctness check,

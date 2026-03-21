@@ -1,13 +1,13 @@
-// rectfree_5xn.c
-// Rectangle-free 4-colorings of a 5×n grid for n=0..40.
+// 5xn.c
+// Rectangle-free 4-colourings of a 5×n grid for n=0..40.
 // Self-contained (no GMP), includes:
 //  - BigInt (base 1e9)
 //  - progress indicator
 //  - per-k incremental stats
-//  - symmetry reduction: 5! row permutations + color permutations (sort 4 blocks)
+//  - symmetry reduction: 5! row permutations + colour permutations (sort 4 blocks)
 //
-// Build: cc -O3 -march=native -std=c11 rectfree_5xn.c -o rectfree_5xn
-// Run:   ./rectfree_5xn
+// Build: cc -O3 -march=native -std=c11 5xn.c -o 5xn
+// Run:   ./5xn
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -96,7 +96,7 @@ static void big_addmul_u32(Big *a, const Big *b, uint32_t mul) {
     int i = 0;
     // ensure a->len at least b->len for the loop
     if (a->len < b->len) {
-        // initialize missing digits to 0
+        // initialise missing digits to 0
         for (int k=a->len; k<b->len; k++) a->d[k] = 0;
         a->len = b->len;
     }
@@ -426,7 +426,7 @@ static void precompute_rowperm_table(void) {
     if (pid != 120) { fprintf(stderr, "perm count mismatch: %d\n", pid); exit(1); }
 }
 
-// canonicalize under row perms + color perms (sort 4 blocks)
+// canonicalise under row perms + colour perms (sort 4 blocks)
 static inline uint64_t canon_rows_and_colors(uint64_t U) {
     const uint64_t MASK10 = (1ULL<<BITS_PER_COLOR) - 1ULL;
     uint16_t b0 = (uint16_t)((U >> (0*BITS_PER_COLOR)) & MASK10);
@@ -504,7 +504,7 @@ static void build_perbit(Vec perbit[TOTAL_BITS]) {
             uint16_t blk = clique10[rows_of_color[colr]];
             mask |= (uint64_t)blk << (colr*BITS_PER_COLOR);
         }
-        // mask cannot be 0 for 5 rows/4 colors
+        // mask cannot be 0 for 5 rows/4 colours
         if (mask == 0) { fprintf(stderr, "Unexpected mask 0\n"); exit(1); }
 
         // insert/increment
@@ -744,7 +744,7 @@ int main(void) {
     stats_print_line(&st, memo.sz, 1);
     if (st.stderr_is_tty) fprintf(stderr, "\n");
 
-    printf("\nF(n) table (5×n, 4 colors):\n");
+    printf("\nF(n) table (5×n, 4 colours):\n");
     for (int n=0;n<=40;n++) {
         printf("%d ", n);
         big_print(&F[n]);
@@ -757,7 +757,7 @@ int main(void) {
     // free perbit vectors
     for (int b=0;b<TOTAL_BITS;b++) free(perbit[b].a);
 
-    // Note: memo stores Polys we never free (program ends). If you want,
+    // Note: memo stores Polys we never free before process exit. If you want,
     // we can add a pass to free all memo values.
     memomap_free(&memo);
     free(canon_cache.t);

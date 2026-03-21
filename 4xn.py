@@ -10,7 +10,7 @@ pairs = [(i, j) for i in range(ROWS) for j in range(i + 1, ROWS)]
 pair_index = {p: k for k, p in enumerate(pairs)}  # 6 pairs
 
 def col_mask(col):
-    """24-bit mask: bit (color*6 + pair) is 1 if that row-pair is monochromatic in that color."""
+    """24-bit mask: bit (colour*6 + pair) is 1 if that row-pair is monochromatic in that colour."""
     m = 0
     for (i, j), pi in pair_index.items():
         if col[i] == col[j]:

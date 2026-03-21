@@ -525,7 +525,7 @@ static int run_merge_mode(const char* prog, const char* count_out_path, int inpu
     return 0;
 }
 
-// --- INITIALIZATION ---
+// --- INITIALISATION ---
 
 void generate_permutations() {
     int p[MAX_ROWS];
@@ -896,7 +896,7 @@ static int candidate_is_stabiliser_orbit_rep(const CanonState* st, int min_idx, 
     return 1;
 }
 
-// --- NAUTY CANONICALIZATION ---
+// --- NAUTY CANONICALISATION ---
 
 // Convert our graph to nauty format and compute canonical form
 void nauty_workspace_init(NautyWorkspace* ws, int n) {
@@ -960,14 +960,14 @@ void get_canonical_graph(Graph* g, Graph* canon, NautyWorkspace* ws) {
         }
     }
     
-    // Initialize labeling
+    // Initialise labelling
     for (int i = 0; i < n; i++) {
         lab[i] = i;
         ptn[i] = 1;
     }
     ptn[n-1] = 0;
     
-    // Set up options for canonical labeling
+    // Set up options for canonical labelling
     DEFAULTOPTIONS_GRAPH(options);
     options.getcanon = TRUE;
     options.defaultptn = TRUE;
@@ -1919,10 +1919,10 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // Initialize nauty's thread-local storage
+    // Initialise nauty's thread-local storage
     nauty_check(WORDSIZE, MAXN_NAUTY, MAXN_NAUTY, NAUTYVERSIONID);
     
-    // 1. Initialize math tables
+    // 1. Initialise maths tables
     factorial[0] = 1;
     for(int i=1; i<=19; i++) factorial[i] = factorial[i-1]*i;
 
@@ -2207,7 +2207,7 @@ int main(int argc, char** argv) {
     if (prefix_depth > 0) {
         printf("Total elapsed including prefix generation: %.2f seconds.\n", total_elapsed);
     }
-    printf("Canonicalization calls: %lld\n", total_canon_calls);
+    printf("Canonicalisation calls: %lld\n", total_canon_calls);
     printf("Canonical cache hits: %lld (%.1f%%)\n", total_cache_hits,
            total_canon_calls > 0 ? 100.0 * total_cache_hits / total_canon_calls : 0.0);
     printf("Raw cache hits: %lld\n", total_raw_cache_hits);
