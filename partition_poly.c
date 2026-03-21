@@ -82,6 +82,11 @@ typedef struct {
 } Graph;
 
 typedef struct {
+    Graph g;
+    int base[MAX_COLS];
+} PartialGraphState;
+
+typedef struct {
     int nmax;
     int mmax;
     graph* ng;
@@ -352,13 +357,13 @@ void print_poly(Poly p) {
 static void usage(const char* prog) {
     fprintf(stderr,
             "Usage:\n"
-            "  %s [rows cols] [--task-start N] [--task-end N] [--task-stride N] [--task-offset N] [--poly-out FILE]\n"
+            "  %s [rows cols] [--task-start N] [--task-end N] [--task-stride N] [--task-offset N] [--prefix-depth N] [--poly-out FILE]\n"
             "  %s --merge [--poly-out FILE] INPUT...\n"
             "\n"
             "Notes:\n"
             "  --task-start/--task-end define a half-open task range [start, end).\n"
             "  --task-stride/--task-offset select interleaved tasks within that range.\n"
-            "  For cols >= 6, tasks correspond to sorted 3-column prefixes.\n",
+            "  --prefix-depth may be 2, 3, or 4.\n",
             prog, prog);
 }
 
@@ -1171,10 +1176,45 @@ Poly solve_graph_poly(Graph g, GraphCache* cache, GraphCache* raw_cache, NautyWo
     return poly_mul(multiplier, res);
 }
 
-Poly solve_structure(int* stack, CanonState* canon_state, GraphCache* cache,
-                     GraphCache* raw_cache, NautyWorkspace* ws,
-                     long long* local_canon_calls, long long* local_cache_hits,
-                     long long* local_raw_cache_hits) {
+static void partial_graph_reset(PartialGraphState* st) {
+    st->g.n = 0;
+    memset(st->g.adj, 0, sizeof(st->g.adj));
+    memset(st->base, 0, sizeof(st->base));
+}
+
+static int partial_graph_append(PartialGraphState* st, int depth, int pid, const int* stack) {
+    int base_new = st->g.n;
+    int num_complex = partitions[pid].num_complex;
+    st->base[depth] = base_new;
+    st->g.n += num_complex;
+    for (int i = 0; i < num_complex; i++) st->g.adj[base_new + i] = 0;
+
+    for (int i1 = 0; i1 < num_complex; i1++) {
+        int u = base_new + i1;
+        st->g.adj[u] |= ((uint64_t)intra_mask[pid][i1]) << base_new;
+    }
+
+    for (int prev = 0; prev < depth; prev++) {
+        int prev_pid = stack[prev];
+        int prev_base = st->base[prev];
+        for (int i1 = 0; i1 < num_complex; i1++) {
+            int u = base_new + i1;
+            uint32_t mask = overlap_mask[pid][prev_pid][i1];
+            if (mask == 0) continue;
+            st->g.adj[u] |= ((uint64_t)mask) << prev_base;
+            while (mask) {
+                int i2 = __builtin_ctz(mask);
+                int v = prev_base + i2;
+                st->g.adj[v] |= (1ULL << u);
+                mask &= mask - 1;
+            }
+        }
+    }
+
+    return 1;
+}
+
+static Poly build_structure_weight(int* stack, const CanonState* canon_state) {
     long long mult_coeff = factorial[g_cols];
     int run = 1;
     for (int i = 1; i < g_cols; i++) {
@@ -1187,69 +1227,38 @@ Poly solve_structure(int* stack, CanonState* canon_state, GraphCache* cache,
     mult_coeff /= factorial[run];
     
     long long row_orbit = get_orbit_multiplier_state(canon_state);
-
-    Graph g;
-    int base[MAX_COLS];
-    
-    g.n = 0;
-    for (int i = 0; i < g_cols; i++) {
-        int pid = stack[i];
-        base[i] = g.n;
-        g.n += partitions[pid].num_complex;
-    }
-    memset(g.adj, 0, (size_t)g.n * sizeof(g.adj[0]));
-    
-    for (int c = 0; c < g_cols; c++) {
-        int pid = stack[c];
-        for (int i1 = 0; i1 < partitions[pid].num_complex; i1++) {
-            int u = base[c] + i1;
-            uint64_t mask = ((uint64_t)intra_mask[pid][i1]) << base[c];
-            g.adj[u] |= mask;
-        }
-    }
-    
-    for (int c1 = 0; c1 < g_cols; c1++) {
-        int pid1 = stack[c1];
-        for (int i1 = 0; i1 < partitions[pid1].num_complex; i1++) {
-            int u = base[c1] + i1;
-            for (int c2 = c1 + 1; c2 < g_cols; c2++) {
-                int pid2 = stack[c2];
-                uint32_t mask = overlap_mask[pid1][pid2][i1];
-                if (mask == 0) continue;
-                g.adj[u] |= ((uint64_t)mask) << base[c2];
-                while (mask) {
-                    int i2 = __builtin_ctz(mask);
-                    int v = base[c2] + i2;
-                    g.adj[v] |= (1ULL << u);
-                    mask &= mask - 1;
-                }
-            }
-        }
-    }
-    
-    Poly struct_poly = solve_graph_poly(g, cache, raw_cache, ws,
-                                        local_canon_calls, local_cache_hits, local_raw_cache_hits);
+    Poly weight = poly_one();
     
     for (int i = 0; i < g_cols; i++) {
         int pid = stack[i];
         int c = partitions[pid].num_complex;
         int s = partitions[pid].num_singletons;
         if (s > 0) {
-            struct_poly = poly_mul_falling(struct_poly, c, s);
+            weight = poly_mul_falling(weight, c, s);
         }
     }
     
-    struct_poly = poly_scale(struct_poly, (long long)(mult_coeff * row_orbit));
+    weight = poly_scale(weight, (long long)(mult_coeff * row_orbit));
     
-    return struct_poly;
+    return weight;
 }
 
-void dfs(int depth, int min_idx, int* stack, CanonState* canon_state, GraphCache* cache,
-         GraphCache* raw_cache, NautyWorkspace* ws, Poly* local_total,
+static Poly solve_structure(int* stack, const Graph* partial_graph, CanonState* canon_state,
+                            GraphCache* cache, GraphCache* raw_cache, NautyWorkspace* ws,
+                            long long* local_canon_calls, long long* local_cache_hits,
+                            long long* local_raw_cache_hits) {
+    Poly weight = build_structure_weight(stack, canon_state);
+    Poly graph_poly = solve_graph_poly(*partial_graph, cache, raw_cache, ws,
+                                       local_canon_calls, local_cache_hits, local_raw_cache_hits);
+    return poly_mul(weight, graph_poly);
+}
+
+void dfs(int depth, int min_idx, int* stack, CanonState* canon_state, const PartialGraphState* partial_graph,
+         GraphCache* cache, GraphCache* raw_cache, NautyWorkspace* ws, Poly* local_total,
          long long* local_canon_calls, long long* local_cache_hits,
          long long* local_raw_cache_hits) {
     if (depth == g_cols) {
-        Poly res = solve_structure(stack, canon_state, cache, raw_cache, ws,
+        Poly res = solve_structure(stack, &partial_graph->g, canon_state, cache, raw_cache, ws,
                                    local_canon_calls, local_cache_hits, local_raw_cache_hits);
         *local_total = poly_add(*local_total, res);
         return;
@@ -1261,8 +1270,11 @@ void dfs(int depth, int min_idx, int* stack, CanonState* canon_state, GraphCache
         if (!canon_state_prepare_push(canon_state, i, next_insert_pos, &next_stabilizer)) continue;
         stack[depth] = i;
         canon_state_commit_push(canon_state, i, next_insert_pos, next_stabilizer);
-        dfs(depth + 1, i, stack, canon_state, cache, raw_cache, ws, local_total,
-            local_canon_calls, local_cache_hits, local_raw_cache_hits);
+        PartialGraphState next_graph = *partial_graph;
+        if (partial_graph_append(&next_graph, depth, i, stack)) {
+            dfs(depth + 1, i, stack, canon_state, &next_graph, cache, raw_cache, ws, local_total,
+                local_canon_calls, local_cache_hits, local_raw_cache_hits);
+        }
         canon_state_pop(canon_state);
     }
 }
@@ -1283,6 +1295,7 @@ int main(int argc, char** argv) {
     long long task_stride = 1;
     long long task_offset = 0;
     const char* poly_out_path = NULL;
+    int prefix_depth_override = -1;
     int merge_mode = 0;
     char** merge_inputs = (char**)malloc((size_t)argc * sizeof(char*));
     if (!merge_inputs) {
@@ -1330,6 +1343,13 @@ int main(int argc, char** argv) {
                 return 1;
             }
             task_offset = parse_ll_or_die(argv[++i], "--task-offset");
+        } else if (strcmp(argv[i], "--prefix-depth") == 0) {
+            if (i + 1 >= argc) {
+                usage(argv[0]);
+                free(merge_inputs);
+                return 1;
+            }
+            prefix_depth_override = (int)parse_ll_or_die(argv[++i], "--prefix-depth");
         } else if (merge_mode) {
             merge_inputs[merge_input_count++] = argv[i];
         } else if (positional_count == 0) {
@@ -1347,7 +1367,7 @@ int main(int argc, char** argv) {
 
     if (merge_mode) {
         if (positional_count != 0 || task_start != 0 || task_end != -1 ||
-            task_stride != 1 || task_offset != 0) {
+            task_stride != 1 || task_offset != 0 || prefix_depth_override != -1) {
             usage(argv[0]);
             free(merge_inputs);
             return 1;
@@ -1385,56 +1405,114 @@ int main(int argc, char** argv) {
     printf("Using nauty for canonical graph caching\n");
 
     // Build prefix list for work distribution.
-    // For wider grids, use 3-column prefixes to reduce long-tail imbalance.
     int prefix_depth = 0;
-    if (g_cols >= 6) prefix_depth = 3;
-    else if (g_cols >= 2) prefix_depth = 2;
+    if (prefix_depth_override != -1) {
+        prefix_depth = prefix_depth_override;
+    } else if (g_cols >= 6) {
+        prefix_depth = 3;
+    } else if (g_cols >= 2) {
+        prefix_depth = 2;
+    }
+    if (prefix_depth != 0 && prefix_depth != 2 && prefix_depth != 3 && prefix_depth != 4) {
+        fprintf(stderr, "--prefix-depth must be 2, 3, or 4\n");
+        return 1;
+    }
+    if (prefix_depth > g_cols) {
+        fprintf(stderr, "--prefix-depth must not exceed cols\n");
+        return 1;
+    }
+    if (g_cols >= 2 && prefix_depth == 0) {
+        fprintf(stderr, "Internal error: invalid zero prefix depth for cols >= 2\n");
+        return 1;
+    }
 
     long long total_prefixes = 0;
-    int *prefix_i = NULL, *prefix_j = NULL, *prefix_k = NULL;
+    int *prefix_i = NULL, *prefix_j = NULL, *prefix_k = NULL, *prefix_l = NULL;
+    double prefix_generation_time = 0.0;
 
-    if (prefix_depth == 2) {
-        total_prefixes = (long long)num_partitions * (num_partitions + 1) / 2;
-        prefix_i = (int*)malloc((size_t)total_prefixes * sizeof(int));
-        prefix_j = (int*)malloc((size_t)total_prefixes * sizeof(int));
-        if (!prefix_i || !prefix_j) {
-            fprintf(stderr, "Failed to allocate prefix arrays\n");
-            return 1;
-        }
-
-        long long idx = 0;
-        for (int i = 0; i < num_partitions; i++) {
-            for (int j = i; j < num_partitions; j++) {
-                prefix_i[idx] = i;
-                prefix_j[idx] = j;
-                idx++;
+    if (prefix_depth > 0) {
+        double prefix_start_time = omp_get_wtime();
+        if (prefix_depth == 2) {
+            total_prefixes = (long long)num_partitions * (num_partitions + 1) / 2;
+            prefix_i = (int*)malloc((size_t)total_prefixes * sizeof(int));
+            prefix_j = (int*)malloc((size_t)total_prefixes * sizeof(int));
+            if (!prefix_i || !prefix_j) {
+                fprintf(stderr, "Failed to allocate prefix arrays\n");
+                return 1;
             }
-        }
-    } else if (prefix_depth == 3) {
-        total_prefixes = (long long)num_partitions * (num_partitions + 1) * (num_partitions + 2) / 6;
-        prefix_i = (int*)malloc((size_t)total_prefixes * sizeof(int));
-        prefix_j = (int*)malloc((size_t)total_prefixes * sizeof(int));
-        prefix_k = (int*)malloc((size_t)total_prefixes * sizeof(int));
-        if (!prefix_i || !prefix_j || !prefix_k) {
-            fprintf(stderr, "Failed to allocate prefix arrays\n");
-            return 1;
-        }
 
-        long long idx = 0;
-        for (int i = 0; i < num_partitions; i++) {
-            for (int j = i; j < num_partitions; j++) {
-                for (int k = j; k < num_partitions; k++) {
+            long long idx = 0;
+            for (int i = 0; i < num_partitions; i++) {
+                for (int j = i; j < num_partitions; j++) {
                     prefix_i[idx] = i;
                     prefix_j[idx] = j;
-                    prefix_k[idx] = k;
                     idx++;
                 }
             }
-        }
-    }
+        } else if (prefix_depth == 3) {
+            total_prefixes = (long long)num_partitions * (num_partitions + 1) * (num_partitions + 2) / 6;
+            prefix_i = (int*)malloc((size_t)total_prefixes * sizeof(int));
+            prefix_j = (int*)malloc((size_t)total_prefixes * sizeof(int));
+            prefix_k = (int*)malloc((size_t)total_prefixes * sizeof(int));
+            if (!prefix_i || !prefix_j || !prefix_k) {
+                fprintf(stderr, "Failed to allocate prefix arrays\n");
+                return 1;
+            }
 
-    if (prefix_depth > 0) {
+            long long idx = 0;
+            for (int i = 0; i < num_partitions; i++) {
+                for (int j = i; j < num_partitions; j++) {
+                    for (int k = j; k < num_partitions; k++) {
+                        prefix_i[idx] = i;
+                        prefix_j[idx] = j;
+                        prefix_k[idx] = k;
+                        idx++;
+                    }
+                }
+            }
+        } else if (prefix_depth == 4) {
+            total_prefixes = (long long)num_partitions * (num_partitions + 1) *
+                             (num_partitions + 2) * (num_partitions + 3) / 24;
+            prefix_i = (int*)malloc((size_t)total_prefixes * sizeof(int));
+            prefix_j = (int*)malloc((size_t)total_prefixes * sizeof(int));
+            prefix_k = (int*)malloc((size_t)total_prefixes * sizeof(int));
+            prefix_l = (int*)malloc((size_t)total_prefixes * sizeof(int));
+            if (!prefix_i || !prefix_j || !prefix_k || !prefix_l) {
+                fprintf(stderr, "Failed to allocate prefix arrays\n");
+                return 1;
+            }
+
+            long long idx = 0;
+            for (int i = 0; i < num_partitions; i++) {
+                for (int j = i; j < num_partitions; j++) {
+                    for (int k = j; k < num_partitions; k++) {
+                        for (int l = k; l < num_partitions; l++) {
+                            prefix_i[idx] = i;
+                            prefix_j[idx] = j;
+                            prefix_k[idx] = k;
+                            prefix_l[idx] = l;
+                            idx++;
+                        }
+                    }
+                }
+            }
+        }
+        prefix_generation_time = omp_get_wtime() - prefix_start_time;
         printf("Prefix depth: %d (%lld tasks)\n", prefix_depth, total_prefixes);
+        printf("Prefix generation: %.2f seconds\n", prefix_generation_time);
+        if (prefix_depth == 2) {
+            printf("Prefix task bytes: %zu each, %.2f MiB total\n",
+                   sizeof(int) * 2,
+                   ((double)(sizeof(int) * 2) * (double)total_prefixes) / (1024.0 * 1024.0));
+        } else if (prefix_depth == 3) {
+            printf("Prefix task bytes: %zu each, %.2f MiB total\n",
+                   sizeof(int) * 3,
+                   ((double)(sizeof(int) * 3) * (double)total_prefixes) / (1024.0 * 1024.0));
+        } else if (prefix_depth == 4) {
+            printf("Prefix task bytes: %zu each, %.2f MiB total\n",
+                   sizeof(int) * 4,
+                   ((double)(sizeof(int) * 4) * (double)total_prefixes) / (1024.0 * 1024.0));
+        }
     }
 
     completed_tasks = 0;
@@ -1536,7 +1614,9 @@ int main(int argc, char** argv) {
 
         int stack[MAX_COLS];
         CanonState canon_state;
+        PartialGraphState partial_graph;
         canon_state_reset(&canon_state, (int)factorial[g_rows]);
+        partial_graph_reset(&partial_graph);
         long long local_canon_calls = 0;
         long long local_cache_hits = 0;
         long long local_raw_cache_hits = 0;
@@ -1547,6 +1627,7 @@ int main(int argc, char** argv) {
             for (long long i = first_task; i < active_task_end; i += task_stride) {
                 stack[0] = i;
                 canon_state_reset(&canon_state, (int)factorial[g_rows]);
+                partial_graph_reset(&partial_graph);
                 uint8_t next_insert_pos[PERM_SIZE];
                 int next_stabilizer = 0;
                 if (!canon_state_prepare_push(&canon_state, (int)i, next_insert_pos, &next_stabilizer)) {
@@ -1555,14 +1636,15 @@ int main(int argc, char** argv) {
                     continue;
                 }
                 canon_state_commit_push(&canon_state, (int)i, next_insert_pos, next_stabilizer);
-                dfs(1, (int)i, stack, &canon_state, &cache, &raw_cache, &ws, &thread_polys[tid],
-                    &local_canon_calls, &local_cache_hits, &local_raw_cache_hits);
+                if (partial_graph_append(&partial_graph, 0, (int)i, stack)) {
+                    dfs(1, (int)i, stack, &canon_state, &partial_graph, &cache, &raw_cache, &ws,
+                        &thread_polys[tid], &local_canon_calls, &local_cache_hits, &local_raw_cache_hits);
+                }
 
                 complete_task_and_report(total_tasks, progress_report_step,
                                          &progress_last_reported, start_time);
             }
         } else if (prefix_depth == 2) {
-            // 2-column prefix parallelism: iterate all (i,j) with j>=i
             #pragma omp for schedule(dynamic, 8)
             for (long long p = first_task; p < active_task_end; p += task_stride) {
                 int i = prefix_i[p];
@@ -1571,6 +1653,7 @@ int main(int argc, char** argv) {
                 int next_stabilizer = 0;
 
                 canon_state_reset(&canon_state, (int)factorial[g_rows]);
+                partial_graph_reset(&partial_graph);
 
                 stack[0] = i;
                 if (!canon_state_prepare_push(&canon_state, i, next_insert_pos, &next_stabilizer)) {
@@ -1579,6 +1662,12 @@ int main(int argc, char** argv) {
                     continue;
                 }
                 canon_state_commit_push(&canon_state, i, next_insert_pos, next_stabilizer);
+                if (!partial_graph_append(&partial_graph, 0, i, stack)) {
+                    canon_state_pop(&canon_state);
+                    complete_task_and_report(total_tasks, progress_report_step,
+                                             &progress_last_reported, start_time);
+                    continue;
+                }
 
                 stack[1] = j;
                 if (!canon_state_prepare_push(&canon_state, j, next_insert_pos, &next_stabilizer)) {
@@ -1588,9 +1677,11 @@ int main(int argc, char** argv) {
                     continue;
                 }
                 canon_state_commit_push(&canon_state, j, next_insert_pos, next_stabilizer);
-
-                dfs(2, j, stack, &canon_state, &cache, &raw_cache, &ws, &thread_polys[tid],
-                    &local_canon_calls, &local_cache_hits, &local_raw_cache_hits);
+                PartialGraphState prefix_graph = partial_graph;
+                if (partial_graph_append(&prefix_graph, 1, j, stack)) {
+                    dfs(2, j, stack, &canon_state, &prefix_graph, &cache, &raw_cache, &ws,
+                        &thread_polys[tid], &local_canon_calls, &local_cache_hits, &local_raw_cache_hits);
+                }
 
                 canon_state_pop(&canon_state);
                 canon_state_pop(&canon_state);
@@ -1598,9 +1689,7 @@ int main(int argc, char** argv) {
                 complete_task_and_report(total_tasks, progress_report_step,
                                          &progress_last_reported, start_time);
             }
-        } else {
-            // 3-column prefix parallelism for wider grids: finer task granularity
-            // reduces long-tail stragglers at the end of the run.
+        } else if (prefix_depth == 3) {
             #pragma omp for schedule(dynamic, 1)
             for (long long p = first_task; p < active_task_end; p += task_stride) {
                 int i = prefix_i[p];
@@ -1610,6 +1699,7 @@ int main(int argc, char** argv) {
                 int next_stabilizer = 0;
 
                 canon_state_reset(&canon_state, (int)factorial[g_rows]);
+                partial_graph_reset(&partial_graph);
 
                 stack[0] = i;
                 if (!canon_state_prepare_push(&canon_state, i, next_insert_pos, &next_stabilizer)) {
@@ -1618,6 +1708,12 @@ int main(int argc, char** argv) {
                     continue;
                 }
                 canon_state_commit_push(&canon_state, i, next_insert_pos, next_stabilizer);
+                if (!partial_graph_append(&partial_graph, 0, i, stack)) {
+                    canon_state_pop(&canon_state);
+                    complete_task_and_report(total_tasks, progress_report_step,
+                                             &progress_last_reported, start_time);
+                    continue;
+                }
 
                 stack[1] = j;
                 if (!canon_state_prepare_push(&canon_state, j, next_insert_pos, &next_stabilizer)) {
@@ -1627,6 +1723,14 @@ int main(int argc, char** argv) {
                     continue;
                 }
                 canon_state_commit_push(&canon_state, j, next_insert_pos, next_stabilizer);
+                PartialGraphState prefix_graph = partial_graph;
+                if (!partial_graph_append(&prefix_graph, 1, j, stack)) {
+                    canon_state_pop(&canon_state);
+                    canon_state_pop(&canon_state);
+                    complete_task_and_report(total_tasks, progress_report_step,
+                                             &progress_last_reported, start_time);
+                    continue;
+                }
 
                 stack[2] = k;
                 if (!canon_state_prepare_push(&canon_state, k, next_insert_pos, &next_stabilizer)) {
@@ -1637,10 +1741,99 @@ int main(int argc, char** argv) {
                     continue;
                 }
                 canon_state_commit_push(&canon_state, k, next_insert_pos, next_stabilizer);
+                PartialGraphState prefix_graph2 = prefix_graph;
+                if (partial_graph_append(&prefix_graph2, 2, k, stack)) {
+                    dfs(3, k, stack, &canon_state, &prefix_graph2, &cache, &raw_cache, &ws,
+                        &thread_polys[tid], &local_canon_calls, &local_cache_hits, &local_raw_cache_hits);
+                }
 
-                dfs(3, k, stack, &canon_state, &cache, &raw_cache, &ws, &thread_polys[tid],
-                    &local_canon_calls, &local_cache_hits, &local_raw_cache_hits);
+                canon_state_pop(&canon_state);
+                canon_state_pop(&canon_state);
+                canon_state_pop(&canon_state);
 
+                complete_task_and_report(total_tasks, progress_report_step,
+                                         &progress_last_reported, start_time);
+            }
+        } else {
+            #pragma omp for schedule(dynamic, 1)
+            for (long long p = first_task; p < active_task_end; p += task_stride) {
+                int i = prefix_i[p];
+                int j = prefix_j[p];
+                int k = prefix_k[p];
+                int l = prefix_l[p];
+                uint8_t next_insert_pos[PERM_SIZE];
+                int next_stabilizer = 0;
+
+                canon_state_reset(&canon_state, (int)factorial[g_rows]);
+                partial_graph_reset(&partial_graph);
+
+                stack[0] = i;
+                if (!canon_state_prepare_push(&canon_state, i, next_insert_pos, &next_stabilizer)) {
+                    complete_task_and_report(total_tasks, progress_report_step,
+                                             &progress_last_reported, start_time);
+                    continue;
+                }
+                canon_state_commit_push(&canon_state, i, next_insert_pos, next_stabilizer);
+                if (!partial_graph_append(&partial_graph, 0, i, stack)) {
+                    canon_state_pop(&canon_state);
+                    complete_task_and_report(total_tasks, progress_report_step,
+                                             &progress_last_reported, start_time);
+                    continue;
+                }
+
+                stack[1] = j;
+                if (!canon_state_prepare_push(&canon_state, j, next_insert_pos, &next_stabilizer)) {
+                    canon_state_pop(&canon_state);
+                    complete_task_and_report(total_tasks, progress_report_step,
+                                             &progress_last_reported, start_time);
+                    continue;
+                }
+                canon_state_commit_push(&canon_state, j, next_insert_pos, next_stabilizer);
+                PartialGraphState prefix_graph = partial_graph;
+                if (!partial_graph_append(&prefix_graph, 1, j, stack)) {
+                    canon_state_pop(&canon_state);
+                    canon_state_pop(&canon_state);
+                    complete_task_and_report(total_tasks, progress_report_step,
+                                             &progress_last_reported, start_time);
+                    continue;
+                }
+
+                stack[2] = k;
+                if (!canon_state_prepare_push(&canon_state, k, next_insert_pos, &next_stabilizer)) {
+                    canon_state_pop(&canon_state);
+                    canon_state_pop(&canon_state);
+                    complete_task_and_report(total_tasks, progress_report_step,
+                                             &progress_last_reported, start_time);
+                    continue;
+                }
+                canon_state_commit_push(&canon_state, k, next_insert_pos, next_stabilizer);
+                PartialGraphState prefix_graph2 = prefix_graph;
+                if (!partial_graph_append(&prefix_graph2, 2, k, stack)) {
+                    canon_state_pop(&canon_state);
+                    canon_state_pop(&canon_state);
+                    canon_state_pop(&canon_state);
+                    complete_task_and_report(total_tasks, progress_report_step,
+                                             &progress_last_reported, start_time);
+                    continue;
+                }
+
+                stack[3] = l;
+                if (!canon_state_prepare_push(&canon_state, l, next_insert_pos, &next_stabilizer)) {
+                    canon_state_pop(&canon_state);
+                    canon_state_pop(&canon_state);
+                    canon_state_pop(&canon_state);
+                    complete_task_and_report(total_tasks, progress_report_step,
+                                             &progress_last_reported, start_time);
+                    continue;
+                }
+                canon_state_commit_push(&canon_state, l, next_insert_pos, next_stabilizer);
+                PartialGraphState prefix_graph3 = prefix_graph2;
+                if (partial_graph_append(&prefix_graph3, 3, l, stack)) {
+                    dfs(4, l, stack, &canon_state, &prefix_graph3, &cache, &raw_cache, &ws,
+                        &thread_polys[tid], &local_canon_calls, &local_cache_hits, &local_raw_cache_hits);
+                }
+
+                canon_state_pop(&canon_state);
                 canon_state_pop(&canon_state);
                 canon_state_pop(&canon_state);
                 canon_state_pop(&canon_state);
@@ -1672,10 +1865,16 @@ int main(int argc, char** argv) {
     free(prefix_i);
     free(prefix_j);
     free(prefix_k);
+    free(prefix_l);
     
     double end_time = omp_get_wtime();
+    double worker_time = end_time - start_time;
+    double total_elapsed = worker_time + prefix_generation_time;
     
-    printf("\n\nCalculation Complete in %.2f seconds.\n", end_time - start_time);
+    printf("\n\nWorker Complete in %.2f seconds.\n", worker_time);
+    if (prefix_depth > 0) {
+        printf("Total elapsed including prefix generation: %.2f seconds.\n", total_elapsed);
+    }
     printf("Canonicalization calls: %lld\n", total_canon_calls);
     printf("Canonical cache hits: %lld (%.1f%%)\n", total_cache_hits,
            total_canon_calls > 0 ? 100.0 * total_cache_hits / total_canon_calls : 0.0);
