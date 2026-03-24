@@ -558,3 +558,30 @@
   - experiment `Worker Complete 4.08s`, `Total elapsed 5.61s`
 - Interpretation: this is another strong `prepare_push()` win. Once the tiny insert/compare loops were cheap, the repeated address arithmetic and row lookups became visible enough that hoisting them paid off, especially on the 7-row-specific binary.
 - Outcome: accepted.
+
+### Experiment 29: Specialise small-row copies in `commit_push()` and `pop()`
+- Goal: reduce the remaining `CanonState` overhead after the `prepare_push()` wins by replacing generic `memcpy()` calls on tiny row prefixes with the same fixed-length copy helper already used in row materialisation.
+- Change:
+  - changed `canon_state_commit_push()` to save old rows and copy prepared rows via `canon_copy_row_prefix()`
+  - changed `canon_state_pop()` to restore rows via `canon_copy_row_prefix()`
+- One-thread benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235 --profile`
+- Baseline from accepted code:
+  - `Prefix generation 1.73s`
+  - `Worker Complete 13.56s`
+  - `canon_state_prepare_push 7.625s`
+  - `canon_state_commit_push 2.810s`
+- Experiment result:
+  - `Prefix generation 1.34s`
+  - `Worker Complete 12.57s`
+  - `canon_state_prepare_push 7.634s`
+  - `canon_state_commit_push 2.249s`
+- Matching 32-thread benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235`
+- 32-thread `partition_poly_7` result:
+  - baseline `Worker Complete 3.67s`, `Total elapsed 5.19s`
+  - experiment `Worker Complete 3.45s`, `Total elapsed 4.82s`
+- Matching generic benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235`
+- Generic result:
+  - baseline `Worker Complete 4.08s`, `Total elapsed 5.61s`
+  - experiment `Worker Complete 3.77s`, `Total elapsed 5.10s`
+- Interpretation: this is another clean win on the same theme. Once `prepare_push()` stopped dominating quite so completely, the generic small-row copies in commit/pop were exposed as the next avoidable fixed overhead, and specialising them paid off immediately.
+- Outcome: accepted.

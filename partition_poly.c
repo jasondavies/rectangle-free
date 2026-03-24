@@ -1548,9 +1548,9 @@ void canon_state_commit_push(CanonState* st, int partition_id, const CanonScratc
         updated_idx[i] = p;
         prev_materialized_len[i] = old_len;
         if (old_len > 0) {
-            memcpy(canon_state_prev_row(st, depth, i), row, (size_t)old_len * sizeof(*row));
+            canon_copy_row_prefix(canon_state_prev_row(st, depth, i), row, old_len);
         }
-        memcpy(row, canon_scratch_prepared_row_const(scratch, p), (size_t)new_depth * sizeof(*row));
+        canon_copy_row_prefix(row, canon_scratch_prepared_row_const(scratch, p), new_depth);
         st->materialized_len[p] = (uint8_t)new_depth;
     }
 
@@ -1571,7 +1571,7 @@ void canon_state_pop(CanonState* st) {
         uint8_t old_len = prev_materialized_len[i];
         uint16_t* row = canon_state_row(st, p);
         if (old_len > 0) {
-            memcpy(row, canon_state_prev_row(st, depth, i), (size_t)old_len * sizeof(*row));
+            canon_copy_row_prefix(row, canon_state_prev_row(st, depth, i), old_len);
         }
         st->materialized_len[p] = old_len;
     }
