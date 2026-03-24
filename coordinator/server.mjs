@@ -21,6 +21,7 @@ function usage() {
       '  node coordinator/server.mjs create-run --rows R --cols C --prefix-depth D --task-stride S [options]',
       '  node coordinator/server.mjs list-runs [--db PATH]',
       '  node coordinator/server.mjs list-shards --run-id ID [--db PATH]',
+      '  node coordinator/server.mjs reset-leases [--run-id ID] [--db PATH]',
       '',
       'create-run options:',
       '  --task-start N           default 0',
@@ -34,6 +35,7 @@ function usage() {
       '',
       'REST API:',
       '  POST /fetch-work   body: { worker_id, run_id? }',
+      '  POST /renew-lease body: { shard_id, lease_token, worker_id }',
       '  POST /submit-result body: { shard_id, lease_token, worker_id, ok, ... }',
       '  GET  /healthz',
     ].join('\n')
@@ -393,6 +395,42 @@ function submitResult(db, body) {
   return { status: 200, payload: { ok: true } };
 }
 
+function renewLease(db, leaseSeconds, body) {
+  const shardId = Number(body.shard_id);
+  const leaseToken = String(body.lease_token ?? '');
+  const workerId = String(body.worker_id ?? '');
+  if (!Number.isInteger(shardId) || shardId <= 0) {
+    return { status: 400, payload: { error: 'valid shard_id is required' } };
+  }
+  if (!leaseToken) {
+    return { status: 400, payload: { error: 'lease_token is required' } };
+  }
+  if (!workerId) {
+    return { status: 400, payload: { error: 'worker_id is required' } };
+  }
+
+  const shard = db.prepare('SELECT * FROM shards WHERE id = ?').get(shardId);
+  if (!shard) {
+    return { status: 404, payload: { error: 'unknown shard' } };
+  }
+  if (shard.status !== 'leased') {
+    return { status: 409, payload: { error: 'shard is not currently leased' } };
+  }
+  if (shard.lease_token !== leaseToken || shard.worker_id !== workerId) {
+    return { status: 409, payload: { error: 'lease mismatch' } };
+  }
+
+  const now = nowIso();
+  const leaseUntil = addSeconds(now, leaseSeconds);
+  db.prepare(`
+    UPDATE shards
+    SET lease_until = ?,
+        updated_at = ?
+    WHERE id = ?
+  `).run(leaseUntil, now, shardId);
+  return { status: 200, payload: { ok: true, lease_until: leaseUntil } };
+}
+
 function statsForRun(db, runId) {
   return db.prepare(`
     SELECT
@@ -417,6 +455,12 @@ function serve(args) {
       if (req.method === 'POST' && req.url === '/fetch-work') {
         const body = await readJsonBody(req);
         const response = fetchWork(db, args.leaseSeconds, body);
+        json(res, response.status, response.payload);
+        return;
+      }
+      if (req.method === 'POST' && req.url === '/renew-lease') {
+        const body = await readJsonBody(req);
+        const response = renewLease(db, args.leaseSeconds, body);
         json(res, response.status, response.payload);
         return;
       }
@@ -574,6 +618,43 @@ function listShards(args) {
   console.log(JSON.stringify(rows, null, 2));
 }
 
+function resetLeases(args) {
+  const db = openDb(args.db);
+  const now = nowIso();
+  const result = args.runId == null
+    ? db.prepare(`
+        UPDATE shards
+        SET status = 'queued',
+            worker_id = NULL,
+            lease_token = NULL,
+            lease_until = NULL,
+            updated_at = ?,
+            last_error = CASE
+              WHEN status = 'leased' THEN 'manual lease reset'
+              ELSE last_error
+            END
+        WHERE status = 'leased'
+      `).run(now)
+    : db.prepare(`
+        UPDATE shards
+        SET status = 'queued',
+            worker_id = NULL,
+            lease_token = NULL,
+            lease_until = NULL,
+            updated_at = ?,
+            last_error = CASE
+              WHEN status = 'leased' THEN 'manual lease reset'
+              ELSE last_error
+            END
+        WHERE run_id = ? AND status = 'leased'
+      `).run(now, args.runId);
+  console.log(JSON.stringify({
+    ok: true,
+    run_id: args.runId ?? null,
+    reset_count: result.changes,
+  }, null, 2));
+}
+
 function main() {
   const { command, args } = parseArgs(process.argv);
   if (command === 'serve') {
@@ -590,6 +671,10 @@ function main() {
   }
   if (command === 'list-shards') {
     listShards(args);
+    return;
+  }
+  if (command === 'reset-leases') {
+    resetLeases(args);
     return;
   }
   usage();

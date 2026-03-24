@@ -19,7 +19,7 @@ That is the right shape for `7x7`:
 ## Start the server
 
 ```bash
-node coordinator/server.mjs serve --db coordinator/coordinator.sqlite --port 3000
+node coordinator/server.mjs serve --db coordinator/coordinator.sqlite --port 3000 --lease-seconds 86400
 ```
 
 ## Seed a run
@@ -74,6 +74,25 @@ node coordinator/worker.mjs \
   --worker-id worker-a
 ```
 
+To target one specific run:
+
+```bash
+node coordinator/worker.mjs \
+  --server http://127.0.0.1:3000 \
+  --worker-id worker-a \
+  --run-id 3
+```
+
+To renew long leases automatically every 10 minutes:
+
+```bash
+node coordinator/worker.mjs \
+  --server http://127.0.0.1:3000 \
+  --worker-id worker-a \
+  --run-id 3 \
+  --heartbeat-seconds 600
+```
+
 The worker:
 - fetches one shard lease
 - runs the solver once for that shard
@@ -89,6 +108,15 @@ Request:
 ```json
 {
   "worker_id": "worker-a"
+}
+```
+
+To restrict leasing to one run:
+
+```json
+{
+  "worker_id": "worker-a",
+  "run_id": 3
 }
 ```
 
@@ -132,6 +160,32 @@ Request body includes:
 - timings
 - solver stdout/stderr
 - `result_poly` as the `.poly` file contents
+
+### `POST /renew-lease`
+
+Request:
+
+```json
+{
+  "worker_id": "worker-a",
+  "shard_id": 12,
+  "lease_token": "uuid"
+}
+```
+
+### Reset stuck leases
+
+To force all leased shards back to the queue:
+
+```bash
+node coordinator/server.mjs reset-leases --db coordinator/coordinator.sqlite
+```
+
+To reset only one run:
+
+```bash
+node coordinator/server.mjs reset-leases --db coordinator/coordinator.sqlite --run-id 3
+```
 
 ## Notes
 
