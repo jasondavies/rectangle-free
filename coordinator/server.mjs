@@ -22,6 +22,7 @@ function usage() {
       '  node coordinator/server.mjs list-runs [--db PATH]',
       '  node coordinator/server.mjs list-shards --run-id ID [--db PATH]',
       '  node coordinator/server.mjs reset-leases [--run-id ID] [--db PATH]',
+      '  node coordinator/server.mjs merge-run --run-id ID [--output FILE] [--db PATH]',
       '',
       'create-run options:',
       '  --task-start N           default 0',
@@ -57,6 +58,7 @@ function parseArgs(argv) {
     adaptiveMaxDepth: 3,
     name: null,
     runId: null,
+    output: null,
   };
   const positionals = [];
   for (let i = 2; i < argv.length; i++) {
@@ -112,6 +114,9 @@ function parseArgs(argv) {
         break;
       case '--run-id':
         args.runId = Number(argv[++i]);
+        break;
+      case '--output':
+        args.output = path.resolve(argv[++i]);
         break;
       default:
         positionals.push(arg);
@@ -655,6 +660,96 @@ function resetLeases(args) {
   }, null, 2));
 }
 
+function writeTempPolyFiles(tempDir, rows) {
+  const paths = [];
+  for (const row of rows) {
+    const filePath = path.join(tempDir, `shard_${row.shard_index}.poly`);
+    fs.writeFileSync(filePath, row.result_poly, 'utf8');
+    paths.push(filePath);
+  }
+  return paths;
+}
+
+function mergePolyBatch(solver, inputPaths, outputPath) {
+  const argv = [solver, '--merge', ...inputPaths, '--poly-out', outputPath];
+  BunLikeSpawnSync(argv);
+}
+
+function mergePolyFiles(solver, inputPaths, outputPath) {
+  if (inputPaths.length === 0) {
+    throw new Error('no shard result files to merge');
+  }
+  if (inputPaths.length === 1) {
+    fs.copyFileSync(inputPaths[0], outputPath);
+    return;
+  }
+  const tempDir = fs.mkdtempSync(path.join(process.cwd(), 'coordinator-merge-'));
+  try {
+    let current = inputPaths.slice();
+    let round = 0;
+    while (current.length > 1) {
+      const next = [];
+      for (let i = 0; i < current.length; i += 128) {
+        const batch = current.slice(i, i + 128);
+        const batchOut = path.join(tempDir, `round_${round}_batch_${Math.floor(i / 128)}.poly`);
+        mergePolyBatch(solver, batch, batchOut);
+        next.push(batchOut);
+      }
+      current = next;
+      round++;
+    }
+    fs.copyFileSync(current[0], outputPath);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
+function mergeRun(args) {
+  if (!Number.isInteger(args.runId) || args.runId <= 0) {
+    throw new Error('merge-run requires --run-id');
+  }
+  const db = openDb(args.db);
+  const run = db.prepare('SELECT * FROM runs WHERE id = ?').get(args.runId);
+  if (!run) {
+    throw new Error(`run ${args.runId} not found`);
+  }
+  const stats = statsForRun(db, args.runId);
+  if ((stats.queued ?? 0) !== 0 || (stats.leased ?? 0) !== 0 || (stats.failed ?? 0) !== 0) {
+    throw new Error(
+      `run ${args.runId} is not mergeable: queued=${stats.queued ?? 0}, leased=${stats.leased ?? 0}, failed=${stats.failed ?? 0}`
+    );
+  }
+  const rows = db.prepare(`
+    SELECT shard_index, result_poly
+    FROM shards
+    WHERE run_id = ? AND status = 'done' AND ok = 1
+    ORDER BY shard_index
+  `).all(args.runId);
+  if (rows.length !== stats.total) {
+    throw new Error(`run ${args.runId} has only ${rows.length}/${stats.total} successful shard results`);
+  }
+  for (const row of rows) {
+    if (!row.result_poly) {
+      throw new Error(`shard ${row.shard_index} has no stored poly result`);
+    }
+  }
+  const outputPath = args.output ?? path.resolve(`run_${args.runId}.poly`);
+  ensureParentDir(outputPath);
+  const tempDir = fs.mkdtempSync(path.join(process.cwd(), 'coordinator-run-'));
+  try {
+    const inputPaths = writeTempPolyFiles(tempDir, rows);
+    mergePolyFiles(run.solver, inputPaths, outputPath);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+  console.log(JSON.stringify({
+    ok: true,
+    run_id: args.runId,
+    output: outputPath,
+    shard_count: rows.length,
+  }, null, 2));
+}
+
 function main() {
   const { command, args } = parseArgs(process.argv);
   if (command === 'serve') {
@@ -675,6 +770,10 @@ function main() {
   }
   if (command === 'reset-leases') {
     resetLeases(args);
+    return;
+  }
+  if (command === 'merge-run') {
+    mergeRun(args);
     return;
   }
   usage();
