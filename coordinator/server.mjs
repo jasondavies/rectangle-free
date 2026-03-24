@@ -20,6 +20,7 @@ function usage() {
       '  node coordinator/server.mjs serve [--db PATH] [--host HOST] [--port PORT] [--lease-seconds N]',
       '  node coordinator/server.mjs create-run --rows R --cols C --prefix-depth D --task-stride S [options]',
       '  node coordinator/server.mjs list-runs [--db PATH]',
+      '  node coordinator/server.mjs show-run --run-id ID [--db PATH]',
       '  node coordinator/server.mjs list-shards --run-id ID [--db PATH]',
       '  node coordinator/server.mjs reset-leases [--run-id ID] [--db PATH]',
       '  node coordinator/server.mjs merge-run --run-id ID [--output FILE] [--db PATH]',
@@ -608,6 +609,54 @@ function listRuns(args) {
   console.log(JSON.stringify(rows, null, 2));
 }
 
+function showRun(args) {
+  if (!Number.isInteger(args.runId) || args.runId <= 0) {
+    throw new Error('show-run requires --run-id');
+  }
+  const db = openDb(args.db);
+  const run = db.prepare('SELECT * FROM runs WHERE id = ?').get(args.runId);
+  if (!run) {
+    throw new Error(`run ${args.runId} not found`);
+  }
+  const stats = statsForRun(db, args.runId);
+  const shardStatus = db.prepare(`
+    SELECT status, COUNT(*) AS count
+    FROM shards
+    WHERE run_id = ?
+    GROUP BY status
+    ORDER BY status
+  `).all(args.runId);
+  const leased = db.prepare(`
+    SELECT shard_index, worker_id, lease_until, attempt_count
+    FROM shards
+    WHERE run_id = ? AND status = 'leased'
+    ORDER BY shard_index
+    LIMIT 16
+  `).all(args.runId);
+  const failed = db.prepare(`
+    SELECT shard_index, worker_id, attempt_count, last_error
+    FROM shards
+    WHERE run_id = ? AND status = 'failed'
+    ORDER BY shard_index
+    LIMIT 16
+  `).all(args.runId);
+  const slowestDone = db.prepare(`
+    SELECT shard_index, elapsed_seconds, worker_seconds, prefix_seconds, attempt_count
+    FROM shards
+    WHERE run_id = ? AND status = 'done'
+    ORDER BY COALESCE(worker_seconds, elapsed_seconds, 0) DESC, shard_index
+    LIMIT 10
+  `).all(args.runId);
+  console.log(JSON.stringify({
+    run,
+    stats,
+    shard_status: shardStatus,
+    leased_shards: leased,
+    failed_shards: failed,
+    slowest_done_shards: slowestDone,
+  }, null, 2));
+}
+
 function listShards(args) {
   if (!Number.isInteger(args.runId)) {
     throw new Error('list-shards requires --run-id');
@@ -762,6 +811,10 @@ function main() {
   }
   if (command === 'list-runs') {
     listRuns(args);
+    return;
+  }
+  if (command === 'show-run') {
+    showRun(args);
     return;
   }
   if (command === 'list-shards') {

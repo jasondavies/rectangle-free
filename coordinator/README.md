@@ -99,6 +99,26 @@ The worker:
 - reads the generated `.poly` file
 - submits the result back into SQLite through the server
 
+## Inspect run state
+
+For a one-line summary of every run:
+
+```bash
+node coordinator/server.mjs list-runs --db coordinator/coordinator.sqlite
+```
+
+For one run’s queued/leased/done/failed breakdown plus a short shard summary:
+
+```bash
+node coordinator/server.mjs show-run --db coordinator/coordinator.sqlite --run-id 3
+```
+
+For every shard in one run:
+
+```bash
+node coordinator/server.mjs list-shards --db coordinator/coordinator.sqlite --run-id 3
+```
+
 ## API
 
 ### `POST /fetch-work`
