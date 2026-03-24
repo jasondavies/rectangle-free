@@ -1528,36 +1528,6 @@ Poly solve_graph_poly(Graph g, GraphCache* cache, GraphCache* raw_cache, NautyWo
         }
     }
 
-    // Canonicalise only if exact lookup missed.
-    Graph canon;
-    get_canonical_graph(&g, &canon, ws, profile);
-    (*local_canon_calls)++;
-    
-    uint64_t hash = hash_graph(&canon);
-    int cache_idx = (int)(hash & (uint64_t)cache->mask);
-    
-    // Cache lookup using canonical form
-    for (int k = 0; k < cache->probe; k++) {
-        int p = (cache_idx + k) & cache->mask;
-        if (cache->keys[p].used && cache->keys[p].key_hash == hash &&
-            cache->keys[p].key_n == (uint32_t)canon.n) {
-            int match = 1;
-            for (int i = 0; i < canon.n && match; i++) {
-                uint64_t row = canon.adj[i] & ADJWORD_MASK;
-                if (cache->adj[(size_t)p * MAXN_NAUTY + i] != (AdjWord)row) match = 0;
-            }
-            if (match) {
-                Poly cached;
-                (*local_cache_hits)++;
-                graph_cache_load_poly(cache, p, &cached);
-                store_graph_cache_entry(raw_cache, raw_hash, (uint32_t)g.n, &g, row_mask, &cached);
-                Poly result = poly_mul(multiplier, cached);
-                if (g_profile && profile) profile->solve_graph_time += omp_get_wtime() - solve_t0;
-                return result;
-            }
-        }
-    }
-
     Poly res;
     uint64_t component_masks[MAXN_NAUTY];
     int component_count = graph_collect_components(&g, component_masks);
@@ -1572,6 +1542,36 @@ Poly solve_graph_poly(Graph g, GraphCache* cache, GraphCache* raw_cache, NautyWo
             res = poly_mul(res, part);
         }
     } else {
+        // Canonicalise only if exact lookup missed and the graph is still connected.
+        Graph canon;
+        get_canonical_graph(&g, &canon, ws, profile);
+        (*local_canon_calls)++;
+        
+        uint64_t hash = hash_graph(&canon);
+        int cache_idx = (int)(hash & (uint64_t)cache->mask);
+        
+        // Cache lookup using canonical form
+        for (int k = 0; k < cache->probe; k++) {
+            int p = (cache_idx + k) & cache->mask;
+            if (cache->keys[p].used && cache->keys[p].key_hash == hash &&
+                cache->keys[p].key_n == (uint32_t)canon.n) {
+                int match = 1;
+                for (int i = 0; i < canon.n && match; i++) {
+                    uint64_t row = canon.adj[i] & ADJWORD_MASK;
+                    if (cache->adj[(size_t)p * MAXN_NAUTY + i] != (AdjWord)row) match = 0;
+                }
+                if (match) {
+                    Poly cached;
+                    (*local_cache_hits)++;
+                    graph_cache_load_poly(cache, p, &cached);
+                    store_graph_cache_entry(raw_cache, raw_hash, (uint32_t)g.n, &g, row_mask, &cached);
+                    Poly result = poly_mul(multiplier, cached);
+                    if (g_profile && profile) profile->solve_graph_time += omp_get_wtime() - solve_t0;
+                    return result;
+                }
+            }
+        }
+
         // Deletion-contraction on original (non-canonical) graph
         int max_deg = -1, u = -1;
         for (int i = 0; i < g.n; i++) {
@@ -1618,9 +1618,10 @@ Poly solve_graph_poly(Graph g, GraphCache* cache, GraphCache* raw_cache, NautyWo
             res = poly_one();
             for (int k = 0; k < g.n; k++) res = poly_mul_linear(res, 0);
         }
+
+        store_graph_cache_entry(cache, hash, (uint32_t)canon.n, &canon, ADJWORD_MASK, &res);
     }
-    
-    store_graph_cache_entry(cache, hash, (uint32_t)canon.n, &canon, ADJWORD_MASK, &res);
+
     store_graph_cache_entry(raw_cache, raw_hash, (uint32_t)g.n, &g, row_mask, &res);
     
     Poly result = poly_mul(multiplier, res);
@@ -1950,6 +1951,8 @@ int main(int argc, char** argv) {
     int prefix_depth = 0;
     if (prefix_depth_override != -1) {
         prefix_depth = prefix_depth_override;
+    } else if (g_rows == 7 && g_cols >= 6) {
+        prefix_depth = 2;
     } else if (g_cols >= 6) {
         prefix_depth = 3;
     } else if (g_cols >= 2) {
@@ -2181,6 +2184,7 @@ int main(int argc, char** argv) {
     
     int num_threads = omp_get_max_threads();
     int poly_len = g_rows * g_cols + 1;
+    int graph_poly_len = g_cols * (g_rows / 2) + 1;
     Poly* thread_polys = checked_aligned_alloc(64, (size_t)num_threads * sizeof(Poly), "thread_polys");
     ProfileStats* thread_profiles =
         checked_aligned_alloc(64, (size_t)num_threads * sizeof(ProfileStats), "thread_profiles");
@@ -2203,19 +2207,21 @@ int main(int argc, char** argv) {
         memset(&ws, 0, sizeof(ws));
         cache.mask = CACHE_MASK;
         cache.probe = CACHE_PROBE;
-        cache.poly_len = poly_len;
+        cache.poly_len = graph_poly_len;
         cache.keys = checked_aligned_alloc(64, sizeof(CacheKey) * CACHE_SIZE, "cache_keys");
         cache.adj = checked_aligned_alloc(64, sizeof(AdjWord) * CACHE_SIZE * MAXN_NAUTY, "cache_adj");
         cache.degs = checked_aligned_alloc(64, sizeof(uint8_t) * CACHE_SIZE, "cache_degs");
-        cache.coeffs = checked_aligned_alloc(64, sizeof(PolyCoeff) * CACHE_SIZE * (size_t)poly_len, "cache_coeffs");
+        cache.coeffs =
+            checked_aligned_alloc(64, sizeof(PolyCoeff) * CACHE_SIZE * (size_t)graph_poly_len, "cache_coeffs");
 
         raw_cache.mask = RAW_CACHE_MASK;
         raw_cache.probe = RAW_CACHE_PROBE;
-        raw_cache.poly_len = poly_len;
+        raw_cache.poly_len = graph_poly_len;
         raw_cache.keys = checked_aligned_alloc(64, sizeof(CacheKey) * RAW_CACHE_SIZE, "raw_cache_keys");
         raw_cache.adj = checked_aligned_alloc(64, sizeof(AdjWord) * RAW_CACHE_SIZE * MAXN_NAUTY, "raw_cache_adj");
         raw_cache.degs = checked_aligned_alloc(64, sizeof(uint8_t) * RAW_CACHE_SIZE, "raw_cache_degs");
-        raw_cache.coeffs = checked_aligned_alloc(64, sizeof(PolyCoeff) * RAW_CACHE_SIZE * (size_t)poly_len, "raw_cache_coeffs");
+        raw_cache.coeffs = checked_aligned_alloc(64, sizeof(PolyCoeff) * RAW_CACHE_SIZE * (size_t)graph_poly_len,
+                                                 "raw_cache_coeffs");
 
         memset(cache.keys, 0, sizeof(CacheKey) * CACHE_SIZE);
         memset(raw_cache.keys, 0, sizeof(CacheKey) * RAW_CACHE_SIZE);

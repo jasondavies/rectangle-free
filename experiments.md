@@ -95,3 +95,24 @@
 - Interpretation: non-adaptive depth-2 still suffers mostly from one giant coarse task, so chunk size alone cannot fix scaling there. But `dynamic,1` does not hurt and still buys about `4%` on the sampled `7x5` run.
 - Final decision: keep `dynamic,1` for `g_rows == 7` depth-2 work, but preserve the older `dynamic,8` default for smaller-row non-adaptive cases.
 - Outcome: accepted.
+
+### Experiment 9: Make `7x7` structural defaults cheaper before chasing more parallel speed
+- Goal: remove obvious `7x7` startup and memory hazards before the next wave of scaling experiments.
+- Change:
+  - force the default `prefix_depth` to `2` for `g_rows == 7 && g_cols >= 6`
+  - shrink graph-cache coefficient slabs to the actual conflict-graph bound `g_cols * floor(g_rows / 2) + 1`
+  - move connected-component splitting ahead of nauty canonicalisation in `solve_graph_poly()`
+- Validation command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly 7 7 --task-end 0`
+- Result:
+  - default `7x7` prefixing now stays at depth `2`
+  - task count remains `385003`
+  - prefix storage stays at `2.94 MiB`
+  - scheduling remains `dynamic,1`
+- Validation command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly 7 2 --task-end 200 --prefix-depth 2`
+- Result: unchanged smoke-test polynomial
+  - `P(x) = 280*x^6 - 2590*x^5 + 9562*x^4 - 17262*x^3 + 15037*x^2 - 5027*x`
+  - `P(4) = 58308`
+  - `P(5) = 450540`
+- Memory impact: for `7x7`, each graph-cache slot now stores `22` coefficients instead of `50`, a `56%` reduction in coefficient-slab footprint for both the canonical and raw per-thread caches.
+- Interpretation: this is the right structural baseline for `7x7`. It removes the bad default depth-3 route, cuts a large chunk of per-thread cache memory, and avoids wasting nauty work on disconnected conflict graphs. I could not take a clean 32-thread timing on this batch because the host was already saturated by another long-running 32-thread solver job, so the throughput comparison is deferred to a later experiment.
+- Outcome: accepted.
