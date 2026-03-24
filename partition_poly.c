@@ -8,10 +8,18 @@
 #include "progress_util.h"
 
 // --- CONFIGURATION ---
+#ifndef DEFAULT_ROWS
 #define DEFAULT_ROWS 6
+#endif
+#ifndef DEFAULT_COLS
 #define DEFAULT_COLS 6
+#endif
+#ifndef MAX_ROWS
 #define MAX_ROWS 7
+#endif
+#ifndef MAX_COLS
 #define MAX_COLS 16
+#endif
 
 // Define MAXN before including nauty
 #define MAX_COMPLEX_PER_COL (MAX_ROWS / 2)

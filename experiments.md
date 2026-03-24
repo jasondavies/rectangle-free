@@ -200,3 +200,33 @@
   - `P(5) = 450540`
 - Interpretation: this is a strong data-structure win. The hot path was paying twice: once in `prepare_push()` to discover active permutations, then again in `commit_push()` to rescan the full permutation set. Reusing the prepared active/change lists removes a large chunk of that wasted work and materially improves both single-thread throughput and 32-thread runtime on the sampled `7x5` workload.
 - Outcome: accepted.
+
+### Experiment 14: Build a 7-row-specific `partition_poly_7` binary
+- Goal: stop paying the generic `MAX_COLS 16` footprint when the target workload is specifically `7xn`.
+- Change:
+  - made the top-level width macros overridable
+  - added a `partition_poly_7` target compiled with `-DMAX_COLS=7 -DDEFAULT_ROWS=7 -DDEFAULT_COLS=7`
+- Structural effect:
+  - `MAXN_NAUTY` drops from `48` to `21`
+  - `AdjWord` drops from `uint64_t` to `uint32_t`
+  - the per-thread canonical-cache adjacency slab drops from about `96 MiB` to about `21 MiB`
+  - the per-thread raw-cache adjacency slab drops from about `3.0 MiB` to about `0.66 MiB`
+- Startup benchmark method:
+  - compared repeated no-work `7x7 --task-end 0` launches with `OMP_NUM_THREADS=1`
+- Generic command: `/usr/bin/time -f '%e' bash -lc 'for i in $(seq 1 10); do env OMP_NUM_THREADS=1 ./partition_poly 7 7 --task-end 0 >/dev/null; done'`
+- Generic result: `1.14s`
+- `partition_poly_7` command: `/usr/bin/time -f '%e' bash -lc 'for i in $(seq 1 10); do env OMP_NUM_THREADS=1 ./partition_poly_7 7 7 --task-end 0 >/dev/null; done'`
+- `partition_poly_7` result: `1.10s`
+- 32-thread benchmark method:
+  - compared the same sampled adaptive `7x5` workload used in earlier runtime experiments
+- Generic command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235`
+- Generic result: `Worker Complete 5.05s`, `Total elapsed 9.03s`
+- `partition_poly_7` command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235`
+- `partition_poly_7` result: `Worker Complete 4.73s`, `Total elapsed 8.58s`
+- Verification command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 2 --task-end 200 --prefix-depth 2`
+- Verification result: unchanged smoke-test polynomial
+  - `P(x) = 280*x^6 - 2590*x^5 + 9562*x^4 - 17262*x^3 + 15037*x^2 - 5027*x`
+  - `P(4) = 58308`
+  - `P(5) = 450540`
+- Interpretation: this is a worthwhile 7-row deployment path. The raw speedup is modest but real, and the cache-adjacency memory reduction is large enough to matter immediately for dense multi-process and multi-node `7xn` runs.
+- Outcome: accepted.
