@@ -9,7 +9,7 @@
 // --- CONFIGURATION ---
 #define DEFAULT_ROWS 6
 #define DEFAULT_COLS 6
-#define MAX_ROWS 6
+#define MAX_ROWS 7
 #define MAX_COLS 16
 
 // Define MAXN before including nauty
@@ -32,8 +32,7 @@ typedef uint64_t AdjWord;
 #endif
 #endif
 
-#define PERM_SIZE 720      // 6!
-#define MAX_PARTITIONS 300 // Sufficient for B(6)=203
+#define MAX_PERMUTATIONS 5040 // 7!
 #define MAX_DEGREE ((MAX_ROWS * MAX_COLS) + 1)
 
 // Cache settings - tuned for better locality
@@ -146,13 +145,16 @@ typedef struct {
 
 // --- GLOBALS ---
 static int num_partitions = 0;
-static Partition partitions[MAX_PARTITIONS];
-static int perms[PERM_SIZE][MAX_ROWS];
-static uint8_t perm_table[MAX_PARTITIONS][PERM_SIZE];
+static int perm_count = 0;
+static int max_partition_capacity = 0;
+static int max_complex_per_partition = 0;
+static Partition* partitions = NULL;
+static int (*perms)[MAX_ROWS] = NULL;
+static uint16_t* perm_table = NULL;
 static uint64_t factorial[20];
-static uint32_t overlap_mask[MAX_PARTITIONS][MAX_PARTITIONS][MAX_ROWS];
-static uint32_t intra_mask[MAX_PARTITIONS][MAX_ROWS];
-static Poly partition_weight_poly[MAX_PARTITIONS];
+static uint32_t* overlap_mask = NULL;
+static uint32_t* intra_mask = NULL;
+static Poly* partition_weight_poly = NULL;
 
 static volatile long long completed_tasks = 0;
 static Poly global_poly = {0}; 
@@ -164,6 +166,28 @@ static int g_adaptive_subdivide = 0;
 static int g_adaptive_threshold = 128;
 static int g_adaptive_max_depth = 3;
 static int g_profile = 0;
+
+static inline uint16_t perm_table_get(int partition_id, int perm_id) {
+    return perm_table[(size_t)partition_id * (size_t)perm_count + (size_t)perm_id];
+}
+
+static inline uint32_t* intra_mask_row(int partition_id) {
+    return intra_mask + (size_t)partition_id * (size_t)max_complex_per_partition;
+}
+
+static inline uint32_t intra_mask_get(int partition_id, int complex_idx) {
+    return intra_mask_row(partition_id)[complex_idx];
+}
+
+static inline uint32_t* overlap_mask_row(int lhs_partition_id, int rhs_partition_id) {
+    return overlap_mask +
+           (((size_t)lhs_partition_id * (size_t)num_partitions + (size_t)rhs_partition_id) *
+            (size_t)max_complex_per_partition);
+}
+
+static inline uint32_t overlap_mask_get(int lhs_partition_id, int rhs_partition_id, int complex_idx) {
+    return overlap_mask_row(lhs_partition_id, rhs_partition_id)[complex_idx];
+}
 
 static void task_timing_insert_topk(TaskTimingStats* stats, long long task_index, double elapsed) {
     for (int i = 0; i < TASK_PROFILE_TOPK; i++) {
@@ -224,6 +248,65 @@ static void* checked_aligned_alloc(size_t alignment, size_t size, const char* la
         exit(1);
     }
     return ptr;
+}
+
+static void* checked_calloc(size_t count, size_t size, const char* label) {
+    void* ptr = calloc(count, size);
+    if (!ptr) {
+        fprintf(stderr, "Failed to allocate %s (%zu bytes)\n", label, count * size);
+        exit(1);
+    }
+    return ptr;
+}
+
+static int bell_number_upper_bound(int rows) {
+    static const int bell_numbers[] = {0, 1, 2, 5, 15, 52, 203, 877};
+    if (rows < 0 || rows >= (int)(sizeof(bell_numbers) / sizeof(bell_numbers[0]))) {
+        fprintf(stderr, "Unsupported row count for Bell number lookup: %d\n", rows);
+        exit(1);
+    }
+    return bell_numbers[rows];
+}
+
+static void init_row_dependent_tables(void) {
+    max_partition_capacity = bell_number_upper_bound(g_rows);
+    perm_count = (int)factorial[g_rows];
+    max_complex_per_partition = g_rows / 2;
+
+    partitions = checked_calloc((size_t)max_partition_capacity, sizeof(*partitions), "partitions");
+    perms = checked_calloc((size_t)perm_count, sizeof(*perms), "perms");
+}
+
+static void init_partition_lookup_tables(void) {
+    size_t partition_count = (size_t)num_partitions;
+
+    perm_table = checked_calloc(partition_count * (size_t)perm_count, sizeof(*perm_table), "perm_table");
+    overlap_mask = checked_calloc(partition_count * partition_count * (size_t)max_complex_per_partition,
+                                  sizeof(*overlap_mask), "overlap_mask");
+    intra_mask = checked_calloc(partition_count * (size_t)max_complex_per_partition,
+                                sizeof(*intra_mask), "intra_mask");
+    partition_weight_poly =
+        checked_calloc(partition_count, sizeof(*partition_weight_poly), "partition_weight_poly");
+}
+
+static void free_row_dependent_tables(void) {
+    free(partitions);
+    free(perms);
+    free(perm_table);
+    free(overlap_mask);
+    free(intra_mask);
+    free(partition_weight_poly);
+
+    partitions = NULL;
+    perms = NULL;
+    perm_table = NULL;
+    overlap_mask = NULL;
+    intra_mask = NULL;
+    partition_weight_poly = NULL;
+    num_partitions = 0;
+    perm_count = 0;
+    max_partition_capacity = 0;
+    max_complex_per_partition = 0;
 }
 
 static void degree_overflow(int deg) {
@@ -709,6 +792,7 @@ void generate_permutations() {
         int l = i + 1, r = g_rows - 1;
         while (l < r) { temp = p[l]; p[l] = p[r]; p[r] = temp; l++; r--; }
     }
+    perm_count = count;
 }
 
 void normalize_partition(uint8_t* p) {
@@ -744,6 +828,10 @@ void generate_partitions_recursive(int idx, uint8_t* current, int max_val) {
         for (int b = 0; b < part.num_blocks; b++) {
             if (part.is_complex[b]) part.complex_blocks[ci++] = (uint8_t)b;
         }
+        if (num_partitions >= max_partition_capacity) {
+            fprintf(stderr, "Partition table capacity exceeded for %d rows\n", g_rows);
+            exit(1);
+        }
         partitions[num_partitions++] = part;
         return;
     }
@@ -765,37 +853,37 @@ int get_partition_id(uint8_t* map) {
 }
 
 void build_perm_table() {
-    int limit = (int)factorial[g_rows];
     uint8_t temp[MAX_ROWS];
     
     for (int id = 0; id < num_partitions; id++) {
-        for (int pi = 0; pi < PERM_SIZE; pi++) {
-            if (pi >= limit) break;
-            
+        for (int pi = 0; pi < perm_count; pi++) {
             for (int r = 0; r < g_rows; r++) {
                 temp[r] = partitions[id].mapping[perms[pi][r]];
             }
             normalize_partition(temp);
             int pid = get_partition_id(temp);
-            if (pid < 0 || pid > 255) {
+            if (pid < 0 || pid > UINT16_MAX) {
                 fprintf(stderr, "partition id out of range in build_perm_table: %d\n", pid);
                 exit(1);
             }
-            perm_table[id][pi] = (uint8_t)pid;
+            perm_table[(size_t)id * (size_t)perm_count + (size_t)pi] = (uint16_t)pid;
         }
     }
 }
 
 void build_overlap_table() {
-    memset(overlap_mask, 0, sizeof(overlap_mask));
-    memset(intra_mask, 0, sizeof(intra_mask));
+    memset(overlap_mask, 0,
+           (size_t)num_partitions * (size_t)num_partitions * (size_t)max_complex_per_partition *
+               sizeof(*overlap_mask));
+    memset(intra_mask, 0,
+           (size_t)num_partitions * (size_t)max_complex_per_partition * sizeof(*intra_mask));
     for (int pid1 = 0; pid1 < num_partitions; pid1++) {
         for (int i1 = 0; i1 < partitions[pid1].num_complex; i1++) {
             uint32_t mask = 0;
             for (int i2 = 0; i2 < partitions[pid1].num_complex; i2++) {
                 if (i1 != i2) mask |= (1u << i2);
             }
-            intra_mask[pid1][i1] = mask;
+            intra_mask_row(pid1)[i1] = mask;
         }
         for (int i1 = 0; i1 < partitions[pid1].num_complex; i1++) {
             int b1 = partitions[pid1].complex_blocks[i1];
@@ -809,7 +897,7 @@ void build_overlap_table() {
                         mask |= (1u << i2);
                     }
                 }
-                overlap_mask[pid1][pid2][i1] = mask;
+                overlap_mask_row(pid1, pid2)[i1] = mask;
             }
         }
     }
@@ -831,22 +919,68 @@ static void build_partition_weight_table(void) {
 
 typedef struct {
     int limit;
+    int cols;
     int depth;
-    uint8_t transformed[PERM_SIZE][MAX_COLS];
-    uint8_t materialized_len[PERM_SIZE];
-    uint16_t updated_idx[MAX_COLS][PERM_SIZE];
+    uint16_t* transformed;
+    uint8_t* materialized_len;
+    uint16_t* updated_idx;
+    uint8_t* prev_materialized_len;
+    uint16_t* prev_rows;
+    uint8_t* first_greater;
+    uint16_t* changed_first_greater_idx;
+    uint8_t* changed_first_greater_old;
     uint16_t updated_count[MAX_COLS];
-    uint8_t prev_rows[MAX_COLS][PERM_SIZE][MAX_COLS];
-    uint8_t prev_materialized_len[MAX_COLS][PERM_SIZE];
-    uint8_t first_greater[PERM_SIZE];
-    uint16_t changed_first_greater_idx[MAX_COLS][PERM_SIZE];
-    uint8_t changed_first_greater_old[MAX_COLS][PERM_SIZE];
     uint16_t changed_first_greater_count[MAX_COLS];
-    uint8_t stack_vals[MAX_COLS];
+    uint16_t stack_vals[MAX_COLS];
     int stabilizer[MAX_COLS + 1];
 } CanonState;
 
-static inline int row_insert_sorted(uint8_t* row, int len, uint8_t val) {
+typedef struct {
+    int limit;
+    int cols;
+    uint8_t* next_first_greater;
+    uint8_t* next_active;
+    uint16_t* prepared_rows;
+} CanonScratch;
+
+static inline uint16_t* canon_state_row(CanonState* st, int perm_id) {
+    return st->transformed + (size_t)perm_id * (size_t)st->cols;
+}
+
+static inline const uint16_t* canon_state_row_const(const CanonState* st, int perm_id) {
+    return st->transformed + (size_t)perm_id * (size_t)st->cols;
+}
+
+static inline uint16_t* canon_state_updated_idx_row(CanonState* st, int depth) {
+    return st->updated_idx + (size_t)depth * (size_t)st->limit;
+}
+
+static inline uint8_t* canon_state_prev_materialized_len_row(CanonState* st, int depth) {
+    return st->prev_materialized_len + (size_t)depth * (size_t)st->limit;
+}
+
+static inline uint16_t* canon_state_prev_row(CanonState* st, int depth, int idx) {
+    return st->prev_rows +
+           (((size_t)depth * (size_t)st->limit + (size_t)idx) * (size_t)st->cols);
+}
+
+static inline uint16_t* canon_state_changed_first_greater_idx_row(CanonState* st, int depth) {
+    return st->changed_first_greater_idx + (size_t)depth * (size_t)st->limit;
+}
+
+static inline uint8_t* canon_state_changed_first_greater_old_row(CanonState* st, int depth) {
+    return st->changed_first_greater_old + (size_t)depth * (size_t)st->limit;
+}
+
+static inline uint16_t* canon_scratch_prepared_row(CanonScratch* scratch, int perm_id) {
+    return scratch->prepared_rows + (size_t)perm_id * (size_t)scratch->cols;
+}
+
+static inline const uint16_t* canon_scratch_prepared_row_const(const CanonScratch* scratch, int perm_id) {
+    return scratch->prepared_rows + (size_t)perm_id * (size_t)scratch->cols;
+}
+
+static inline int row_insert_sorted(uint16_t* row, int len, uint16_t val) {
     int j = len;
     while (j > 0 && row[j - 1] > val) j--;
     for (int k = len; k > j; k--) row[k] = row[k - 1];
@@ -854,89 +988,149 @@ static inline int row_insert_sorted(uint8_t* row, int len, uint8_t val) {
     return j;
 }
 
-void canon_state_reset(CanonState* st, int limit) {
+static void canon_state_init(CanonState* st, int limit) {
+    memset(st, 0, sizeof(*st));
     st->limit = limit;
-    st->depth = 0;
-    st->stabilizer[0] = limit;
-    memset(st->materialized_len, 0, sizeof(st->materialized_len));
-    memset(st->first_greater, 0, sizeof(st->first_greater));
+    st->cols = g_cols;
+    st->transformed =
+        checked_calloc((size_t)limit * (size_t)st->cols, sizeof(*st->transformed), "canon_state_transformed");
+    st->materialized_len =
+        checked_calloc((size_t)limit, sizeof(*st->materialized_len), "canon_state_materialized_len");
+    st->updated_idx =
+        checked_calloc((size_t)st->cols * (size_t)limit, sizeof(*st->updated_idx), "canon_state_updated_idx");
+    st->prev_materialized_len = checked_calloc((size_t)st->cols * (size_t)limit,
+                                               sizeof(*st->prev_materialized_len),
+                                               "canon_state_prev_materialized_len");
+    st->prev_rows = checked_calloc((size_t)st->cols * (size_t)limit * (size_t)st->cols,
+                                   sizeof(*st->prev_rows), "canon_state_prev_rows");
+    st->first_greater =
+        checked_calloc((size_t)limit, sizeof(*st->first_greater), "canon_state_first_greater");
+    st->changed_first_greater_idx =
+        checked_calloc((size_t)st->cols * (size_t)limit, sizeof(*st->changed_first_greater_idx),
+                       "canon_state_changed_first_greater_idx");
+    st->changed_first_greater_old =
+        checked_calloc((size_t)st->cols * (size_t)limit, sizeof(*st->changed_first_greater_old),
+                       "canon_state_changed_first_greater_old");
 }
 
-int canon_state_prepare_push(const CanonState* st, int partition_id, uint8_t* next_insert_pos,
-                             uint8_t* next_first_greater, uint8_t* next_active,
-                             uint8_t prepared_rows[PERM_SIZE][MAX_COLS], int* next_stabilizer) {
+static void canon_state_free(CanonState* st) {
+    free(st->transformed);
+    free(st->materialized_len);
+    free(st->updated_idx);
+    free(st->prev_materialized_len);
+    free(st->prev_rows);
+    free(st->first_greater);
+    free(st->changed_first_greater_idx);
+    free(st->changed_first_greater_old);
+    memset(st, 0, sizeof(*st));
+}
+
+static void canon_scratch_init(CanonScratch* scratch, int limit) {
+    memset(scratch, 0, sizeof(*scratch));
+    scratch->limit = limit;
+    scratch->cols = g_cols;
+    scratch->next_first_greater =
+        checked_calloc((size_t)limit, sizeof(*scratch->next_first_greater), "canon_scratch_next_first_greater");
+    scratch->next_active =
+        checked_calloc((size_t)limit, sizeof(*scratch->next_active), "canon_scratch_next_active");
+    scratch->prepared_rows = checked_calloc((size_t)limit * (size_t)scratch->cols,
+                                            sizeof(*scratch->prepared_rows), "canon_scratch_prepared_rows");
+}
+
+static void canon_scratch_free(CanonScratch* scratch) {
+    free(scratch->next_first_greater);
+    free(scratch->next_active);
+    free(scratch->prepared_rows);
+    memset(scratch, 0, sizeof(*scratch));
+}
+
+void canon_state_reset(CanonState* st, int limit) {
+    st->limit = limit;
+    st->cols = g_cols;
+    st->depth = 0;
+    st->stabilizer[0] = limit;
+    memset(st->materialized_len, 0, (size_t)limit * sizeof(*st->materialized_len));
+    memset(st->first_greater, 0, (size_t)limit * sizeof(*st->first_greater));
+}
+
+int canon_state_prepare_push(const CanonState* st, int partition_id, CanonScratch* scratch,
+                             int* next_stabilizer) {
     int depth = st->depth;
     int new_depth = depth + 1;
     int stabilizer = 0;
-    uint8_t pid = (uint8_t)partition_id;
+    uint16_t pid = (uint16_t)partition_id;
 
     for (int p = 0; p < st->limit; p++) {
-        uint8_t val = perm_table[partition_id][p];
+        uint16_t val = perm_table_get(partition_id, p);
         int g = st->first_greater[p];
-        if (g < depth && st->materialized_len[p] > g && val >= st->transformed[p][g]) {
-            next_active[p] = 0;
-            next_insert_pos[p] = 255;
-            next_first_greater[p] = (uint8_t)g;
+        const uint16_t* transformed_row = canon_state_row_const(st, p);
+        if (g < depth && st->materialized_len[p] > g && val >= transformed_row[g]) {
+            scratch->next_active[p] = 0;
+            scratch->next_first_greater[p] = (uint8_t)g;
             continue;
         }
 
-        uint8_t* row = prepared_rows[p];
+        uint16_t* row = canon_scratch_prepared_row(scratch, p);
         int len = st->materialized_len[p];
         if (len > 0) {
-            memcpy(row, st->transformed[p], (size_t)len * sizeof(row[0]));
+            memcpy(row, transformed_row, (size_t)len * sizeof(*row));
         }
         for (int t = len; t < depth; t++) {
-            row_insert_sorted(row, t, perm_table[st->stack_vals[t]][p]);
+            row_insert_sorted(row, t, perm_table_get((int)st->stack_vals[t], p));
         }
 
-        int j = row_insert_sorted(row, depth, val);
-        next_insert_pos[p] = (uint8_t)j;
-        next_active[p] = 1;
+        row_insert_sorted(row, depth, val);
+        scratch->next_active[p] = 1;
 
-        int cmp = 0;
         int first_greater = new_depth;
         for (int k = 0; k < new_depth; k++) {
-            int sv = (k < depth) ? st->stack_vals[k] : pid;
-            if (row[k] < sv) return 0;
+            int sv = (k < depth) ? st->stack_vals[k] : (int)pid;
+            if (row[k] < sv) {
+                return 0;
+            }
             if (row[k] > sv) {
-                cmp = 1;
                 first_greater = k;
                 break;
             }
         }
-        if (cmp == 0) {
+        if (first_greater == new_depth) {
             stabilizer++;
-            first_greater = new_depth;
         }
-        next_first_greater[p] = (uint8_t)first_greater;
+        scratch->next_first_greater[p] = (uint8_t)first_greater;
     }
     *next_stabilizer = stabilizer;
     return 1;
 }
 
-void canon_state_commit_push(CanonState* st, int partition_id, const uint8_t* next_insert_pos,
-                             const uint8_t* next_first_greater, const uint8_t* next_active,
-                             uint8_t prepared_rows[PERM_SIZE][MAX_COLS], int next_stabilizer) {
+void canon_state_commit_push(CanonState* st, int partition_id, const CanonScratch* scratch,
+                             int next_stabilizer) {
     int depth = st->depth;
     int new_depth = depth + 1;
+    uint16_t* updated_idx = canon_state_updated_idx_row(st, depth);
+    uint8_t* prev_materialized_len = canon_state_prev_materialized_len_row(st, depth);
+    uint16_t* changed_first_greater_idx = canon_state_changed_first_greater_idx_row(st, depth);
+    uint8_t* changed_first_greater_old = canon_state_changed_first_greater_old_row(st, depth);
     uint16_t changed_fg_count = 0;
     uint16_t updated_count = 0;
-    st->stack_vals[depth] = (uint8_t)partition_id;
+    st->stack_vals[depth] = (uint16_t)partition_id;
 
     for (int p = 0; p < st->limit; p++) {
-        if (st->first_greater[p] != next_first_greater[p]) {
-            st->changed_first_greater_idx[depth][changed_fg_count] = (uint16_t)p;
-            st->changed_first_greater_old[depth][changed_fg_count] = st->first_greater[p];
+        uint16_t* row = canon_state_row(st, p);
+        if (st->first_greater[p] != scratch->next_first_greater[p]) {
+            changed_first_greater_idx[changed_fg_count] = (uint16_t)p;
+            changed_first_greater_old[changed_fg_count] = st->first_greater[p];
             changed_fg_count++;
-            st->first_greater[p] = next_first_greater[p];
+            st->first_greater[p] = scratch->next_first_greater[p];
         }
-        if (!next_active[p]) continue;
+        if (!scratch->next_active[p]) continue;
 
-        st->updated_idx[depth][updated_count] = (uint16_t)p;
-        st->prev_materialized_len[depth][updated_count] = st->materialized_len[p];
-        memcpy(st->prev_rows[depth][updated_count], st->transformed[p],
-               (size_t)MAX_COLS * sizeof(st->transformed[p][0]));
-        memcpy(st->transformed[p], prepared_rows[p], (size_t)new_depth * sizeof(prepared_rows[p][0]));
+        uint8_t old_len = st->materialized_len[p];
+        updated_idx[updated_count] = (uint16_t)p;
+        prev_materialized_len[updated_count] = old_len;
+        if (old_len > 0) {
+            memcpy(canon_state_prev_row(st, depth, updated_count), row, (size_t)old_len * sizeof(*row));
+        }
+        memcpy(row, canon_scratch_prepared_row_const(scratch, p), (size_t)new_depth * sizeof(*row));
         st->materialized_len[p] = (uint8_t)new_depth;
         updated_count++;
     }
@@ -949,15 +1143,22 @@ void canon_state_commit_push(CanonState* st, int partition_id, const uint8_t* ne
 
 void canon_state_pop(CanonState* st) {
     int depth = st->depth - 1;
+    uint16_t* updated_idx = canon_state_updated_idx_row(st, depth);
+    uint8_t* prev_materialized_len = canon_state_prev_materialized_len_row(st, depth);
+    uint16_t* changed_first_greater_idx = canon_state_changed_first_greater_idx_row(st, depth);
+    uint8_t* changed_first_greater_old = canon_state_changed_first_greater_old_row(st, depth);
     for (uint16_t i = 0; i < st->updated_count[depth]; i++) {
-        uint16_t p = st->updated_idx[depth][i];
-        memcpy(st->transformed[p], st->prev_rows[depth][i],
-               (size_t)MAX_COLS * sizeof(st->transformed[p][0]));
-        st->materialized_len[p] = st->prev_materialized_len[depth][i];
+        uint16_t p = updated_idx[i];
+        uint8_t old_len = prev_materialized_len[i];
+        uint16_t* row = canon_state_row(st, p);
+        if (old_len > 0) {
+            memcpy(row, canon_state_prev_row(st, depth, i), (size_t)old_len * sizeof(*row));
+        }
+        st->materialized_len[p] = old_len;
     }
     for (uint16_t i = 0; i < st->changed_first_greater_count[depth]; i++) {
-        uint16_t p = st->changed_first_greater_idx[depth][i];
-        st->first_greater[p] = st->changed_first_greater_old[depth][i];
+        uint16_t p = changed_first_greater_idx[i];
+        st->first_greater[p] = changed_first_greater_old[i];
     }
     st->depth = depth;
 }
@@ -1076,6 +1277,51 @@ static inline uint64_t graph_row_mask(int n) {
     if (n >= 64) return ~0ULL;
     if (n <= 0) return 0ULL;
     return (1ULL << n) - 1ULL;
+}
+
+static void induced_subgraph_from_mask(const Graph* src, uint64_t mask, Graph* dst) {
+    int verts[MAXN_NAUTY];
+    int n = 0;
+    uint64_t rem = mask;
+    while (rem) {
+        verts[n++] = __builtin_ctzll(rem);
+        rem &= rem - 1;
+    }
+
+    dst->n = n;
+    memset(dst->adj, 0, sizeof(dst->adj));
+    for (int i = 0; i < n; i++) {
+        for (int j = i + 1; j < n; j++) {
+            if ((src->adj[verts[i]] >> verts[j]) & 1ULL) {
+                dst->adj[i] |= 1ULL << j;
+                dst->adj[j] |= 1ULL << i;
+            }
+        }
+    }
+}
+
+static int graph_collect_components(const Graph* g, uint64_t* component_masks) {
+    uint64_t remaining = graph_row_mask(g->n);
+    int count = 0;
+    while (remaining) {
+        int start = __builtin_ctzll(remaining);
+        uint64_t component = 0;
+        uint64_t frontier = 1ULL << start;
+        while (frontier) {
+            component |= frontier;
+            uint64_t next = 0;
+            uint64_t current = frontier;
+            while (current) {
+                int v = __builtin_ctzll(current);
+                next |= g->adj[v];
+                current &= current - 1;
+            }
+            frontier = next & remaining & ~component;
+        }
+        component_masks[count++] = component;
+        remaining &= ~component;
+    }
+    return count;
 }
 
 uint64_t hash_graph(const Graph* g) {
@@ -1245,52 +1491,66 @@ Poly solve_graph_poly(Graph g, GraphCache* cache, GraphCache* raw_cache, NautyWo
         }
     }
 
-    // Deletion-contraction on original (non-canonical) graph
-    int max_deg = -1, u = -1;
-    for (int i = 0; i < g.n; i++) {
-        int d = __builtin_popcountll(g.adj[i]);
-        if (d > max_deg) { max_deg = d; u = i; }
-    }
-    
-    int v = -1;
-    if (u != -1) {
-        for (int k = 0; k < g.n; k++) {
-            if ((g.adj[u] >> k) & 1ULL) { v = k; break; }
-        }
-    }
-    
     Poly res;
-    if (u != -1 && v != -1) {
-        // Deletion: remove edge (u,v)
-        Graph g_del = g;
-        g_del.adj[u] &= ~(1ULL << v);
-        g_del.adj[v] &= ~(1ULL << u);
-        Poly p_del = solve_graph_poly(g_del, cache, raw_cache, ws,
-                                      local_canon_calls, local_cache_hits, local_raw_cache_hits,
-                                      profile);
-        
-        // Contraction: merge v into u
-        Graph g_cont = g;
-        g_cont.adj[u] |= g_cont.adj[v];
-        g_cont.adj[u] &= ~(1ULL << u);
-        g_cont.adj[u] &= ~(1ULL << v);
-        for (int k = 0; k < g_cont.n; k++) {
-            if (k == u || k == v) continue;
-            if ((g_cont.adj[k] >> v) & 1ULL) {
-                g_cont.adj[k] &= ~(1ULL << v);
-                g_cont.adj[k] |= (1ULL << u);
-                g_cont.adj[u] |= (1ULL << k);
+    uint64_t component_masks[MAXN_NAUTY];
+    int component_count = graph_collect_components(&g, component_masks);
+    if (component_count > 1) {
+        res = poly_one();
+        for (int i = 0; i < component_count; i++) {
+            Graph subgraph;
+            induced_subgraph_from_mask(&g, component_masks[i], &subgraph);
+            Poly part = solve_graph_poly(subgraph, cache, raw_cache, ws,
+                                         local_canon_calls, local_cache_hits, local_raw_cache_hits,
+                                         profile);
+            res = poly_mul(res, part);
+        }
+    } else {
+        // Deletion-contraction on original (non-canonical) graph
+        int max_deg = -1, u = -1;
+        for (int i = 0; i < g.n; i++) {
+            int d = __builtin_popcountll(g.adj[i]);
+            if (d > max_deg) { max_deg = d; u = i; }
+        }
+
+        int v = -1;
+        if (u != -1) {
+            for (int k = 0; k < g.n; k++) {
+                if ((g.adj[u] >> k) & 1ULL) { v = k; break; }
             }
         }
-        remove_vertex(&g_cont, v);
-        Poly p_cont = solve_graph_poly(g_cont, cache, raw_cache, ws,
-                                       local_canon_calls, local_cache_hits, local_raw_cache_hits,
-                                       profile);
-        
-        res = poly_sub(p_del, p_cont);
-    } else {
-        res = poly_one();
-        for(int k=0; k<g.n; k++) res = poly_mul_linear(res, 0);
+
+        if (u != -1 && v != -1) {
+        // Deletion: remove edge (u,v)
+            Graph g_del = g;
+            g_del.adj[u] &= ~(1ULL << v);
+            g_del.adj[v] &= ~(1ULL << u);
+            Poly p_del = solve_graph_poly(g_del, cache, raw_cache, ws,
+                                          local_canon_calls, local_cache_hits, local_raw_cache_hits,
+                                          profile);
+
+            // Contraction: merge v into u
+            Graph g_cont = g;
+            g_cont.adj[u] |= g_cont.adj[v];
+            g_cont.adj[u] &= ~(1ULL << u);
+            g_cont.adj[u] &= ~(1ULL << v);
+            for (int k = 0; k < g_cont.n; k++) {
+                if (k == u || k == v) continue;
+                if ((g_cont.adj[k] >> v) & 1ULL) {
+                    g_cont.adj[k] &= ~(1ULL << v);
+                    g_cont.adj[k] |= (1ULL << u);
+                    g_cont.adj[u] |= (1ULL << k);
+                }
+            }
+            remove_vertex(&g_cont, v);
+            Poly p_cont = solve_graph_poly(g_cont, cache, raw_cache, ws,
+                                           local_canon_calls, local_cache_hits, local_raw_cache_hits,
+                                           profile);
+
+            res = poly_sub(p_del, p_cont);
+        } else {
+            res = poly_one();
+            for (int k = 0; k < g.n; k++) res = poly_mul_linear(res, 0);
+        }
     }
     
     store_graph_cache_entry(cache, hash, (uint32_t)canon.n, &canon, ADJWORD_MASK, &res);
@@ -1316,7 +1576,7 @@ static int partial_graph_append(PartialGraphState* st, int depth, int pid, const
 
     for (int i1 = 0; i1 < num_complex; i1++) {
         int u = base_new + i1;
-        st->g.adj[u] |= ((uint64_t)intra_mask[pid][i1]) << base_new;
+        st->g.adj[u] |= ((uint64_t)intra_mask_get(pid, i1)) << base_new;
     }
 
     for (int prev = 0; prev < depth; prev++) {
@@ -1324,7 +1584,7 @@ static int partial_graph_append(PartialGraphState* st, int depth, int pid, const
         int prev_base = st->base[prev];
         for (int i1 = 0; i1 < num_complex; i1++) {
             int u = base_new + i1;
-            uint32_t mask = overlap_mask[pid][prev_pid][i1];
+            uint32_t mask = overlap_mask_get(pid, prev_pid, i1);
             if (mask == 0) continue;
             st->g.adj[u] |= ((uint64_t)mask) << prev_base;
             while (mask) {
@@ -1362,7 +1622,7 @@ void dfs(int depth, int min_idx, int* stack, CanonState* canon_state, const Part
          GraphCache* cache, GraphCache* raw_cache, NautyWorkspace* ws, Poly* local_total,
          long long* local_canon_calls, long long* local_cache_hits,
          long long* local_raw_cache_hits, const Poly* weight_prod, long long mult_coeff,
-         int run_len, ProfileStats* profile) {
+         int run_len, ProfileStats* profile, CanonScratch* canon_scratch) {
     if (depth == g_cols) {
         Poly res = solve_structure(stack, &partial_graph->g, canon_state, cache, raw_cache, ws,
                                    local_canon_calls, local_cache_hits, local_raw_cache_hits,
@@ -1371,10 +1631,6 @@ void dfs(int depth, int min_idx, int* stack, CanonState* canon_state, const Part
         return;
     }
 
-    uint8_t next_insert_pos[PERM_SIZE];
-    uint8_t next_first_greater[PERM_SIZE];
-    uint8_t next_active[PERM_SIZE];
-    uint8_t prepared_rows[PERM_SIZE][MAX_COLS];
     int next_stabilizer = 0;
     for (int i = min_idx; i < num_partitions; i++) {
         double t0 = 0.0;
@@ -1383,8 +1639,7 @@ void dfs(int depth, int min_idx, int* stack, CanonState* canon_state, const Part
             profile->canon_prepare_calls_by_depth[depth]++;
             t0 = omp_get_wtime();
         }
-        if (!canon_state_prepare_push(canon_state, i, next_insert_pos, next_first_greater,
-                                      next_active, prepared_rows, &next_stabilizer)) {
+        if (!canon_state_prepare_push(canon_state, i, canon_scratch, &next_stabilizer)) {
             if (g_profile && profile) profile->canon_prepare_time += omp_get_wtime() - t0;
             continue;
         }
@@ -1404,8 +1659,7 @@ void dfs(int depth, int min_idx, int* stack, CanonState* canon_state, const Part
             next_run_len = run_len + 1;
             next_mult_coeff /= next_run_len;
         }
-        canon_state_commit_push(canon_state, i, next_insert_pos, next_first_greater,
-                                next_active, prepared_rows, next_stabilizer);
+        canon_state_commit_push(canon_state, i, canon_scratch, next_stabilizer);
         if (g_profile && profile) profile->canon_commit_time += omp_get_wtime() - t0;
         PartialGraphState next_graph = *partial_graph;
         if (g_profile && profile) {
@@ -1417,61 +1671,51 @@ void dfs(int depth, int min_idx, int* stack, CanonState* canon_state, const Part
         if (ok) {
             dfs(depth + 1, i, stack, canon_state, &next_graph, cache, raw_cache, ws, local_total,
                 local_canon_calls, local_cache_hits, local_raw_cache_hits, &next_weight_prod,
-                next_mult_coeff, next_run_len, profile);
+                next_mult_coeff, next_run_len, profile, canon_scratch);
         }
         canon_state_pop(canon_state);
     }
 }
 
-static long long append_adaptive_children_for_prefix2(int i, int j,
+static long long append_adaptive_children_for_prefix2(CanonState* canon_state, CanonScratch* canon_scratch,
+                                                      int i, int j,
                                                       int* out_i, int* out_j, int* out_k,
                                                       long long out_idx) {
     int stack[MAX_COLS];
-    CanonState canon_state;
     PartialGraphState partial_graph;
-    uint8_t next_insert_pos[PERM_SIZE];
-    uint8_t next_first_greater[PERM_SIZE];
-    uint8_t next_active[PERM_SIZE];
-    uint8_t prepared_rows[PERM_SIZE][MAX_COLS];
     int next_stabilizer = 0;
 
-    canon_state_reset(&canon_state, (int)factorial[g_rows]);
+    canon_state_reset(canon_state, perm_count);
     partial_graph_reset(&partial_graph);
 
     stack[0] = i;
-    if (!canon_state_prepare_push(&canon_state, i, next_insert_pos, next_first_greater,
-                                  next_active, prepared_rows, &next_stabilizer)) return 0;
-    canon_state_commit_push(&canon_state, i, next_insert_pos, next_first_greater,
-                            next_active, prepared_rows, next_stabilizer);
+    if (!canon_state_prepare_push(canon_state, i, canon_scratch, &next_stabilizer)) return 0;
+    canon_state_commit_push(canon_state, i, canon_scratch, next_stabilizer);
     if (!partial_graph_append(&partial_graph, 0, i, stack)) {
-        canon_state_pop(&canon_state);
+        canon_state_pop(canon_state);
         return 0;
     }
 
     stack[1] = j;
-    if (!canon_state_prepare_push(&canon_state, j, next_insert_pos, next_first_greater,
-                                  next_active, prepared_rows, &next_stabilizer)) {
-        canon_state_pop(&canon_state);
+    if (!canon_state_prepare_push(canon_state, j, canon_scratch, &next_stabilizer)) {
+        canon_state_pop(canon_state);
         return 0;
     }
-    canon_state_commit_push(&canon_state, j, next_insert_pos, next_first_greater,
-                            next_active, prepared_rows, next_stabilizer);
+    canon_state_commit_push(canon_state, j, canon_scratch, next_stabilizer);
     PartialGraphState prefix_graph = partial_graph;
     if (!partial_graph_append(&prefix_graph, 1, j, stack)) {
-        canon_state_pop(&canon_state);
-        canon_state_pop(&canon_state);
+        canon_state_pop(canon_state);
+        canon_state_pop(canon_state);
         return 0;
     }
 
     long long count = 0;
     for (int k = j; k < num_partitions; k++) {
         stack[2] = k;
-        if (!canon_state_prepare_push(&canon_state, k, next_insert_pos, next_first_greater,
-                                      next_active, prepared_rows, &next_stabilizer)) {
+        if (!canon_state_prepare_push(canon_state, k, canon_scratch, &next_stabilizer)) {
             continue;
         }
-        canon_state_commit_push(&canon_state, k, next_insert_pos, next_first_greater,
-                                next_active, prepared_rows, next_stabilizer);
+        canon_state_commit_push(canon_state, k, canon_scratch, next_stabilizer);
         PartialGraphState prefix_graph2 = prefix_graph;
         if (partial_graph_append(&prefix_graph2, 2, k, stack)) {
             if (out_i) {
@@ -1481,11 +1725,11 @@ static long long append_adaptive_children_for_prefix2(int i, int j,
             }
             count++;
         }
-        canon_state_pop(&canon_state);
+        canon_state_pop(canon_state);
     }
 
-    canon_state_pop(&canon_state);
-    canon_state_pop(&canon_state);
+    canon_state_pop(canon_state);
+    canon_state_pop(canon_state);
     return count;
 }
 
@@ -1621,11 +1865,13 @@ int main(int argc, char** argv) {
     for(int i=1; i<=19; i++) factorial[i] = factorial[i-1]*i;
 
     // 2. Data structures
+    init_row_dependent_tables();
     generate_permutations();
     uint8_t buffer[MAX_ROWS] = {0};
     generate_partitions_recursive(0, buffer, -1);
     
     // 3. Build lookup tables
+    init_partition_lookup_tables();
     build_perm_table();
     build_overlap_table();
     build_partition_weight_table();
@@ -1684,13 +1930,19 @@ int main(int argc, char** argv) {
                     return 1;
                 }
 
+                CanonState adaptive_canon_state;
+                CanonScratch adaptive_canon_scratch;
+                canon_state_init(&adaptive_canon_state, perm_count);
+                canon_scratch_init(&adaptive_canon_scratch, perm_count);
                 long long idx = 0;
                 for (int i = 0; i < num_partitions; i++) {
                     for (int j = i; j < num_partitions; j++) {
-                        long long child_count =
-                            append_adaptive_children_for_prefix2(i, j, NULL, NULL, NULL, 0);
+                        long long child_count = append_adaptive_children_for_prefix2(
+                            &adaptive_canon_state, &adaptive_canon_scratch, i, j, NULL, NULL, NULL, 0);
                         if (child_count >= g_adaptive_threshold) {
-                            idx += append_adaptive_children_for_prefix2(i, j, prefix_i, prefix_j, prefix_k, idx);
+                            idx += append_adaptive_children_for_prefix2(
+                                &adaptive_canon_state, &adaptive_canon_scratch,
+                                i, j, prefix_i, prefix_j, prefix_k, idx);
                         } else {
                             prefix_i[idx] = i;
                             prefix_j[idx] = j;
@@ -1699,6 +1951,8 @@ int main(int argc, char** argv) {
                         }
                     }
                 }
+                canon_state_free(&adaptive_canon_state);
+                canon_scratch_free(&adaptive_canon_scratch);
                 total_prefixes = idx;
             } else {
                 total_prefixes = base_prefixes;
@@ -1909,8 +2163,11 @@ int main(int argc, char** argv) {
 
         int stack[MAX_COLS];
         CanonState canon_state;
+        CanonScratch canon_scratch;
         PartialGraphState partial_graph;
-        canon_state_reset(&canon_state, (int)factorial[g_rows]);
+        canon_state_init(&canon_state, perm_count);
+        canon_scratch_init(&canon_scratch, perm_count);
+        canon_state_reset(&canon_state, perm_count);
         partial_graph_reset(&partial_graph);
         long long local_canon_calls = 0;
         long long local_cache_hits = 0;
@@ -1925,20 +2182,15 @@ int main(int argc, char** argv) {
                 double task_t0 = g_profile ? omp_get_wtime() : 0.0;
                 double t0 = 0.0;
                 stack[0] = i;
-                canon_state_reset(&canon_state, (int)factorial[g_rows]);
+                canon_state_reset(&canon_state, perm_count);
                 partial_graph_reset(&partial_graph);
-                uint8_t next_insert_pos[PERM_SIZE];
-                uint8_t next_first_greater[PERM_SIZE];
-                uint8_t next_active[PERM_SIZE];
-                uint8_t prepared_rows[PERM_SIZE][MAX_COLS];
                 int next_stabilizer = 0;
                 if (g_profile) {
                     profile->canon_prepare_calls++;
                     profile->canon_prepare_calls_by_depth[0]++;
                     t0 = omp_get_wtime();
                 }
-                if (!canon_state_prepare_push(&canon_state, (int)i, next_insert_pos, next_first_greater,
-                                              next_active, prepared_rows, &next_stabilizer)) {
+                if (!canon_state_prepare_push(&canon_state, (int)i, &canon_scratch, &next_stabilizer)) {
                     if (g_profile) profile->canon_prepare_time += omp_get_wtime() - t0;
                     complete_task_report_and_time(total_tasks, progress_report_step,
                                                   &progress_last_reported, start_time,
@@ -1953,8 +2205,7 @@ int main(int argc, char** argv) {
                     profile->canon_commit_calls++;
                     t0 = omp_get_wtime();
                 }
-                canon_state_commit_push(&canon_state, (int)i, next_insert_pos, next_first_greater,
-                                        next_active, prepared_rows, next_stabilizer);
+                canon_state_commit_push(&canon_state, (int)i, &canon_scratch, next_stabilizer);
                 if (g_profile) profile->canon_commit_time += omp_get_wtime() - t0;
                 if (g_profile) {
                     profile->partial_append_calls++;
@@ -1965,7 +2216,7 @@ int main(int argc, char** argv) {
                 if (ok) {
                     dfs(1, (int)i, stack, &canon_state, &partial_graph, &cache, &raw_cache, &ws,
                         &thread_polys[tid], &local_canon_calls, &local_cache_hits, &local_raw_cache_hits,
-                        &partition_weight_poly[i], 1, 1, profile);
+                        &partition_weight_poly[i], 1, 1, profile, &canon_scratch);
                 }
                 complete_task_report_and_time(total_tasks, progress_report_step,
                                               &progress_last_reported, start_time,
@@ -1979,13 +2230,9 @@ int main(int argc, char** argv) {
                 int i = prefix_i[p];
                 int j = prefix_j[p];
                 int k = prefix_k ? prefix_k[p] : -1;
-                uint8_t next_insert_pos[PERM_SIZE];
-                uint8_t next_first_greater[PERM_SIZE];
-                uint8_t next_active[PERM_SIZE];
-                uint8_t prepared_rows[PERM_SIZE][MAX_COLS];
                 int next_stabilizer = 0;
 
-                canon_state_reset(&canon_state, (int)factorial[g_rows]);
+                canon_state_reset(&canon_state, perm_count);
                 partial_graph_reset(&partial_graph);
 
                 stack[0] = i;
@@ -1994,8 +2241,7 @@ int main(int argc, char** argv) {
                     profile->canon_prepare_calls_by_depth[0]++;
                     t0 = omp_get_wtime();
                 }
-                if (!canon_state_prepare_push(&canon_state, i, next_insert_pos, next_first_greater,
-                                              next_active, prepared_rows, &next_stabilizer)) {
+                if (!canon_state_prepare_push(&canon_state, i, &canon_scratch, &next_stabilizer)) {
                     if (g_profile) profile->canon_prepare_time += omp_get_wtime() - t0;
                     complete_task_report_and_time(total_tasks, progress_report_step,
                                                   &progress_last_reported, start_time,
@@ -2010,8 +2256,7 @@ int main(int argc, char** argv) {
                     profile->canon_commit_calls++;
                     t0 = omp_get_wtime();
                 }
-                canon_state_commit_push(&canon_state, i, next_insert_pos, next_first_greater,
-                                        next_active, prepared_rows, next_stabilizer);
+                canon_state_commit_push(&canon_state, i, &canon_scratch, next_stabilizer);
                 if (g_profile) profile->canon_commit_time += omp_get_wtime() - t0;
                 if (g_profile) {
                     profile->partial_append_calls++;
@@ -2033,8 +2278,7 @@ int main(int argc, char** argv) {
                     profile->canon_prepare_calls_by_depth[1]++;
                     t0 = omp_get_wtime();
                 }
-                if (!canon_state_prepare_push(&canon_state, j, next_insert_pos, next_first_greater,
-                                              next_active, prepared_rows, &next_stabilizer)) {
+                if (!canon_state_prepare_push(&canon_state, j, &canon_scratch, &next_stabilizer)) {
                     if (g_profile) profile->canon_prepare_time += omp_get_wtime() - t0;
                     canon_state_pop(&canon_state);
                     complete_task_report_and_time(total_tasks, progress_report_step,
@@ -2050,8 +2294,7 @@ int main(int argc, char** argv) {
                     profile->canon_commit_calls++;
                     t0 = omp_get_wtime();
                 }
-                canon_state_commit_push(&canon_state, j, next_insert_pos, next_first_greater,
-                                        next_active, prepared_rows, next_stabilizer);
+                canon_state_commit_push(&canon_state, j, &canon_scratch, next_stabilizer);
                 if (g_profile) profile->canon_commit_time += omp_get_wtime() - t0;
                 PartialGraphState prefix_graph = partial_graph;
                 if (g_profile) {
@@ -2067,7 +2310,7 @@ int main(int argc, char** argv) {
                         int prefix_run = (i == j) ? 2 : 1;
                         dfs(2, j, stack, &canon_state, &prefix_graph, &cache, &raw_cache, &ws,
                             &thread_polys[tid], &local_canon_calls, &local_cache_hits, &local_raw_cache_hits,
-                            &prefix_weight, prefix_mult, prefix_run, profile);
+                            &prefix_weight, prefix_mult, prefix_run, profile, &canon_scratch);
                     } else {
                         stack[2] = k;
                         if (g_profile) {
@@ -2075,8 +2318,7 @@ int main(int argc, char** argv) {
                             profile->canon_prepare_calls_by_depth[2]++;
                             t0 = omp_get_wtime();
                         }
-                        if (canon_state_prepare_push(&canon_state, k, next_insert_pos, next_first_greater,
-                                                     next_active, prepared_rows, &next_stabilizer)) {
+                        if (canon_state_prepare_push(&canon_state, k, &canon_scratch, &next_stabilizer)) {
                             if (g_profile) {
                                 profile->canon_prepare_time += omp_get_wtime() - t0;
                                 profile->canon_prepare_accepts++;
@@ -2085,8 +2327,7 @@ int main(int argc, char** argv) {
                                 profile->canon_commit_calls++;
                                 t0 = omp_get_wtime();
                             }
-                            canon_state_commit_push(&canon_state, k, next_insert_pos, next_first_greater,
-                                                    next_active, prepared_rows, next_stabilizer);
+                            canon_state_commit_push(&canon_state, k, &canon_scratch, next_stabilizer);
                             if (g_profile) profile->canon_commit_time += omp_get_wtime() - t0;
                             PartialGraphState prefix_graph2 = prefix_graph;
                             if (g_profile) {
@@ -2109,7 +2350,7 @@ int main(int argc, char** argv) {
                                 }
                                 dfs(3, k, stack, &canon_state, &prefix_graph2, &cache, &raw_cache, &ws,
                                     &thread_polys[tid], &local_canon_calls, &local_cache_hits, &local_raw_cache_hits,
-                                    &prefix_weight, prefix_mult, prefix_run, profile);
+                                    &prefix_weight, prefix_mult, prefix_run, profile, &canon_scratch);
                             }
                             canon_state_pop(&canon_state);
                         } else if (g_profile) {
@@ -2132,25 +2373,19 @@ int main(int argc, char** argv) {
                 int i = prefix_i[p];
                 int j = prefix_j[p];
                 int k = prefix_k[p];
-                uint8_t next_insert_pos[PERM_SIZE];
-                uint8_t next_first_greater[PERM_SIZE];
-                uint8_t next_active[PERM_SIZE];
-                uint8_t prepared_rows[PERM_SIZE][MAX_COLS];
                 int next_stabilizer = 0;
 
-                canon_state_reset(&canon_state, (int)factorial[g_rows]);
+                canon_state_reset(&canon_state, perm_count);
                 partial_graph_reset(&partial_graph);
 
                 stack[0] = i;
-                if (!canon_state_prepare_push(&canon_state, i, next_insert_pos, next_first_greater,
-                                              next_active, prepared_rows, &next_stabilizer)) {
+                if (!canon_state_prepare_push(&canon_state, i, &canon_scratch, &next_stabilizer)) {
                     complete_task_report_and_time(total_tasks, progress_report_step,
                                                   &progress_last_reported, start_time,
                                                   task_timing, p, task_t0);
                     continue;
                 }
-                canon_state_commit_push(&canon_state, i, next_insert_pos, next_first_greater,
-                                        next_active, prepared_rows, next_stabilizer);
+                canon_state_commit_push(&canon_state, i, &canon_scratch, next_stabilizer);
                 if (!partial_graph_append(&partial_graph, 0, i, stack)) {
                     canon_state_pop(&canon_state);
                     complete_task_report_and_time(total_tasks, progress_report_step,
@@ -2160,16 +2395,14 @@ int main(int argc, char** argv) {
                 }
 
                 stack[1] = j;
-                if (!canon_state_prepare_push(&canon_state, j, next_insert_pos, next_first_greater,
-                                              next_active, prepared_rows, &next_stabilizer)) {
+                if (!canon_state_prepare_push(&canon_state, j, &canon_scratch, &next_stabilizer)) {
                     canon_state_pop(&canon_state);
                     complete_task_report_and_time(total_tasks, progress_report_step,
                                                   &progress_last_reported, start_time,
                                                   task_timing, p, task_t0);
                     continue;
                 }
-                canon_state_commit_push(&canon_state, j, next_insert_pos, next_first_greater,
-                                        next_active, prepared_rows, next_stabilizer);
+                canon_state_commit_push(&canon_state, j, &canon_scratch, next_stabilizer);
                 PartialGraphState prefix_graph = partial_graph;
                 if (!partial_graph_append(&prefix_graph, 1, j, stack)) {
                     canon_state_pop(&canon_state);
@@ -2181,8 +2414,7 @@ int main(int argc, char** argv) {
                 }
 
                 stack[2] = k;
-                if (!canon_state_prepare_push(&canon_state, k, next_insert_pos, next_first_greater,
-                                              next_active, prepared_rows, &next_stabilizer)) {
+                if (!canon_state_prepare_push(&canon_state, k, &canon_scratch, &next_stabilizer)) {
                     canon_state_pop(&canon_state);
                     canon_state_pop(&canon_state);
                     complete_task_report_and_time(total_tasks, progress_report_step,
@@ -2190,8 +2422,7 @@ int main(int argc, char** argv) {
                                                   task_timing, p, task_t0);
                     continue;
                 }
-                canon_state_commit_push(&canon_state, k, next_insert_pos, next_first_greater,
-                                        next_active, prepared_rows, next_stabilizer);
+                canon_state_commit_push(&canon_state, k, &canon_scratch, next_stabilizer);
                 PartialGraphState prefix_graph2 = prefix_graph;
                 int ok = partial_graph_append(&prefix_graph2, 2, k, stack);
                 if (ok) {
@@ -2208,7 +2439,7 @@ int main(int argc, char** argv) {
                     }
                     dfs(3, k, stack, &canon_state, &prefix_graph2, &cache, &raw_cache, &ws,
                         &thread_polys[tid], &local_canon_calls, &local_cache_hits, &local_raw_cache_hits,
-                        &prefix_weight, prefix_mult, prefix_run, profile);
+                        &prefix_weight, prefix_mult, prefix_run, profile, &canon_scratch);
                 }
 
                 canon_state_pop(&canon_state);
@@ -2227,25 +2458,19 @@ int main(int argc, char** argv) {
                 int j = prefix_j[p];
                 int k = prefix_k[p];
                 int l = prefix_l[p];
-                uint8_t next_insert_pos[PERM_SIZE];
-                uint8_t next_first_greater[PERM_SIZE];
-                uint8_t next_active[PERM_SIZE];
-                uint8_t prepared_rows[PERM_SIZE][MAX_COLS];
                 int next_stabilizer = 0;
 
-                canon_state_reset(&canon_state, (int)factorial[g_rows]);
+                canon_state_reset(&canon_state, perm_count);
                 partial_graph_reset(&partial_graph);
 
                 stack[0] = i;
-                if (!canon_state_prepare_push(&canon_state, i, next_insert_pos, next_first_greater,
-                                              next_active, prepared_rows, &next_stabilizer)) {
+                if (!canon_state_prepare_push(&canon_state, i, &canon_scratch, &next_stabilizer)) {
                     complete_task_report_and_time(total_tasks, progress_report_step,
                                                   &progress_last_reported, start_time,
                                                   task_timing, p, task_t0);
                     continue;
                 }
-                canon_state_commit_push(&canon_state, i, next_insert_pos, next_first_greater,
-                                        next_active, prepared_rows, next_stabilizer);
+                canon_state_commit_push(&canon_state, i, &canon_scratch, next_stabilizer);
                 if (!partial_graph_append(&partial_graph, 0, i, stack)) {
                     canon_state_pop(&canon_state);
                     complete_task_report_and_time(total_tasks, progress_report_step,
@@ -2255,16 +2480,14 @@ int main(int argc, char** argv) {
                 }
 
                 stack[1] = j;
-                if (!canon_state_prepare_push(&canon_state, j, next_insert_pos, next_first_greater,
-                                              next_active, prepared_rows, &next_stabilizer)) {
+                if (!canon_state_prepare_push(&canon_state, j, &canon_scratch, &next_stabilizer)) {
                     canon_state_pop(&canon_state);
                     complete_task_report_and_time(total_tasks, progress_report_step,
                                                   &progress_last_reported, start_time,
                                                   task_timing, p, task_t0);
                     continue;
                 }
-                canon_state_commit_push(&canon_state, j, next_insert_pos, next_first_greater,
-                                        next_active, prepared_rows, next_stabilizer);
+                canon_state_commit_push(&canon_state, j, &canon_scratch, next_stabilizer);
                 PartialGraphState prefix_graph = partial_graph;
                 if (!partial_graph_append(&prefix_graph, 1, j, stack)) {
                     canon_state_pop(&canon_state);
@@ -2276,8 +2499,7 @@ int main(int argc, char** argv) {
                 }
 
                 stack[2] = k;
-                if (!canon_state_prepare_push(&canon_state, k, next_insert_pos, next_first_greater,
-                                              next_active, prepared_rows, &next_stabilizer)) {
+                if (!canon_state_prepare_push(&canon_state, k, &canon_scratch, &next_stabilizer)) {
                     canon_state_pop(&canon_state);
                     canon_state_pop(&canon_state);
                     complete_task_report_and_time(total_tasks, progress_report_step,
@@ -2285,8 +2507,7 @@ int main(int argc, char** argv) {
                                                   task_timing, p, task_t0);
                     continue;
                 }
-                canon_state_commit_push(&canon_state, k, next_insert_pos, next_first_greater,
-                                        next_active, prepared_rows, next_stabilizer);
+                canon_state_commit_push(&canon_state, k, &canon_scratch, next_stabilizer);
                 PartialGraphState prefix_graph2 = prefix_graph;
                 if (!partial_graph_append(&prefix_graph2, 2, k, stack)) {
                     canon_state_pop(&canon_state);
@@ -2299,8 +2520,7 @@ int main(int argc, char** argv) {
                 }
 
                 stack[3] = l;
-                if (!canon_state_prepare_push(&canon_state, l, next_insert_pos, next_first_greater,
-                                              next_active, prepared_rows, &next_stabilizer)) {
+                if (!canon_state_prepare_push(&canon_state, l, &canon_scratch, &next_stabilizer)) {
                     canon_state_pop(&canon_state);
                     canon_state_pop(&canon_state);
                     canon_state_pop(&canon_state);
@@ -2309,8 +2529,7 @@ int main(int argc, char** argv) {
                                                   task_timing, p, task_t0);
                     continue;
                 }
-                canon_state_commit_push(&canon_state, l, next_insert_pos, next_first_greater,
-                                        next_active, prepared_rows, next_stabilizer);
+                canon_state_commit_push(&canon_state, l, &canon_scratch, next_stabilizer);
                 PartialGraphState prefix_graph3 = prefix_graph2;
                 int ok = partial_graph_append(&prefix_graph3, 3, l, stack);
                 if (ok) {
@@ -2335,7 +2554,7 @@ int main(int argc, char** argv) {
                     }
                     dfs(4, l, stack, &canon_state, &prefix_graph3, &cache, &raw_cache, &ws,
                         &thread_polys[tid], &local_canon_calls, &local_cache_hits, &local_raw_cache_hits,
-                        &prefix_weight, prefix_mult, prefix_run, profile);
+                        &prefix_weight, prefix_mult, prefix_run, profile, &canon_scratch);
                 }
 
                 canon_state_pop(&canon_state);
@@ -2353,6 +2572,8 @@ int main(int argc, char** argv) {
         total_cache_hits += local_cache_hits;
         total_raw_cache_hits += local_raw_cache_hits;
         
+        canon_state_free(&canon_state);
+        canon_scratch_free(&canon_scratch);
         nauty_workspace_free(&ws);
         free(cache.keys);
         free(cache.adj);
@@ -2411,6 +2632,7 @@ int main(int argc, char** argv) {
     free(prefix_j);
     free(prefix_k);
     free(prefix_l);
+    free_row_dependent_tables();
     
     progress_reporter_finish(&progress_reporter);
 
