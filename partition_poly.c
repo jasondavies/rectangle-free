@@ -3,6 +3,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <errno.h>
+#include <limits.h>
 #include <omp.h>
 #include "progress_util.h"
 
@@ -143,6 +144,16 @@ typedef struct {
     long long top_indices[TASK_PROFILE_TOPK];
 } TaskTimingStats;
 
+typedef struct {
+    int* i;
+    int* j;
+    int* k;
+    int* l;
+    long long count;
+    long long capacity;
+    int with_l;
+} PrefixTaskBuffer;
+
 // --- GLOBALS ---
 static int num_partitions = 0;
 static int perm_count = 0;
@@ -257,6 +268,63 @@ static void* checked_calloc(size_t count, size_t size, const char* label) {
         exit(1);
     }
     return ptr;
+}
+
+static void prefix_task_buffer_init(PrefixTaskBuffer* buf, long long initial_capacity, int with_l) {
+    memset(buf, 0, sizeof(*buf));
+    if (initial_capacity < 16) initial_capacity = 16;
+    buf->capacity = initial_capacity;
+    buf->with_l = with_l;
+    buf->i = checked_calloc((size_t)buf->capacity, sizeof(*buf->i), "prefix_buffer_i");
+    buf->j = checked_calloc((size_t)buf->capacity, sizeof(*buf->j), "prefix_buffer_j");
+    buf->k = checked_calloc((size_t)buf->capacity, sizeof(*buf->k), "prefix_buffer_k");
+    if (with_l) {
+        buf->l = checked_calloc((size_t)buf->capacity, sizeof(*buf->l), "prefix_buffer_l");
+    }
+}
+
+static void prefix_task_buffer_reserve(PrefixTaskBuffer* buf, long long needed) {
+    if (needed <= buf->capacity) return;
+    long long new_capacity = buf->capacity;
+    while (new_capacity < needed) {
+        if (new_capacity > LLONG_MAX / 2) {
+            fprintf(stderr, "Prefix task buffer capacity overflow\n");
+            exit(1);
+        }
+        new_capacity *= 2;
+    }
+    int* new_i = realloc(buf->i, (size_t)new_capacity * sizeof(*buf->i));
+    int* new_j = realloc(buf->j, (size_t)new_capacity * sizeof(*buf->j));
+    int* new_k = realloc(buf->k, (size_t)new_capacity * sizeof(*buf->k));
+    int* new_l = buf->l;
+    if (buf->with_l) {
+        new_l = realloc(buf->l, (size_t)new_capacity * sizeof(*buf->l));
+    }
+    if (!new_i || !new_j || !new_k || (buf->with_l && !new_l)) {
+        fprintf(stderr, "Failed to grow adaptive prefix buffers to %lld entries\n", new_capacity);
+        exit(1);
+    }
+    buf->i = new_i;
+    buf->j = new_j;
+    buf->k = new_k;
+    buf->l = new_l;
+    buf->capacity = new_capacity;
+}
+
+static void prefix_task_buffer_push3(PrefixTaskBuffer* buf, int i, int j, int k) {
+    prefix_task_buffer_reserve(buf, buf->count + 1);
+    buf->i[buf->count] = i;
+    buf->j[buf->count] = j;
+    buf->k[buf->count] = k;
+    buf->count++;
+}
+
+static void prefix_task_buffer_free(PrefixTaskBuffer* buf) {
+    free(buf->i);
+    free(buf->j);
+    free(buf->k);
+    free(buf->l);
+    memset(buf, 0, sizeof(*buf));
 }
 
 static int bell_number_upper_bound(int rows) {
@@ -1078,7 +1146,6 @@ int canon_state_prepare_push(const CanonState* st, int partition_id, CanonScratc
         for (int t = len; t < depth; t++) {
             row_insert_sorted(row, t, perm_table_get((int)st->stack_vals[t], p));
         }
-
         row_insert_sorted(row, depth, val);
         scratch->next_active[p] = 1;
 
@@ -1920,40 +1987,34 @@ int main(int argc, char** argv) {
                     fprintf(stderr, "Adaptive subdivision currently supports only --adaptive-max-depth 3\n");
                     return 1;
                 }
-                long long max_prefixes =
-                    (long long)num_partitions * (num_partitions + 1) * (num_partitions + 2) / 6;
-                prefix_i = (int*)malloc((size_t)max_prefixes * sizeof(int));
-                prefix_j = (int*)malloc((size_t)max_prefixes * sizeof(int));
-                prefix_k = (int*)malloc((size_t)max_prefixes * sizeof(int));
-                if (!prefix_i || !prefix_j || !prefix_k) {
-                    fprintf(stderr, "Failed to allocate adaptive prefix arrays\n");
-                    return 1;
-                }
-
+                PrefixTaskBuffer adaptive_prefixes;
+                prefix_task_buffer_init(&adaptive_prefixes, base_prefixes, 0);
                 CanonState adaptive_canon_state;
                 CanonScratch adaptive_canon_scratch;
                 canon_state_init(&adaptive_canon_state, perm_count);
                 canon_scratch_init(&adaptive_canon_scratch, perm_count);
-                long long idx = 0;
                 for (int i = 0; i < num_partitions; i++) {
                     for (int j = i; j < num_partitions; j++) {
                         long long child_count = append_adaptive_children_for_prefix2(
                             &adaptive_canon_state, &adaptive_canon_scratch, i, j, NULL, NULL, NULL, 0);
                         if (child_count >= g_adaptive_threshold) {
-                            idx += append_adaptive_children_for_prefix2(
+                            long long old_count = adaptive_prefixes.count;
+                            prefix_task_buffer_reserve(&adaptive_prefixes, old_count + child_count);
+                            append_adaptive_children_for_prefix2(
                                 &adaptive_canon_state, &adaptive_canon_scratch,
-                                i, j, prefix_i, prefix_j, prefix_k, idx);
+                                i, j, adaptive_prefixes.i, adaptive_prefixes.j, adaptive_prefixes.k, old_count);
+                            adaptive_prefixes.count += child_count;
                         } else {
-                            prefix_i[idx] = i;
-                            prefix_j[idx] = j;
-                            prefix_k[idx] = -1;
-                            idx++;
+                            prefix_task_buffer_push3(&adaptive_prefixes, i, j, -1);
                         }
                     }
                 }
                 canon_state_free(&adaptive_canon_state);
                 canon_scratch_free(&adaptive_canon_scratch);
-                total_prefixes = idx;
+                total_prefixes = adaptive_prefixes.count;
+                prefix_i = adaptive_prefixes.i;
+                prefix_j = adaptive_prefixes.j;
+                prefix_k = adaptive_prefixes.k;
             } else {
                 total_prefixes = base_prefixes;
                 prefix_i = (int*)malloc((size_t)total_prefixes * sizeof(int));
