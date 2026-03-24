@@ -26,39 +26,38 @@ This repo contains a mix of:
 The two partition-based C solvers in particular came out of a sequence of
 algorithmic experiments. The important distinction is:
 
-- `6xn_poly.c` computes the full chromatic polynomial associated with a
+- `partition_poly.c` computes the full chromatic polynomial associated with a
   column structure.
-- `6xn.c` keeps the same structure search, but specialises hard to
+- `partition_count4.c` keeps the same structure search, but specialises hard to
   `k = 4` and turns the graph side into an exact branch-and-bound search.
 
 ## File guide
 
 ### Small-width Python scripts
 
-- `2xn.py`
+- `2xn_count4.py`
   Closed form for `T_4(2, n)`.
 
-- `3xn.py`
-  Small symbolic / polynomial computation for `T_k(3, n)`, printed here for
-  `k = 4`.
+- `3xn_count4.py`
+  Closed-form evaluation for `T_4(3, n)` using precomputed coefficients.
 
-- `4xn.py`
+- `4xn_count4.py`
   Weighted set-packing DP on row-pair masks for `T_4(4, n)`.
 
 ### 5-row C solver
 
-- `5xn.c`
+- `5xn_count4.c`
   Fast C version of the `5 x n`, `k = 4` state-space DP. This is the
   row/colour-canonicalised token-mask solver.
 
 ### 6-row C solvers
 
-- `6xn_poly.c`
+- `partition_poly.c`
   Partition/structure-graph solver that computes the chromatic polynomial
   `P(x)` for the reduced graph induced by a column multiset. It uses nauty to
   canonicalise graphs for caching and prints `P(4)` and `P(5)` at the end.
 
-- `6xn.c`
+- `partition_count4.c`
   Partition/structure-graph solver specialised to `k = 4`. Instead of computing
   the full polynomial, it counts 4-colourings directly. It adds stronger
   pruning, 4-colourability checks, and prefix-task generation for parallel
@@ -88,7 +87,7 @@ There are two main algorithm families in this repo.
 Used by:
 
 - `4xn.py`
-- `5xn.c`
+- `5xn_count4.c`
 
 These programs encode which row-pair / colour combinations are still available,
 then recurse with memoisation. For `5 x n`, the important optimisation is
@@ -98,8 +97,8 @@ canonicalisation under row permutations and colour permutations.
 
 Used by:
 
-- `6xn_poly.c`
-- `6xn.c`
+- `partition_poly.c`
+- `partition_count4.c`
 - `7xn_poly.c`
 
 These programs enumerate column partitions, build a structure graph describing
@@ -121,12 +120,12 @@ At a high level, the partition solvers work like this:
 
 This gives two related but different solvers:
 
-- `6xn_poly.c`
+- `partition_poly.c`
   treats the graph contribution symbolically and computes a chromatic
   polynomial `P(x)` by deletion-contraction, with canonical graph caching via
   nauty.
 
-- `6xn.c`
+- `partition_count4.c`
   keeps the same canonical partition search, but replaces the symbolic graph
   stage with a direct 4-colouring counter and adds monotone pruning:
   incremental conflict graphs, pair-shadow capacity bounds, cheap `K5`
@@ -150,32 +149,32 @@ In practice, that division is useful:
 Each Python file is a standalone script. Examples:
 
 ```bash
-python3 2xn.py
-python3 3xn.py
-python3 4xn.py
+python3 2xn_count4.py
+python3 3xn_count4.py
+python3 4xn_count4.py
 ```
 
 The scripts print tables of exact counts.
 
 ## Building the C programs
 
-### `5xn.c`
+### `5xn_count4.c`
 
 This file is self-contained.
 
 Example:
 
 ```bash
-cc -O3 -march=native -std=c11 5xn.c -o 5xn
+cc -O3 -march=native -std=c11 5xn_count4.c -o 5xn_count4
 ```
 
 Run with:
 
 ```bash
-./5xn
+./5xn_count4
 ```
 
-### `6xn_poly.c`, `6xn.c`, and `7xn_poly.c`
+### `partition_poly.c`, `partition_count4.c`, and `7xn_poly.c`
 
 These require:
 
@@ -229,9 +228,9 @@ cp -R third_party/nauty third_party/nauty-build
 (cd third_party/nauty-build && ./configure --enable-tls && make nautyT.a)
 
 cc -O3 -march=native -fopenmp -I./third_party/nauty-build -I./third_party/nauty \
-  -DUSE_TLS -o 6xn_poly 6xn_poly.c ./third_party/nauty-build/nautyT.a -lm
+  -DUSE_TLS -o partition_poly partition_poly.c ./third_party/nauty-build/nautyT.a -lm
 cc -O3 -march=native -fopenmp -I./third_party/nauty-build -I./third_party/nauty \
-  -DUSE_TLS -o 6xn 6xn.c ./third_party/nauty-build/nautyT.a -lm
+  -DUSE_TLS -o partition_count4 partition_count4.c ./third_party/nauty-build/nautyT.a -lm
 cc -O3 -march=native -fopenmp -I./third_party/nauty-build -I./third_party/nauty \
   -DUSE_TLS -o 7xn_poly 7xn_poly.c ./third_party/nauty-build/nautyT.a -lm
 ```
@@ -243,7 +242,7 @@ current `Makefile` uses
 For the self-contained 5-row solver, simply run:
 
 ```bash
-make 5xn
+make 5xn_count4
 ```
 
 To build everything:
@@ -252,12 +251,12 @@ To build everything:
 make
 ```
 
-## Using `6xn_poly`
+## Using `partition_poly`
 
 Default run:
 
 ```bash
-./6xn_poly
+./partition_poly
 ```
 
 Explicit size:

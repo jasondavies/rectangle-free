@@ -1,4 +1,4 @@
-// 5xn.c
+// 5xn_count4.c
 // Rectangle-free 4-colourings of a 5×n grid for n=0..40.
 // Self-contained (no GMP), includes:
 //  - BigInt (base 1e9)
@@ -6,8 +6,8 @@
 //  - per-k incremental stats
 //  - symmetry reduction: 5! row permutations + colour permutations (sort 4 blocks)
 //
-// Build: cc -O3 -march=native -std=c11 5xn.c -o 5xn
-// Run:   ./5xn
+// Build: cc -O3 -march=native -std=c11 5xn_count4.c -o 5xn_count4
+// Run:   ./5xn_count4
 
 #define _POSIX_C_SOURCE 200809L
 
