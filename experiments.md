@@ -611,3 +611,37 @@
   - experiment `Worker Complete 3.61s`, `Total elapsed 5.00s`
 - Interpretation: this is a smaller win than the CanonState changes, but it is real and easy to justify. Once the symmetry front-end got faster, argument-copy overhead in the solver path became visible enough that passing `Poly` by reference on hot callsites paid for itself.
 - Outcome: accepted.
+
+### Experiment 31: Try a by-reference `poly_mul_linear()` on the solver simplification path
+- Goal: extend the by-reference polynomial arithmetic idea to the linear multiply used in graph simplification and edgeless base cases.
+- Change:
+  - added a temporary `poly_mul_linear_ref()` helper
+  - switched the `solve_graph_poly()` simplification loop and the edgeless fallback to use it
+- One-thread benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235 --profile`
+- Baseline from accepted code:
+  - `Worker Complete 12.57s`
+  - `solve_graph_poly 3.507s`
+- Experiment result:
+  - `Worker Complete 12.50s`
+  - `solve_graph_poly 3.348s`
+- Matching 32-thread benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235`
+- 32-thread `partition_poly_7` result:
+  - baseline `Worker Complete 3.35s`, `Total elapsed 4.70s`
+  - experiment `Worker Complete 3.43s`, `Total elapsed 4.76s`
+- Interpretation: even though the one-thread run looked slightly better on solver time, the 32-thread sampled workload regressed overall. This is not a clear enough win to justify the extra API surface, so it should stay reverted.
+- Outcome: rejected and reverted.
+
+### Experiment 32: Walk transformed/prepared row buffers with running pointers
+- Goal: cut address arithmetic inside `canon_state_prepare_push()` by iterating the transformed-row and prepared-row buffers with running pointers instead of recomputing `p * cols` offsets.
+- Change:
+  - rewrote the `prepare_push()` scan to advance `transformed_row` and `prepared_row` pointers through the row buffers
+  - adjusted `canon_materialize_row()` to consume those pointers directly
+- One-thread benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235 --profile`
+- Baseline from accepted code:
+  - `Worker Complete 12.57s`
+  - `canon_state_prepare_push 7.634s`
+- Experiment result:
+  - `Worker Complete 13.43s`
+  - `canon_state_prepare_push 8.603s`
+- Interpretation: this is a clear regression. The extra pointer plumbing and less direct indexing hurt more than the saved multiply/add address calculations, so the straightforward indexed form should stay.
+- Outcome: rejected and reverted.
