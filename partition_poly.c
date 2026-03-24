@@ -508,44 +508,56 @@ static void trim_newline(char* s) {
     }
 }
 
-Poly poly_add(Poly a, Poly b) {
+static inline Poly poly_add_ref(const Poly* a, const Poly* b) {
     Poly r;
-    r.deg = (a.deg > b.deg) ? a.deg : b.deg;
+    r.deg = (a->deg > b->deg) ? a->deg : b->deg;
     for (int i = 0; i <= r.deg; i++) {
-        PolyCoeff av = (i <= a.deg) ? a.coeffs[i] : 0;
-        PolyCoeff bv = (i <= b.deg) ? b.coeffs[i] : 0;
+        PolyCoeff av = (i <= a->deg) ? a->coeffs[i] : 0;
+        PolyCoeff bv = (i <= b->deg) ? b->coeffs[i] : 0;
         r.coeffs[i] = av + bv;
     }
     while (r.deg > 0 && r.coeffs[r.deg] == 0) r.deg--;
     return r;
 }
 
-Poly poly_sub(Poly a, Poly b) {
+Poly poly_add(Poly a, Poly b) {
+    return poly_add_ref(&a, &b);
+}
+
+static inline Poly poly_sub_ref(const Poly* a, const Poly* b) {
     Poly r;
-    r.deg = (a.deg > b.deg) ? a.deg : b.deg;
+    r.deg = (a->deg > b->deg) ? a->deg : b->deg;
     for (int i = 0; i <= r.deg; i++) {
-        PolyCoeff av = (i <= a.deg) ? a.coeffs[i] : 0;
-        PolyCoeff bv = (i <= b.deg) ? b.coeffs[i] : 0;
+        PolyCoeff av = (i <= a->deg) ? a->coeffs[i] : 0;
+        PolyCoeff bv = (i <= b->deg) ? b->coeffs[i] : 0;
         r.coeffs[i] = av - bv;
     }
     while (r.deg > 0 && r.coeffs[r.deg] == 0) r.deg--;
     return r;
 }
 
-Poly poly_mul(Poly a, Poly b) {
+Poly poly_sub(Poly a, Poly b) {
+    return poly_sub_ref(&a, &b);
+}
+
+static inline Poly poly_mul_ref(const Poly* a, const Poly* b) {
     Poly r;
-    r.deg = a.deg + b.deg;
+    r.deg = a->deg + b->deg;
     if (r.deg >= MAX_DEGREE) {
         degree_overflow(r.deg);
     }
     memset(r.coeffs, 0, (size_t)(r.deg + 1) * sizeof(r.coeffs[0]));
-    for (int i = 0; i <= a.deg; i++) {
-        if (a.coeffs[i] == 0) continue;
-        for (int j = 0; j <= b.deg; j++) {
-            r.coeffs[i + j] += a.coeffs[i] * b.coeffs[j];
+    for (int i = 0; i <= a->deg; i++) {
+        if (a->coeffs[i] == 0) continue;
+        for (int j = 0; j <= b->deg; j++) {
+            r.coeffs[i + j] += a->coeffs[i] * b->coeffs[j];
         }
     }
     return r;
+}
+
+Poly poly_mul(Poly a, Poly b) {
+    return poly_mul_ref(&a, &b);
 }
 
 Poly poly_scale(Poly a, long long s) {
@@ -1873,7 +1885,7 @@ Poly solve_graph_poly(Graph g, GraphCache* cache, GraphCache* raw_cache, NautyWo
                 Poly cached;
                 (*local_raw_cache_hits)++;
                 graph_cache_load_poly(raw_cache, p, &cached);
-                Poly result = poly_mul(multiplier, cached);
+                Poly result = poly_mul_ref(&multiplier, &cached);
                 if (g_profile && profile) profile->solve_graph_time += omp_get_wtime() - solve_t0;
                 return result;
             }
@@ -1891,7 +1903,7 @@ Poly solve_graph_poly(Graph g, GraphCache* cache, GraphCache* raw_cache, NautyWo
             Poly part = solve_graph_poly(subgraph, cache, raw_cache, ws,
                                          local_canon_calls, local_cache_hits, local_raw_cache_hits,
                                          profile);
-            res = poly_mul(res, part);
+            res = poly_mul_ref(&res, &part);
         }
     } else {
         // Canonicalise only if exact lookup missed and the graph is still connected.
@@ -1917,7 +1929,7 @@ Poly solve_graph_poly(Graph g, GraphCache* cache, GraphCache* raw_cache, NautyWo
                     (*local_cache_hits)++;
                     graph_cache_load_poly(cache, p, &cached);
                     store_graph_cache_entry(raw_cache, raw_hash, (uint32_t)g.n, &g, row_mask, &cached);
-                    Poly result = poly_mul(multiplier, cached);
+                    Poly result = poly_mul_ref(&multiplier, &cached);
                     if (g_profile && profile) profile->solve_graph_time += omp_get_wtime() - solve_t0;
                     return result;
                 }
@@ -1965,7 +1977,7 @@ Poly solve_graph_poly(Graph g, GraphCache* cache, GraphCache* raw_cache, NautyWo
                                            local_canon_calls, local_cache_hits, local_raw_cache_hits,
                                            profile);
 
-            res = poly_sub(p_del, p_cont);
+            res = poly_sub_ref(&p_del, &p_cont);
         } else {
             res = poly_one();
             for (int k = 0; k < g.n; k++) res = poly_mul_linear(res, 0);
@@ -1976,7 +1988,7 @@ Poly solve_graph_poly(Graph g, GraphCache* cache, GraphCache* raw_cache, NautyWo
 
     store_graph_cache_entry(raw_cache, raw_hash, (uint32_t)g.n, &g, row_mask, &res);
     
-    Poly result = poly_mul(multiplier, res);
+    Poly result = poly_mul_ref(&multiplier, &res);
     if (g_profile && profile) profile->solve_graph_time += omp_get_wtime() - solve_t0;
     return result;
 }
@@ -2035,7 +2047,7 @@ static Poly solve_structure(int* stack, const Graph* partial_graph, CanonState* 
     Poly graph_poly = solve_graph_poly(*partial_graph, cache, raw_cache, ws,
                                        local_canon_calls, local_cache_hits, local_raw_cache_hits,
                                        profile);
-    return poly_mul(weight, graph_poly);
+    return poly_mul_ref(&weight, &graph_poly);
 }
 
 void dfs(int depth, int min_idx, int* stack, CanonState* canon_state, const PartialGraphState* partial_graph,
@@ -2047,7 +2059,7 @@ void dfs(int depth, int min_idx, int* stack, CanonState* canon_state, const Part
         Poly res = solve_structure(stack, &partial_graph->g, canon_state, cache, raw_cache, ws,
                                    local_canon_calls, local_cache_hits, local_raw_cache_hits,
                                    weight_prod, mult_coeff, profile);
-        *local_total = poly_add(*local_total, res);
+        *local_total = poly_add_ref(local_total, &res);
         return;
     }
 
@@ -2072,7 +2084,7 @@ void dfs(int depth, int min_idx, int* stack, CanonState* canon_state, const Part
             t0 = omp_get_wtime();
         }
         stack[depth] = i;
-        Poly next_weight_prod = poly_mul(*weight_prod, partition_weight_poly[i]);
+        Poly next_weight_prod = poly_mul_ref(weight_prod, &partition_weight_poly[i]);
         long long next_mult_coeff = mult_coeff * (depth + 1);
         int next_run_len = 1;
         if (depth > 0 && i == stack[depth - 1]) {
@@ -2730,7 +2742,7 @@ int main(int argc, char** argv) {
                 if (g_profile) profile->partial_append_time += omp_get_wtime() - t0;
                 if (ok) {
                     if (k < 0) {
-                        Poly prefix_weight = poly_mul(partition_weight_poly[i], partition_weight_poly[j]);
+                        Poly prefix_weight = poly_mul_ref(&partition_weight_poly[i], &partition_weight_poly[j]);
                         long long prefix_mult = (i == j) ? 1 : 2;
                         int prefix_run = (i == j) ? 2 : 1;
                         dfs(2, j, stack, &canon_state, &prefix_graph, &cache, &raw_cache, &ws,
@@ -2762,8 +2774,8 @@ int main(int argc, char** argv) {
                             ok = partial_graph_append(&prefix_graph2, 2, k, stack);
                             if (g_profile) profile->partial_append_time += omp_get_wtime() - t0;
                             if (ok) {
-                                Poly prefix_weight = poly_mul(partition_weight_poly[i], partition_weight_poly[j]);
-                                prefix_weight = poly_mul(prefix_weight, partition_weight_poly[k]);
+                                Poly prefix_weight = poly_mul_ref(&partition_weight_poly[i], &partition_weight_poly[j]);
+                                prefix_weight = poly_mul_ref(&prefix_weight, &partition_weight_poly[k]);
                                 long long prefix_mult = (i == j) ? 1 : 2;
                                 int prefix_run = (i == j) ? 2 : 1;
                                 if (k == j) {
@@ -2845,8 +2857,8 @@ int main(int argc, char** argv) {
                 PartialGraphState prefix_graph2 = prefix_graph;
                 int ok = partial_graph_append(&prefix_graph2, 2, k, stack);
                 if (ok) {
-                    Poly prefix_weight = poly_mul(partition_weight_poly[i], partition_weight_poly[j]);
-                    prefix_weight = poly_mul(prefix_weight, partition_weight_poly[k]);
+                    Poly prefix_weight = poly_mul_ref(&partition_weight_poly[i], &partition_weight_poly[j]);
+                    prefix_weight = poly_mul_ref(&prefix_weight, &partition_weight_poly[k]);
                     long long prefix_mult = (i == j) ? 1 : 2;
                     int prefix_run = (i == j) ? 2 : 1;
                     if (k == j) {
@@ -2944,9 +2956,9 @@ int main(int argc, char** argv) {
                 PartialGraphState prefix_graph3 = prefix_graph2;
                 int ok = partial_graph_append(&prefix_graph3, 3, l, stack);
                 if (ok) {
-                    Poly prefix_weight = poly_mul(partition_weight_poly[i], partition_weight_poly[j]);
-                    prefix_weight = poly_mul(prefix_weight, partition_weight_poly[k]);
-                    prefix_weight = poly_mul(prefix_weight, partition_weight_poly[l]);
+                    Poly prefix_weight = poly_mul_ref(&partition_weight_poly[i], &partition_weight_poly[j]);
+                    prefix_weight = poly_mul_ref(&prefix_weight, &partition_weight_poly[k]);
+                    prefix_weight = poly_mul_ref(&prefix_weight, &partition_weight_poly[l]);
                     long long prefix_mult = (i == j) ? 1 : 2;
                     int prefix_run = (i == j) ? 2 : 1;
                     if (k == j) {
@@ -2999,7 +3011,7 @@ int main(int argc, char** argv) {
     }
     
     for(int i=0; i<num_threads; i++) {
-        global_poly = poly_add(global_poly, thread_polys[i]);
+        global_poly = poly_add_ref(&global_poly, &thread_polys[i]);
     }
 
     ProfileStats total_profile = {0};

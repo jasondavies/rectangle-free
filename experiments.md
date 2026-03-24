@@ -585,3 +585,29 @@
   - experiment `Worker Complete 3.77s`, `Total elapsed 5.10s`
 - Interpretation: this is another clean win on the same theme. Once `prepare_push()` stopped dominating quite so completely, the generic small-row copies in commit/pop were exposed as the next avoidable fixed overhead, and specialising them paid off immediately.
 - Outcome: accepted.
+
+### Experiment 30: Use by-reference polynomial arithmetic on the runtime hot path
+- Goal: reduce solver-side and accumulation overhead from copying large `Poly` values into `poly_add()`, `poly_sub()`, and `poly_mul()`.
+- Change:
+  - added `poly_add_ref()`, `poly_sub_ref()`, and `poly_mul_ref()` helpers taking `const Poly*`
+  - switched the runtime-heavy callsites in `solve_graph_poly()`, `solve_structure()`, DFS, prefix handling, and final thread reduction to the by-reference helpers
+  - kept the original by-value functions as wrappers for compatibility inside the file
+- One-thread benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235 --profile`
+- Baseline from accepted code:
+  - `Prefix generation 1.34s`
+  - `Worker Complete 12.57s`
+  - `solve_graph_poly 3.507s`
+- Experiment result:
+  - `Prefix generation 1.33s`
+  - `Worker Complete 12.43s`
+  - `solve_graph_poly 3.376s`
+- Matching 32-thread benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235`
+- 32-thread `partition_poly_7` result:
+  - baseline `Worker Complete 3.45s`, `Total elapsed 4.82s`
+  - experiment `Worker Complete 3.35s`, `Total elapsed 4.70s`
+- Matching generic benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235`
+- Generic result:
+  - baseline `Worker Complete 3.77s`, `Total elapsed 5.10s`
+  - experiment `Worker Complete 3.61s`, `Total elapsed 5.00s`
+- Interpretation: this is a smaller win than the CanonState changes, but it is real and easy to justify. Once the symmetry front-end got faster, argument-copy overhead in the solver path became visible enough that passing `Poly` by reference on hot callsites paid for itself.
+- Outcome: accepted.
