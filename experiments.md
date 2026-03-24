@@ -662,3 +662,24 @@
   - experiment `Worker Complete 3.42s`, `Total elapsed 4.74s`
 - Interpretation: this is essentially performance-neutral on the sampled `7x5` shard, which is acceptable because the main win is structural. Fixed-prefix shards now allocate no prefix arrays at all, and adaptive shards only store the selected tasks instead of the full global prefix list.
 - Outcome: accepted.
+
+### Experiment 34: Stop emitting dead adaptive tasks and restore schedule tunability
+- Goal: improve shard quality and runtime by removing zero-work adaptive tasks, while also letting `OMP_SCHEDULE` control `schedule(runtime)` loops again.
+- Change:
+  - adaptive prefix generation no longer emits `(i,j,-1)` tasks when the prefix is already dead at depth 1 or depth 2
+  - added `--adaptive-threshold must be positive` validation
+  - stopped calling `omp_set_schedule()` by default when `OMP_SCHEDULE` is already set; `RECT_OMP_STATIC` still forces `static,1`
+  - removed the unused `poly_len` local and earlier hardened the nauty workspace allocator / dropped `volatile` from `completed_tasks`
+- Small adaptive correctness check:
+  - `./partition_poly_7 7 3 --adaptive-subdivide` task count dropped from `407604` to `23092`
+  - full run polynomial stayed identical
+  - two `--task-stride 2` shards merged exactly back to the full result
+- Matching 32-thread benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235`
+- 32-thread `partition_poly_7` result:
+  - baseline `Worker Complete 3.42s`, `Total elapsed 4.74s`
+  - experiment `Worker Complete 2.41s`, `Total elapsed 3.77s`
+- Additional checks:
+  - `OMP_SCHEDULE=guided,1` now reports `OpenMP scheduling: runtime from OMP_SCHEDULE=guided,1`
+  - `./partition_poly_7 7 3 --adaptive-subdivide --adaptive-threshold 0 --task-end 0` now fails with `--adaptive-threshold must be positive`
+- Interpretation: this is a strong win. The main gain comes from cutting dead adaptive tasks out of the task space entirely, which improves both prefix generation and shard balance. Restoring `OMP_SCHEDULE` control is primarily a tuning fix rather than a measured speedup.
+- Outcome: accepted.

@@ -190,7 +190,7 @@ static uint32_t* overlap_mask = NULL;
 static uint32_t* intra_mask = NULL;
 static Poly* partition_weight_poly = NULL;
 
-static volatile long long completed_tasks = 0;
+static long long completed_tasks = 0;
 static Poly global_poly = {0}; 
 
 static int g_rows = DEFAULT_ROWS;
@@ -1714,11 +1714,11 @@ void nauty_workspace_init(NautyWorkspace* ws, int n) {
     free(ws->lab);
     free(ws->ptn);
     free(ws->orbits);
-    ws->ng = (graph*)malloc((size_t)n * (size_t)m * sizeof(graph));
-    ws->cg = (graph*)malloc((size_t)n * (size_t)m * sizeof(graph));
-    ws->lab = (int*)malloc((size_t)n * sizeof(int));
-    ws->ptn = (int*)malloc((size_t)n * sizeof(int));
-    ws->orbits = (int*)malloc((size_t)n * sizeof(int));
+    ws->ng = checked_calloc((size_t)n * (size_t)m, sizeof(graph), "nauty_ng");
+    ws->cg = checked_calloc((size_t)n * (size_t)m, sizeof(graph), "nauty_cg");
+    ws->lab = checked_calloc((size_t)n, sizeof(int), "nauty_lab");
+    ws->ptn = checked_calloc((size_t)n, sizeof(int), "nauty_ptn");
+    ws->orbits = checked_calloc((size_t)n, sizeof(int), "nauty_orbits");
     ws->nmax = n;
     ws->mmax = m;
 }
@@ -2393,6 +2393,10 @@ int main(int argc, char** argv) {
         fprintf(stderr, "--adaptive-subdivide requires cols >= 3\n");
         return 1;
     }
+    if (g_adaptive_threshold <= 0) {
+        fprintf(stderr, "--adaptive-threshold must be positive\n");
+        return 1;
+    }
 
     if (task_start < 0) {
         fprintf(stderr, "--task-start must be non-negative\n");
@@ -2440,25 +2444,11 @@ int main(int argc, char** argv) {
                     adaptive_stack[0] = i;
                     if (!canon_state_prepare_push(&adaptive_canon_state, i, &adaptive_canon_scratch,
                                                   &next_stabilizer)) {
-                        for (int j = i; j < num_partitions; j++) {
-                            if (task_matches_selection(adaptive_task_index, task_start, task_end,
-                                                       task_stride, task_offset)) {
-                                prefix_task_buffer_push3(&adaptive_prefixes, i, j, -1);
-                            }
-                            adaptive_task_index++;
-                        }
                         continue;
                     }
                     canon_state_commit_push(&adaptive_canon_state, i, &adaptive_canon_scratch, next_stabilizer);
                     if (!partial_graph_append(&adaptive_partial_graph, 0, i, adaptive_stack)) {
                         canon_state_pop(&adaptive_canon_state);
-                        for (int j = i; j < num_partitions; j++) {
-                            if (task_matches_selection(adaptive_task_index, task_start, task_end,
-                                                       task_stride, task_offset)) {
-                                prefix_task_buffer_push3(&adaptive_prefixes, i, j, -1);
-                            }
-                            adaptive_task_index++;
-                        }
                         continue;
                     }
 
@@ -2470,22 +2460,12 @@ int main(int argc, char** argv) {
                         adaptive_stack[1] = j;
                         if (!canon_state_prepare_push(&adaptive_canon_state, j, &adaptive_canon_scratch,
                                                       &next_stabilizer)) {
-                            if (task_matches_selection(adaptive_task_index, task_start, task_end,
-                                                       task_stride, task_offset)) {
-                                prefix_task_buffer_push3(&adaptive_prefixes, i, j, -1);
-                            }
-                            adaptive_task_index++;
                             continue;
                         }
                         canon_state_commit_push(&adaptive_canon_state, j, &adaptive_canon_scratch, next_stabilizer);
                         PartialGraphState prefix_graph = adaptive_partial_graph;
                         if (!partial_graph_append(&prefix_graph, 1, j, adaptive_stack)) {
                             canon_state_pop(&adaptive_canon_state);
-                            if (task_matches_selection(adaptive_task_index, task_start, task_end,
-                                                       task_stride, task_offset)) {
-                                prefix_task_buffer_push3(&adaptive_prefixes, i, j, -1);
-                            }
-                            adaptive_task_index++;
                             continue;
                         }
 
@@ -2614,6 +2594,7 @@ int main(int argc, char** argv) {
     const char* omp_static_env = getenv("RECT_OMP_STATIC");
     int use_static_schedule =
         (omp_static_env && *omp_static_env && strcmp(omp_static_env, "0") != 0);
+    const char* omp_schedule_env = getenv("OMP_SCHEDULE");
     int omp_chunk = 1;
     if (!use_static_schedule) {
         omp_chunk = (prefix_depth == 2 && g_rows < 7 && !g_adaptive_subdivide) ? 8 : 1;
@@ -2621,6 +2602,8 @@ int main(int argc, char** argv) {
     if (use_static_schedule) {
         printf("OpenMP scheduling: static,1 (RECT_OMP_STATIC override)\n");
         omp_set_schedule(omp_sched_static, 1);
+    } else if (omp_schedule_env && *omp_schedule_env) {
+        printf("OpenMP scheduling: runtime from OMP_SCHEDULE=%s\n", omp_schedule_env);
     } else {
         printf("OpenMP scheduling: dynamic,%d\n", omp_chunk);
         omp_set_schedule(omp_sched_dynamic, omp_chunk);
@@ -2642,7 +2625,6 @@ int main(int argc, char** argv) {
     double start_time = omp_get_wtime();
     
     int num_threads = omp_get_max_threads();
-    int poly_len = g_rows * g_cols + 1;
     int graph_poly_len = g_cols * (g_rows / 2) + 1;
     Poly* thread_polys = checked_aligned_alloc(64, (size_t)num_threads * sizeof(Poly), "thread_polys");
     ProfileStats* thread_profiles =
