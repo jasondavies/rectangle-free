@@ -84,3 +84,14 @@
   - After: `Worker Complete 6.55s`, `Total 11.45s`
 - Interpretation: chunk size `8` was starving the scheduler on this kind of irregular adaptive workload. Once each adaptive task became its own schedulable unit, 32-thread execution improved by about `2.66x` in the worker phase and about `1.95x` overall, with identical polynomial output.
 - Outcome: accepted.
+
+### Experiment 8: Use `dynamic,1` for 7-row non-adaptive `prefix-depth 2`
+- Goal: check whether the same scheduler-granularity change helps the non-adaptive `7x5` path as well.
+- Temporary change for the experiment: widened the `dynamic,1` rule to all depth-2 runs.
+- Benchmark command: `OMP_NUM_THREADS=32 ./partition_poly 7 5 --prefix-depth 2 --task-stride 3073`
+- Result: modest but real improvement on the exact same sampled workload.
+  - Before: `Worker Complete 35.97s`, `Total 35.98s`
+  - Experiment: `Worker Complete 34.41s`, `Total 34.41s`
+- Interpretation: non-adaptive depth-2 still suffers mostly from one giant coarse task, so chunk size alone cannot fix scaling there. But `dynamic,1` does not hurt and still buys about `4%` on the sampled `7x5` run.
+- Final decision: keep `dynamic,1` for `g_rows == 7` depth-2 work, but preserve the older `dynamic,8` default for smaller-row non-adaptive cases.
+- Outcome: accepted.

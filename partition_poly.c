@@ -2155,7 +2155,7 @@ int main(int argc, char** argv) {
         (omp_static_env && *omp_static_env && strcmp(omp_static_env, "0") != 0);
     int omp_chunk = 1;
     if (!use_static_schedule) {
-        omp_chunk = (prefix_depth == 2 && !g_adaptive_subdivide) ? 8 : 1;
+        omp_chunk = (prefix_depth == 2 && g_rows < 7 && !g_adaptive_subdivide) ? 8 : 1;
     }
     if (use_static_schedule) {
         printf("OpenMP scheduling: static,1 (RECT_OMP_STATIC override)\n");
