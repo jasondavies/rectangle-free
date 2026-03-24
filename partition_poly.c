@@ -202,7 +202,7 @@ typedef struct {
     Poly total;
 } CoordinatorShard;
 
-#define COORD_MAX_ACTIVE_SHARDS 16
+#define COORD_MAX_ACTIVE_SHARDS 128
 
 typedef struct {
     pthread_mutex_t mutex;
@@ -212,6 +212,7 @@ typedef struct {
     int head;
     int tail;
     int count;
+    int inflight_tasks;
     int stop;
     int no_more_work;
     int fatal_error;
@@ -2736,6 +2737,7 @@ static int coordinator_queue_pop(CoordinatorQueue* queue, CoordTask* task) {
     *task = queue->tasks[queue->head];
     queue->head = (queue->head + 1) % queue->capacity;
     queue->count--;
+    queue->inflight_tasks++;
     pthread_cond_broadcast(&queue->cond);
     pthread_mutex_unlock(&queue->mutex);
     return 1;
@@ -2768,6 +2770,7 @@ static void* coordinator_feeder_main(void* opaque) {
             break;
         }
         int active_shards = coordinator_queue_active_shards(queue);
+        int buffered_tasks = queue->count + queue->inflight_tasks;
         if (queue->no_more_work && queue->count == 0 && active_shards == 0) {
             queue->stop = 1;
             pthread_cond_broadcast(&queue->cond);
@@ -2775,7 +2778,7 @@ static void* coordinator_feeder_main(void* opaque) {
             break;
         }
         int should_fetch = !queue->no_more_work &&
-                           queue->count < queue->low_watermark &&
+                           buffered_tasks < queue->low_watermark &&
                            active_shards < COORD_MAX_ACTIVE_SHARDS;
         pthread_mutex_unlock(&queue->mutex);
 
@@ -2795,39 +2798,51 @@ static void* coordinator_feeder_main(void* opaque) {
         }
 
         if (should_fetch) {
-            CoordinatorShard shard;
-            if (!coordinator_fetch_shard(&args->endpoint, args->worker_id, args->run_id,
-                                         args->full_tasks, &shard)) {
+            for (;;) {
                 pthread_mutex_lock(&queue->mutex);
-                queue->no_more_work = 1;
-                pthread_cond_broadcast(&queue->cond);
+                active_shards = coordinator_queue_active_shards(queue);
+                buffered_tasks = queue->count + queue->inflight_tasks;
+                int keep_fetching = !queue->fatal_error &&
+                                    !queue->no_more_work &&
+                                    buffered_tasks < queue->high_watermark &&
+                                    active_shards < COORD_MAX_ACTIVE_SHARDS;
                 pthread_mutex_unlock(&queue->mutex);
-                continue;
-            }
-            pthread_mutex_lock(&queue->mutex);
-            int slot = coordinator_queue_find_free_slot(queue);
-            if (slot < 0) {
-                pthread_mutex_unlock(&queue->mutex);
-                coordinator_queue_set_fatal(queue, "No free coordinator shard slot");
-                break;
-            }
-            queue->shards[slot] = shard;
-            pthread_mutex_unlock(&queue->mutex);
+                if (!keep_fetching) break;
 
-            if (shard.remaining_tasks == 0) {
-                coordinator_submit_shard(&args->endpoint, args->worker_id, &shard);
+                CoordinatorShard shard;
+                if (!coordinator_fetch_shard(&args->endpoint, args->worker_id, args->run_id,
+                                             args->full_tasks, &shard)) {
+                    pthread_mutex_lock(&queue->mutex);
+                    queue->no_more_work = 1;
+                    pthread_cond_broadcast(&queue->cond);
+                    pthread_mutex_unlock(&queue->mutex);
+                    break;
+                }
                 pthread_mutex_lock(&queue->mutex);
-                queue->shards[slot].active = 0;
-                pthread_cond_broadcast(&queue->cond);
+                int slot = coordinator_queue_find_free_slot(queue);
+                if (slot < 0) {
+                    pthread_mutex_unlock(&queue->mutex);
+                    coordinator_queue_set_fatal(queue, "No free coordinator shard slot");
+                    break;
+                }
+                queue->shards[slot] = shard;
                 pthread_mutex_unlock(&queue->mutex);
-                continue;
-            }
 
-            long long first = first_selected_task(shard.task_start, shard.task_end,
-                                                  shard.task_stride, shard.task_offset);
-            for (long long p = first; p < shard.task_end; p += shard.task_stride) {
-                CoordTask task = {.shard_slot = slot, .p = p};
-                coordinator_queue_push(queue, task);
+                if (shard.remaining_tasks == 0) {
+                    coordinator_submit_shard(&args->endpoint, args->worker_id, &shard);
+                    pthread_mutex_lock(&queue->mutex);
+                    queue->shards[slot].active = 0;
+                    pthread_cond_broadcast(&queue->cond);
+                    pthread_mutex_unlock(&queue->mutex);
+                    continue;
+                }
+
+                long long first = first_selected_task(shard.task_start, shard.task_end,
+                                                      shard.task_stride, shard.task_offset);
+                for (long long p = first; p < shard.task_end; p += shard.task_stride) {
+                    CoordTask task = {.shard_slot = slot, .p = p};
+                    coordinator_queue_push(queue, task);
+                }
             }
             continue;
         }
@@ -2930,6 +2945,7 @@ static int run_coordinator_worker(long long full_tasks, int num_threads, int gra
             CoordinatorShard shard_copy;
             int should_submit = 0;
             pthread_mutex_lock(&queue.mutex);
+            queue.inflight_tasks--;
             CoordinatorShard* shard = &queue.shards[task.shard_slot];
             shard->total = poly_add_ref(&shard->total, &task_total);
             shard->remaining_tasks--;
