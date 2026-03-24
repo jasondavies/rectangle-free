@@ -645,3 +645,20 @@
   - `canon_state_prepare_push 8.603s`
 - Interpretation: this is a clear regression. The extra pointer plumbing and less direct indexing hurt more than the saved multiply/add address calculations, so the straightforward indexed form should stay.
 - Outcome: rejected and reverted.
+
+### Experiment 33: Materialise only the selected shard's prefix tasks
+- Goal: stop allocating prefix arrays for the entire global task space when a shard only needs a small selected subset, especially for `--task-stride/--task-offset` runs.
+- Change:
+  - removed full-array materialisation for fixed depth-2/3/4 prefixes
+  - added on-demand unranking for fixed prefixes from the global task id
+  - changed adaptive depth-2 generation to stream the global task order and keep only the selected shard's tasks in memory
+- Correctness checks:
+  - `./partition_poly_7 7 2` full run and two `--task-stride 2` shards merged exactly
+  - `./partition_poly_7 7 3 --adaptive-subdivide` full run and two `--task-stride 2` shards merged exactly
+  - generic `./partition_poly 6 2 --task-end 0` smoke test passed after recompiling
+- Matching 32-thread benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235`
+- 32-thread `partition_poly_7` result:
+  - baseline `Worker Complete 3.35s`, `Total elapsed 4.70s`
+  - experiment `Worker Complete 3.42s`, `Total elapsed 4.74s`
+- Interpretation: this is essentially performance-neutral on the sampled `7x5` shard, which is acceptable because the main win is structural. Fixed-prefix shards now allocate no prefix arrays at all, and adaptive shards only store the selected tasks instead of the full global prefix list.
+- Outcome: accepted.

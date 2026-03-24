@@ -361,24 +361,128 @@ static void prefix_task_buffer_push3(PrefixTaskBuffer* buf, int i, int j, int k)
     buf->count++;
 }
 
-static void prefix_task_buffer_append3_batch(PrefixTaskBuffer* buf, int i, int j,
-                                             const uint16_t* ks, int count) {
-    long long base = buf->count;
-    prefix_task_buffer_reserve(buf, base + count);
-    for (int idx = 0; idx < count; idx++) {
-        buf->i[base + idx] = (PrefixId)i;
-        buf->j[base + idx] = (PrefixId)j;
-        buf->k[base + idx] = ks[idx];
-    }
-    buf->count = base + count;
-}
-
 static void prefix_task_buffer_free(PrefixTaskBuffer* buf) {
     free(buf->i);
     free(buf->j);
     free(buf->k);
     free(buf->l);
     memset(buf, 0, sizeof(*buf));
+}
+
+static inline int task_matches_selection(long long task_index, long long task_start, long long task_end,
+                                         long long task_stride, long long task_offset) {
+    if (task_index < task_start) return 0;
+    if (task_end >= 0 && task_index >= task_end) return 0;
+    long long remainder = task_index % task_stride;
+    if (remainder < 0) remainder += task_stride;
+    return remainder == task_offset;
+}
+
+static void prefix_task_buffer_append3_selected_batch(PrefixTaskBuffer* buf, int i, int j,
+                                                      const uint16_t* ks, int count,
+                                                      long long first_task_index,
+                                                      long long task_start, long long task_end,
+                                                      long long task_stride, long long task_offset) {
+    long long selected = 0;
+    for (int idx = 0; idx < count; idx++) {
+        if (task_matches_selection(first_task_index + idx, task_start, task_end,
+                                   task_stride, task_offset)) {
+            selected++;
+        }
+    }
+    if (selected == 0) return;
+
+    long long base = buf->count;
+    prefix_task_buffer_reserve(buf, base + selected);
+    for (int idx = 0; idx < count; idx++) {
+        if (!task_matches_selection(first_task_index + idx, task_start, task_end,
+                                    task_stride, task_offset)) {
+            continue;
+        }
+        buf->i[buf->count] = (PrefixId)i;
+        buf->j[buf->count] = (PrefixId)j;
+        buf->k[buf->count] = ks[idx];
+        buf->count++;
+    }
+}
+
+static inline long long repeated_combo_count(int values, int slots) {
+    switch (slots) {
+        case 0:
+            return 1;
+        case 1:
+            return values;
+        case 2:
+            return (long long)values * (values + 1) / 2;
+        case 3:
+            return (long long)values * (values + 1) * (values + 2) / 6;
+        default:
+            fprintf(stderr, "Unsupported repeated combination slot count: %d\n", slots);
+            exit(1);
+    }
+}
+
+static void unrank_prefix2(long long rank, int* i, int* j) {
+    for (int a = 0; a < num_partitions; a++) {
+        long long count = num_partitions - a;
+        if (rank < count) {
+            *i = a;
+            *j = a + (int)rank;
+            return;
+        }
+        rank -= count;
+    }
+    fprintf(stderr, "Depth-2 prefix rank out of range\n");
+    exit(1);
+}
+
+static void unrank_prefix3(long long rank, int* i, int* j, int* k) {
+    for (int a = 0; a < num_partitions; a++) {
+        long long count_a = repeated_combo_count(num_partitions - a, 2);
+        if (rank < count_a) {
+            *i = a;
+            for (int b = a; b < num_partitions; b++) {
+                long long count_b = num_partitions - b;
+                if (rank < count_b) {
+                    *j = b;
+                    *k = b + (int)rank;
+                    return;
+                }
+                rank -= count_b;
+            }
+        }
+        rank -= count_a;
+    }
+    fprintf(stderr, "Depth-3 prefix rank out of range\n");
+    exit(1);
+}
+
+static void unrank_prefix4(long long rank, int* i, int* j, int* k, int* l) {
+    for (int a = 0; a < num_partitions; a++) {
+        long long count_a = repeated_combo_count(num_partitions - a, 3);
+        if (rank < count_a) {
+            *i = a;
+            for (int b = a; b < num_partitions; b++) {
+                long long count_b = repeated_combo_count(num_partitions - b, 2);
+                if (rank < count_b) {
+                    *j = b;
+                    for (int c = b; c < num_partitions; c++) {
+                        long long count_c = num_partitions - c;
+                        if (rank < count_c) {
+                            *k = c;
+                            *l = c + (int)rank;
+                            return;
+                        }
+                        rank -= count_c;
+                    }
+                }
+                rank -= count_b;
+            }
+        }
+        rank -= count_a;
+    }
+    fprintf(stderr, "Depth-4 prefix rank out of range\n");
+    exit(1);
 }
 
 static int bell_number_upper_bound(int rows) {
@@ -2290,7 +2394,22 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    if (task_start < 0) {
+        fprintf(stderr, "--task-start must be non-negative\n");
+        return 1;
+    }
+    if (task_stride <= 0) {
+        fprintf(stderr, "--task-stride must be positive\n");
+        return 1;
+    }
+    if (task_end >= 0 && task_end < task_start) {
+        fprintf(stderr, "Task range must satisfy 0 <= start <= end\n");
+        return 1;
+    }
+    task_offset = normalise_task_offset(task_stride, task_offset);
+
     long long total_prefixes = 0;
+    long long materialized_prefixes = 0;
     PrefixId *prefix_i = NULL, *prefix_j = NULL, *prefix_k = NULL, *prefix_l = NULL;
     double prefix_generation_time = 0.0;
 
@@ -2304,11 +2423,14 @@ int main(int argc, char** argv) {
                     return 1;
                 }
                 PrefixTaskBuffer adaptive_prefixes;
-                prefix_task_buffer_init(&adaptive_prefixes, base_prefixes, 0);
+                long long adaptive_initial_capacity =
+                    (task_end >= 0) ? count_selected_tasks(task_start, task_end, task_stride, task_offset) : 1024;
+                prefix_task_buffer_init(&adaptive_prefixes, adaptive_initial_capacity, 0);
                 CanonState adaptive_canon_state;
                 CanonScratch adaptive_canon_scratch;
                 PartialGraphState adaptive_partial_graph;
                 int adaptive_stack[MAX_COLS];
+                long long adaptive_task_index = 0;
                 canon_state_init(&adaptive_canon_state, perm_count);
                 canon_scratch_init(&adaptive_canon_scratch, perm_count);
                 for (int i = 0; i < num_partitions; i++) {
@@ -2319,7 +2441,11 @@ int main(int argc, char** argv) {
                     if (!canon_state_prepare_push(&adaptive_canon_state, i, &adaptive_canon_scratch,
                                                   &next_stabilizer)) {
                         for (int j = i; j < num_partitions; j++) {
-                            prefix_task_buffer_push3(&adaptive_prefixes, i, j, -1);
+                            if (task_matches_selection(adaptive_task_index, task_start, task_end,
+                                                       task_stride, task_offset)) {
+                                prefix_task_buffer_push3(&adaptive_prefixes, i, j, -1);
+                            }
+                            adaptive_task_index++;
                         }
                         continue;
                     }
@@ -2327,7 +2453,11 @@ int main(int argc, char** argv) {
                     if (!partial_graph_append(&adaptive_partial_graph, 0, i, adaptive_stack)) {
                         canon_state_pop(&adaptive_canon_state);
                         for (int j = i; j < num_partitions; j++) {
-                            prefix_task_buffer_push3(&adaptive_prefixes, i, j, -1);
+                            if (task_matches_selection(adaptive_task_index, task_start, task_end,
+                                                       task_stride, task_offset)) {
+                                prefix_task_buffer_push3(&adaptive_prefixes, i, j, -1);
+                            }
+                            adaptive_task_index++;
                         }
                         continue;
                     }
@@ -2340,14 +2470,22 @@ int main(int argc, char** argv) {
                         adaptive_stack[1] = j;
                         if (!canon_state_prepare_push(&adaptive_canon_state, j, &adaptive_canon_scratch,
                                                       &next_stabilizer)) {
-                            prefix_task_buffer_push3(&adaptive_prefixes, i, j, -1);
+                            if (task_matches_selection(adaptive_task_index, task_start, task_end,
+                                                       task_stride, task_offset)) {
+                                prefix_task_buffer_push3(&adaptive_prefixes, i, j, -1);
+                            }
+                            adaptive_task_index++;
                             continue;
                         }
                         canon_state_commit_push(&adaptive_canon_state, j, &adaptive_canon_scratch, next_stabilizer);
                         PartialGraphState prefix_graph = adaptive_partial_graph;
                         if (!partial_graph_append(&prefix_graph, 1, j, adaptive_stack)) {
                             canon_state_pop(&adaptive_canon_state);
-                            prefix_task_buffer_push3(&adaptive_prefixes, i, j, -1);
+                            if (task_matches_selection(adaptive_task_index, task_start, task_end,
+                                                       task_stride, task_offset)) {
+                                prefix_task_buffer_push3(&adaptive_prefixes, i, j, -1);
+                            }
+                            adaptive_task_index++;
                             continue;
                         }
 
@@ -2365,12 +2503,19 @@ int main(int argc, char** argv) {
                                     buffered_k[child_count] = (uint16_t)k;
                                     child_count++;
                                     if (child_count == g_adaptive_threshold) {
-                                        prefix_task_buffer_append3_batch(&adaptive_prefixes, i, j,
-                                                                         buffered_k, child_count);
+                                        prefix_task_buffer_append3_selected_batch(
+                                            &adaptive_prefixes, i, j, buffered_k, child_count,
+                                            adaptive_task_index, task_start, task_end,
+                                            task_stride, task_offset);
+                                        adaptive_task_index += child_count;
                                         expanded = 1;
                                     }
                                 } else {
-                                    prefix_task_buffer_push3(&adaptive_prefixes, i, j, k);
+                                    if (task_matches_selection(adaptive_task_index, task_start, task_end,
+                                                               task_stride, task_offset)) {
+                                        prefix_task_buffer_push3(&adaptive_prefixes, i, j, k);
+                                    }
+                                    adaptive_task_index++;
                                     child_count++;
                                 }
                             }
@@ -2379,7 +2524,11 @@ int main(int argc, char** argv) {
 
                         canon_state_pop(&adaptive_canon_state);
                         if (!expanded) {
-                            prefix_task_buffer_push3(&adaptive_prefixes, i, j, -1);
+                            if (task_matches_selection(adaptive_task_index, task_start, task_end,
+                                                       task_stride, task_offset)) {
+                                prefix_task_buffer_push3(&adaptive_prefixes, i, j, -1);
+                            }
+                            adaptive_task_index++;
                         }
                     }
 
@@ -2387,121 +2536,56 @@ int main(int argc, char** argv) {
                 }
                 canon_state_free(&adaptive_canon_state);
                 canon_scratch_free(&adaptive_canon_scratch);
-                total_prefixes = adaptive_prefixes.count;
+                total_prefixes = adaptive_task_index;
+                materialized_prefixes = adaptive_prefixes.count;
                 prefix_i = adaptive_prefixes.i;
                 prefix_j = adaptive_prefixes.j;
                 prefix_k = adaptive_prefixes.k;
             } else {
                 total_prefixes = base_prefixes;
-                prefix_i = (PrefixId*)malloc((size_t)total_prefixes * sizeof(PrefixId));
-                prefix_j = (PrefixId*)malloc((size_t)total_prefixes * sizeof(PrefixId));
-                if (!prefix_i || !prefix_j) {
-                    fprintf(stderr, "Failed to allocate prefix arrays\n");
-                    return 1;
-                }
-
-                long long idx = 0;
-                for (int i = 0; i < num_partitions; i++) {
-                    for (int j = i; j < num_partitions; j++) {
-                        prefix_i[idx] = (PrefixId)i;
-                        prefix_j[idx] = (PrefixId)j;
-                        idx++;
-                    }
-                }
             }
         } else if (prefix_depth == 3) {
             total_prefixes = (long long)num_partitions * (num_partitions + 1) * (num_partitions + 2) / 6;
-            prefix_i = (PrefixId*)malloc((size_t)total_prefixes * sizeof(PrefixId));
-            prefix_j = (PrefixId*)malloc((size_t)total_prefixes * sizeof(PrefixId));
-            prefix_k = (PrefixId*)malloc((size_t)total_prefixes * sizeof(PrefixId));
-            if (!prefix_i || !prefix_j || !prefix_k) {
-                fprintf(stderr, "Failed to allocate prefix arrays\n");
-                return 1;
-            }
-
-            long long idx = 0;
-            for (int i = 0; i < num_partitions; i++) {
-                for (int j = i; j < num_partitions; j++) {
-                    for (int k = j; k < num_partitions; k++) {
-                        prefix_i[idx] = (PrefixId)i;
-                        prefix_j[idx] = (PrefixId)j;
-                        prefix_k[idx] = (PrefixId)k;
-                        idx++;
-                    }
-                }
-            }
         } else if (prefix_depth == 4) {
             total_prefixes = (long long)num_partitions * (num_partitions + 1) *
                              (num_partitions + 2) * (num_partitions + 3) / 24;
-            prefix_i = (PrefixId*)malloc((size_t)total_prefixes * sizeof(PrefixId));
-            prefix_j = (PrefixId*)malloc((size_t)total_prefixes * sizeof(PrefixId));
-            prefix_k = (PrefixId*)malloc((size_t)total_prefixes * sizeof(PrefixId));
-            prefix_l = (PrefixId*)malloc((size_t)total_prefixes * sizeof(PrefixId));
-            if (!prefix_i || !prefix_j || !prefix_k || !prefix_l) {
-                fprintf(stderr, "Failed to allocate prefix arrays\n");
-                return 1;
-            }
-
-            long long idx = 0;
-            for (int i = 0; i < num_partitions; i++) {
-                for (int j = i; j < num_partitions; j++) {
-                    for (int k = j; k < num_partitions; k++) {
-                        for (int l = k; l < num_partitions; l++) {
-                            prefix_i[idx] = (PrefixId)i;
-                            prefix_j[idx] = (PrefixId)j;
-                            prefix_k[idx] = (PrefixId)k;
-                            prefix_l[idx] = (PrefixId)l;
-                            idx++;
-                        }
-                    }
-                }
-            }
         }
         prefix_generation_time = omp_get_wtime() - prefix_start_time;
-        printf("Prefix depth: %d (%lld tasks)\n", prefix_depth, total_prefixes);
-        if (g_adaptive_subdivide) {
-            printf("Adaptive subdivision: threshold %d, max depth %d\n",
-                   g_adaptive_threshold, g_adaptive_max_depth);
-        }
-        printf("Prefix generation: %.2f seconds\n", prefix_generation_time);
-        if (prefix_depth == 2) {
-            printf("Prefix task bytes: %zu each, %.2f MiB total\n",
-                   (size_t)(g_adaptive_subdivide ? sizeof(PrefixId) * 3 : sizeof(PrefixId) * 2),
-                   ((double)(g_adaptive_subdivide ? sizeof(PrefixId) * 3 : sizeof(PrefixId) * 2) *
-                    (double)total_prefixes) / (1024.0 * 1024.0));
-        } else if (prefix_depth == 3) {
-            printf("Prefix task bytes: %zu each, %.2f MiB total\n",
-                   sizeof(PrefixId) * 3,
-                   ((double)(sizeof(PrefixId) * 3) * (double)total_prefixes) / (1024.0 * 1024.0));
-        } else if (prefix_depth == 4) {
-            printf("Prefix task bytes: %zu each, %.2f MiB total\n",
-                   sizeof(PrefixId) * 4,
-                   ((double)(sizeof(PrefixId) * 4) * (double)total_prefixes) / (1024.0 * 1024.0));
-        }
     }
 
     completed_tasks = 0;
     long long full_tasks = (g_cols == 1) ? (long long)num_partitions : total_prefixes;
-    if (task_start < 0) {
-        fprintf(stderr, "--task-start must be non-negative\n");
-        return 1;
-    }
-    if (task_stride <= 0) {
-        fprintf(stderr, "--task-stride must be positive\n");
-        return 1;
-    }
     if (task_end < 0) task_end = full_tasks;
     if (task_end < task_start || task_end > full_tasks) {
         fprintf(stderr, "Task range must satisfy 0 <= start <= end <= %lld\n", full_tasks);
         return 1;
     }
-    task_offset = normalise_task_offset(task_stride, task_offset);
     long long active_task_start = task_start;
     long long active_task_end = task_end;
     long long total_tasks = count_selected_tasks(active_task_start, active_task_end,
                                                 task_stride, task_offset);
     long long first_task = first_selected_task(active_task_start, active_task_end,
                                                task_stride, task_offset);
+    if (g_adaptive_subdivide && prefix_depth == 2 && materialized_prefixes != total_tasks) {
+        fprintf(stderr, "Internal error: adaptive prefix selection mismatch\n");
+        return 1;
+    }
+    printf("Prefix depth: %d (%lld tasks)\n", prefix_depth, total_prefixes);
+    if (g_adaptive_subdivide) {
+        printf("Adaptive subdivision: threshold %d, max depth %d\n",
+               g_adaptive_threshold, g_adaptive_max_depth);
+    }
+    printf("Prefix generation: %.2f seconds\n", prefix_generation_time);
+    if (prefix_depth > 0) {
+        if (g_adaptive_subdivide) {
+            size_t bytes_per_task = sizeof(PrefixId) * 3;
+            printf("Selected prefix task bytes: %zu each, %.2f MiB total\n",
+                   bytes_per_task,
+                   ((double)bytes_per_task * (double)materialized_prefixes) / (1024.0 * 1024.0));
+        } else {
+            printf("Prefix task storage: unranked on demand for selected tasks\n");
+        }
+    }
     long long progress_report_step = 0;
     long long progress_updates = DEFAULT_PROGRESS_UPDATES;
     const char* progress_step_env = getenv("RECT_PROGRESS_STEP");
@@ -2664,12 +2748,20 @@ int main(int argc, char** argv) {
             }
         } else if (prefix_depth == 2) {
             #pragma omp for schedule(runtime)
-            for (long long p = first_task; p < active_task_end; p += task_stride) {
+            for (long long t = 0; t < total_tasks; t++) {
                 double task_t0 = g_profile ? omp_get_wtime() : 0.0;
                 double t0 = 0.0;
-                int i = (int)prefix_i[p];
-                int j = (int)prefix_j[p];
-                int k = prefix_k ? ((prefix_k[p] == PREFIX_ID_NONE) ? -1 : (int)prefix_k[p]) : -1;
+                long long p = first_task + t * task_stride;
+                int i = 0;
+                int j = 0;
+                int k = -1;
+                if (g_adaptive_subdivide) {
+                    i = (int)prefix_i[t];
+                    j = (int)prefix_j[t];
+                    k = (prefix_k[t] == PREFIX_ID_NONE) ? -1 : (int)prefix_k[t];
+                } else {
+                    unrank_prefix2(p, &i, &j);
+                }
                 int next_stabilizer = 0;
 
                 canon_state_reset(&canon_state, perm_count);
@@ -2804,11 +2896,13 @@ int main(int argc, char** argv) {
             }
         } else if (prefix_depth == 3) {
             #pragma omp for schedule(runtime)
-            for (long long p = first_task; p < active_task_end; p += task_stride) {
+            for (long long t = 0; t < total_tasks; t++) {
                 double task_t0 = g_profile ? omp_get_wtime() : 0.0;
-                int i = (int)prefix_i[p];
-                int j = (int)prefix_j[p];
-                int k = (int)prefix_k[p];
+                long long p = first_task + t * task_stride;
+                int i = 0;
+                int j = 0;
+                int k = 0;
+                unrank_prefix3(p, &i, &j, &k);
                 int next_stabilizer = 0;
 
                 canon_state_reset(&canon_state, perm_count);
@@ -2882,12 +2976,14 @@ int main(int argc, char** argv) {
             }
         } else {
             #pragma omp for schedule(runtime)
-            for (long long p = first_task; p < active_task_end; p += task_stride) {
+            for (long long t = 0; t < total_tasks; t++) {
                 double task_t0 = g_profile ? omp_get_wtime() : 0.0;
-                int i = (int)prefix_i[p];
-                int j = (int)prefix_j[p];
-                int k = (int)prefix_k[p];
-                int l = (int)prefix_l[p];
+                long long p = first_task + t * task_stride;
+                int i = 0;
+                int j = 0;
+                int k = 0;
+                int l = 0;
+                unrank_prefix4(p, &i, &j, &k, &l);
                 int next_stabilizer = 0;
 
                 canon_state_reset(&canon_state, perm_count);
