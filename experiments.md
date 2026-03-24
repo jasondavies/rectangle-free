@@ -506,3 +506,29 @@
   - experiment `Worker Complete 4.25s`, `Total elapsed 5.95s`
 - Interpretation: this is the same successful pattern as Experiment 25. The compare loop is on the hot active-permutation path, so shaving branchy tiny-loop overhead there translates into real single-thread and 32-thread gains without changing the search space.
 - Outcome: accepted.
+
+### Experiment 27: Specialise small-row materialisation in `CanonState`
+- Goal: squeeze a little more out of the same active-permutation path by specialising the tiny row-copy and “fill missing stack values” logic before the final insert-and-compare step.
+- Change:
+  - added `canon_copy_row_prefix()` with fixed-length copies for prefixes up to length `5`
+  - added `canon_materialize_row()` with depth-specialised fill logic for the missing stack values
+  - kept generic fallbacks for longer lengths and depths, though they are unreachable on the current `7xn` path
+- One-thread benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235 --profile`
+- Baseline from accepted code:
+  - `Prefix generation 1.70s`
+  - `Worker Complete 14.59s`
+  - `canon_state_prepare_push 8.615s`
+- Experiment result:
+  - `Prefix generation 1.60s`
+  - `Worker Complete 14.49s`
+  - `canon_state_prepare_push 8.576s`
+- Matching 32-thread benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235`
+- 32-thread `partition_poly_7` result:
+  - baseline `Worker Complete 3.88s`, `Total elapsed 5.56s`
+  - experiment `Worker Complete 3.88s`, `Total elapsed 5.48s`
+- Matching generic benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235`
+- Generic result:
+  - baseline `Worker Complete 4.25s`, `Total elapsed 5.95s`
+  - experiment `Worker Complete 4.13s`, `Total elapsed 5.72s`
+- Interpretation: this is a modest but real follow-on win. The gain is much smaller than the insert and compare unrolls, which suggests the remaining hot cost is no longer dominated by row materialisation, but it still trims enough branch and loop overhead to be worth keeping.
+- Outcome: accepted.

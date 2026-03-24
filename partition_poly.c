@@ -1297,6 +1297,115 @@ static inline int canon_row_compare(const CanonState* st, const uint16_t* row, i
     }
 }
 
+static inline void canon_copy_row_prefix(uint16_t* dst, const uint16_t* src, int len) {
+    switch (len) {
+        case 5:
+            dst[4] = src[4];
+            /* fall through */
+        case 4:
+            dst[3] = src[3];
+            /* fall through */
+        case 3:
+            dst[2] = src[2];
+            /* fall through */
+        case 2:
+            dst[1] = src[1];
+            /* fall through */
+        case 1:
+            dst[0] = src[0];
+            /* fall through */
+        case 0:
+            break;
+        default:
+            memcpy(dst, src, (size_t)len * sizeof(*dst));
+            break;
+    }
+}
+
+static inline void canon_materialize_row(const CanonState* st, CanonScratch* scratch, int p, int depth, int len) {
+    uint16_t* row = canon_scratch_prepared_row(scratch, p);
+    const uint16_t* transformed_row = canon_state_row_const(st, p);
+    canon_copy_row_prefix(row, transformed_row, len);
+    switch (depth) {
+        case 5:
+            switch (len) {
+                case 0:
+                    row_insert_sorted(row, 0, perm_table_get((int)st->stack_vals[0], p));
+                    /* fall through */
+                case 1:
+                    row_insert_sorted(row, 1, perm_table_get((int)st->stack_vals[1], p));
+                    /* fall through */
+                case 2:
+                    row_insert_sorted(row, 2, perm_table_get((int)st->stack_vals[2], p));
+                    /* fall through */
+                case 3:
+                    row_insert_sorted(row, 3, perm_table_get((int)st->stack_vals[3], p));
+                    /* fall through */
+                case 4:
+                    row_insert_sorted(row, 4, perm_table_get((int)st->stack_vals[4], p));
+                    /* fall through */
+                default:
+                    break;
+            }
+            break;
+        case 4:
+            switch (len) {
+                case 0:
+                    row_insert_sorted(row, 0, perm_table_get((int)st->stack_vals[0], p));
+                    /* fall through */
+                case 1:
+                    row_insert_sorted(row, 1, perm_table_get((int)st->stack_vals[1], p));
+                    /* fall through */
+                case 2:
+                    row_insert_sorted(row, 2, perm_table_get((int)st->stack_vals[2], p));
+                    /* fall through */
+                case 3:
+                    row_insert_sorted(row, 3, perm_table_get((int)st->stack_vals[3], p));
+                    /* fall through */
+                default:
+                    break;
+            }
+            break;
+        case 3:
+            switch (len) {
+                case 0:
+                    row_insert_sorted(row, 0, perm_table_get((int)st->stack_vals[0], p));
+                    /* fall through */
+                case 1:
+                    row_insert_sorted(row, 1, perm_table_get((int)st->stack_vals[1], p));
+                    /* fall through */
+                case 2:
+                    row_insert_sorted(row, 2, perm_table_get((int)st->stack_vals[2], p));
+                    /* fall through */
+                default:
+                    break;
+            }
+            break;
+        case 2:
+            switch (len) {
+                case 0:
+                    row_insert_sorted(row, 0, perm_table_get((int)st->stack_vals[0], p));
+                    /* fall through */
+                case 1:
+                    row_insert_sorted(row, 1, perm_table_get((int)st->stack_vals[1], p));
+                    /* fall through */
+                default:
+                    break;
+            }
+            break;
+        case 1:
+            if (len == 0) {
+                row_insert_sorted(row, 0, perm_table_get((int)st->stack_vals[0], p));
+            }
+            break;
+        default:
+            for (int t = len; t < depth; t++) {
+                row_insert_sorted(row, t, perm_table_get((int)st->stack_vals[t], p));
+            }
+            break;
+    }
+}
+
 static void canon_state_init(CanonState* st, int limit) {
     memset(st, 0, sizeof(*st));
     st->limit = limit;
@@ -1383,14 +1492,9 @@ int canon_state_prepare_push(const CanonState* st, int partition_id, CanonScratc
             continue;
         }
 
-        uint16_t* row = canon_scratch_prepared_row(scratch, p);
         int len = st->materialized_len[p];
-        if (len > 0) {
-            memcpy(row, transformed_row, (size_t)len * sizeof(*row));
-        }
-        for (int t = len; t < depth; t++) {
-            row_insert_sorted(row, t, perm_table_get((int)st->stack_vals[t], p));
-        }
+        canon_materialize_row(st, scratch, p, depth, len);
+        uint16_t* row = canon_scratch_prepared_row(scratch, p);
         row_insert_sorted(row, depth, val);
         int first_greater = canon_row_compare(st, row, depth, pid);
         if (first_greater < 0) return 0;
