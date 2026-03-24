@@ -329,6 +329,18 @@ static void prefix_task_buffer_push3(PrefixTaskBuffer* buf, int i, int j, int k)
     buf->count++;
 }
 
+static void prefix_task_buffer_append3_batch(PrefixTaskBuffer* buf, int i, int j,
+                                             const uint16_t* ks, int count) {
+    long long base = buf->count;
+    prefix_task_buffer_reserve(buf, base + count);
+    for (int idx = 0; idx < count; idx++) {
+        buf->i[base + idx] = i;
+        buf->j[base + idx] = j;
+        buf->k[base + idx] = ks[idx];
+    }
+    buf->count = base + count;
+}
+
 static void prefix_task_buffer_free(PrefixTaskBuffer* buf) {
     free(buf->i);
     free(buf->j);
@@ -1784,39 +1796,45 @@ void dfs(int depth, int min_idx, int* stack, CanonState* canon_state, const Part
     }
 }
 
-static long long append_adaptive_children_for_prefix2(CanonState* canon_state, CanonScratch* canon_scratch,
-                                                      int i, int j,
-                                                      int* out_i, int* out_j, int* out_k,
-                                                      long long out_idx) {
+static void append_adaptive_children_for_prefix2(CanonState* canon_state, CanonScratch* canon_scratch,
+                                                 int i, int j, PrefixTaskBuffer* out) {
     int stack[MAX_COLS];
     PartialGraphState partial_graph;
     int next_stabilizer = 0;
+    uint16_t buffered_k[1024];
+    int child_count = 0;
+    int expanded = 0;
 
     canon_state_reset(canon_state, perm_count);
     partial_graph_reset(&partial_graph);
 
     stack[0] = i;
-    if (!canon_state_prepare_push(canon_state, i, canon_scratch, &next_stabilizer)) return 0;
+    if (!canon_state_prepare_push(canon_state, i, canon_scratch, &next_stabilizer)) {
+        prefix_task_buffer_push3(out, i, j, -1);
+        return;
+    }
     canon_state_commit_push(canon_state, i, canon_scratch, next_stabilizer);
     if (!partial_graph_append(&partial_graph, 0, i, stack)) {
         canon_state_pop(canon_state);
-        return 0;
+        prefix_task_buffer_push3(out, i, j, -1);
+        return;
     }
 
     stack[1] = j;
     if (!canon_state_prepare_push(canon_state, j, canon_scratch, &next_stabilizer)) {
         canon_state_pop(canon_state);
-        return 0;
+        prefix_task_buffer_push3(out, i, j, -1);
+        return;
     }
     canon_state_commit_push(canon_state, j, canon_scratch, next_stabilizer);
     PartialGraphState prefix_graph = partial_graph;
     if (!partial_graph_append(&prefix_graph, 1, j, stack)) {
         canon_state_pop(canon_state);
         canon_state_pop(canon_state);
-        return 0;
+        prefix_task_buffer_push3(out, i, j, -1);
+        return;
     }
 
-    long long count = 0;
     for (int k = j; k < num_partitions; k++) {
         stack[2] = k;
         if (!canon_state_prepare_push(canon_state, k, canon_scratch, &next_stabilizer)) {
@@ -1825,17 +1843,26 @@ static long long append_adaptive_children_for_prefix2(CanonState* canon_state, C
         canon_state_commit_push(canon_state, k, canon_scratch, next_stabilizer);
         PartialGraphState prefix_graph2 = prefix_graph;
         if (partial_graph_append(&prefix_graph2, 2, k, stack)) {
-            if (out_i) out_i[out_idx + count] = i;
-            if (out_j) out_j[out_idx + count] = j;
-            if (out_k) out_k[out_idx + count] = k;
-            count++;
+            if (!expanded) {
+                buffered_k[child_count] = (uint16_t)k;
+                child_count++;
+                if (child_count == g_adaptive_threshold) {
+                    prefix_task_buffer_append3_batch(out, i, j, buffered_k, child_count);
+                    expanded = 1;
+                }
+            } else {
+                prefix_task_buffer_push3(out, i, j, k);
+                child_count++;
+            }
         }
         canon_state_pop(canon_state);
     }
 
     canon_state_pop(canon_state);
     canon_state_pop(canon_state);
-    return count;
+    if (!expanded) {
+        prefix_task_buffer_push3(out, i, j, -1);
+    }
 }
 
 PolyCoeff poly_eval(Poly p, long long x) {
@@ -2036,18 +2063,8 @@ int main(int argc, char** argv) {
                 canon_scratch_init(&adaptive_canon_scratch, perm_count);
                 for (int i = 0; i < num_partitions; i++) {
                     for (int j = i; j < num_partitions; j++) {
-                        long long child_count = append_adaptive_children_for_prefix2(
-                            &adaptive_canon_state, &adaptive_canon_scratch, i, j, NULL, NULL, NULL, 0);
-                        if (child_count >= g_adaptive_threshold) {
-                            long long old_count = adaptive_prefixes.count;
-                            prefix_task_buffer_reserve(&adaptive_prefixes, old_count + child_count);
-                            append_adaptive_children_for_prefix2(
-                                &adaptive_canon_state, &adaptive_canon_scratch,
-                                i, j, adaptive_prefixes.i, adaptive_prefixes.j, adaptive_prefixes.k, old_count);
-                            adaptive_prefixes.count += child_count;
-                        } else {
-                            prefix_task_buffer_push3(&adaptive_prefixes, i, j, -1);
-                        }
+                        append_adaptive_children_for_prefix2(
+                            &adaptive_canon_state, &adaptive_canon_scratch, i, j, &adaptive_prefixes);
                     }
                 }
                 canon_state_free(&adaptive_canon_state);

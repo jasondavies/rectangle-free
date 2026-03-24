@@ -230,3 +230,53 @@
   - `P(5) = 450540`
 - Interpretation: this is a worthwhile 7-row deployment path. The raw speedup is modest but real, and the cache-adjacency memory reduction is large enough to matter immediately for dense multi-process and multi-node `7xn` runs.
 - Outcome: accepted.
+
+### Experiment 15: Filter `partition_poly` siblings by the current stabiliser orbit
+- Goal: test whether the stabiliser-orbit representative filter from the specialised `7xn_poly` code also helps the generic `partition_poly` symmetry search.
+- Change:
+  - tracked the current stabiliser permutations per depth in `CanonState`
+  - rejected sibling candidates `partition_id` when a stabiliser permutation mapped them to a smaller admissible image in `[min_idx, partition_id)`
+  - threaded that check through DFS and the prefixed worker paths
+- One-thread benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235 --profile`
+- Baseline from accepted code:
+  - `Worker Complete`: `18.12s`
+  - `Prefix generation`: `3.96s`
+  - `canon_state_prepare_push`: `930747` calls, `11.534s`
+- Experiment result:
+  - `Worker Complete`: `18.31s`
+  - `Prefix generation`: `4.15s`
+  - `canon_state_prepare_push`: `593493` calls, `11.719s`
+- Matching 32-thread benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235`
+- 32-thread result:
+  - baseline `Worker Complete`: `5.05s`, `Total elapsed`: `9.03s`
+  - experiment `Worker Complete`: `5.18s`, `Total elapsed`: `9.32s`
+- Interpretation: the representative filter does reduce the number of `prepare_push` calls, but in `partition_poly` the extra orbit-test overhead more than cancels that out. Unlike the specialised `7xn_poly` path, the generic canon-state machinery is already paying for lazier row materialisation and `first_greater` pruning, so the additional sibling filter is not a net win on the sampled `7x5` workload.
+- Outcome: rejected and reverted.
+
+### Experiment 16: Make adaptive prefix generation single-pass
+- Goal: remove the remaining “discover then redo” pattern in adaptive depth-2 prefix generation.
+- Problem:
+  - for every heavy `(i,j)` prefix, the old code first counted children with `append_adaptive_children_for_prefix2(..., NULL, NULL, NULL, 0)`
+  - then replayed the same depth-2 canon-state and partial-graph construction again to emit the `(i,j,k)` tasks
+- Change:
+  - rewrote `append_adaptive_children_for_prefix2()` to buffer child `k` values locally until the threshold is hit
+  - once the threshold is reached, emit the buffered children immediately and continue streaming later children in the same pass
+  - preserved the old task-space shape by still emitting the sentinel `(i,j,-1)` task for light or dead prefixes
+- Prefix-generation benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly 7 5 --task-end 0 --prefix-depth 2 --adaptive-subdivide`
+- Baseline from accepted code: `407604` tasks, `Prefix generation 3.96s`
+- Experiment result: `407604` tasks, `Prefix generation 2.95s`
+- One-thread sampled benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235 --profile`
+- One-thread result:
+  - baseline `Worker Complete`: `18.12s`, `Total elapsed`: `22.08s`
+  - experiment `Worker Complete`: `18.10s`, `Total elapsed`: `21.03s`
+- Matching 32-thread benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235`
+- 32-thread result:
+  - baseline `Worker Complete`: `5.05s`, `Total elapsed`: `9.03s`
+  - experiment `Worker Complete`: `5.08s`, `Total elapsed`: `8.04s`
+- Verification command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly 7 2 --task-end 200 --prefix-depth 2`
+- Verification result: unchanged smoke-test polynomial
+  - `P(x) = 280*x^6 - 2590*x^5 + 9562*x^4 - 17262*x^3 + 15037*x^2 - 5027*x`
+  - `P(4) = 58308`
+  - `P(5) = 450540`
+- Interpretation: this is exactly the same optimisation shape as the successful `commit_push` change: stop redoing work that was already computed. It does not materially change worker throughput, but it removes about one second of serial setup on the sampled adaptive `7x5` run, which is valuable because prefix generation is on the critical path for every shard.
+- Outcome: accepted.
