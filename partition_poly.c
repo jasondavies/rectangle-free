@@ -45,16 +45,24 @@ typedef uint64_t AdjWord;
 #define MAX_DEGREE ((MAX_ROWS * MAX_COLS) + 1)
 
 // Cache settings - tuned for better locality
+#ifndef CACHE_BITS
 #define CACHE_BITS 18
+#endif
 #define CACHE_SIZE (1 << CACHE_BITS)
 #define CACHE_MASK (CACHE_SIZE - 1)
+#ifndef CACHE_PROBE
 #define CACHE_PROBE 16
+#endif
 
 // Lookaside cache for exact labelled graphs before nauty canonicalisation.
+#ifndef RAW_CACHE_BITS
 #define RAW_CACHE_BITS 13
+#endif
 #define RAW_CACHE_SIZE (1 << RAW_CACHE_BITS)
 #define RAW_CACHE_MASK (RAW_CACHE_SIZE - 1)
+#ifndef RAW_CACHE_PROBE
 #define RAW_CACHE_PROBE 8
+#endif
 
 // --- DATA TYPES ---
 

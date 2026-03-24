@@ -325,3 +325,26 @@
   - `P(5) = 450540`
 - Interpretation: this is the same successful optimisation pattern again: build an expensive prefix state once and reuse it instead of replaying it. It barely affects worker time, but it removes another full second of serial setup from the sampled adaptive `7x5` run and brings total elapsed down materially.
 - Outcome: accepted.
+
+### Experiment 19: Shrink the canonical cache for the 7-row-specific build
+- Goal: reduce per-thread memory footprint and cache-bandwidth pressure in `partition_poly_7` without giving up too many canonical-cache hits.
+- Method:
+  - kept the generic `partition_poly` binary unchanged
+  - compared temporary `partition_poly_7` builds with smaller `CACHE_BITS` values on the same sampled adaptive `7x5` workload
+- Baseline command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235`
+- Baseline result:
+  - `Worker Complete 4.77s`
+  - `Total elapsed 6.75s`
+  - `Canonical cache hits 150528 (53.8%)`
+- `CACHE_BITS=17` command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 /tmp/partition_poly_7_cache17 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235`
+- `CACHE_BITS=17` result:
+  - `Worker Complete 4.69s`
+  - `Total elapsed 6.66s`
+  - `Canonical cache hits 150531 (53.8%)`
+- `CACHE_BITS=16` command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 /tmp/partition_poly_7_cache16 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235`
+- `CACHE_BITS=16` result:
+  - `Worker Complete 4.77s`
+  - `Total elapsed 6.74s`
+  - `Canonical cache hits 151417 (53.7%)`
+- Interpretation: for the sampled `7x5` workload, the 7-row-specific build does not need the full generic canonical cache. Halving the canonical cache from `2^18` to `2^17` entries improves runtime slightly while cutting a large chunk of per-thread cache memory. Dropping further to `2^16` entries gives back most of the gain, so `17` looks like the better 7-row setting.
+- Outcome: accepted for `partition_poly_7` only.

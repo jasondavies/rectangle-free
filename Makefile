@@ -47,7 +47,7 @@ partition_poly: partition_poly.c $(NAUTY_BUILD_DIR)/nautyT.a
 	$(CC) $(PARTITION_CFLAGS) -o $@ $< $(LDFLAGS)
 
 partition_poly_7: partition_poly.c $(NAUTY_BUILD_DIR)/nautyT.a
-	$(CC) $(PARTITION_CFLAGS) -DMAX_COLS=7 -DDEFAULT_ROWS=7 -DDEFAULT_COLS=7 -o $@ $< $(LDFLAGS)
+	$(CC) $(PARTITION_CFLAGS) -DMAX_COLS=7 -DDEFAULT_ROWS=7 -DDEFAULT_COLS=7 -DCACHE_BITS=17 -o $@ $< $(LDFLAGS)
 
 7xn_poly: 7xn_poly.c $(NAUTY_BUILD_DIR)/nautyT.a
 	$(CC) $(PARTITION_CFLAGS) -o $@ $< $(LDFLAGS)
