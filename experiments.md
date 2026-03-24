@@ -280,3 +280,48 @@
   - `P(5) = 450540`
 - Interpretation: this is exactly the same optimisation shape as the successful `commit_push` change: stop redoing work that was already computed. It does not materially change worker throughput, but it removes about one second of serial setup on the sampled adaptive `7x5` run, which is valuable because prefix generation is on the critical path for every shard.
 - Outcome: accepted.
+
+### Experiment 17: Pack prepared scratch rows densely by active-permutation order
+- Goal: improve cache locality in `canon_state_prepare_push()` and `canon_state_commit_push()` by storing prepared rows densely in active-permutation order instead of indexing them by raw permutation id.
+- Change:
+  - wrote prepared rows to `scratch->prepared_rows[active_slot]` rather than `scratch->prepared_rows[perm_id]`
+  - made `commit_push()` read them back in the same dense order
+- Benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235 --profile`
+- Baseline from accepted code:
+  - `Prefix generation`: `2.93s`
+  - `Worker Complete`: `18.10s`
+  - `canon_state_prepare_push`: `11.569s`
+- Experiment result:
+  - `Prefix generation`: `3.05s`
+  - `Worker Complete`: `18.69s`
+  - `canon_state_prepare_push`: `12.039s`
+- Interpretation: the sparse-by-permutation scratch layout is actually helping here, likely because it preserves a direct index relationship with `next_first_greater`, `first_greater`, and `materialized_len`. Packing rows densely adds enough bookkeeping and indirection to lose the locality benefit it was meant to create.
+- Outcome: rejected and reverted.
+
+### Experiment 18: Reuse the depth-1 adaptive prefix state across all `j`
+- Goal: remove another repeated-work pattern in adaptive prefix generation after the single-pass emitter change.
+- Problem:
+  - for fixed `i`, the adaptive builder was still resetting the canon state and rebuilding the depth-1 `i` prefix separately for every `j >= i`
+  - that means repeating the same depth-0 `prepare_push`, `commit_push`, and `partial_graph_append` work `num_partitions - i` times
+- Change:
+  - hoisted the depth-1 state build out of the inner `j` loop
+  - for each `i`, build the depth-1 canon state and partial graph once, then reuse that state while iterating all `j`
+  - removed the now-dead `append_adaptive_children_for_prefix2()` helper
+- Prefix-generation benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly 7 5 --task-end 0 --prefix-depth 2 --adaptive-subdivide`
+- Baseline from accepted code: `407604` tasks, `Prefix generation 2.95s`
+- Experiment result: `407604` tasks, `Prefix generation 1.97s`
+- One-thread sampled benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235 --profile`
+- One-thread result:
+  - baseline `Worker Complete`: `18.10s`, `Total elapsed`: `21.03s`
+  - experiment `Worker Complete`: `18.08s`, `Total elapsed`: `20.06s`
+- Matching 32-thread benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235`
+- 32-thread result:
+  - baseline `Worker Complete`: `5.08s`, `Total elapsed`: `8.04s`
+  - experiment `Worker Complete`: `5.11s`, `Total elapsed`: `7.14s`
+- Verification command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly 7 2 --task-end 200 --prefix-depth 2`
+- Verification result: unchanged smoke-test polynomial
+  - `P(x) = 280*x^6 - 2590*x^5 + 9562*x^4 - 17262*x^3 + 15037*x^2 - 5027*x`
+  - `P(4) = 58308`
+  - `P(5) = 450540`
+- Interpretation: this is the same successful optimisation pattern again: build an expensive prefix state once and reuse it instead of replaying it. It barely affects worker time, but it removes another full second of serial setup from the sampled adaptive `7x5` run and brings total elapsed down materially.
+- Outcome: accepted.

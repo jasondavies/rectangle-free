@@ -1796,75 +1796,6 @@ void dfs(int depth, int min_idx, int* stack, CanonState* canon_state, const Part
     }
 }
 
-static void append_adaptive_children_for_prefix2(CanonState* canon_state, CanonScratch* canon_scratch,
-                                                 int i, int j, PrefixTaskBuffer* out) {
-    int stack[MAX_COLS];
-    PartialGraphState partial_graph;
-    int next_stabilizer = 0;
-    uint16_t buffered_k[1024];
-    int child_count = 0;
-    int expanded = 0;
-
-    canon_state_reset(canon_state, perm_count);
-    partial_graph_reset(&partial_graph);
-
-    stack[0] = i;
-    if (!canon_state_prepare_push(canon_state, i, canon_scratch, &next_stabilizer)) {
-        prefix_task_buffer_push3(out, i, j, -1);
-        return;
-    }
-    canon_state_commit_push(canon_state, i, canon_scratch, next_stabilizer);
-    if (!partial_graph_append(&partial_graph, 0, i, stack)) {
-        canon_state_pop(canon_state);
-        prefix_task_buffer_push3(out, i, j, -1);
-        return;
-    }
-
-    stack[1] = j;
-    if (!canon_state_prepare_push(canon_state, j, canon_scratch, &next_stabilizer)) {
-        canon_state_pop(canon_state);
-        prefix_task_buffer_push3(out, i, j, -1);
-        return;
-    }
-    canon_state_commit_push(canon_state, j, canon_scratch, next_stabilizer);
-    PartialGraphState prefix_graph = partial_graph;
-    if (!partial_graph_append(&prefix_graph, 1, j, stack)) {
-        canon_state_pop(canon_state);
-        canon_state_pop(canon_state);
-        prefix_task_buffer_push3(out, i, j, -1);
-        return;
-    }
-
-    for (int k = j; k < num_partitions; k++) {
-        stack[2] = k;
-        if (!canon_state_prepare_push(canon_state, k, canon_scratch, &next_stabilizer)) {
-            continue;
-        }
-        canon_state_commit_push(canon_state, k, canon_scratch, next_stabilizer);
-        PartialGraphState prefix_graph2 = prefix_graph;
-        if (partial_graph_append(&prefix_graph2, 2, k, stack)) {
-            if (!expanded) {
-                buffered_k[child_count] = (uint16_t)k;
-                child_count++;
-                if (child_count == g_adaptive_threshold) {
-                    prefix_task_buffer_append3_batch(out, i, j, buffered_k, child_count);
-                    expanded = 1;
-                }
-            } else {
-                prefix_task_buffer_push3(out, i, j, k);
-                child_count++;
-            }
-        }
-        canon_state_pop(canon_state);
-    }
-
-    canon_state_pop(canon_state);
-    canon_state_pop(canon_state);
-    if (!expanded) {
-        prefix_task_buffer_push3(out, i, j, -1);
-    }
-}
-
 PolyCoeff poly_eval(Poly p, long long x) {
     PolyCoeff res = 0;
     PolyCoeff xp = 1;
@@ -2059,13 +1990,83 @@ int main(int argc, char** argv) {
                 prefix_task_buffer_init(&adaptive_prefixes, base_prefixes, 0);
                 CanonState adaptive_canon_state;
                 CanonScratch adaptive_canon_scratch;
+                PartialGraphState adaptive_partial_graph;
+                int adaptive_stack[MAX_COLS];
                 canon_state_init(&adaptive_canon_state, perm_count);
                 canon_scratch_init(&adaptive_canon_scratch, perm_count);
                 for (int i = 0; i < num_partitions; i++) {
-                    for (int j = i; j < num_partitions; j++) {
-                        append_adaptive_children_for_prefix2(
-                            &adaptive_canon_state, &adaptive_canon_scratch, i, j, &adaptive_prefixes);
+                    int next_stabilizer = 0;
+                    canon_state_reset(&adaptive_canon_state, perm_count);
+                    partial_graph_reset(&adaptive_partial_graph);
+                    adaptive_stack[0] = i;
+                    if (!canon_state_prepare_push(&adaptive_canon_state, i, &adaptive_canon_scratch,
+                                                  &next_stabilizer)) {
+                        for (int j = i; j < num_partitions; j++) {
+                            prefix_task_buffer_push3(&adaptive_prefixes, i, j, -1);
+                        }
+                        continue;
                     }
+                    canon_state_commit_push(&adaptive_canon_state, i, &adaptive_canon_scratch, next_stabilizer);
+                    if (!partial_graph_append(&adaptive_partial_graph, 0, i, adaptive_stack)) {
+                        canon_state_pop(&adaptive_canon_state);
+                        for (int j = i; j < num_partitions; j++) {
+                            prefix_task_buffer_push3(&adaptive_prefixes, i, j, -1);
+                        }
+                        continue;
+                    }
+
+                    for (int j = i; j < num_partitions; j++) {
+                        int child_count = 0;
+                        int expanded = 0;
+                        uint16_t buffered_k[1024];
+
+                        adaptive_stack[1] = j;
+                        if (!canon_state_prepare_push(&adaptive_canon_state, j, &adaptive_canon_scratch,
+                                                      &next_stabilizer)) {
+                            prefix_task_buffer_push3(&adaptive_prefixes, i, j, -1);
+                            continue;
+                        }
+                        canon_state_commit_push(&adaptive_canon_state, j, &adaptive_canon_scratch, next_stabilizer);
+                        PartialGraphState prefix_graph = adaptive_partial_graph;
+                        if (!partial_graph_append(&prefix_graph, 1, j, adaptive_stack)) {
+                            canon_state_pop(&adaptive_canon_state);
+                            prefix_task_buffer_push3(&adaptive_prefixes, i, j, -1);
+                            continue;
+                        }
+
+                        for (int k = j; k < num_partitions; k++) {
+                            adaptive_stack[2] = k;
+                            if (!canon_state_prepare_push(&adaptive_canon_state, k, &adaptive_canon_scratch,
+                                                          &next_stabilizer)) {
+                                continue;
+                            }
+                            canon_state_commit_push(&adaptive_canon_state, k, &adaptive_canon_scratch,
+                                                    next_stabilizer);
+                            PartialGraphState prefix_graph2 = prefix_graph;
+                            if (partial_graph_append(&prefix_graph2, 2, k, adaptive_stack)) {
+                                if (!expanded) {
+                                    buffered_k[child_count] = (uint16_t)k;
+                                    child_count++;
+                                    if (child_count == g_adaptive_threshold) {
+                                        prefix_task_buffer_append3_batch(&adaptive_prefixes, i, j,
+                                                                         buffered_k, child_count);
+                                        expanded = 1;
+                                    }
+                                } else {
+                                    prefix_task_buffer_push3(&adaptive_prefixes, i, j, k);
+                                    child_count++;
+                                }
+                            }
+                            canon_state_pop(&adaptive_canon_state);
+                        }
+
+                        canon_state_pop(&adaptive_canon_state);
+                        if (!expanded) {
+                            prefix_task_buffer_push3(&adaptive_prefixes, i, j, -1);
+                        }
+                    }
+
+                    canon_state_pop(&adaptive_canon_state);
                 }
                 canon_state_free(&adaptive_canon_state);
                 canon_scratch_free(&adaptive_canon_scratch);
