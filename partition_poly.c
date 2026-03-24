@@ -4,6 +4,12 @@
 #include <stdint.h>
 #include <errno.h>
 #include <limits.h>
+#include <unistd.h>
+#include <pthread.h>
+#include <netdb.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <time.h>
 #include <omp.h>
 #include "progress_util.h"
 
@@ -175,6 +181,61 @@ typedef struct {
     int with_l;
 } PrefixTaskBuffer;
 
+typedef struct {
+    int shard_slot;
+    long long p;
+} CoordTask;
+
+typedef struct {
+    int active;
+    int submitting;
+    long long shard_id;
+    long long run_id;
+    long long shard_index;
+    long long task_start;
+    long long task_end;
+    long long task_stride;
+    long long task_offset;
+    long long full_tasks;
+    long long remaining_tasks;
+    char lease_token[80];
+    Poly total;
+} CoordinatorShard;
+
+#define COORD_MAX_ACTIVE_SHARDS 16
+
+typedef struct {
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+    CoordTask* tasks;
+    int capacity;
+    int head;
+    int tail;
+    int count;
+    int stop;
+    int no_more_work;
+    int fatal_error;
+    char fatal_message[512];
+    int low_watermark;
+    int high_watermark;
+    CoordinatorShard shards[COORD_MAX_ACTIVE_SHARDS];
+} CoordinatorQueue;
+
+typedef struct {
+    char host[256];
+    char port[32];
+    char path_prefix[256];
+} CoordinatorEndpoint;
+
+typedef struct {
+    CoordinatorEndpoint endpoint;
+    char worker_id[128];
+    long long run_id;
+    int heartbeat_seconds;
+    long long full_tasks;
+    CoordinatorQueue* queue;
+} CoordinatorFeederArgs;
+
 // --- GLOBALS ---
 static int num_partitions = 0;
 static int perm_count = 0;
@@ -202,6 +263,12 @@ static int g_adaptive_threshold = 128;
 static int g_adaptive_max_depth = 3;
 static int g_profile = 0;
 static __thread ProfileStats* tls_profile = NULL;
+static const char* g_coordinator_url = NULL;
+static const char* g_worker_id = NULL;
+static long long g_run_id = -1;
+static int g_coord_low_watermark = 0;
+static int g_coord_high_watermark = 0;
+static int g_coord_heartbeat_seconds = 600;
 
 static inline uint16_t perm_table_get(int partition_id, int perm_id) {
     return perm_table[(size_t)partition_id * (size_t)perm_count + (size_t)perm_id];
@@ -732,7 +799,7 @@ void print_poly(Poly p) {
 static void usage(const char* prog) {
     fprintf(stderr,
             "Usage:\n"
-            "  %s [rows cols] [--task-start N] [--task-end N] [--task-stride N] [--task-offset N] [--prefix-depth N] [--adaptive-subdivide] [--adaptive-threshold N] [--adaptive-max-depth N] [--poly-out FILE] [--profile]\n"
+            "  %s [rows cols] [--task-start N] [--task-end N] [--task-stride N] [--task-offset N] [--prefix-depth N] [--adaptive-subdivide] [--adaptive-threshold N] [--adaptive-max-depth N] [--coordinator-url URL] [--worker-id ID] [--run-id N] [--coord-low-watermark N] [--coord-high-watermark N] [--coord-heartbeat-seconds N] [--poly-out FILE] [--profile]\n"
             "  %s --merge [--poly-out FILE] INPUT...\n"
             "\n"
             "Notes:\n"
@@ -740,6 +807,7 @@ static void usage(const char* prog) {
             "  --task-stride/--task-offset select interleaved tasks within that range.\n"
             "  --prefix-depth may be 2, 3, or 4.\n"
             "  Adaptive subdivision currently supports depth 2 split to depth 3 only.\n"
+            "  Coordinator mode currently supports only fixed prefix-depth 2 work queues.\n"
             "  --profile prints coarse timing counters for the main phases.\n",
             prog, prog);
 }
@@ -768,13 +836,7 @@ static long long count_selected_tasks(long long task_start, long long task_end,
     return 1 + ((task_end - 1 - first) / task_stride);
 }
 
-static void write_poly_file(const char* path, const Poly* poly, const PolyFileMeta* meta) {
-    FILE* f = fopen(path, "w");
-    if (!f) {
-        fprintf(stderr, "Failed to open %s for writing\n", path);
-        exit(1);
-    }
-
+static void write_poly_file_stream(FILE* f, const Poly* poly, const PolyFileMeta* meta) {
     fprintf(f, "RECT_POLY_V1\n");
     fprintf(f, "rows %d\n", meta->rows);
     fprintf(f, "cols %d\n", meta->cols);
@@ -805,11 +867,37 @@ static void write_poly_file(const char* path, const Poly* poly, const PolyFileMe
         fputc('\n', f);
     }
     fprintf(f, "end\n");
+}
+
+static void write_poly_file(const char* path, const Poly* poly, const PolyFileMeta* meta) {
+    FILE* f = fopen(path, "w");
+    if (!f) {
+        fprintf(stderr, "Failed to open %s for writing\n", path);
+        exit(1);
+    }
+
+    write_poly_file_stream(f, poly, meta);
 
     if (fclose(f) != 0) {
         fprintf(stderr, "Failed to close %s\n", path);
         exit(1);
     }
+}
+
+static char* build_poly_file_string(const Poly* poly, const PolyFileMeta* meta) {
+    char* buffer = NULL;
+    size_t size = 0;
+    FILE* f = open_memstream(&buffer, &size);
+    if (!f) {
+        fprintf(stderr, "Failed to open memory stream for polynomial output\n");
+        exit(1);
+    }
+    write_poly_file_stream(f, poly, meta);
+    if (fclose(f) != 0) {
+        fprintf(stderr, "Failed to close polynomial memory stream\n");
+        exit(1);
+    }
+    return buffer;
 }
 
 static void read_poly_file(const char* path, Poly* poly, PolyFileMeta* meta) {
@@ -880,6 +968,360 @@ static void read_poly_file(const char* path, Poly* poly, PolyFileMeta* meta) {
         fprintf(stderr, "Failed to close %s\n", path);
         exit(1);
     }
+}
+
+static void json_append_escaped(char** dst, size_t* cap, size_t* len, const char* text) {
+    for (const unsigned char* p = (const unsigned char*)text; *p; p++) {
+        unsigned char c = *p;
+        const char* escape = NULL;
+        char tmp[8];
+        if (c == '\\') escape = "\\\\";
+        else if (c == '"') escape = "\\\"";
+        else if (c == '\n') escape = "\\n";
+        else if (c == '\r') escape = "\\r";
+        else if (c == '\t') escape = "\\t";
+        else if (c < 0x20) {
+            snprintf(tmp, sizeof(tmp), "\\u%04x", (unsigned)c);
+            escape = tmp;
+        }
+        const char* src = escape ? escape : (const char[]){(char)c, '\0'};
+        size_t add = strlen(src);
+        if (*len + add + 1 > *cap) {
+            while (*len + add + 1 > *cap) *cap *= 2;
+            *dst = realloc(*dst, *cap);
+            if (!*dst) {
+                fprintf(stderr, "Failed to grow JSON buffer\n");
+                exit(1);
+            }
+        }
+        memcpy(*dst + *len, src, add);
+        *len += add;
+        (*dst)[*len] = '\0';
+    }
+}
+
+static char* json_quote_string(const char* text) {
+    size_t cap = strlen(text) * 2 + 16;
+    char* out = malloc(cap);
+    if (!out) {
+        fprintf(stderr, "Failed to allocate JSON string buffer\n");
+        exit(1);
+    }
+    size_t len = 0;
+    out[len++] = '"';
+    out[len] = '\0';
+    json_append_escaped(&out, &cap, &len, text);
+    if (len + 2 > cap) {
+        cap = len + 2;
+        out = realloc(out, cap);
+        if (!out) {
+            fprintf(stderr, "Failed to grow JSON string buffer\n");
+            exit(1);
+        }
+    }
+    out[len++] = '"';
+    out[len] = '\0';
+    return out;
+}
+
+static int parse_coordinator_endpoint(const char* url, CoordinatorEndpoint* endpoint) {
+    const char* prefix = "http://";
+    size_t prefix_len = strlen(prefix);
+    if (strncmp(url, prefix, prefix_len) != 0) return 0;
+    const char* host_start = url + prefix_len;
+    const char* slash = strchr(host_start, '/');
+    const char* host_end = slash ? slash : url + strlen(url);
+    const char* colon = NULL;
+    for (const char* p = host_start; p < host_end; p++) {
+        if (*p == ':') colon = p;
+    }
+    size_t host_len = colon ? (size_t)(colon - host_start) : (size_t)(host_end - host_start);
+    size_t port_len = colon ? (size_t)(host_end - colon - 1) : strlen("80");
+    if (host_len == 0 || host_len >= sizeof(endpoint->host) || port_len == 0 || port_len >= sizeof(endpoint->port)) {
+        return 0;
+    }
+    memcpy(endpoint->host, host_start, host_len);
+    endpoint->host[host_len] = '\0';
+    if (colon) {
+        memcpy(endpoint->port, colon + 1, port_len);
+        endpoint->port[port_len] = '\0';
+    } else {
+        strcpy(endpoint->port, "80");
+    }
+    if (slash) {
+        snprintf(endpoint->path_prefix, sizeof(endpoint->path_prefix), "%s", slash);
+    } else {
+        strcpy(endpoint->path_prefix, "");
+    }
+    return 1;
+}
+
+static char* http_post_json(const CoordinatorEndpoint* endpoint, const char* path, const char* body) {
+    struct addrinfo hints;
+    struct addrinfo* result = NULL;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    int rc = getaddrinfo(endpoint->host, endpoint->port, &hints, &result);
+    if (rc != 0) {
+        fprintf(stderr, "getaddrinfo failed for coordinator %s:%s: %s\n",
+                endpoint->host, endpoint->port, gai_strerror(rc));
+        exit(1);
+    }
+
+    int sock = -1;
+    for (struct addrinfo* ai = result; ai; ai = ai->ai_next) {
+        sock = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (sock < 0) continue;
+        if (connect(sock, ai->ai_addr, ai->ai_addrlen) == 0) break;
+        close(sock);
+        sock = -1;
+    }
+    freeaddrinfo(result);
+    if (sock < 0) {
+        fprintf(stderr, "Failed to connect to coordinator %s:%s\n", endpoint->host, endpoint->port);
+        exit(1);
+    }
+
+    char request_head[1024];
+    int head_len = snprintf(request_head, sizeof(request_head),
+                            "POST %s%s HTTP/1.1\r\n"
+                            "Host: %s:%s\r\n"
+                            "Content-Type: application/json\r\n"
+                            "Content-Length: %zu\r\n"
+                            "Connection: close\r\n\r\n",
+                            endpoint->path_prefix, path, endpoint->host, endpoint->port, strlen(body));
+    if (head_len <= 0 || head_len >= (int)sizeof(request_head)) {
+        fprintf(stderr, "Coordinator request header too large\n");
+        exit(1);
+    }
+    if (write(sock, request_head, (size_t)head_len) != head_len ||
+        write(sock, body, strlen(body)) != (ssize_t)strlen(body)) {
+        fprintf(stderr, "Failed to send coordinator request\n");
+        close(sock);
+        exit(1);
+    }
+
+    size_t cap = 8192;
+    size_t len = 0;
+    char* response = malloc(cap);
+    if (!response) {
+        fprintf(stderr, "Failed to allocate coordinator response buffer\n");
+        close(sock);
+        exit(1);
+    }
+    ssize_t nread = 0;
+    while ((nread = read(sock, response + len, cap - len - 1)) > 0) {
+        len += (size_t)nread;
+        if (len + 1 >= cap) {
+            cap *= 2;
+            response = realloc(response, cap);
+            if (!response) {
+                fprintf(stderr, "Failed to grow coordinator response buffer\n");
+                close(sock);
+                exit(1);
+            }
+        }
+    }
+    close(sock);
+    response[len] = '\0';
+    if (strncmp(response, "HTTP/1.1 200", 12) != 0 && strncmp(response, "HTTP/1.0 200", 12) != 0) {
+        fprintf(stderr, "Coordinator returned non-200 response:\n%s\n", response);
+        free(response);
+        exit(1);
+    }
+    char* body_start = strstr(response, "\r\n\r\n");
+    if (!body_start) {
+        fprintf(stderr, "Malformed coordinator response\n");
+        free(response);
+        exit(1);
+    }
+    body_start += 4;
+    char* out = strdup(body_start);
+    free(response);
+    if (!out) {
+        fprintf(stderr, "Failed to copy coordinator response body\n");
+        exit(1);
+    }
+    return out;
+}
+
+static const char* json_find_key(const char* json, const char* key) {
+    static char pattern[128];
+    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+    const char* p = strstr(json, pattern);
+    if (!p) return NULL;
+    p += strlen(pattern);
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+    if (*p != ':') return NULL;
+    p++;
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+    return p;
+}
+
+static int json_get_long_long(const char* json, const char* key, long long* value) {
+    const char* p = json_find_key(json, key);
+    if (!p) return 0;
+    char* end = NULL;
+    long long parsed = strtoll(p, &end, 10);
+    if (end == p) return 0;
+    *value = parsed;
+    return 1;
+}
+
+static int json_get_bool(const char* json, const char* key, int* value) {
+    const char* p = json_find_key(json, key);
+    if (!p) return 0;
+    if (strncmp(p, "true", 4) == 0) {
+        *value = 1;
+        return 1;
+    }
+    if (strncmp(p, "false", 5) == 0) {
+        *value = 0;
+        return 1;
+    }
+    return 0;
+}
+
+static int json_get_string(const char* json, const char* key, char* out, size_t out_size) {
+    const char* p = json_find_key(json, key);
+    if (!p || *p != '"') return 0;
+    p++;
+    size_t len = 0;
+    while (*p && *p != '"') {
+        if (*p == '\\') {
+            p++;
+            if (*p == 'n') out[len++] = '\n';
+            else if (*p == 'r') out[len++] = '\r';
+            else if (*p == 't') out[len++] = '\t';
+            else out[len++] = *p;
+            p++;
+        } else {
+            out[len++] = *p++;
+        }
+        if (len + 1 >= out_size) return 0;
+    }
+    if (*p != '"') return 0;
+    out[len] = '\0';
+    return 1;
+}
+
+static int coordinator_fetch_shard(const CoordinatorEndpoint* endpoint, const char* worker_id,
+                                   long long run_id, long long full_tasks, CoordinatorShard* shard) {
+    char* worker_json = json_quote_string(worker_id);
+    char body[512];
+    if (run_id > 0) {
+        snprintf(body, sizeof(body), "{ \"worker_id\": %s, \"run_id\": %lld }", worker_json, run_id);
+    } else {
+        snprintf(body, sizeof(body), "{ \"worker_id\": %s }", worker_json);
+    }
+    free(worker_json);
+    char* response = http_post_json(endpoint, "/fetch-work", body);
+    int work_available = 0;
+    if (!json_get_bool(response, "work_available", &work_available)) {
+        fprintf(stderr, "Failed to parse coordinator fetch response: %s\n", response);
+        free(response);
+        exit(1);
+    }
+    if (!work_available) {
+        free(response);
+        return 0;
+    }
+    memset(shard, 0, sizeof(*shard));
+    shard->active = 1;
+    shard->full_tasks = full_tasks;
+    poly_zero(&shard->total);
+    if (!json_get_long_long(response, "shard_id", &shard->shard_id) ||
+        !json_get_long_long(response, "run_id", &shard->run_id) ||
+        !json_get_long_long(response, "shard_index", &shard->shard_index) ||
+        !json_get_long_long(response, "task_start", &shard->task_start) ||
+        !json_get_long_long(response, "task_end", &shard->task_end) ||
+        !json_get_long_long(response, "task_stride", &shard->task_stride) ||
+        !json_get_long_long(response, "task_offset", &shard->task_offset) ||
+        !json_get_string(response, "lease_token", shard->lease_token, sizeof(shard->lease_token))) {
+        fprintf(stderr, "Failed to parse shard payload: %s\n", response);
+        free(response);
+        exit(1);
+    }
+    shard->remaining_tasks = count_selected_tasks(shard->task_start, shard->task_end,
+                                                  shard->task_stride, shard->task_offset);
+    free(response);
+    return 1;
+}
+
+static void coordinator_renew_shard(const CoordinatorEndpoint* endpoint, const char* worker_id,
+                                    const CoordinatorShard* shard) {
+    char* worker_json = json_quote_string(worker_id);
+    char* token_json = json_quote_string(shard->lease_token);
+    char body[512];
+    snprintf(body, sizeof(body),
+             "{ \"worker_id\": %s, \"shard_id\": %lld, \"lease_token\": %s }",
+             worker_json, shard->shard_id, token_json);
+    free(worker_json);
+    free(token_json);
+    char* response = http_post_json(endpoint, "/renew-lease", body);
+    free(response);
+}
+
+static void coordinator_submit_shard(const CoordinatorEndpoint* endpoint, const char* worker_id,
+                                     const CoordinatorShard* shard) {
+    PolyFileMeta meta = {
+        .rows = g_rows,
+        .cols = g_cols,
+        .task_start = shard->task_start,
+        .task_end = shard->task_end,
+        .full_tasks = shard->full_tasks,
+        .task_stride = shard->task_stride,
+        .task_offset = shard->task_offset,
+    };
+    char* poly_text = build_poly_file_string(&shard->total, &meta);
+    char* worker_json = json_quote_string(worker_id);
+    char* token_json = json_quote_string(shard->lease_token);
+    char* poly_json = json_quote_string(poly_text);
+    size_t body_cap = strlen(poly_json) + 512;
+    char* body = malloc(body_cap);
+    if (!body) {
+        fprintf(stderr, "Failed to allocate coordinator submit body\n");
+        exit(1);
+    }
+    snprintf(body, body_cap,
+             "{ \"worker_id\": %s, \"shard_id\": %lld, \"lease_token\": %s, \"ok\": true, \"result_poly\": %s }",
+             worker_json, shard->shard_id, token_json, poly_json);
+    free(poly_text);
+    free(worker_json);
+    free(token_json);
+    free(poly_json);
+    char* response = http_post_json(endpoint, "/submit-result", body);
+    free(body);
+    free(response);
+}
+
+static void coordinator_queue_set_fatal(CoordinatorQueue* queue, const char* message) {
+    pthread_mutex_lock(&queue->mutex);
+    if (!queue->fatal_error) {
+        queue->fatal_error = 1;
+        snprintf(queue->fatal_message, sizeof(queue->fatal_message), "%s", message);
+        queue->stop = 1;
+    }
+    pthread_cond_broadcast(&queue->cond);
+    pthread_mutex_unlock(&queue->mutex);
+}
+
+static void coordinator_queue_init(CoordinatorQueue* queue, int capacity, int low_watermark,
+                                   int high_watermark) {
+    memset(queue, 0, sizeof(*queue));
+    pthread_mutex_init(&queue->mutex, NULL);
+    pthread_cond_init(&queue->cond, NULL);
+    queue->tasks = checked_calloc((size_t)capacity, sizeof(*queue->tasks), "coordinator_task_queue");
+    queue->capacity = capacity;
+    queue->low_watermark = low_watermark;
+    queue->high_watermark = high_watermark;
+}
+
+static void coordinator_queue_free(CoordinatorQueue* queue) {
+    free(queue->tasks);
+    pthread_cond_destroy(&queue->cond);
+    pthread_mutex_destroy(&queue->mutex);
 }
 
 static int run_merge_mode(const char* prog, const char* poly_out_path, int input_count, char** inputs) {
@@ -2223,6 +2665,318 @@ PolyCoeff poly_eval(Poly p, long long x) {
     return res;
 }
 
+static void execute_prefix2_fixed_task(long long p,
+                                       GraphCache* cache, GraphCache* raw_cache, NautyWorkspace* ws,
+                                       CanonState* canon_state, CanonScratch* canon_scratch,
+                                       PartialGraphState* partial_graph, int* stack, Poly* task_total,
+                                       long long* local_canon_calls, long long* local_cache_hits,
+                                       long long* local_raw_cache_hits) {
+    int i = 0;
+    int j = 0;
+    int next_stabilizer = 0;
+    poly_zero(task_total);
+    unrank_prefix2(p, &i, &j);
+
+    canon_state_reset(canon_state, perm_count);
+    partial_graph_reset(partial_graph);
+
+    stack[0] = i;
+    if (!canon_state_prepare_push(canon_state, i, canon_scratch, &next_stabilizer)) {
+        return;
+    }
+    canon_state_commit_push(canon_state, i, canon_scratch, next_stabilizer);
+    if (!partial_graph_append(partial_graph, 0, i, stack)) {
+        canon_state_pop(canon_state);
+        return;
+    }
+
+    stack[1] = j;
+    if (!canon_state_prepare_push(canon_state, j, canon_scratch, &next_stabilizer)) {
+        canon_state_pop(canon_state);
+        return;
+    }
+    canon_state_commit_push(canon_state, j, canon_scratch, next_stabilizer);
+    PartialGraphState prefix_graph = *partial_graph;
+    if (partial_graph_append(&prefix_graph, 1, j, stack)) {
+        Poly prefix_weight = poly_mul_ref(&partition_weight_poly[i], &partition_weight_poly[j]);
+        long long prefix_mult = (i == j) ? 1 : 2;
+        int prefix_run = (i == j) ? 2 : 1;
+        dfs(2, j, stack, canon_state, &prefix_graph, cache, raw_cache, ws, task_total,
+            local_canon_calls, local_cache_hits, local_raw_cache_hits,
+            &prefix_weight, prefix_mult, prefix_run, NULL, canon_scratch);
+    }
+    canon_state_pop(canon_state);
+    canon_state_pop(canon_state);
+}
+
+static int coordinator_queue_find_free_slot(CoordinatorQueue* queue) {
+    for (int i = 0; i < COORD_MAX_ACTIVE_SHARDS; i++) {
+        if (!queue->shards[i].active && !queue->shards[i].submitting) return i;
+    }
+    return -1;
+}
+
+static int coordinator_queue_active_shards(const CoordinatorQueue* queue) {
+    int active = 0;
+    for (int i = 0; i < COORD_MAX_ACTIVE_SHARDS; i++) {
+        if (queue->shards[i].active || queue->shards[i].submitting) active++;
+    }
+    return active;
+}
+
+static int coordinator_queue_pop(CoordinatorQueue* queue, CoordTask* task) {
+    pthread_mutex_lock(&queue->mutex);
+    while (queue->count == 0 && !queue->stop) {
+        pthread_cond_wait(&queue->cond, &queue->mutex);
+    }
+    if (queue->count == 0 && queue->stop) {
+        pthread_mutex_unlock(&queue->mutex);
+        return 0;
+    }
+    *task = queue->tasks[queue->head];
+    queue->head = (queue->head + 1) % queue->capacity;
+    queue->count--;
+    pthread_cond_broadcast(&queue->cond);
+    pthread_mutex_unlock(&queue->mutex);
+    return 1;
+}
+
+static void coordinator_queue_push(CoordinatorQueue* queue, CoordTask task) {
+    pthread_mutex_lock(&queue->mutex);
+    while (queue->count == queue->capacity && !queue->fatal_error) {
+        pthread_cond_wait(&queue->cond, &queue->mutex);
+    }
+    if (queue->fatal_error) {
+        pthread_mutex_unlock(&queue->mutex);
+        return;
+    }
+    queue->tasks[queue->tail] = task;
+    queue->tail = (queue->tail + 1) % queue->capacity;
+    queue->count++;
+    pthread_cond_broadcast(&queue->cond);
+    pthread_mutex_unlock(&queue->mutex);
+}
+
+static void* coordinator_feeder_main(void* opaque) {
+    CoordinatorFeederArgs* args = (CoordinatorFeederArgs*)opaque;
+    CoordinatorQueue* queue = args->queue;
+    time_t last_renew = time(NULL);
+    for (;;) {
+        pthread_mutex_lock(&queue->mutex);
+        if (queue->fatal_error) {
+            pthread_mutex_unlock(&queue->mutex);
+            break;
+        }
+        int active_shards = coordinator_queue_active_shards(queue);
+        if (queue->no_more_work && queue->count == 0 && active_shards == 0) {
+            queue->stop = 1;
+            pthread_cond_broadcast(&queue->cond);
+            pthread_mutex_unlock(&queue->mutex);
+            break;
+        }
+        int should_fetch = !queue->no_more_work &&
+                           queue->count < queue->low_watermark &&
+                           active_shards < COORD_MAX_ACTIVE_SHARDS;
+        pthread_mutex_unlock(&queue->mutex);
+
+        time_t now = time(NULL);
+        if (args->heartbeat_seconds > 0 && now - last_renew >= args->heartbeat_seconds / 2) {
+            pthread_mutex_lock(&queue->mutex);
+            for (int i = 0; i < COORD_MAX_ACTIVE_SHARDS; i++) {
+                if (queue->shards[i].active && queue->shards[i].remaining_tasks > 0) {
+                    CoordinatorShard shard = queue->shards[i];
+                    pthread_mutex_unlock(&queue->mutex);
+                    coordinator_renew_shard(&args->endpoint, args->worker_id, &shard);
+                    pthread_mutex_lock(&queue->mutex);
+                }
+            }
+            pthread_mutex_unlock(&queue->mutex);
+            last_renew = now;
+        }
+
+        if (should_fetch) {
+            CoordinatorShard shard;
+            if (!coordinator_fetch_shard(&args->endpoint, args->worker_id, args->run_id,
+                                         args->full_tasks, &shard)) {
+                pthread_mutex_lock(&queue->mutex);
+                queue->no_more_work = 1;
+                pthread_cond_broadcast(&queue->cond);
+                pthread_mutex_unlock(&queue->mutex);
+                continue;
+            }
+            pthread_mutex_lock(&queue->mutex);
+            int slot = coordinator_queue_find_free_slot(queue);
+            if (slot < 0) {
+                pthread_mutex_unlock(&queue->mutex);
+                coordinator_queue_set_fatal(queue, "No free coordinator shard slot");
+                break;
+            }
+            queue->shards[slot] = shard;
+            pthread_mutex_unlock(&queue->mutex);
+
+            if (shard.remaining_tasks == 0) {
+                coordinator_submit_shard(&args->endpoint, args->worker_id, &shard);
+                pthread_mutex_lock(&queue->mutex);
+                queue->shards[slot].active = 0;
+                pthread_cond_broadcast(&queue->cond);
+                pthread_mutex_unlock(&queue->mutex);
+                continue;
+            }
+
+            long long first = first_selected_task(shard.task_start, shard.task_end,
+                                                  shard.task_stride, shard.task_offset);
+            for (long long p = first; p < shard.task_end; p += shard.task_stride) {
+                CoordTask task = {.shard_slot = slot, .p = p};
+                coordinator_queue_push(queue, task);
+            }
+            continue;
+        }
+
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_sec += 1;
+        pthread_mutex_lock(&queue->mutex);
+        if (!queue->fatal_error && !queue->stop) {
+            pthread_cond_timedwait(&queue->cond, &queue->mutex, &ts);
+        }
+        pthread_mutex_unlock(&queue->mutex);
+    }
+    return NULL;
+}
+
+static int run_coordinator_worker(long long full_tasks, int num_threads, int graph_poly_len) {
+    if (!g_coordinator_url || !g_worker_id || g_run_id <= 0) {
+        fprintf(stderr, "Coordinator worker requires --coordinator-url, --worker-id, and --run-id\n");
+        return 1;
+    }
+    if (g_cols < 2 || g_adaptive_subdivide) {
+        fprintf(stderr, "Coordinator worker currently supports fixed prefix-depth 2 only\n");
+        return 1;
+    }
+    CoordinatorEndpoint endpoint;
+    if (!parse_coordinator_endpoint(g_coordinator_url, &endpoint)) {
+        fprintf(stderr, "Invalid --coordinator-url: %s\n", g_coordinator_url);
+        return 1;
+    }
+    CoordinatorQueue queue;
+    int low_watermark = g_coord_low_watermark > 0 ? g_coord_low_watermark : (num_threads * 2);
+    int high_watermark = g_coord_high_watermark > 0 ? g_coord_high_watermark : (num_threads * 8);
+    if (high_watermark < low_watermark) high_watermark = low_watermark;
+    int queue_capacity = high_watermark * 32;
+    if (queue_capacity < 1024) queue_capacity = 1024;
+    coordinator_queue_init(&queue, queue_capacity, low_watermark, high_watermark);
+
+    CoordinatorFeederArgs feeder_args;
+    memset(&feeder_args, 0, sizeof(feeder_args));
+    feeder_args.endpoint = endpoint;
+    snprintf(feeder_args.worker_id, sizeof(feeder_args.worker_id), "%s", g_worker_id);
+    feeder_args.run_id = g_run_id;
+    feeder_args.heartbeat_seconds = g_coord_heartbeat_seconds;
+    feeder_args.full_tasks = full_tasks;
+    feeder_args.queue = &queue;
+
+    pthread_t feeder_thread;
+    if (pthread_create(&feeder_thread, NULL, coordinator_feeder_main, &feeder_args) != 0) {
+        fprintf(stderr, "Failed to start coordinator feeder thread\n");
+        coordinator_queue_free(&queue);
+        return 1;
+    }
+
+    #pragma omp parallel num_threads(num_threads)
+    {
+        GraphCache cache = {0};
+        GraphCache raw_cache = {0};
+        NautyWorkspace ws;
+        memset(&ws, 0, sizeof(ws));
+        cache.mask = CACHE_MASK;
+        cache.probe = CACHE_PROBE;
+        cache.poly_len = graph_poly_len;
+        cache.keys = checked_aligned_alloc(64, sizeof(CacheKey) * CACHE_SIZE, "cache_keys");
+        cache.adj = checked_aligned_alloc(64, sizeof(AdjWord) * CACHE_SIZE * MAXN_NAUTY, "cache_adj");
+        cache.degs = checked_aligned_alloc(64, sizeof(uint8_t) * CACHE_SIZE, "cache_degs");
+        cache.coeffs = checked_aligned_alloc(64, sizeof(PolyCoeff) * CACHE_SIZE * (size_t)graph_poly_len,
+                                             "cache_coeffs");
+        raw_cache.mask = RAW_CACHE_MASK;
+        raw_cache.probe = RAW_CACHE_PROBE;
+        raw_cache.poly_len = graph_poly_len;
+        raw_cache.keys = checked_aligned_alloc(64, sizeof(CacheKey) * RAW_CACHE_SIZE, "raw_cache_keys");
+        raw_cache.adj = checked_aligned_alloc(64, sizeof(AdjWord) * RAW_CACHE_SIZE * MAXN_NAUTY, "raw_cache_adj");
+        raw_cache.degs = checked_aligned_alloc(64, sizeof(uint8_t) * RAW_CACHE_SIZE, "raw_cache_degs");
+        raw_cache.coeffs = checked_aligned_alloc(64, sizeof(PolyCoeff) * RAW_CACHE_SIZE * (size_t)graph_poly_len,
+                                                 "raw_cache_coeffs");
+        memset(cache.keys, 0, sizeof(CacheKey) * CACHE_SIZE);
+        memset(raw_cache.keys, 0, sizeof(CacheKey) * RAW_CACHE_SIZE);
+
+        int stack[MAX_COLS];
+        CanonState canon_state;
+        CanonScratch canon_scratch;
+        PartialGraphState partial_graph;
+        canon_state_init(&canon_state, perm_count);
+        canon_scratch_init(&canon_scratch, perm_count);
+        canon_state_reset(&canon_state, perm_count);
+        partial_graph_reset(&partial_graph);
+        long long local_canon_calls = 0;
+        long long local_cache_hits = 0;
+        long long local_raw_cache_hits = 0;
+
+        for (;;) {
+            CoordTask task;
+            if (!coordinator_queue_pop(&queue, &task)) break;
+            Poly task_total;
+            execute_prefix2_fixed_task(task.p, &cache, &raw_cache, &ws, &canon_state, &canon_scratch,
+                                       &partial_graph, stack, &task_total,
+                                       &local_canon_calls, &local_cache_hits, &local_raw_cache_hits);
+
+            CoordinatorShard shard_copy;
+            int should_submit = 0;
+            pthread_mutex_lock(&queue.mutex);
+            CoordinatorShard* shard = &queue.shards[task.shard_slot];
+            shard->total = poly_add_ref(&shard->total, &task_total);
+            shard->remaining_tasks--;
+            if (shard->remaining_tasks == 0 && shard->active && !shard->submitting) {
+                shard->submitting = 1;
+                shard_copy = *shard;
+                should_submit = 1;
+            }
+            pthread_cond_broadcast(&queue.cond);
+            pthread_mutex_unlock(&queue.mutex);
+
+            if (should_submit) {
+                coordinator_submit_shard(&endpoint, g_worker_id, &shard_copy);
+                pthread_mutex_lock(&queue.mutex);
+                queue.shards[task.shard_slot].active = 0;
+                queue.shards[task.shard_slot].submitting = 0;
+                pthread_cond_broadcast(&queue.cond);
+                pthread_mutex_unlock(&queue.mutex);
+            }
+        }
+
+        canon_state_free(&canon_state);
+        canon_scratch_free(&canon_scratch);
+        nauty_workspace_free(&ws);
+        free(cache.keys);
+        free(cache.adj);
+        free(cache.degs);
+        free(cache.coeffs);
+        free(raw_cache.keys);
+        free(raw_cache.adj);
+        free(raw_cache.degs);
+        free(raw_cache.coeffs);
+        (void)local_canon_calls;
+        (void)local_cache_hits;
+        (void)local_raw_cache_hits;
+    }
+
+    pthread_join(feeder_thread, NULL);
+    int rc = 0;
+    if (queue.fatal_error) {
+        fprintf(stderr, "Coordinator worker fatal error: %s\n", queue.fatal_message);
+        rc = 1;
+    }
+    coordinator_queue_free(&queue);
+    return rc;
+}
+
 int main(int argc, char** argv) {
     long long task_start = 0;
     long long task_end = -1;
@@ -2300,6 +3054,48 @@ int main(int argc, char** argv) {
                 return 1;
             }
             g_adaptive_max_depth = (int)parse_ll_or_die(argv[++i], "--adaptive-max-depth");
+        } else if (strcmp(argv[i], "--coordinator-url") == 0) {
+            if (i + 1 >= argc) {
+                usage(argv[0]);
+                free(merge_inputs);
+                return 1;
+            }
+            g_coordinator_url = argv[++i];
+        } else if (strcmp(argv[i], "--worker-id") == 0) {
+            if (i + 1 >= argc) {
+                usage(argv[0]);
+                free(merge_inputs);
+                return 1;
+            }
+            g_worker_id = argv[++i];
+        } else if (strcmp(argv[i], "--run-id") == 0) {
+            if (i + 1 >= argc) {
+                usage(argv[0]);
+                free(merge_inputs);
+                return 1;
+            }
+            g_run_id = parse_ll_or_die(argv[++i], "--run-id");
+        } else if (strcmp(argv[i], "--coord-low-watermark") == 0) {
+            if (i + 1 >= argc) {
+                usage(argv[0]);
+                free(merge_inputs);
+                return 1;
+            }
+            g_coord_low_watermark = (int)parse_ll_or_die(argv[++i], "--coord-low-watermark");
+        } else if (strcmp(argv[i], "--coord-high-watermark") == 0) {
+            if (i + 1 >= argc) {
+                usage(argv[0]);
+                free(merge_inputs);
+                return 1;
+            }
+            g_coord_high_watermark = (int)parse_ll_or_die(argv[++i], "--coord-high-watermark");
+        } else if (strcmp(argv[i], "--coord-heartbeat-seconds") == 0) {
+            if (i + 1 >= argc) {
+                usage(argv[0]);
+                free(merge_inputs);
+                return 1;
+            }
+            g_coord_heartbeat_seconds = (int)parse_ll_or_die(argv[++i], "--coord-heartbeat-seconds");
         } else if (strcmp(argv[i], "--profile") == 0) {
             g_profile = 1;
         } else if (merge_mode) {
@@ -2321,7 +3117,8 @@ int main(int argc, char** argv) {
         if (positional_count != 0 || task_start != 0 || task_end != -1 ||
             task_stride != 1 || task_offset != 0 || prefix_depth_override != -1 ||
             g_adaptive_subdivide || g_adaptive_threshold != 128 || g_adaptive_max_depth != 3 ||
-            g_profile) {
+            g_coordinator_url || g_worker_id || g_run_id != -1 || g_coord_low_watermark != 0 ||
+            g_coord_high_watermark != 0 || g_coord_heartbeat_seconds != 600 || g_profile) {
             usage(argv[0]);
             free(merge_inputs);
             return 1;
@@ -2397,6 +3194,18 @@ int main(int argc, char** argv) {
         fprintf(stderr, "--adaptive-threshold must be positive\n");
         return 1;
     }
+    if (g_coord_low_watermark < 0) {
+        fprintf(stderr, "--coord-low-watermark must be non-negative\n");
+        return 1;
+    }
+    if (g_coord_high_watermark < 0) {
+        fprintf(stderr, "--coord-high-watermark must be non-negative\n");
+        return 1;
+    }
+    if (g_coord_heartbeat_seconds <= 0) {
+        fprintf(stderr, "--coord-heartbeat-seconds must be positive\n");
+        return 1;
+    }
 
     if (task_start < 0) {
         fprintf(stderr, "--task-start must be non-negative\n");
@@ -2411,6 +3220,40 @@ int main(int argc, char** argv) {
         return 1;
     }
     task_offset = normalise_task_offset(task_stride, task_offset);
+
+    int coordinator_mode = (g_coordinator_url != NULL) || (g_worker_id != NULL) || (g_run_id != -1);
+    if (coordinator_mode) {
+        if (!g_coordinator_url || !g_worker_id || g_run_id <= 0) {
+            fprintf(stderr, "Coordinator mode requires --coordinator-url, --worker-id, and --run-id\n");
+            return 1;
+        }
+        if (prefix_depth != 2 || g_adaptive_subdivide || g_cols < 2) {
+            fprintf(stderr, "Coordinator mode currently supports fixed --prefix-depth 2 only\n");
+            return 1;
+        }
+        if (task_start != 0 || task_end != -1 || task_stride != 1 || task_offset != 0) {
+            fprintf(stderr, "Coordinator mode does not accept local --task-* selection\n");
+            return 1;
+        }
+        if (poly_out_path) {
+            fprintf(stderr, "Coordinator mode does not support --poly-out; results are submitted to the coordinator\n");
+            return 1;
+        }
+    }
+
+    int graph_poly_len = g_cols * (g_rows / 2) + 1;
+    if (coordinator_mode) {
+        long long full_tasks = (long long)num_partitions * (num_partitions + 1) / 2;
+        printf("Coordinator worker mode\n");
+        printf("Grid: %dx%d\n", g_rows, g_cols);
+        printf("Partitions: %d\n", num_partitions);
+        printf("Threads: %d\n", omp_get_max_threads());
+        printf("Using nauty for canonical graph caching\n");
+        printf("Coordinator URL: %s\n", g_coordinator_url);
+        printf("Run ID: %lld\n", g_run_id);
+        printf("Fixed prefix depth: 2 (%lld tasks)\n", full_tasks);
+        return run_coordinator_worker(full_tasks, omp_get_max_threads(), graph_poly_len);
+    }
 
     long long total_prefixes = 0;
     long long materialized_prefixes = 0;
@@ -2625,7 +3468,6 @@ int main(int argc, char** argv) {
     double start_time = omp_get_wtime();
     
     int num_threads = omp_get_max_threads();
-    int graph_poly_len = g_cols * (g_rows / 2) + 1;
     Poly* thread_polys = checked_aligned_alloc(64, (size_t)num_threads * sizeof(Poly), "thread_polys");
     ProfileStats* thread_profiles =
         checked_aligned_alloc(64, (size_t)num_threads * sizeof(ProfileStats), "thread_profiles");
