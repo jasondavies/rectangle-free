@@ -348,3 +348,54 @@
   - `Canonical cache hits 151417 (53.7%)`
 - Interpretation: for the sampled `7x5` workload, the 7-row-specific build does not need the full generic canonical cache. Halving the canonical cache from `2^18` to `2^17` entries improves runtime slightly while cutting a large chunk of per-thread cache memory. Dropping further to `2^16` entries gives back most of the gain, so `17` looks like the better 7-row setting.
 - Outcome: accepted for `partition_poly_7` only.
+
+### Experiment 20: Harden adaptive control flow and batch progress updates
+- Goal: fix the remaining adaptive-subdivide correctness hole and remove the racy per-task progress bookkeeping without perturbing the worker hot path.
+- Change:
+  - rejected `--adaptive-subdivide` when `cols < 3`
+  - changed the misleading `nauty_check()` comment to reflect that it is a compatibility check, not TLS initialisation
+  - batched task completions per thread before touching the shared completion counter
+  - moved progress reporting behind a single OpenMP critical section using shared `progress_last_reported`
+- Verification commands:
+  - `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly 7 2 --task-end 200 --prefix-depth 2`
+  - `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 2 --task-end 200 --prefix-depth 2`
+  - `./partition_poly 7 2 --prefix-depth 2 --adaptive-subdivide`
+- Verification result:
+  - both smoke tests kept the same polynomial
+  - adaptive subdivision now correctly fails with `--adaptive-subdivide requires cols >= 3`
+- Sampled 32-thread benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235`
+- Benchmark result:
+  - baseline `Worker Complete 4.70s`, `Total elapsed 6.70s`
+  - experiment `Worker Complete 4.62s`, `Total elapsed 6.60s`
+- Matching generic benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235`
+- Generic result:
+  - baseline `Worker Complete 5.11s`, `Total elapsed 7.14s`
+  - experiment `Worker Complete 5.20s`, `Total elapsed 7.30s`
+- Interpretation: this is primarily a correctness and robustness fix. On the sampled `partition_poly_7` workload it is neutral-to-slightly-positive, while the generic build moved by noise-level amounts in the opposite direction. The important part is eliminating the adaptive `cols == 2` bug and the shared progress-report race without any meaningful 7-row throughput penalty.
+- Outcome: accepted.
+
+### Experiment 21: Store prefix task ids as `uint16_t`
+- Goal: cut prefix-task memory in half for 7-row runs and tighten prefix-generation locality.
+- Change:
+  - introduced a `PrefixId` type (`uint16_t`) for `prefix_i/j/k/l` and `PrefixTaskBuffer`
+  - used `UINT16_MAX` as the adaptive “unsplit” sentinel instead of `-1`
+  - left the DFS and solver logic unchanged, converting to `int` only when a worker consumes a prefix task
+- Sampled 32-thread benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235`
+- Baseline from accepted code:
+  - `Prefix task bytes 12 each, 4.66 MiB total`
+  - `Prefix generation 1.98s`
+  - `Worker Complete 4.62s`
+  - `Total elapsed 6.60s`
+- Experiment result:
+  - `Prefix task bytes 6 each, 2.33 MiB total`
+  - `Prefix generation 1.97s`
+  - `Worker Complete 4.63s`
+  - `Total elapsed 6.60s`
+- Matching generic benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235`
+- Generic result:
+  - `Prefix task bytes 6 each, 2.33 MiB total`
+  - `Prefix generation 2.07s`
+  - `Worker Complete 5.13s`
+  - `Total elapsed 7.20s`
+- Interpretation: this is a clean memory win with essentially flat runtime on the sampled workload. For `7x7` sharded runs, halving the prefix-task footprint is useful even when throughput stays the same, because prefix generation is paid by every shard and the smaller arrays are friendlier to cache and NUMA pressure.
+- Outcome: accepted.

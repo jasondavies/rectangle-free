@@ -67,6 +67,9 @@ typedef uint64_t AdjWord;
 // --- DATA TYPES ---
 
 typedef __int128_t PolyCoeff;
+typedef uint16_t PrefixId;
+
+#define PREFIX_ID_NONE UINT16_MAX
 
 typedef struct {
     int rows;
@@ -161,10 +164,10 @@ typedef struct {
 } TaskTimingStats;
 
 typedef struct {
-    int* i;
-    int* j;
-    int* k;
-    int* l;
+    PrefixId* i;
+    PrefixId* j;
+    PrefixId* k;
+    PrefixId* l;
     long long count;
     long long capacity;
     int with_l;
@@ -191,6 +194,7 @@ static Poly global_poly = {0};
 static int g_rows = DEFAULT_ROWS;
 static int g_cols = DEFAULT_COLS;
 static ProgressReporter progress_reporter;
+static long long progress_last_reported = 0;
 static int g_adaptive_subdivide = 0;
 static int g_adaptive_threshold = 128;
 static int g_adaptive_max_depth = 3;
@@ -243,28 +247,45 @@ static void task_timing_record(TaskTimingStats* stats, long long task_index, dou
 }
 
 #define DEFAULT_PROGRESS_UPDATES 2000
+#define PROGRESS_FLUSH_BATCH 64
 
 static inline void maybe_report_progress(long long done, long long total_tasks, long long report_step,
-                                         long long* last_reported, double start_time) {
-    progress_reporter.last_reported = *last_reported;
-    progress_reporter_maybe_report(&progress_reporter, done, total_tasks, report_step,
-                                   start_time, omp_get_wtime());
-    *last_reported = progress_reporter.last_reported;
+                                         double start_time) {
+    #pragma omp critical(progress_report)
+    {
+        progress_reporter.last_reported = progress_last_reported;
+        progress_reporter_maybe_report(&progress_reporter, done, total_tasks, report_step,
+                                       start_time, omp_get_wtime());
+        progress_last_reported = progress_reporter.last_reported;
+    }
+}
+
+static inline void flush_completed_tasks(long long total_tasks, long long report_step,
+                                         double start_time, long long* pending_completed) {
+    if (*pending_completed == 0) return;
+    long long done = 0;
+    #pragma omp atomic capture
+    {
+        completed_tasks += *pending_completed;
+        done = completed_tasks;
+    }
+    *pending_completed = 0;
+    maybe_report_progress(done, total_tasks, report_step, start_time);
 }
 
 static inline void complete_task_and_report(long long total_tasks, long long report_step,
-                                            long long* last_reported, double start_time) {
-    long long done = 0;
-    #pragma omp atomic capture
-    done = ++completed_tasks;
-    maybe_report_progress(done, total_tasks, report_step, last_reported, start_time);
+                                            double start_time, long long* pending_completed) {
+    (*pending_completed)++;
+    if (*pending_completed >= PROGRESS_FLUSH_BATCH) {
+        flush_completed_tasks(total_tasks, report_step, start_time, pending_completed);
+    }
 }
 
 static inline void complete_task_report_and_time(long long total_tasks, long long report_step,
-                                                 long long* last_reported, double start_time,
+                                                 double start_time, long long* pending_completed,
                                                  TaskTimingStats* task_timing, long long task_index,
                                                  double task_t0) {
-    complete_task_and_report(total_tasks, report_step, last_reported, start_time);
+    complete_task_and_report(total_tasks, report_step, start_time, pending_completed);
     if (g_profile && task_timing) {
         task_timing_record(task_timing, task_index, omp_get_wtime() - task_t0);
     }
@@ -311,10 +332,10 @@ static void prefix_task_buffer_reserve(PrefixTaskBuffer* buf, long long needed) 
         }
         new_capacity *= 2;
     }
-    int* new_i = realloc(buf->i, (size_t)new_capacity * sizeof(*buf->i));
-    int* new_j = realloc(buf->j, (size_t)new_capacity * sizeof(*buf->j));
-    int* new_k = realloc(buf->k, (size_t)new_capacity * sizeof(*buf->k));
-    int* new_l = buf->l;
+    PrefixId* new_i = realloc(buf->i, (size_t)new_capacity * sizeof(*buf->i));
+    PrefixId* new_j = realloc(buf->j, (size_t)new_capacity * sizeof(*buf->j));
+    PrefixId* new_k = realloc(buf->k, (size_t)new_capacity * sizeof(*buf->k));
+    PrefixId* new_l = buf->l;
     if (buf->with_l) {
         new_l = realloc(buf->l, (size_t)new_capacity * sizeof(*buf->l));
     }
@@ -331,9 +352,9 @@ static void prefix_task_buffer_reserve(PrefixTaskBuffer* buf, long long needed) 
 
 static void prefix_task_buffer_push3(PrefixTaskBuffer* buf, int i, int j, int k) {
     prefix_task_buffer_reserve(buf, buf->count + 1);
-    buf->i[buf->count] = i;
-    buf->j[buf->count] = j;
-    buf->k[buf->count] = k;
+    buf->i[buf->count] = (PrefixId)i;
+    buf->j[buf->count] = (PrefixId)j;
+    buf->k[buf->count] = (k < 0) ? PREFIX_ID_NONE : (PrefixId)k;
     buf->count++;
 }
 
@@ -342,8 +363,8 @@ static void prefix_task_buffer_append3_batch(PrefixTaskBuffer* buf, int i, int j
     long long base = buf->count;
     prefix_task_buffer_reserve(buf, base + count);
     for (int idx = 0; idx < count; idx++) {
-        buf->i[base + idx] = i;
-        buf->j[base + idx] = j;
+        buf->i[base + idx] = (PrefixId)i;
+        buf->j[base + idx] = (PrefixId)j;
         buf->k[base + idx] = ks[idx];
     }
     buf->count = base + count;
@@ -1928,7 +1949,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // Initialise nauty's thread-local storage
+    // Verify nauty build/runtime compatibility
     nauty_check(WORDSIZE, MAXN_NAUTY, MAXN_NAUTY, NAUTYVERSIONID);
     
     // 1. Initialise maths tables
@@ -1980,9 +2001,13 @@ int main(int argc, char** argv) {
         fprintf(stderr, "Adaptive subdivision currently supports only --prefix-depth 2\n");
         return 1;
     }
+    if (g_adaptive_subdivide && g_cols < 3) {
+        fprintf(stderr, "--adaptive-subdivide requires cols >= 3\n");
+        return 1;
+    }
 
     long long total_prefixes = 0;
-    int *prefix_i = NULL, *prefix_j = NULL, *prefix_k = NULL, *prefix_l = NULL;
+    PrefixId *prefix_i = NULL, *prefix_j = NULL, *prefix_k = NULL, *prefix_l = NULL;
     double prefix_generation_time = 0.0;
 
     if (prefix_depth > 0) {
@@ -2084,8 +2109,8 @@ int main(int argc, char** argv) {
                 prefix_k = adaptive_prefixes.k;
             } else {
                 total_prefixes = base_prefixes;
-                prefix_i = (int*)malloc((size_t)total_prefixes * sizeof(int));
-                prefix_j = (int*)malloc((size_t)total_prefixes * sizeof(int));
+                prefix_i = (PrefixId*)malloc((size_t)total_prefixes * sizeof(PrefixId));
+                prefix_j = (PrefixId*)malloc((size_t)total_prefixes * sizeof(PrefixId));
                 if (!prefix_i || !prefix_j) {
                     fprintf(stderr, "Failed to allocate prefix arrays\n");
                     return 1;
@@ -2094,17 +2119,17 @@ int main(int argc, char** argv) {
                 long long idx = 0;
                 for (int i = 0; i < num_partitions; i++) {
                     for (int j = i; j < num_partitions; j++) {
-                        prefix_i[idx] = i;
-                        prefix_j[idx] = j;
+                        prefix_i[idx] = (PrefixId)i;
+                        prefix_j[idx] = (PrefixId)j;
                         idx++;
                     }
                 }
             }
         } else if (prefix_depth == 3) {
             total_prefixes = (long long)num_partitions * (num_partitions + 1) * (num_partitions + 2) / 6;
-            prefix_i = (int*)malloc((size_t)total_prefixes * sizeof(int));
-            prefix_j = (int*)malloc((size_t)total_prefixes * sizeof(int));
-            prefix_k = (int*)malloc((size_t)total_prefixes * sizeof(int));
+            prefix_i = (PrefixId*)malloc((size_t)total_prefixes * sizeof(PrefixId));
+            prefix_j = (PrefixId*)malloc((size_t)total_prefixes * sizeof(PrefixId));
+            prefix_k = (PrefixId*)malloc((size_t)total_prefixes * sizeof(PrefixId));
             if (!prefix_i || !prefix_j || !prefix_k) {
                 fprintf(stderr, "Failed to allocate prefix arrays\n");
                 return 1;
@@ -2114,9 +2139,9 @@ int main(int argc, char** argv) {
             for (int i = 0; i < num_partitions; i++) {
                 for (int j = i; j < num_partitions; j++) {
                     for (int k = j; k < num_partitions; k++) {
-                        prefix_i[idx] = i;
-                        prefix_j[idx] = j;
-                        prefix_k[idx] = k;
+                        prefix_i[idx] = (PrefixId)i;
+                        prefix_j[idx] = (PrefixId)j;
+                        prefix_k[idx] = (PrefixId)k;
                         idx++;
                     }
                 }
@@ -2124,10 +2149,10 @@ int main(int argc, char** argv) {
         } else if (prefix_depth == 4) {
             total_prefixes = (long long)num_partitions * (num_partitions + 1) *
                              (num_partitions + 2) * (num_partitions + 3) / 24;
-            prefix_i = (int*)malloc((size_t)total_prefixes * sizeof(int));
-            prefix_j = (int*)malloc((size_t)total_prefixes * sizeof(int));
-            prefix_k = (int*)malloc((size_t)total_prefixes * sizeof(int));
-            prefix_l = (int*)malloc((size_t)total_prefixes * sizeof(int));
+            prefix_i = (PrefixId*)malloc((size_t)total_prefixes * sizeof(PrefixId));
+            prefix_j = (PrefixId*)malloc((size_t)total_prefixes * sizeof(PrefixId));
+            prefix_k = (PrefixId*)malloc((size_t)total_prefixes * sizeof(PrefixId));
+            prefix_l = (PrefixId*)malloc((size_t)total_prefixes * sizeof(PrefixId));
             if (!prefix_i || !prefix_j || !prefix_k || !prefix_l) {
                 fprintf(stderr, "Failed to allocate prefix arrays\n");
                 return 1;
@@ -2138,10 +2163,10 @@ int main(int argc, char** argv) {
                 for (int j = i; j < num_partitions; j++) {
                     for (int k = j; k < num_partitions; k++) {
                         for (int l = k; l < num_partitions; l++) {
-                            prefix_i[idx] = i;
-                            prefix_j[idx] = j;
-                            prefix_k[idx] = k;
-                            prefix_l[idx] = l;
+                            prefix_i[idx] = (PrefixId)i;
+                            prefix_j[idx] = (PrefixId)j;
+                            prefix_k[idx] = (PrefixId)k;
+                            prefix_l[idx] = (PrefixId)l;
                             idx++;
                         }
                     }
@@ -2157,17 +2182,17 @@ int main(int argc, char** argv) {
         printf("Prefix generation: %.2f seconds\n", prefix_generation_time);
         if (prefix_depth == 2) {
             printf("Prefix task bytes: %zu each, %.2f MiB total\n",
-                   (size_t)(g_adaptive_subdivide ? sizeof(int) * 3 : sizeof(int) * 2),
-                   ((double)(g_adaptive_subdivide ? sizeof(int) * 3 : sizeof(int) * 2) *
+                   (size_t)(g_adaptive_subdivide ? sizeof(PrefixId) * 3 : sizeof(PrefixId) * 2),
+                   ((double)(g_adaptive_subdivide ? sizeof(PrefixId) * 3 : sizeof(PrefixId) * 2) *
                     (double)total_prefixes) / (1024.0 * 1024.0));
         } else if (prefix_depth == 3) {
             printf("Prefix task bytes: %zu each, %.2f MiB total\n",
-                   sizeof(int) * 3,
-                   ((double)(sizeof(int) * 3) * (double)total_prefixes) / (1024.0 * 1024.0));
+                   sizeof(PrefixId) * 3,
+                   ((double)(sizeof(PrefixId) * 3) * (double)total_prefixes) / (1024.0 * 1024.0));
         } else if (prefix_depth == 4) {
             printf("Prefix task bytes: %zu each, %.2f MiB total\n",
-                   sizeof(int) * 4,
-                   ((double)(sizeof(int) * 4) * (double)total_prefixes) / (1024.0 * 1024.0));
+                   sizeof(PrefixId) * 4,
+                   ((double)(sizeof(PrefixId) * 4) * (double)total_prefixes) / (1024.0 * 1024.0));
         }
     }
 
@@ -2216,7 +2241,6 @@ int main(int argc, char** argv) {
         if (progress_report_step < 1) progress_report_step = 1;
     }
     if (total_tasks > 0 && progress_report_step > total_tasks) progress_report_step = total_tasks;
-    long long progress_last_reported = 0;
     printf("Task range: [%lld, %lld) of %lld\n", active_task_start, active_task_end, full_tasks);
     printf("Task selection: stride %lld, offset %lld\n", task_stride, task_offset);
     const char* omp_static_env = getenv("RECT_OMP_STATIC");
@@ -2243,6 +2267,7 @@ int main(int argc, char** argv) {
         printf(" (target ~%lld updates)", progress_updates);
     }
     printf("\n");
+    progress_last_reported = 0;
     progress_reporter_init(&progress_reporter, stdout);
     progress_reporter_print_initial(&progress_reporter, total_tasks);
 
@@ -2305,6 +2330,7 @@ int main(int argc, char** argv) {
         long long local_raw_cache_hits = 0;
         ProfileStats* profile = &thread_profiles[tid];
         TaskTimingStats* task_timing = &thread_task_timing[tid];
+        long long pending_completed = 0;
         
         if (g_cols == 1) {
             // Original 1-column parallelism (nothing to prefix)
@@ -2323,9 +2349,8 @@ int main(int argc, char** argv) {
                 }
                 if (!canon_state_prepare_push(&canon_state, (int)i, &canon_scratch, &next_stabilizer)) {
                     if (g_profile) profile->canon_prepare_time += omp_get_wtime() - t0;
-                    complete_task_report_and_time(total_tasks, progress_report_step,
-                                                  &progress_last_reported, start_time,
-                                                  task_timing, i, task_t0);
+                    complete_task_report_and_time(total_tasks, progress_report_step, start_time,
+                                                  &pending_completed, task_timing, i, task_t0);
                     continue;
                 }
                 if (g_profile) {
@@ -2349,18 +2374,17 @@ int main(int argc, char** argv) {
                         &thread_polys[tid], &local_canon_calls, &local_cache_hits, &local_raw_cache_hits,
                         &partition_weight_poly[i], 1, 1, profile, &canon_scratch);
                 }
-                complete_task_report_and_time(total_tasks, progress_report_step,
-                                              &progress_last_reported, start_time,
-                                              task_timing, i, task_t0);
+                complete_task_report_and_time(total_tasks, progress_report_step, start_time,
+                                              &pending_completed, task_timing, i, task_t0);
             }
         } else if (prefix_depth == 2) {
             #pragma omp for schedule(runtime)
             for (long long p = first_task; p < active_task_end; p += task_stride) {
                 double task_t0 = g_profile ? omp_get_wtime() : 0.0;
                 double t0 = 0.0;
-                int i = prefix_i[p];
-                int j = prefix_j[p];
-                int k = prefix_k ? prefix_k[p] : -1;
+                int i = (int)prefix_i[p];
+                int j = (int)prefix_j[p];
+                int k = prefix_k ? ((prefix_k[p] == PREFIX_ID_NONE) ? -1 : (int)prefix_k[p]) : -1;
                 int next_stabilizer = 0;
 
                 canon_state_reset(&canon_state, perm_count);
@@ -2374,9 +2398,8 @@ int main(int argc, char** argv) {
                 }
                 if (!canon_state_prepare_push(&canon_state, i, &canon_scratch, &next_stabilizer)) {
                     if (g_profile) profile->canon_prepare_time += omp_get_wtime() - t0;
-                    complete_task_report_and_time(total_tasks, progress_report_step,
-                                                  &progress_last_reported, start_time,
-                                                  task_timing, p, task_t0);
+                    complete_task_report_and_time(total_tasks, progress_report_step, start_time,
+                                                  &pending_completed, task_timing, p, task_t0);
                     continue;
                 }
                 if (g_profile) {
@@ -2397,9 +2420,8 @@ int main(int argc, char** argv) {
                 if (g_profile) profile->partial_append_time += omp_get_wtime() - t0;
                 if (!ok) {
                     canon_state_pop(&canon_state);
-                    complete_task_report_and_time(total_tasks, progress_report_step,
-                                                  &progress_last_reported, start_time,
-                                                  task_timing, p, task_t0);
+                    complete_task_report_and_time(total_tasks, progress_report_step, start_time,
+                                                  &pending_completed, task_timing, p, task_t0);
                     continue;
                 }
 
@@ -2412,9 +2434,8 @@ int main(int argc, char** argv) {
                 if (!canon_state_prepare_push(&canon_state, j, &canon_scratch, &next_stabilizer)) {
                     if (g_profile) profile->canon_prepare_time += omp_get_wtime() - t0;
                     canon_state_pop(&canon_state);
-                    complete_task_report_and_time(total_tasks, progress_report_step,
-                                                  &progress_last_reported, start_time,
-                                                  task_timing, p, task_t0);
+                    complete_task_report_and_time(total_tasks, progress_report_step, start_time,
+                                                  &pending_completed, task_timing, p, task_t0);
                     continue;
                 }
                 if (g_profile) {
@@ -2493,17 +2514,16 @@ int main(int argc, char** argv) {
                 canon_state_pop(&canon_state);
                 canon_state_pop(&canon_state);
 
-                complete_task_report_and_time(total_tasks, progress_report_step,
-                                              &progress_last_reported, start_time,
-                                              task_timing, p, task_t0);
+                complete_task_report_and_time(total_tasks, progress_report_step, start_time,
+                                              &pending_completed, task_timing, p, task_t0);
             }
         } else if (prefix_depth == 3) {
             #pragma omp for schedule(runtime)
             for (long long p = first_task; p < active_task_end; p += task_stride) {
                 double task_t0 = g_profile ? omp_get_wtime() : 0.0;
-                int i = prefix_i[p];
-                int j = prefix_j[p];
-                int k = prefix_k[p];
+                int i = (int)prefix_i[p];
+                int j = (int)prefix_j[p];
+                int k = (int)prefix_k[p];
                 int next_stabilizer = 0;
 
                 canon_state_reset(&canon_state, perm_count);
@@ -2511,26 +2531,23 @@ int main(int argc, char** argv) {
 
                 stack[0] = i;
                 if (!canon_state_prepare_push(&canon_state, i, &canon_scratch, &next_stabilizer)) {
-                    complete_task_report_and_time(total_tasks, progress_report_step,
-                                                  &progress_last_reported, start_time,
-                                                  task_timing, p, task_t0);
+                    complete_task_report_and_time(total_tasks, progress_report_step, start_time,
+                                                  &pending_completed, task_timing, p, task_t0);
                     continue;
                 }
                 canon_state_commit_push(&canon_state, i, &canon_scratch, next_stabilizer);
                 if (!partial_graph_append(&partial_graph, 0, i, stack)) {
                     canon_state_pop(&canon_state);
-                    complete_task_report_and_time(total_tasks, progress_report_step,
-                                                  &progress_last_reported, start_time,
-                                                  task_timing, p, task_t0);
+                    complete_task_report_and_time(total_tasks, progress_report_step, start_time,
+                                                  &pending_completed, task_timing, p, task_t0);
                     continue;
                 }
 
                 stack[1] = j;
                 if (!canon_state_prepare_push(&canon_state, j, &canon_scratch, &next_stabilizer)) {
                     canon_state_pop(&canon_state);
-                    complete_task_report_and_time(total_tasks, progress_report_step,
-                                                  &progress_last_reported, start_time,
-                                                  task_timing, p, task_t0);
+                    complete_task_report_and_time(total_tasks, progress_report_step, start_time,
+                                                  &pending_completed, task_timing, p, task_t0);
                     continue;
                 }
                 canon_state_commit_push(&canon_state, j, &canon_scratch, next_stabilizer);
@@ -2538,9 +2555,8 @@ int main(int argc, char** argv) {
                 if (!partial_graph_append(&prefix_graph, 1, j, stack)) {
                     canon_state_pop(&canon_state);
                     canon_state_pop(&canon_state);
-                    complete_task_report_and_time(total_tasks, progress_report_step,
-                                                  &progress_last_reported, start_time,
-                                                  task_timing, p, task_t0);
+                    complete_task_report_and_time(total_tasks, progress_report_step, start_time,
+                                                  &pending_completed, task_timing, p, task_t0);
                     continue;
                 }
 
@@ -2548,9 +2564,8 @@ int main(int argc, char** argv) {
                 if (!canon_state_prepare_push(&canon_state, k, &canon_scratch, &next_stabilizer)) {
                     canon_state_pop(&canon_state);
                     canon_state_pop(&canon_state);
-                    complete_task_report_and_time(total_tasks, progress_report_step,
-                                                  &progress_last_reported, start_time,
-                                                  task_timing, p, task_t0);
+                    complete_task_report_and_time(total_tasks, progress_report_step, start_time,
+                                                  &pending_completed, task_timing, p, task_t0);
                     continue;
                 }
                 canon_state_commit_push(&canon_state, k, &canon_scratch, next_stabilizer);
@@ -2577,18 +2592,17 @@ int main(int argc, char** argv) {
                 canon_state_pop(&canon_state);
                 canon_state_pop(&canon_state);
 
-                complete_task_report_and_time(total_tasks, progress_report_step,
-                                              &progress_last_reported, start_time,
-                                              task_timing, p, task_t0);
+                complete_task_report_and_time(total_tasks, progress_report_step, start_time,
+                                              &pending_completed, task_timing, p, task_t0);
             }
         } else {
             #pragma omp for schedule(runtime)
             for (long long p = first_task; p < active_task_end; p += task_stride) {
                 double task_t0 = g_profile ? omp_get_wtime() : 0.0;
-                int i = prefix_i[p];
-                int j = prefix_j[p];
-                int k = prefix_k[p];
-                int l = prefix_l[p];
+                int i = (int)prefix_i[p];
+                int j = (int)prefix_j[p];
+                int k = (int)prefix_k[p];
+                int l = (int)prefix_l[p];
                 int next_stabilizer = 0;
 
                 canon_state_reset(&canon_state, perm_count);
@@ -2596,26 +2610,23 @@ int main(int argc, char** argv) {
 
                 stack[0] = i;
                 if (!canon_state_prepare_push(&canon_state, i, &canon_scratch, &next_stabilizer)) {
-                    complete_task_report_and_time(total_tasks, progress_report_step,
-                                                  &progress_last_reported, start_time,
-                                                  task_timing, p, task_t0);
+                    complete_task_report_and_time(total_tasks, progress_report_step, start_time,
+                                                  &pending_completed, task_timing, p, task_t0);
                     continue;
                 }
                 canon_state_commit_push(&canon_state, i, &canon_scratch, next_stabilizer);
                 if (!partial_graph_append(&partial_graph, 0, i, stack)) {
                     canon_state_pop(&canon_state);
-                    complete_task_report_and_time(total_tasks, progress_report_step,
-                                                  &progress_last_reported, start_time,
-                                                  task_timing, p, task_t0);
+                    complete_task_report_and_time(total_tasks, progress_report_step, start_time,
+                                                  &pending_completed, task_timing, p, task_t0);
                     continue;
                 }
 
                 stack[1] = j;
                 if (!canon_state_prepare_push(&canon_state, j, &canon_scratch, &next_stabilizer)) {
                     canon_state_pop(&canon_state);
-                    complete_task_report_and_time(total_tasks, progress_report_step,
-                                                  &progress_last_reported, start_time,
-                                                  task_timing, p, task_t0);
+                    complete_task_report_and_time(total_tasks, progress_report_step, start_time,
+                                                  &pending_completed, task_timing, p, task_t0);
                     continue;
                 }
                 canon_state_commit_push(&canon_state, j, &canon_scratch, next_stabilizer);
@@ -2623,9 +2634,8 @@ int main(int argc, char** argv) {
                 if (!partial_graph_append(&prefix_graph, 1, j, stack)) {
                     canon_state_pop(&canon_state);
                     canon_state_pop(&canon_state);
-                    complete_task_report_and_time(total_tasks, progress_report_step,
-                                                  &progress_last_reported, start_time,
-                                                  task_timing, p, task_t0);
+                    complete_task_report_and_time(total_tasks, progress_report_step, start_time,
+                                                  &pending_completed, task_timing, p, task_t0);
                     continue;
                 }
 
@@ -2633,9 +2643,8 @@ int main(int argc, char** argv) {
                 if (!canon_state_prepare_push(&canon_state, k, &canon_scratch, &next_stabilizer)) {
                     canon_state_pop(&canon_state);
                     canon_state_pop(&canon_state);
-                    complete_task_report_and_time(total_tasks, progress_report_step,
-                                                  &progress_last_reported, start_time,
-                                                  task_timing, p, task_t0);
+                    complete_task_report_and_time(total_tasks, progress_report_step, start_time,
+                                                  &pending_completed, task_timing, p, task_t0);
                     continue;
                 }
                 canon_state_commit_push(&canon_state, k, &canon_scratch, next_stabilizer);
@@ -2644,9 +2653,8 @@ int main(int argc, char** argv) {
                     canon_state_pop(&canon_state);
                     canon_state_pop(&canon_state);
                     canon_state_pop(&canon_state);
-                    complete_task_report_and_time(total_tasks, progress_report_step,
-                                                  &progress_last_reported, start_time,
-                                                  task_timing, p, task_t0);
+                    complete_task_report_and_time(total_tasks, progress_report_step, start_time,
+                                                  &pending_completed, task_timing, p, task_t0);
                     continue;
                 }
 
@@ -2655,9 +2663,8 @@ int main(int argc, char** argv) {
                     canon_state_pop(&canon_state);
                     canon_state_pop(&canon_state);
                     canon_state_pop(&canon_state);
-                    complete_task_report_and_time(total_tasks, progress_report_step,
-                                                  &progress_last_reported, start_time,
-                                                  task_timing, p, task_t0);
+                    complete_task_report_and_time(total_tasks, progress_report_step, start_time,
+                                                  &pending_completed, task_timing, p, task_t0);
                     continue;
                 }
                 canon_state_commit_push(&canon_state, l, &canon_scratch, next_stabilizer);
@@ -2693,11 +2700,12 @@ int main(int argc, char** argv) {
                 canon_state_pop(&canon_state);
                 canon_state_pop(&canon_state);
 
-                complete_task_report_and_time(total_tasks, progress_report_step,
-                                              &progress_last_reported, start_time,
-                                              task_timing, p, task_t0);
+                complete_task_report_and_time(total_tasks, progress_report_step, start_time,
+                                              &pending_completed, task_timing, p, task_t0);
             }
         }
+
+        flush_completed_tasks(total_tasks, progress_report_step, start_time, &pending_completed);
         
         total_canon_calls += local_canon_calls;
         total_cache_hits += local_cache_hits;
