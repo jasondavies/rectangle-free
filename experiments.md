@@ -532,3 +532,29 @@
   - experiment `Worker Complete 4.13s`, `Total elapsed 5.72s`
 - Interpretation: this is a modest but real follow-on win. The gain is much smaller than the insert and compare unrolls, which suggests the remaining hot cost is no longer dominated by row materialisation, but it still trims enough branch and loop overhead to be worth keeping.
 - Outcome: accepted.
+
+### Experiment 28: Hoist `perm_table` row pointers inside `prepare_push()`
+- Goal: remove repeated indexed `perm_table_get()` calls from the active-permutation materialisation path.
+- Change:
+  - precomputed the current candidate partition row pointer once per `canon_state_prepare_push()` call
+  - precomputed row pointers for the current stack values once per call
+  - changed `canon_materialize_row()` to consume those row pointers directly instead of repeatedly recomputing `(partition_id * perm_count + p)` addresses
+- One-thread benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235 --profile`
+- Baseline from accepted code:
+  - `Prefix generation 1.60s`
+  - `Worker Complete 14.49s`
+  - `canon_state_prepare_push 8.576s`
+- Experiment result:
+  - `Prefix generation 1.73s`
+  - `Worker Complete 13.56s`
+  - `canon_state_prepare_push 7.625s`
+- Matching 32-thread benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235`
+- 32-thread `partition_poly_7` result:
+  - baseline `Worker Complete 3.88s`, `Total elapsed 5.48s`
+  - experiment `Worker Complete 3.67s`, `Total elapsed 5.19s`
+- Matching generic benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235`
+- Generic result:
+  - baseline `Worker Complete 4.13s`, `Total elapsed 5.72s`
+  - experiment `Worker Complete 4.08s`, `Total elapsed 5.61s`
+- Interpretation: this is another strong `prepare_push()` win. Once the tiny insert/compare loops were cheap, the repeated address arithmetic and row lookups became visible enough that hoisting them paid off, especially on the 7-row-specific binary.
+- Outcome: accepted.

@@ -1322,7 +1322,8 @@ static inline void canon_copy_row_prefix(uint16_t* dst, const uint16_t* src, int
     }
 }
 
-static inline void canon_materialize_row(const CanonState* st, CanonScratch* scratch, int p, int depth, int len) {
+static inline void canon_materialize_row(const CanonState* st, CanonScratch* scratch, int p, int depth, int len,
+                                         const uint16_t* const* stack_perm_rows) {
     uint16_t* row = canon_scratch_prepared_row(scratch, p);
     const uint16_t* transformed_row = canon_state_row_const(st, p);
     canon_copy_row_prefix(row, transformed_row, len);
@@ -1330,19 +1331,19 @@ static inline void canon_materialize_row(const CanonState* st, CanonScratch* scr
         case 5:
             switch (len) {
                 case 0:
-                    row_insert_sorted(row, 0, perm_table_get((int)st->stack_vals[0], p));
+                    row_insert_sorted(row, 0, stack_perm_rows[0][p]);
                     /* fall through */
                 case 1:
-                    row_insert_sorted(row, 1, perm_table_get((int)st->stack_vals[1], p));
+                    row_insert_sorted(row, 1, stack_perm_rows[1][p]);
                     /* fall through */
                 case 2:
-                    row_insert_sorted(row, 2, perm_table_get((int)st->stack_vals[2], p));
+                    row_insert_sorted(row, 2, stack_perm_rows[2][p]);
                     /* fall through */
                 case 3:
-                    row_insert_sorted(row, 3, perm_table_get((int)st->stack_vals[3], p));
+                    row_insert_sorted(row, 3, stack_perm_rows[3][p]);
                     /* fall through */
                 case 4:
-                    row_insert_sorted(row, 4, perm_table_get((int)st->stack_vals[4], p));
+                    row_insert_sorted(row, 4, stack_perm_rows[4][p]);
                     /* fall through */
                 default:
                     break;
@@ -1351,16 +1352,16 @@ static inline void canon_materialize_row(const CanonState* st, CanonScratch* scr
         case 4:
             switch (len) {
                 case 0:
-                    row_insert_sorted(row, 0, perm_table_get((int)st->stack_vals[0], p));
+                    row_insert_sorted(row, 0, stack_perm_rows[0][p]);
                     /* fall through */
                 case 1:
-                    row_insert_sorted(row, 1, perm_table_get((int)st->stack_vals[1], p));
+                    row_insert_sorted(row, 1, stack_perm_rows[1][p]);
                     /* fall through */
                 case 2:
-                    row_insert_sorted(row, 2, perm_table_get((int)st->stack_vals[2], p));
+                    row_insert_sorted(row, 2, stack_perm_rows[2][p]);
                     /* fall through */
                 case 3:
-                    row_insert_sorted(row, 3, perm_table_get((int)st->stack_vals[3], p));
+                    row_insert_sorted(row, 3, stack_perm_rows[3][p]);
                     /* fall through */
                 default:
                     break;
@@ -1369,13 +1370,13 @@ static inline void canon_materialize_row(const CanonState* st, CanonScratch* scr
         case 3:
             switch (len) {
                 case 0:
-                    row_insert_sorted(row, 0, perm_table_get((int)st->stack_vals[0], p));
+                    row_insert_sorted(row, 0, stack_perm_rows[0][p]);
                     /* fall through */
                 case 1:
-                    row_insert_sorted(row, 1, perm_table_get((int)st->stack_vals[1], p));
+                    row_insert_sorted(row, 1, stack_perm_rows[1][p]);
                     /* fall through */
                 case 2:
-                    row_insert_sorted(row, 2, perm_table_get((int)st->stack_vals[2], p));
+                    row_insert_sorted(row, 2, stack_perm_rows[2][p]);
                     /* fall through */
                 default:
                     break;
@@ -1384,10 +1385,10 @@ static inline void canon_materialize_row(const CanonState* st, CanonScratch* scr
         case 2:
             switch (len) {
                 case 0:
-                    row_insert_sorted(row, 0, perm_table_get((int)st->stack_vals[0], p));
+                    row_insert_sorted(row, 0, stack_perm_rows[0][p]);
                     /* fall through */
                 case 1:
-                    row_insert_sorted(row, 1, perm_table_get((int)st->stack_vals[1], p));
+                    row_insert_sorted(row, 1, stack_perm_rows[1][p]);
                     /* fall through */
                 default:
                     break;
@@ -1395,12 +1396,12 @@ static inline void canon_materialize_row(const CanonState* st, CanonScratch* scr
             break;
         case 1:
             if (len == 0) {
-                row_insert_sorted(row, 0, perm_table_get((int)st->stack_vals[0], p));
+                row_insert_sorted(row, 0, stack_perm_rows[0][p]);
             }
             break;
         default:
             for (int t = len; t < depth; t++) {
-                row_insert_sorted(row, t, perm_table_get((int)st->stack_vals[t], p));
+                row_insert_sorted(row, t, stack_perm_rows[t][p]);
             }
             break;
     }
@@ -1481,11 +1482,17 @@ int canon_state_prepare_push(const CanonState* st, int partition_id, CanonScratc
     int new_depth = depth + 1;
     int stabilizer = 0;
     uint16_t pid = (uint16_t)partition_id;
+    const uint16_t* partition_perm_row =
+        perm_table + (size_t)partition_id * (size_t)perm_count;
+    const uint16_t* stack_perm_rows[MAX_COLS] = {0};
+    for (int t = 0; t < depth; t++) {
+        stack_perm_rows[t] = perm_table + (size_t)st->stack_vals[t] * (size_t)perm_count;
+    }
     scratch->active_count = 0;
     scratch->changed_first_greater_count = 0;
 
     for (int p = 0; p < st->limit; p++) {
-        uint16_t val = perm_table_get(partition_id, p);
+        uint16_t val = partition_perm_row[p];
         int g = st->first_greater[p];
         const uint16_t* transformed_row = canon_state_row_const(st, p);
         if (g < depth && st->materialized_len[p] > g && val >= transformed_row[g]) {
@@ -1493,7 +1500,7 @@ int canon_state_prepare_push(const CanonState* st, int partition_id, CanonScratc
         }
 
         int len = st->materialized_len[p];
-        canon_materialize_row(st, scratch, p, depth, len);
+        canon_materialize_row(st, scratch, p, depth, len, stack_perm_rows);
         uint16_t* row = canon_scratch_prepared_row(scratch, p);
         row_insert_sorted(row, depth, val);
         int first_greater = canon_row_compare(st, row, depth, pid);
