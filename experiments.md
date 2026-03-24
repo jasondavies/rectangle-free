@@ -481,3 +481,28 @@
   - experiment `Worker Complete 4.38s`, `Total elapsed 6.14s`
 - Interpretation: this is the first successful post-prefix optimisation to attack the main symmetry hotspot directly. Unlike the rejected schedule and hot-set experiments, it reduces actual work in the active-permutation path instead of adding control overhead, and the gain carries through cleanly to 32-thread runs.
 - Outcome: accepted.
+
+### Experiment 26: Hand-specialise lexicographic row comparison in `CanonState`
+- Goal: keep pushing on the same `canon_state_prepare_push()` hotspot by replacing the tiny generic row-versus-stack comparison loop with hand-specialised cases for depths `1..6`.
+- Change:
+  - added a `canon_row_compare()` helper with unrolled comparisons against `stack_vals` and the candidate partition id
+  - kept a generic fallback only for unreachable longer depths
+- One-thread benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235 --profile`
+- Baseline from accepted code:
+  - `Prefix generation 1.73s`
+  - `Worker Complete 15.17s`
+  - `canon_state_prepare_push 9.204s`
+- Experiment result:
+  - `Prefix generation 1.70s`
+  - `Worker Complete 14.59s`
+  - `canon_state_prepare_push 8.615s`
+- Matching 32-thread benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235`
+- 32-thread `partition_poly_7` result:
+  - baseline `Worker Complete 4.04s`, `Total elapsed 5.79s`
+  - experiment `Worker Complete 3.88s`, `Total elapsed 5.56s`
+- Matching generic benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235`
+- Generic result:
+  - baseline `Worker Complete 4.38s`, `Total elapsed 6.14s`
+  - experiment `Worker Complete 4.25s`, `Total elapsed 5.95s`
+- Interpretation: this is the same successful pattern as Experiment 25. The compare loop is on the hot active-permutation path, so shaving branchy tiny-loop overhead there translates into real single-thread and 32-thread gains without changing the search space.
+- Outcome: accepted.

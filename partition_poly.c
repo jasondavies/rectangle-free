@@ -1231,6 +1231,72 @@ static inline int row_insert_sorted(uint16_t* row, int len, uint16_t val) {
     }
 }
 
+static inline int canon_row_compare(const CanonState* st, const uint16_t* row, int depth, uint16_t pid) {
+    switch (depth + 1) {
+        case 1:
+            if (row[0] < pid) return -1;
+            if (row[0] > pid) return 0;
+            return 1;
+        case 2:
+            if (row[0] < st->stack_vals[0]) return -1;
+            if (row[0] > st->stack_vals[0]) return 0;
+            if (row[1] < pid) return -1;
+            if (row[1] > pid) return 1;
+            return 2;
+        case 3:
+            if (row[0] < st->stack_vals[0]) return -1;
+            if (row[0] > st->stack_vals[0]) return 0;
+            if (row[1] < st->stack_vals[1]) return -1;
+            if (row[1] > st->stack_vals[1]) return 1;
+            if (row[2] < pid) return -1;
+            if (row[2] > pid) return 2;
+            return 3;
+        case 4:
+            if (row[0] < st->stack_vals[0]) return -1;
+            if (row[0] > st->stack_vals[0]) return 0;
+            if (row[1] < st->stack_vals[1]) return -1;
+            if (row[1] > st->stack_vals[1]) return 1;
+            if (row[2] < st->stack_vals[2]) return -1;
+            if (row[2] > st->stack_vals[2]) return 2;
+            if (row[3] < pid) return -1;
+            if (row[3] > pid) return 3;
+            return 4;
+        case 5:
+            if (row[0] < st->stack_vals[0]) return -1;
+            if (row[0] > st->stack_vals[0]) return 0;
+            if (row[1] < st->stack_vals[1]) return -1;
+            if (row[1] > st->stack_vals[1]) return 1;
+            if (row[2] < st->stack_vals[2]) return -1;
+            if (row[2] > st->stack_vals[2]) return 2;
+            if (row[3] < st->stack_vals[3]) return -1;
+            if (row[3] > st->stack_vals[3]) return 3;
+            if (row[4] < pid) return -1;
+            if (row[4] > pid) return 4;
+            return 5;
+        case 6:
+            if (row[0] < st->stack_vals[0]) return -1;
+            if (row[0] > st->stack_vals[0]) return 0;
+            if (row[1] < st->stack_vals[1]) return -1;
+            if (row[1] > st->stack_vals[1]) return 1;
+            if (row[2] < st->stack_vals[2]) return -1;
+            if (row[2] > st->stack_vals[2]) return 2;
+            if (row[3] < st->stack_vals[3]) return -1;
+            if (row[3] > st->stack_vals[3]) return 3;
+            if (row[4] < st->stack_vals[4]) return -1;
+            if (row[4] > st->stack_vals[4]) return 4;
+            if (row[5] < pid) return -1;
+            if (row[5] > pid) return 5;
+            return 6;
+        default:
+            for (int k = 0; k <= depth; k++) {
+                uint16_t sv = (k < depth) ? st->stack_vals[k] : pid;
+                if (row[k] < sv) return -1;
+                if (row[k] > sv) return k;
+            }
+            return depth + 1;
+    }
+}
+
 static void canon_state_init(CanonState* st, int limit) {
     memset(st, 0, sizeof(*st));
     st->limit = limit;
@@ -1326,17 +1392,8 @@ int canon_state_prepare_push(const CanonState* st, int partition_id, CanonScratc
             row_insert_sorted(row, t, perm_table_get((int)st->stack_vals[t], p));
         }
         row_insert_sorted(row, depth, val);
-        int first_greater = new_depth;
-        for (int k = 0; k < new_depth; k++) {
-            int sv = (k < depth) ? st->stack_vals[k] : (int)pid;
-            if (row[k] < sv) {
-                return 0;
-            }
-            if (row[k] > sv) {
-                first_greater = k;
-                break;
-            }
-        }
+        int first_greater = canon_row_compare(st, row, depth, pid);
+        if (first_greater < 0) return 0;
         if (first_greater == new_depth) {
             stabilizer++;
         }
