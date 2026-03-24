@@ -162,6 +162,8 @@ static int max_complex_per_partition = 0;
 static Partition* partitions = NULL;
 static int (*perms)[MAX_ROWS] = NULL;
 static uint16_t* perm_table = NULL;
+static uint16_t* partition_id_lookup = NULL;
+static uint32_t partition_id_lookup_size = 0;
 static uint64_t factorial[20];
 static uint32_t* overlap_mask = NULL;
 static uint32_t* intra_mask = NULL;
@@ -347,8 +349,13 @@ static void init_row_dependent_tables(void) {
 
 static void init_partition_lookup_tables(void) {
     size_t partition_count = (size_t)num_partitions;
+    partition_id_lookup_size = 1u << (3 * g_rows);
 
     perm_table = checked_calloc(partition_count * (size_t)perm_count, sizeof(*perm_table), "perm_table");
+    partition_id_lookup =
+        checked_aligned_alloc(64, (size_t)partition_id_lookup_size * sizeof(*partition_id_lookup),
+                              "partition_id_lookup");
+    memset(partition_id_lookup, 0xff, (size_t)partition_id_lookup_size * sizeof(*partition_id_lookup));
     overlap_mask = checked_calloc(partition_count * partition_count * (size_t)max_complex_per_partition,
                                   sizeof(*overlap_mask), "overlap_mask");
     intra_mask = checked_calloc(partition_count * (size_t)max_complex_per_partition,
@@ -361,6 +368,7 @@ static void free_row_dependent_tables(void) {
     free(partitions);
     free(perms);
     free(perm_table);
+    free(partition_id_lookup);
     free(overlap_mask);
     free(intra_mask);
     free(partition_weight_poly);
@@ -368,6 +376,8 @@ static void free_row_dependent_tables(void) {
     partitions = NULL;
     perms = NULL;
     perm_table = NULL;
+    partition_id_lookup = NULL;
+    partition_id_lookup_size = 0;
     overlap_mask = NULL;
     intra_mask = NULL;
     partition_weight_poly = NULL;
@@ -914,10 +924,23 @@ void generate_partitions_recursive(int idx, uint8_t* current, int max_val) {
 }
 
 int get_partition_id(uint8_t* map) {
-    for (int i = 0; i < num_partitions; i++) {
-        if (memcmp(partitions[i].mapping, map, g_rows) == 0) return i;
+    uint32_t key = 0;
+    for (int i = 0; i < g_rows; i++) {
+        key |= (uint32_t)map[i] << (3 * i);
     }
-    return -1;
+    if (key >= partition_id_lookup_size) return -1;
+    uint16_t val = partition_id_lookup[key];
+    return (val == UINT16_MAX) ? -1 : (int)val;
+}
+
+static void build_partition_id_lookup(void) {
+    for (int id = 0; id < num_partitions; id++) {
+        uint32_t key = 0;
+        for (int i = 0; i < g_rows; i++) {
+            key |= (uint32_t)partitions[id].mapping[i] << (3 * i);
+        }
+        partition_id_lookup[key] = (uint16_t)id;
+    }
 }
 
 void build_perm_table() {
@@ -1938,6 +1961,7 @@ int main(int argc, char** argv) {
     
     // 3. Build lookup tables
     init_partition_lookup_tables();
+    build_partition_id_lookup();
     build_perm_table();
     build_overlap_table();
     build_partition_weight_table();

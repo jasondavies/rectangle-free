@@ -116,3 +116,24 @@
 - Memory impact: for `7x7`, each graph-cache slot now stores `22` coefficients instead of `50`, a `56%` reduction in coefficient-slab footprint for both the canonical and raw per-thread caches.
 - Interpretation: this is the right structural baseline for `7x7`. It removes the bad default depth-3 route, cuts a large chunk of per-thread cache memory, and avoids wasting nauty work on disconnected conflict graphs. I could not take a clean 32-thread timing on this batch because the host was already saturated by another long-running 32-thread solver job, so the throughput comparison is deferred to a later experiment.
 - Outcome: accepted.
+
+### Experiment 10: Replace linear `get_partition_id()` scans with a dense restricted-growth lookup
+- Goal: remove the startup bottleneck in `build_perm_table()`, which runs once per shard and gets more painful as we overshard `7x7`.
+- Change:
+  - encode each normalised partition mapping in `3 * g_rows` bits
+  - build a dense lookup table from encoded restricted-growth strings to partition ids
+  - replace `get_partition_id()`'s linear `memcmp` scan with the direct table probe
+- Benchmark method:
+  - built a baseline binary from commit `ecec393`
+  - compared repeated startup-only launches with `OMP_NUM_THREADS=1` and `7 7 --task-end 0`, redirecting normal program output to `/dev/null`
+- Baseline command: `/usr/bin/time -f '%e' bash -lc 'for i in $(seq 1 10); do env OMP_NUM_THREADS=1 /tmp/partition_poly_exp9 7 7 --task-end 0 >/dev/null; done'`
+- Baseline result: `79.08s`
+- Experiment command: `/usr/bin/time -f '%e' bash -lc 'for i in $(seq 1 10); do env OMP_NUM_THREADS=1 ./partition_poly 7 7 --task-end 0 >/dev/null; done'`
+- Experiment result: `1.11s`
+- Verification command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly 7 2 --task-end 200 --prefix-depth 2`
+- Verification result: unchanged smoke-test polynomial
+  - `P(x) = 280*x^6 - 2590*x^5 + 9562*x^4 - 17262*x^3 + 15037*x^2 - 5027*x`
+  - `P(4) = 58308`
+  - `P(5) = 450540`
+- Interpretation: the old permutation-table build was dominated by repeated linear scans over the `877` partitions. For `7` rows, making that lookup O(1) cuts startup by about `71x` on this benchmark. That is exactly the kind of win that matters for a sharded cluster run, where table-generation cost gets paid once per process.
+- Outcome: accepted.
