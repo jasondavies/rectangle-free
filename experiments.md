@@ -137,3 +137,66 @@
   - `P(5) = 450540`
 - Interpretation: the old permutation-table build was dominated by repeated linear scans over the `877` partitions. For `7` rows, making that lookup O(1) cuts startup by about `71x` on this benchmark. That is exactly the kind of win that matters for a sharded cluster run, where table-generation cost gets paid once per process.
 - Outcome: accepted.
+
+### Experiment 11: Unrank non-adaptive depth-2 prefixes instead of storing `(i,j)` arrays
+- Goal: remove the `2.94 MiB` depth-2 prefix arrays from the common non-adaptive `7x7` path and replace them with a tiny row-offset index.
+- Change:
+  - built a small prefix-row offset table
+  - recovered `(i,j)` from the task index at runtime instead of materialising all depth-2 pairs up front
+- Benchmark method:
+  - built a baseline binary from commit `d9f0b68`
+  - compared repeated startup-only launches with `OMP_NUM_THREADS=1` and `7 7 --task-end 0`
+- Baseline command: `/usr/bin/time -f '%e' bash -lc 'for i in $(seq 1 10); do env OMP_NUM_THREADS=1 /tmp/partition_poly_exp10 7 7 --task-end 0 >/dev/null; done'`
+- Baseline result: `1.13s`
+- Experiment command: `/usr/bin/time -f '%e' bash -lc 'for i in $(seq 1 10); do env OMP_NUM_THREADS=1 ./partition_poly 7 7 --task-end 0 >/dev/null; done'`
+- Experiment result: `1.19s`
+- Interpretation: this does save a small allocation, but the allocation is only about `2.94 MiB` and the extra unranking machinery did not pay back its complexity on the measured startup path. Since the result was slightly slower and this is not a material memory problem after forcing `7x7` to depth `2`, the change is not worth keeping.
+- Outcome: rejected and reverted.
+
+### Experiment 12: Pick deletion-contraction edges by triangle density
+- Goal: improve the graph solver by replacing the very basic branch-edge choice with a more graph-aware heuristic.
+- Change:
+  - scored every edge by common-neighbour count first
+  - broke ties by degree sum and then max endpoint degree
+- Benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235 --profile`
+- Baseline from accepted code:
+  - `Worker Complete`: `24.14s`
+  - `solve_graph_poly`: `4.565s`
+  - `Canonicalisation calls`: `234559`
+- Experiment result:
+  - `Worker Complete`: `24.89s`
+  - `solve_graph_poly`: `7.906s`
+  - `Canonicalisation calls`: `352133`
+- Interpretation: this heuristic makes the solver tree worse on the sampled `7x5` workload. It drives many more canonicalisations and increases graph-solver time substantially, overwhelming any benefit from the more expensive edge choice. The simple max-degree endpoint heuristic is better here.
+- Outcome: rejected and reverted.
+
+### Experiment 13: Let `commit_push` consume the prepared active-permutation lists
+- Goal: cut symmetry-front-end overhead without changing the search tree, by stopping `canon_state_commit_push()` from rescanning all `5040` permutations after `prepare_push()` has already identified the active and changed ones.
+- Change:
+  - extended `CanonScratch` with explicit `active_idx` and `changed_first_greater_idx` lists
+  - filled those lists during `canon_state_prepare_push()`
+  - rewrote `canon_state_commit_push()` to update only the listed permutations instead of looping over the full permutation table
+- One-thread benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235 --profile`
+- Baseline from accepted code:
+  - `Prefix generation`: `4.93s`
+  - `Worker Complete`: `24.14s`
+  - `canon_state_prepare_push`: `13.943s`
+  - `canon_state_commit_push`: `6.434s`
+  - `solve_graph_poly`: `4.565s`
+- Experiment result:
+  - `Prefix generation`: `3.96s`
+  - `Worker Complete`: `18.12s`
+  - `canon_state_prepare_push`: `11.534s`
+  - `canon_state_commit_push`: `2.882s`
+  - `solve_graph_poly`: `4.519s`
+- Matching 32-thread benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235`
+- 32-thread result:
+  - baseline `Worker Complete`: `6.41s`, `Total elapsed`: `11.31s`
+  - experiment `Worker Complete`: `5.07s`, `Total elapsed`: `9.05s`
+- Verification command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly 7 2 --task-end 200 --prefix-depth 2`
+- Verification result: unchanged smoke-test polynomial
+  - `P(x) = 280*x^6 - 2590*x^5 + 9562*x^4 - 17262*x^3 + 15037*x^2 - 5027*x`
+  - `P(4) = 58308`
+  - `P(5) = 450540`
+- Interpretation: this is a strong data-structure win. The hot path was paying twice: once in `prepare_push()` to discover active permutations, then again in `commit_push()` to rescan the full permutation set. Reusing the prepared active/change lists removes a large chunk of that wasted work and materially improves both single-thread throughput and 32-thread runtime on the sampled `7x5` workload.
+- Outcome: accepted.
