@@ -399,3 +399,85 @@
   - `Total elapsed 7.20s`
 - Interpretation: this is a clean memory win with essentially flat runtime on the sampled workload. For `7x7` sharded runs, halving the prefix-task footprint is useful even when throughput stays the same, because prefix generation is paid by every shard and the smaller arrays are friendlier to cache and NUMA pressure.
 - Outcome: accepted.
+
+### Experiment 22: Try `guided,1` scheduling for adaptive 7-row work
+- Goal: test whether `guided,1` scheduling improves balance for the uneven adaptive `7x5` shard mix.
+- Change:
+  - temporarily switched the default OpenMP runtime schedule from `dynamic,1` to `guided,1` when `g_rows == 7` and adaptive subdivision is enabled
+- Benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235`
+- Baseline from accepted code:
+  - `Worker Complete 4.63s`
+  - `Total elapsed 6.60s`
+- Experiment result:
+  - `Worker Complete 8.25s`
+  - `Total elapsed 10.28s`
+- Interpretation: `guided,1` is a hard regression on this workload. The adaptive task sizes are uneven enough that the front-loaded guided chunks cause materially worse balance than plain `dynamic,1`.
+- Outcome: rejected and reverted.
+
+### Experiment 23: Retune the 7-row raw exact-cache size
+- Goal: test whether changing the per-thread raw labelled-graph cache size can beat the current `RAW_CACHE_BITS=13` setting in the 7-row-specific build.
+- Method:
+  - compiled temporary `partition_poly_7` variants with `RAW_CACHE_BITS=12`, `11`, and `14`
+  - kept the accepted `CACHE_BITS=17` canonical cache setting fixed
+- Benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 /tmp/partition_poly_7_rawXX 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235`
+- Baseline from accepted code:
+  - `Worker Complete 4.63s`
+  - `Total elapsed 6.60s`
+  - `Raw cache hits 378796`
+- `RAW_CACHE_BITS=12` result:
+  - `Worker Complete 4.82s`
+  - `Total elapsed 6.85s`
+  - `Raw cache hits 368723`
+- `RAW_CACHE_BITS=11` result:
+  - `Worker Complete 4.85s`
+  - `Total elapsed 6.85s`
+  - `Raw cache hits 357869`
+- `RAW_CACHE_BITS=14` result:
+  - `Worker Complete 4.76s`
+  - `Total elapsed 6.76s`
+  - `Raw cache hits 387001`
+- Interpretation: the current `RAW_CACHE_BITS=13` setting is already near the local optimum for the sampled `7x5` workload. Smaller raw caches lose too many exact-cache hits, while a larger raw cache recovers some hits but still loses overall on locality and footprint.
+- Outcome: rejected; keep `RAW_CACHE_BITS=13`.
+
+### Experiment 24: Scan the previous sibling’s hot permutation set first
+- Goal: reduce average `canon_state_prepare_push()` rejection cost by scanning the previous sibling’s active permutation set before the full permutation range.
+- Change:
+  - added per-depth scratch state to remember the previous active set
+  - tried that remembered set first in the next `prepare_push()` call at the same depth
+- One-thread benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235 --profile`
+- Baseline from accepted code:
+  - `Prefix generation 2.00s`
+  - `Worker Complete 17.62s`
+  - `canon_state_prepare_push 11.623s`
+- Experiment result:
+  - `Prefix generation 2.33s`
+  - `Worker Complete 20.98s`
+  - `canon_state_prepare_push 15.010s`
+- Interpretation: the extra seed-tracking and marking overhead costs more than any earlier rejection wins. This confirms that `prepare_push()` is sensitive to bookkeeping overhead; optimisations here need to reduce actual per-permutation work, not add another layer of metadata.
+- Outcome: rejected and reverted.
+
+### Experiment 25: Hand-specialise sorted row insertion in `CanonState`
+- Goal: cut the per-active-permutation cost in `canon_state_prepare_push()` by replacing the tiny generic insertion loop with hand-specialised cases for row lengths `0..5`.
+- Change:
+  - rewrote `row_insert_sorted()` as a switch with unrolled insertion paths for the small row lengths that occur in practice
+  - kept a generic fallback only for longer lengths, which are unreachable for the current `7xn` path
+  - also added profile-only counters for scanned versus active permutations by depth to help steer later work
+- One-thread benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235 --profile`
+- Baseline from accepted code:
+  - `Prefix generation 2.00s`
+  - `Worker Complete 17.62s`
+  - `canon_state_prepare_push 11.623s`
+- Experiment result:
+  - `Prefix generation 1.73s`
+  - `Worker Complete 15.17s`
+  - `canon_state_prepare_push 9.204s`
+- Matching 32-thread benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235`
+- 32-thread `partition_poly_7` result:
+  - baseline `Worker Complete 4.63s`, `Total elapsed 6.60s`
+  - experiment `Worker Complete 4.04s`, `Total elapsed 5.79s`
+- Matching generic benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235`
+- Generic result:
+  - baseline `Worker Complete 5.13s`, `Total elapsed 7.20s`
+  - experiment `Worker Complete 4.38s`, `Total elapsed 6.14s`
+- Interpretation: this is the first successful post-prefix optimisation to attack the main symmetry hotspot directly. Unlike the rejected schedule and hot-set experiments, it reduces actual work in the active-permutation path instead of adding control overhead, and the gain carries through cleanly to 32-thread runs.
+- Outcome: accepted.

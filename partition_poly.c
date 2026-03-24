@@ -144,6 +144,8 @@ typedef struct {
     long long canon_prepare_calls_by_depth[MAX_COLS + 1];
     long long canon_prepare_accepts_by_depth[MAX_COLS + 1];
     long long stabilizer_sum_by_depth[MAX_COLS + 1];
+    long long canon_prepare_scanned_by_depth[MAX_COLS + 1];
+    long long canon_prepare_active_by_depth[MAX_COLS + 1];
     double canon_prepare_time;
     double canon_commit_time;
     double partial_append_time;
@@ -199,6 +201,7 @@ static int g_adaptive_subdivide = 0;
 static int g_adaptive_threshold = 128;
 static int g_adaptive_max_depth = 3;
 static int g_profile = 0;
+static __thread ProfileStats* tls_profile = NULL;
 
 static inline uint16_t perm_table_get(int partition_id, int perm_id) {
     return perm_table[(size_t)partition_id * (size_t)perm_count + (size_t)perm_id];
@@ -1124,11 +1127,108 @@ static inline const uint16_t* canon_scratch_prepared_row_const(const CanonScratc
 }
 
 static inline int row_insert_sorted(uint16_t* row, int len, uint16_t val) {
-    int j = len;
-    while (j > 0 && row[j - 1] > val) j--;
-    for (int k = len; k > j; k--) row[k] = row[k - 1];
-    row[j] = val;
-    return j;
+    switch (len) {
+        case 0:
+            row[0] = val;
+            return 0;
+        case 1:
+            if (row[0] > val) {
+                row[1] = row[0];
+                row[0] = val;
+                return 0;
+            }
+            row[1] = val;
+            return 1;
+        case 2:
+            if (row[1] > val) {
+                row[2] = row[1];
+                if (row[0] > val) {
+                    row[1] = row[0];
+                    row[0] = val;
+                    return 0;
+                }
+                row[1] = val;
+                return 1;
+            }
+            row[2] = val;
+            return 2;
+        case 3:
+            if (row[2] > val) {
+                row[3] = row[2];
+                if (row[1] > val) {
+                    row[2] = row[1];
+                    if (row[0] > val) {
+                        row[1] = row[0];
+                        row[0] = val;
+                        return 0;
+                    }
+                    row[1] = val;
+                    return 1;
+                }
+                row[2] = val;
+                return 2;
+            }
+            row[3] = val;
+            return 3;
+        case 4:
+            if (row[3] > val) {
+                row[4] = row[3];
+                if (row[2] > val) {
+                    row[3] = row[2];
+                    if (row[1] > val) {
+                        row[2] = row[1];
+                        if (row[0] > val) {
+                            row[1] = row[0];
+                            row[0] = val;
+                            return 0;
+                        }
+                        row[1] = val;
+                        return 1;
+                    }
+                    row[2] = val;
+                    return 2;
+                }
+                row[3] = val;
+                return 3;
+            }
+            row[4] = val;
+            return 4;
+        case 5:
+            if (row[4] > val) {
+                row[5] = row[4];
+                if (row[3] > val) {
+                    row[4] = row[3];
+                    if (row[2] > val) {
+                        row[3] = row[2];
+                        if (row[1] > val) {
+                            row[2] = row[1];
+                            if (row[0] > val) {
+                                row[1] = row[0];
+                                row[0] = val;
+                                return 0;
+                            }
+                            row[1] = val;
+                            return 1;
+                        }
+                        row[2] = val;
+                        return 2;
+                    }
+                    row[3] = val;
+                    return 3;
+                }
+                row[4] = val;
+                return 4;
+            }
+            row[5] = val;
+            return 5;
+        default: {
+            int j = len;
+            while (j > 0 && row[j - 1] > val) j--;
+            for (int k = len; k > j; k--) row[k] = row[k - 1];
+            row[j] = val;
+            return j;
+        }
+    }
 }
 
 static void canon_state_init(CanonState* st, int limit) {
@@ -1245,6 +1345,10 @@ int canon_state_prepare_push(const CanonState* st, int partition_id, CanonScratc
         if (st->first_greater[p] != first_greater) {
             scratch->changed_first_greater_idx[scratch->changed_first_greater_count++] = (uint16_t)p;
         }
+    }
+    if (g_profile && tls_profile) {
+        tls_profile->canon_prepare_scanned_by_depth[depth] += st->limit;
+        tls_profile->canon_prepare_active_by_depth[depth] += scratch->active_count;
     }
     *next_stabilizer = stabilizer;
     return 1;
@@ -2331,6 +2435,7 @@ int main(int argc, char** argv) {
         ProfileStats* profile = &thread_profiles[tid];
         TaskTimingStats* task_timing = &thread_task_timing[tid];
         long long pending_completed = 0;
+        tls_profile = profile;
         
         if (g_cols == 1) {
             // Original 1-column parallelism (nothing to prefix)
@@ -2706,6 +2811,7 @@ int main(int argc, char** argv) {
         }
 
         flush_completed_tasks(total_tasks, progress_report_step, start_time, &pending_completed);
+        tls_profile = NULL;
         
         total_canon_calls += local_canon_calls;
         total_cache_hits += local_cache_hits;
@@ -2749,6 +2855,8 @@ int main(int argc, char** argv) {
             total_profile.canon_prepare_calls_by_depth[d] += src->canon_prepare_calls_by_depth[d];
             total_profile.canon_prepare_accepts_by_depth[d] += src->canon_prepare_accepts_by_depth[d];
             total_profile.stabilizer_sum_by_depth[d] += src->stabilizer_sum_by_depth[d];
+            total_profile.canon_prepare_scanned_by_depth[d] += src->canon_prepare_scanned_by_depth[d];
+            total_profile.canon_prepare_active_by_depth[d] += src->canon_prepare_active_by_depth[d];
         }
 
         total_task_timing.task_count += thread_task_timing[i].task_count;
@@ -2809,8 +2917,17 @@ int main(int argc, char** argv) {
             double accept_rate = 100.0 * (double)accepts / (double)calls;
             double avg_stabilizer =
                 accepts > 0 ? (double)total_profile.stabilizer_sum_by_depth[d] / (double)accepts : 0.0;
-            printf("    depth %d: prepare %lld, accept %lld (%.1f%%), avg stabiliser %.1f\n",
-                   d, calls, accepts, accept_rate, avg_stabilizer);
+            double avg_scanned =
+                calls > 0 ? (double)total_profile.canon_prepare_scanned_by_depth[d] / (double)calls : 0.0;
+            double avg_active =
+                calls > 0 ? (double)total_profile.canon_prepare_active_by_depth[d] / (double)calls : 0.0;
+            double active_rate =
+                total_profile.canon_prepare_scanned_by_depth[d] > 0
+                    ? 100.0 * (double)total_profile.canon_prepare_active_by_depth[d] /
+                          (double)total_profile.canon_prepare_scanned_by_depth[d]
+                    : 0.0;
+            printf("    depth %d: prepare %lld, accept %lld (%.1f%%), avg stabiliser %.1f, avg active %.1f/%.0f (%.1f%%)\n",
+                   d, calls, accepts, accept_rate, avg_stabilizer, avg_active, avg_scanned, active_rate);
         }
         if (total_task_timing.task_count > 0) {
             printf("  Task timings: %lld tasks, avg %.6fs, max %.6fs (task %lld)\n",
