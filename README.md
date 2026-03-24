@@ -35,11 +35,9 @@ algorithmic experiments. The important distinction is:
 
 ### Small-width Python scripts
 
-- `2xn_count4.py`
-  Closed form for `T_4(2, n)`.
-
-- `3xn_count4.py`
-  Closed-form evaluation for `T_4(3, n)` using precomputed coefficients.
+- `count4.py`
+  Small dispatcher for exact `k = 4` counts in the easy cases. It currently
+  handles `T_4(2, n)` and `T_4(3, n)`.
 
 - `4xn_count4.py`
   Weighted set-packing DP on row-pair masks for `T_4(4, n)`.
@@ -149,8 +147,8 @@ In practice, that division is useful:
 Each Python file is a standalone script. Examples:
 
 ```bash
-python3 2xn_count4.py
-python3 3xn_count4.py
+python3 count4.py 2
+python3 count4.py 3
 python3 4xn_count4.py
 ```
 
