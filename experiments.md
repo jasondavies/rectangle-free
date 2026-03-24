@@ -66,3 +66,21 @@
   - Result: unchanged polynomial on the smoke test.
 - Interpretation: this is a real memory optimisation and a prerequisite for more aggressive adaptive prefixing. It does not change the current task list or output, but it removes a very large avoidable allocation from the `7x5+` adaptive path.
 - Outcome: accepted.
+
+### Experiment 6: Adaptive depth-4 splitting from `prefix-depth 2`
+- Goal: break the remaining heavy adaptive tasks down one level further without materialising the full depth-4 space.
+- Change: extended adaptive subdivision so a depth-2 prefix could expand to depth-3 children and then selectively to depth-4 grandchildren.
+- Probe command: `OMP_NUM_THREADS=1 ./partition_poly 7 5 --task-end 0 --prefix-depth 2 --adaptive-subdivide --adaptive-max-depth 4`
+- Result: rejected before full benchmarking. Prefix generation alone stayed busy for well over `50s` without finishing, which is already too expensive for the intended use.
+- Interpretation: the extra branching factor at depth 4 overwhelms the cheap-task advantage. If we revisit deeper adaptive splitting later, it will need a much sharper heavy-prefix predictor or a cheaper counting pass than the naïve recursive expansion attempted here.
+- Outcome: rejected and reverted.
+
+### Experiment 7: Use `dynamic,1` for adaptive `prefix-depth 2`
+- Goal: improve 32-core utilisation once adaptive subdivision turns a few huge depth-2 tasks into a modest number of uneven depth-3 tasks.
+- Change: switched adaptive `prefix-depth 2` scheduling from `dynamic,8` to `dynamic,1`, while leaving the non-adaptive depth-2 path at `dynamic,8`.
+- Benchmark command: `OMP_NUM_THREADS=32 ./partition_poly 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235`
+- Result: strong win on the same sampled adaptive workload.
+  - Before: `Worker Complete 17.41s`, `Total 22.29s`
+  - After: `Worker Complete 6.55s`, `Total 11.45s`
+- Interpretation: chunk size `8` was starving the scheduler on this kind of irregular adaptive workload. Once each adaptive task became its own schedulable unit, 32-thread execution improved by about `2.66x` in the worker phase and about `1.95x` overall, with identical polynomial output.
+- Outcome: accepted.

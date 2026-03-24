@@ -1785,11 +1785,9 @@ static long long append_adaptive_children_for_prefix2(CanonState* canon_state, C
         canon_state_commit_push(canon_state, k, canon_scratch, next_stabilizer);
         PartialGraphState prefix_graph2 = prefix_graph;
         if (partial_graph_append(&prefix_graph2, 2, k, stack)) {
-            if (out_i) {
-                out_i[out_idx + count] = i;
-                out_j[out_idx + count] = j;
-                out_k[out_idx + count] = k;
-            }
+            if (out_i) out_i[out_idx + count] = i;
+            if (out_j) out_j[out_idx + count] = j;
+            if (out_k) out_k[out_idx + count] = k;
             count++;
         }
         canon_state_pop(canon_state);
@@ -2157,7 +2155,7 @@ int main(int argc, char** argv) {
         (omp_static_env && *omp_static_env && strcmp(omp_static_env, "0") != 0);
     int omp_chunk = 1;
     if (!use_static_schedule) {
-        omp_chunk = (prefix_depth == 2) ? 8 : 1;
+        omp_chunk = (prefix_depth == 2 && !g_adaptive_subdivide) ? 8 : 1;
     }
     if (use_static_schedule) {
         printf("OpenMP scheduling: static,1 (RECT_OMP_STATIC override)\n");
