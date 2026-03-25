@@ -2426,7 +2426,7 @@ void get_canonical_graph(Graph* g, Graph* canon, NautyWorkspace* ws, ProfileStat
     int* orbits = ws->orbits;
     
     EMPTYGRAPH(ng, m, n);
-    
+
     // Convert our adjacency representation to nauty format
     for (int i = 0; i < n; i++) {
         for (int j = i + 1; j < n; j++) {
@@ -2471,7 +2471,6 @@ void get_canonical_graph(Graph* g, Graph* canon, NautyWorkspace* ws, ProfileStat
             }
         }
     }
-    
 }
 
 // --- GRAPH SOLVER ---
@@ -3024,6 +3023,7 @@ static int runtime_queue_pop(RuntimeDonateQueue* queue, RuntimeWorkItem* task) {
 }
 
 static void runtime_queue_push(RuntimeDonateQueue* queue, RuntimeWorkItem task) {
+    int outstanding = 0;
     pthread_mutex_lock(&queue->mutex);
     while (queue->count == queue->capacity && !queue->fatal_error) {
         pthread_cond_wait(&queue->cond, &queue->mutex);
@@ -3035,10 +3035,10 @@ static void runtime_queue_push(RuntimeDonateQueue* queue, RuntimeWorkItem task) 
     queue->tasks[queue->tail] = task;
     queue->tail = (queue->tail + 1) % queue->capacity;
     queue->count++;
+    outstanding = atomic_fetch_add_explicit(&queue->outstanding_tasks, 1, memory_order_relaxed) + 1;
+    runtime_queue_note_outstanding(queue, outstanding);
     pthread_cond_broadcast(&queue->cond);
     pthread_mutex_unlock(&queue->mutex);
-    int outstanding = atomic_fetch_add_explicit(&queue->outstanding_tasks, 1, memory_order_relaxed) + 1;
-    runtime_queue_note_outstanding(queue, outstanding);
 }
 
 static void runtime_queue_increment_shard_remaining(RuntimeDonateQueue* queue, int shard_slot) {

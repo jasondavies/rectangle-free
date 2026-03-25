@@ -833,3 +833,158 @@
   - completed successfully and produced the expected polynomial output
 - Interpretation: the wall-clock win on the sampled 32-thread case is small but real, while the one-thread profile shows a much larger reduction in graph-solver time. The out-parameter refactor removes a meaningful amount of `Poly`/`Graph` copy overhead from the recursive solver path without changing results.
 - Outcome: accepted.
+
+### Experiment 41: Pseudo-random eviction within a full cache probe window
+- Goal: avoid deterministic ping-pong eviction in `store_graph_cache_entry()` when all `cache->probe` slots in a linear-probe window are full.
+- Change:
+  - kept the existing first-free-slot insertion policy
+  - when no free slot exists in the probe window, replaced the unconditional overwrite of `cache_idx` with a bounded pseudo-random victim:
+    - `best_slot = (cache_idx + (key_hash % cache->probe)) & cache->mask`
+- 32-thread benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235`
+- Baseline from accepted code:
+  - `Prefix generation 1.36s`
+  - `Worker Complete 2.39s`
+  - `Total elapsed 3.75s`
+  - `Canonicalisation calls 223970`
+  - `Canonical cache hits 111299`
+  - `Raw cache hits 193251`
+- Experiment result:
+  - `Prefix generation 1.31s`
+  - `Worker Complete 2.39s`
+  - `Total elapsed 3.70s`
+  - `Canonicalisation calls 225889`
+  - `Canonical cache hits 113249`
+  - `Raw cache hits 191271`
+- One-thread profile command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235 --profile`
+- One-thread profile result:
+  - `Prefix generation 1.31s`
+  - `Worker Complete 6.88s`
+  - `Total elapsed 8.19s`
+  - `solve_graph_poly 430036 calls, 3.366s`
+  - `Canonicalisation calls 213402`
+  - `Canonical cache hits 109823`
+  - `Raw cache hits 185859`
+- Interpretation: the 32-thread total-time change is just setup-scale noise; worker time is unchanged. The one-thread profile is marginally worse in the graph-solver hot path, so the randomised victim does not show a convincing win on the sampled workload.
+- Outcome: rejected and reverted.
+
+### Experiment 42: Add a Murmur-style avalanche finaliser to `hash_graph()`
+- Goal: improve cache index distribution by mixing the low bits of the existing FNV-1a graph hash more aggressively before the final `hash & cache->mask`.
+- Change:
+  - kept the existing FNV-1a row fold
+  - added a MurmurHash3-style avalanche finaliser immediately before returning:
+    - `h ^= h >> 33`
+    - `h *= 0xff51afd7ed558ccdULL`
+    - `h ^= h >> 33`
+    - `h *= 0xc4ceb9fe1a85ec53ULL`
+    - `h ^= h >> 33`
+- 32-thread benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235`
+- Baseline from accepted code:
+  - `Prefix generation 1.36s`
+  - `Worker Complete 2.39s`
+  - `Total elapsed 3.75s`
+  - `Canonicalisation calls 223970`
+  - `Canonical cache hits 111299`
+  - `Raw cache hits 193251`
+- First experiment result:
+  - `Prefix generation 1.30s`
+  - `Worker Complete 2.34s`
+  - `Total elapsed 3.64s`
+  - `Canonicalisation calls 223984`
+  - `Canonical cache hits 111300`
+  - `Raw cache hits 193269`
+- Repeat 32-thread result:
+  - `Prefix generation 1.33s`
+  - `Worker Complete 2.39s`
+  - `Total elapsed 3.72s`
+- One-thread profile command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235 --profile`
+- One-thread profile result:
+  - `Prefix generation 1.31s`
+  - `Worker Complete 6.86s`
+  - `Total elapsed 8.17s`
+  - `solve_graph_poly 430206 calls, 3.384s`
+  - `Canonicalisation calls 211174`
+  - `Canonical cache hits 107518`
+  - `Raw cache hits 188248`
+- Interpretation: the first 32-thread run looked slightly better, but the repeat run fell back to the baseline worker time. The one-thread profile is flat overall and slightly worse in `solve_graph_poly`, so the avalanche mixer does not show a robust benefit on the sampled workload.
+- Outcome: rejected and reverted.
+
+### Experiment 43: Add a process-wide shared canonical cache behind a read/write lock
+- Goal: capture cross-thread reuse of canonical graph solves after each thread's local canonical and raw caches miss.
+- Change:
+  - added a process-wide canonical `GraphCache`
+  - protected it with a single `pthread_rwlock_t`
+  - enabled it only for multithreaded local runs
+  - lookup order became:
+    - thread-local raw cache
+    - thread-local canonical cache
+    - shared canonical cache
+  - on a shared-cache hit, repopulated the thread-local canonical and raw caches
+  - on a canonical miss that was solved locally, also stored the result into the shared canonical cache
+  - added `Shared cache hits` to the final counters
+- 32-thread benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235`
+- Baseline from accepted code:
+  - `Prefix generation 1.36s`
+  - `Worker Complete 2.39s`
+  - `Total elapsed 3.75s`
+  - `Canonicalisation calls 223970`
+  - `Canonical cache hits 111299`
+  - `Raw cache hits 193251`
+- Experiment result:
+  - `Prefix generation 1.36s`
+  - `Worker Complete 2.51s`
+  - `Total elapsed 3.87s`
+  - `Canonicalisation calls 210287`
+  - `Canonical cache hits 100042`
+  - `Shared cache hits 6753`
+  - `Raw cache hits 188806`
+- Interpretation: the shared cache did find real cross-thread reuse, but the single read/write lock cost more than those hits were worth. Even with thousands of shared hits, the sampled 32-thread worker time regressed noticeably.
+- Outcome: rejected and reverted.
+
+### Experiment 44: Fix runtime-donation queue accounting race
+- Goal: fix the `runtime_queue_push()` ordering bug where a donated task became visible in the queue before `outstanding_tasks` was incremented.
+- Change:
+  - moved the `atomic_fetch_add()` of `outstanding_tasks` into the queue critical section
+  - the donated task is now counted before `pthread_cond_broadcast()` wakes consumers
+  - `runtime_queue_note_outstanding()` now also runs before unlock, so the queue-depth signal cannot lag behind a just-published task
+- 32-thread benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235`
+- Baseline from accepted code:
+  - `Prefix generation 1.36s`
+  - `Worker Complete 2.39s`
+  - `Total elapsed 3.75s`
+- Experiment result:
+  - `Prefix generation 1.36s`
+  - `Worker Complete 2.33s`
+  - `Total elapsed 3.69s`
+- One-thread profile command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235 --profile`
+- One-thread profile result:
+  - `Prefix generation 1.34s`
+  - `Worker Complete 6.88s`
+  - `Total elapsed 8.23s`
+  - `solve_graph_poly 430118 calls, 3.409s`
+- Runtime-donation smoke check:
+  - started a temporary local coordinator on `http://127.0.0.1:3016`
+  - created a `6x3` run with `task_stride=4`
+  - ran:
+    - `OMP_NUM_THREADS=4 ./partition_poly_7 6 3 --prefix-depth 2 --coordinator-url http://127.0.0.1:3016 --worker-id runtime-fix --run-id 1 --runtime-donate --runtime-donate-min-depth 2 --runtime-donate-max-depth 3 --coord-low-watermark 25000 --coord-high-watermark 25032`
+  - result:
+    - `Runtime donation stats: donated=3883, max outstanding=11518`
+    - all 4 shards finished `done`
+    - merged coordinator output matched a direct `OMP_NUM_THREADS=1 ./partition_poly_7 6 3 --prefix-depth 2 --poly-out ...` run exactly
+- Interpretation: this is primarily a correctness fix for the donation scheduler. It does not affect the normal local hot path materially, and the runtime-donation path still behaves correctly end to end after the ordering change.
+- Outcome: accepted.
+
+### Experiment 45: Switch canonicalisation from `densenauty()` to direct `nauty()` with reusable per-thread workspace
+- Goal: lower canonicalisation overhead by replacing `densenauty()` with a direct `nauty()` call using per-thread reusable work buffers, while also replacing the edge-by-edge dense-graph rebuild with direct row assignment from the internal 64-bit adjacency.
+- Change:
+  - extended `NautyWorkspace` with a reusable `set* work` buffer sized like `densenauty()`'s internal workspace
+  - called `nauty()` directly instead of `densenauty()`
+  - converted `Graph -> nauty dense graph` and `cg -> Graph` by direct row assignment instead of nested `ADDONEEDGE` / `ISELEMENT` loops
+  - mirrored `densenauty()`'s temporary `options.digraph` handling for diagonal loops
+- Reproduction command:
+  - `gdb -batch -ex run -ex bt --args ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235 --task-end 8`
+- Result:
+  - reproducible `SIGSEGV` inside nauty:
+    - `permset -> updatecan -> processnode -> ... -> nauty -> get_canonical_graph`
+  - the same fault appeared on the tiny `task-end 8` slice, so this was not a long-run timing artefact
+- Interpretation: the direct `nauty()` conversion is not safe in the current form. The queue-accounting fix is independent and was kept, but the low-level canonicalisation change was reverted.
+- Outcome: rejected and reverted.
