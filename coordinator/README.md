@@ -63,6 +63,31 @@ node coordinator/server.mjs create-run \
   --threads 32
 ```
 
+To bias leasing toward heavier fixed depth-2 prefixes, first collect timing data:
+
+```bash
+OMP_NUM_THREADS=32 ./partition_poly_7 7 7 \
+  --prefix-depth 2 \
+  --profile \
+  --task-times-out /tmp/7x7_task_times.csv
+```
+
+Then seed a weighted run:
+
+```bash
+node coordinator/server.mjs create-run \
+  --db coordinator/coordinator.sqlite \
+  --solver ./partition_poly_7 \
+  --rows 7 \
+  --cols 7 \
+  --prefix-depth 2 \
+  --task-stride 16384 \
+  --threads 32 \
+  --weights-file /tmp/7x7_task_times.csv
+```
+
+The shard protocol is unchanged; the coordinator just leases higher-weight offsets first.
+
 Adaptive runs can be seeded too:
 
 ```bash
@@ -166,6 +191,7 @@ Response when work exists:
     "task_end": 385003,
     "task_stride": 16384,
     "task_offset": 11,
+    "estimated_weight": 42.73,
     "lease_token": "uuid",
     "lease_until": "2026-03-24T12:00:00.000Z",
     "solver": "./partition_poly_7",

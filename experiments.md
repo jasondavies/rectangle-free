@@ -1142,3 +1142,33 @@
   - this is exactly the locality win expected from reusing the depth-1 `i` state across multiple `j` children
   - it only affects the fixed non-adaptive depth-2 path; adaptive and coordinator execution are unchanged
 - Outcome: accepted.
+
+### Experiment 52: Export exact task timings and seed weighted coordinator shards
+- Goal: improve distributed `7x7` balance by capturing real top-level task timings and teaching the coordinator to prefer heavier interleaved offsets first, without changing the existing shard protocol.
+- Implementation:
+  - added `--task-times-out FILE` to `partition_poly` for profiled runs
+  - timing CSV includes exact `task_index`, `elapsed_seconds`, and decoded fixed depth-2 prefixes `(i,j)`
+  - added `--weights-file FILE` to `node coordinator/server.mjs create-run`
+  - per-shard `estimated_weight` is computed from the timing CSV and stored in SQLite
+  - `fetch-work` now leases queued shards by `estimated_weight DESC`
+- Smoke test command:
+  - `OMP_NUM_THREADS=1 ./partition_poly_7 6 3 --prefix-depth 2 --profile --task-times-out task_times_6x3.csv`
+  - `node coordinator/server.mjs create-run --db /tmp/coord_weighted.sqlite --solver ./partition_poly_7 --rows 6 --cols 3 --prefix-depth 2 --task-stride 4 --threads 1 --weights-file /home/jason/src/rectangle-free2/task_times_6x3.csv`
+- Smoke test result:
+  - task timing CSV written successfully with rows like:
+    - `0,0.000286495,0,0,,`
+    - `1,0.000193445,0,1,,`
+  - slow-task profile output now decodes fixed depth-2 tasks directly, e.g.:
+    - `task 1999 (10,24): 0.000705s`
+  - coordinator run stats show weighted shards:
+    - total estimated weight `18834.0365`
+    - shard weights:
+      - offset `0`: `4708.0086`
+      - offset `1`: `4709.0102`
+      - offset `2`: `4710.0088`
+      - offset `3`: `4707.0089`
+- Interpretation:
+  - this is infrastructure rather than a direct throughput win on its own
+  - it gives the coordinator the right signal to prioritise heavier offsets first and makes slow prefixes visible in a machine-readable form
+  - it preserves the existing interleaved shard model, so workers do not need a protocol change
+- Outcome: accepted.

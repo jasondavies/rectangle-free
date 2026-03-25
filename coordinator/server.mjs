@@ -34,6 +34,7 @@ function usage() {
       '  --adaptive-subdivide     enable adaptive subdivision',
       '  --adaptive-threshold N   default 128',
       '  --adaptive-max-depth N   default 3',
+      '  --weights-file FILE      optional CSV from --task-times-out for weighted shard leasing',
       '  --name TEXT              optional run label',
       '',
       'REST API:',
@@ -58,6 +59,7 @@ function parseArgs(argv) {
     adaptiveSubdivide: false,
     adaptiveThreshold: 128,
     adaptiveMaxDepth: 3,
+    weightsFile: null,
     name: null,
     runId: null,
     output: null,
@@ -122,6 +124,9 @@ function parseArgs(argv) {
       case '--name':
         args.name = argv[++i];
         break;
+      case '--weights-file':
+        args.weightsFile = path.resolve(argv[++i]);
+        break;
       case '--run-id':
         args.runId = Number(argv[++i]);
         break;
@@ -173,6 +178,7 @@ function openDb(dbPath) {
       task_end INTEGER NOT NULL,
       task_stride INTEGER NOT NULL,
       task_offset INTEGER NOT NULL,
+      estimated_weight REAL NOT NULL DEFAULT 1.0,
       status TEXT NOT NULL,
       worker_id TEXT,
       lease_token TEXT,
@@ -197,6 +203,10 @@ function openDb(dbPath) {
     CREATE INDEX IF NOT EXISTS shards_claim_idx
       ON shards(run_id, status, lease_until, shard_index);
   `);
+  const shardColumns = db.prepare(`PRAGMA table_info(shards)`).all();
+  if (!shardColumns.some((row) => row.name === 'estimated_weight')) {
+    db.exec(`ALTER TABLE shards ADD COLUMN estimated_weight REAL NOT NULL DEFAULT 1.0`);
+  }
   return db;
 }
 
@@ -206,6 +216,49 @@ function nowIso() {
 
 function addSeconds(iso, seconds) {
   return new Date(new Date(iso).getTime() + seconds * 1000).toISOString();
+}
+
+function normaliseTaskOffset(taskStride, taskOffset) {
+  let normalised = taskOffset % taskStride;
+  if (normalised < 0) normalised += taskStride;
+  return normalised;
+}
+
+function firstSelectedTask(taskStart, taskEnd, taskStride, taskOffset) {
+  if (taskStart >= taskEnd) return taskEnd;
+  const normalisedOffset = normaliseTaskOffset(taskStride, taskOffset);
+  let remainder = taskStart % taskStride;
+  if (remainder < 0) remainder += taskStride;
+  const delta = (normalisedOffset - remainder + taskStride) % taskStride;
+  const first = taskStart + delta;
+  return first < taskEnd ? first : taskEnd;
+}
+
+function loadTaskWeights(weightsFile) {
+  const text = fs.readFileSync(weightsFile, 'utf8');
+  const weights = new Map();
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('task_index,')) continue;
+    const parts = line.split(',');
+    if (parts.length < 2) continue;
+    const taskIndex = Number(parts[0]);
+    const elapsed = Number(parts[1]);
+    if (!Number.isFinite(taskIndex) || !Number.isFinite(elapsed)) continue;
+    weights.set(taskIndex, elapsed);
+  }
+  return weights;
+}
+
+function computeShardWeights(taskStart, taskEnd, taskStride, weights) {
+  const shardWeights = Array.from({ length: taskStride }, () => 0.0);
+  for (let offset = 0; offset < taskStride; offset++) {
+    const first = firstSelectedTask(taskStart, taskEnd, taskStride, offset);
+    for (let task = first; task < taskEnd; task += taskStride) {
+      shardWeights[offset] += weights.get(task) ?? 1.0;
+    }
+  }
+  return shardWeights;
 }
 
 function json(res, statusCode, payload) {
@@ -290,7 +343,7 @@ function fetchWork(db, leaseSeconds, body) {
           JOIN runs r ON r.id = s.run_id
           WHERE s.status IN ('queued', 'leased')
             AND (s.lease_until IS NULL OR s.lease_until < ?)
-          ORDER BY s.run_id, s.shard_index
+          ORDER BY s.estimated_weight DESC, s.run_id, s.shard_index
           LIMIT 1
         `).get(now)
       : db.prepare(`
@@ -301,7 +354,7 @@ function fetchWork(db, leaseSeconds, body) {
           WHERE s.run_id = ?
             AND s.status IN ('queued', 'leased')
             AND (s.lease_until IS NULL OR s.lease_until < ?)
-          ORDER BY s.shard_index
+          ORDER BY s.estimated_weight DESC, s.shard_index
           LIMIT 1
         `).get(runId, now);
 
@@ -337,6 +390,7 @@ function fetchWork(db, leaseSeconds, body) {
           task_end: shard.task_end,
           task_stride: shard.task_stride,
           task_offset: shard.task_offset,
+          estimated_weight: shard.estimated_weight,
           lease_token: leaseToken,
           lease_until: leaseUntil,
           solver: shard.solver,
@@ -450,6 +504,11 @@ function statsForRun(db, runId) {
   return db.prepare(`
     SELECT
       COUNT(*) AS total,
+      COALESCE(SUM(estimated_weight), 0) AS total_estimated_weight,
+      COALESCE(SUM(CASE WHEN status = 'queued' THEN estimated_weight ELSE 0 END), 0) AS queued_estimated_weight,
+      COALESCE(SUM(CASE WHEN status = 'leased' THEN estimated_weight ELSE 0 END), 0) AS leased_estimated_weight,
+      COALESCE(SUM(CASE WHEN status = 'done' THEN estimated_weight ELSE 0 END), 0) AS done_estimated_weight,
+      COALESCE(SUM(CASE WHEN status = 'failed' THEN estimated_weight ELSE 0 END), 0) AS failed_estimated_weight,
       SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) AS queued,
       SUM(CASE WHEN status = 'leased' THEN 1 ELSE 0 END) AS leased,
       SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END) AS done,
@@ -575,6 +634,9 @@ function createRun(args) {
   const totalTasks = runSolverForTotalTasks(args);
   const taskStart = args.taskStart ?? 0;
   const taskEnd = args.taskEnd ?? totalTasks;
+  const shardWeights = args.weightsFile
+    ? computeShardWeights(taskStart, taskEnd, args.taskStride, loadTaskWeights(args.weightsFile))
+    : Array.from({ length: args.taskStride }, () => 1.0);
   const runInfo = db.prepare(`
     INSERT INTO runs (
       name, solver, rows, cols, prefix_depth, task_start, task_end, task_stride, total_tasks,
@@ -601,11 +663,11 @@ function createRun(args) {
   try {
     const insertShard = db.prepare(`
       INSERT INTO shards (
-        run_id, shard_index, task_start, task_end, task_stride, task_offset, status
-      ) VALUES (?, ?, ?, ?, ?, ?, 'queued')
+        run_id, shard_index, task_start, task_end, task_stride, task_offset, estimated_weight, status
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued')
     `);
     for (let offset = 0; offset < args.taskStride; offset++) {
-      insertShard.run(runId, offset, taskStart, taskEnd, args.taskStride, offset);
+      insertShard.run(runId, offset, taskStart, taskEnd, args.taskStride, offset, shardWeights[offset]);
     }
     db.exec('COMMIT');
   } catch (err) {
@@ -622,6 +684,7 @@ function listRuns(args) {
   const db = openDb(args.db);
   const rows = db.prepare(`
     SELECT r.*,
+           COALESCE(SUM(s.estimated_weight), 0) AS total_estimated_weight,
            SUM(CASE WHEN s.status = 'queued' THEN 1 ELSE 0 END) AS queued,
            SUM(CASE WHEN s.status = 'leased' THEN 1 ELSE 0 END) AS leased,
            SUM(CASE WHEN s.status = 'done' THEN 1 ELSE 0 END) AS done,
@@ -652,21 +715,21 @@ function showRun(args) {
     ORDER BY status
   `).all(args.runId);
   const leased = db.prepare(`
-    SELECT shard_index, worker_id, lease_until, attempt_count
+    SELECT shard_index, estimated_weight, worker_id, lease_until, attempt_count
     FROM shards
     WHERE run_id = ? AND status = 'leased'
-    ORDER BY shard_index
+    ORDER BY estimated_weight DESC, shard_index
     LIMIT 16
   `).all(args.runId);
   const failed = db.prepare(`
-    SELECT shard_index, worker_id, attempt_count, last_error
+    SELECT shard_index, estimated_weight, worker_id, attempt_count, last_error
     FROM shards
     WHERE run_id = ? AND status = 'failed'
-    ORDER BY shard_index
+    ORDER BY estimated_weight DESC, shard_index
     LIMIT 16
   `).all(args.runId);
   const slowestDone = db.prepare(`
-    SELECT shard_index, elapsed_seconds, worker_seconds, prefix_seconds, attempt_count
+    SELECT shard_index, estimated_weight, elapsed_seconds, worker_seconds, prefix_seconds, attempt_count
     FROM shards
     WHERE run_id = ? AND status = 'done'
     ORDER BY COALESCE(worker_seconds, elapsed_seconds, 0) DESC, shard_index
@@ -688,7 +751,7 @@ function listShards(args) {
   }
   const db = openDb(args.db);
   const rows = db.prepare(`
-    SELECT id, shard_index, task_stride, task_offset, status, worker_id, lease_until,
+    SELECT id, shard_index, task_stride, task_offset, estimated_weight, status, worker_id, lease_until,
            attempt_count, elapsed_seconds, worker_seconds, prefix_seconds, ok
     FROM shards
     WHERE run_id = ?

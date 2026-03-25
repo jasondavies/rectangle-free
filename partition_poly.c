@@ -328,6 +328,12 @@ static uint64_t g_eval_mod = 0;
 static int g_eval_q_set = 0;
 static int g_eval_mod_set = 0;
 static __thread ProfileStats* tls_profile = NULL;
+static const char* g_task_times_out_path = NULL;
+static long long g_task_times_first_task = 0;
+static long long g_task_times_stride = 1;
+static long long g_task_times_count = 0;
+static double* g_task_times_values = NULL;
+static int g_effective_prefix_depth = 0;
 static const char* g_coordinator_url = NULL;
 static const char* g_worker_id = NULL;
 static long long g_run_id = -1;
@@ -359,6 +365,11 @@ static inline uint32_t* overlap_mask_row(int lhs_partition_id, int rhs_partition
 static inline uint32_t overlap_mask_get(int lhs_partition_id, int rhs_partition_id, int complex_idx) {
     return overlap_mask_row(lhs_partition_id, rhs_partition_id)[complex_idx];
 }
+
+static void unrank_prefix2(long long rank, int* i, int* j);
+static void unrank_prefix3(long long rank, int* i, int* j, int* k);
+static void unrank_prefix4(long long rank, int* i, int* j, int* k, int* l);
+static inline long long repeated_combo_count(int values, int slots);
 
 static void task_timing_insert_topk(TaskTimingStats* stats, long long task_index, double elapsed) {
     for (int i = 0; i < TASK_PROFILE_TOPK; i++) {
@@ -395,6 +406,117 @@ static void task_timing_merge(TaskTimingStats* dst, const TaskTimingStats* src) 
         if (src->top_times[i] <= 0.0) break;
         task_timing_insert_topk(dst, src->top_indices[i], src->top_times[i]);
     }
+}
+
+static void record_task_time_value(long long task_index, double elapsed) {
+    if (!g_task_times_values || g_task_times_count <= 0) return;
+    long long delta = task_index - g_task_times_first_task;
+    if (delta < 0) return;
+    if (delta % g_task_times_stride != 0) return;
+    long long slot = delta / g_task_times_stride;
+    if (slot < 0 || slot >= g_task_times_count) return;
+    g_task_times_values[slot] = elapsed;
+}
+
+static int decode_task_prefix(long long task_index, int* i, int* j, int* k, int* l) {
+    *i = -1;
+    *j = -1;
+    *k = -1;
+    *l = -1;
+    if (g_adaptive_subdivide) return 0;
+    if (g_effective_prefix_depth == 2) {
+        long long rank = task_index;
+        for (int a = 0; a < num_partitions; a++) {
+            long long count = num_partitions - a;
+            if (rank < count) {
+                *i = a;
+                *j = a + (int)rank;
+                return 1;
+            }
+            rank -= count;
+        }
+        return 0;
+    }
+    if (g_effective_prefix_depth == 3) {
+        long long rank = task_index;
+        for (int a = 0; a < num_partitions; a++) {
+            long long count_a = repeated_combo_count(num_partitions - a, 2);
+            if (rank >= count_a) {
+                rank -= count_a;
+                continue;
+            }
+            for (int b = a; b < num_partitions; b++) {
+                long long count_b = num_partitions - b;
+                if (rank < count_b) {
+                    *i = a;
+                    *j = b;
+                    *k = b + (int)rank;
+                    return 1;
+                }
+                rank -= count_b;
+            }
+            return 0;
+        }
+        return 0;
+    }
+    if (g_effective_prefix_depth == 4) {
+        long long rank = task_index;
+        for (int a = 0; a < num_partitions; a++) {
+            long long count_a = repeated_combo_count(num_partitions - a, 3);
+            if (rank >= count_a) {
+                rank -= count_a;
+                continue;
+            }
+            for (int b = a; b < num_partitions; b++) {
+                long long count_b = repeated_combo_count(num_partitions - b, 2);
+                if (rank >= count_b) {
+                    rank -= count_b;
+                    continue;
+                }
+                for (int c = b; c < num_partitions; c++) {
+                    long long count_c = num_partitions - c;
+                    if (rank < count_c) {
+                        *i = a;
+                        *j = b;
+                        *k = c;
+                        *l = c + (int)rank;
+                        return 1;
+                    }
+                    rank -= count_c;
+                }
+                return 0;
+            }
+        }
+        return 0;
+    }
+    return 0;
+}
+
+static void write_task_times_file(const char* path) {
+    if (!path || !g_task_times_values || g_task_times_count <= 0) return;
+    FILE* f = fopen(path, "w");
+    if (!f) {
+        fprintf(stderr, "Failed to open task timing output %s: %s\n", path, strerror(errno));
+        exit(1);
+    }
+    fprintf(f, "task_index,elapsed_seconds,i,j,k,l\n");
+    for (long long t = 0; t < g_task_times_count; t++) {
+        double elapsed = g_task_times_values[t];
+        if (elapsed < 0.0) continue;
+        long long task_index = g_task_times_first_task + t * g_task_times_stride;
+        int i, j, k, l;
+        int have_prefix = decode_task_prefix(task_index, &i, &j, &k, &l);
+        fprintf(f, "%lld,%.9f,", task_index, elapsed);
+        if (have_prefix && i >= 0) fprintf(f, "%d", i);
+        fprintf(f, ",");
+        if (have_prefix && j >= 0) fprintf(f, "%d", j);
+        fprintf(f, ",");
+        if (have_prefix && k >= 0) fprintf(f, "%d", k);
+        fprintf(f, ",");
+        if (have_prefix && l >= 0) fprintf(f, "%d", l);
+        fprintf(f, "\n");
+    }
+    fclose(f);
 }
 
 #define DEFAULT_PROGRESS_UPDATES 2000
@@ -438,7 +560,9 @@ static inline void complete_task_report_and_time(long long total_tasks, long lon
                                                  double task_t0) {
     complete_task_and_report(total_tasks, report_step, start_time, pending_completed);
     if (g_profile && task_timing) {
-        task_timing_record(task_timing, task_index, omp_get_wtime() - task_t0);
+        double elapsed = omp_get_wtime() - task_t0;
+        task_timing_record(task_timing, task_index, elapsed);
+        record_task_time_value(task_index, elapsed);
     }
 }
 
@@ -1029,7 +1153,7 @@ void print_poly(Poly p) {
 static void usage(const char* prog) {
     fprintf(stderr,
             "Usage:\n"
-            "  %s [rows cols] [--task-start N] [--task-end N] [--task-stride N] [--task-offset N] [--prefix-depth N] [--adaptive-subdivide] [--adaptive-threshold N] [--adaptive-max-depth N] [--coordinator-url URL] [--worker-id ID] [--run-id N] [--coord-low-watermark N] [--coord-high-watermark N] [--coord-heartbeat-seconds N] [--runtime-donate] [--runtime-donate-min-depth N] [--runtime-donate-max-depth N] [--eval-q Q --mod P] [--poly-out FILE] [--profile]\n"
+            "  %s [rows cols] [--task-start N] [--task-end N] [--task-stride N] [--task-offset N] [--prefix-depth N] [--adaptive-subdivide] [--adaptive-threshold N] [--adaptive-max-depth N] [--coordinator-url URL] [--worker-id ID] [--run-id N] [--coord-low-watermark N] [--coord-high-watermark N] [--coord-heartbeat-seconds N] [--runtime-donate] [--runtime-donate-min-depth N] [--runtime-donate-max-depth N] [--eval-q Q --mod P] [--poly-out FILE] [--profile] [--task-times-out FILE]\n"
             "  %s --merge [--poly-out FILE] INPUT...\n"
             "\n"
             "Notes:\n"
@@ -4478,6 +4602,13 @@ int main(int argc, char** argv) {
             g_eval_mod_set = 1;
         } else if (strcmp(argv[i], "--profile") == 0) {
             g_profile = 1;
+        } else if (strcmp(argv[i], "--task-times-out") == 0) {
+            if (i + 1 >= argc) {
+                usage(argv[0]);
+                free(merge_inputs);
+                return 1;
+            }
+            g_task_times_out_path = argv[++i];
         } else if (merge_mode) {
             merge_inputs[merge_input_count++] = argv[i];
         } else if (positional_count == 0) {
@@ -4500,7 +4631,7 @@ int main(int argc, char** argv) {
             g_coordinator_url || g_worker_id || g_run_id != -1 || g_coord_low_watermark != 0 ||
             g_coord_high_watermark != 0 || g_coord_heartbeat_seconds != 600 ||
             g_runtime_donate || g_runtime_donate_min_depth != 3 || g_runtime_donate_max_depth != 4 ||
-            g_eval_mode || g_eval_q_set || g_eval_mod_set || g_profile) {
+            g_eval_mode || g_eval_q_set || g_eval_mod_set || g_profile || g_task_times_out_path) {
             usage(argv[0]);
             free(merge_inputs);
             return 1;
@@ -4604,6 +4735,10 @@ int main(int argc, char** argv) {
         fprintf(stderr, "Internal error: inconsistent eval mode flags\n");
         return 1;
     }
+    if (g_task_times_out_path && !g_profile) {
+        fprintf(stderr, "--task-times-out requires --profile\n");
+        return 1;
+    }
     if (g_eval_mode) {
         if (!g_eval_q_set || !g_eval_mod_set) {
             fprintf(stderr, "Modular evaluation mode requires both --eval-q and --mod\n");
@@ -4655,6 +4790,10 @@ int main(int argc, char** argv) {
             fprintf(stderr, "--runtime-donate does not support --profile in coordinator mode\n");
             return 1;
         }
+        if (g_task_times_out_path) {
+            fprintf(stderr, "Coordinator mode does not support --task-times-out\n");
+            return 1;
+        }
         if (g_eval_mode) {
             fprintf(stderr, "Coordinator mode does not support modular evaluation mode yet\n");
             return 1;
@@ -4664,6 +4803,7 @@ int main(int argc, char** argv) {
         fprintf(stderr, "Modular evaluation mode currently supports only --prefix-depth 2\n");
         return 1;
     }
+    g_effective_prefix_depth = prefix_depth;
 
     int graph_poly_len = g_cols * (g_rows / 2) + 1;
     if (coordinator_mode) {
@@ -4823,6 +4963,16 @@ int main(int argc, char** argv) {
                                                 task_stride, task_offset);
     long long first_task = first_selected_task(active_task_start, active_task_end,
                                                task_stride, task_offset);
+    g_task_times_first_task = first_task;
+    g_task_times_stride = task_stride;
+    g_task_times_count = total_tasks;
+    if (g_task_times_out_path && total_tasks > 0) {
+        g_task_times_values = checked_calloc((size_t)total_tasks, sizeof(*g_task_times_values),
+                                             "task_times_values");
+        for (long long t = 0; t < total_tasks; t++) {
+            g_task_times_values[t] = -1.0;
+        }
+    }
     if (g_adaptive_subdivide && prefix_depth == 2 && materialized_prefixes != total_tasks) {
         fprintf(stderr, "Internal error: adaptive prefix selection mismatch\n");
         return 1;
@@ -5595,15 +5745,6 @@ int main(int argc, char** argv) {
     free(thread_polys);
     free(thread_profiles);
     free(thread_task_timing);
-    free(prefix_i);
-    free(prefix_j);
-    free(prefix_k);
-    free(prefix_l);
-    free(prefix2_batches);
-    free(prefix2_batch_js);
-    free(prefix2_batch_ps);
-    free_row_dependent_tables();
-    
     progress_reporter_finish(&progress_reporter);
 
     double end_time = omp_get_wtime();
@@ -5661,11 +5802,37 @@ int main(int argc, char** argv) {
             printf("  Slowest tasks:\n");
             for (int i = 0; i < TASK_PROFILE_TOPK; i++) {
                 if (total_task_timing.top_times[i] <= 0.0) break;
-                printf("    task %lld: %.6fs\n",
-                       total_task_timing.top_indices[i],
-                       total_task_timing.top_times[i]);
+                int pi, pj, pk, pl;
+                if (decode_task_prefix(total_task_timing.top_indices[i], &pi, &pj, &pk, &pl)) {
+                    if (pk >= 0 && pl >= 0) {
+                        printf("    task %lld (%d,%d,%d,%d): %.6fs\n",
+                               total_task_timing.top_indices[i], pi, pj, pk, pl,
+                               total_task_timing.top_times[i]);
+                    } else if (pk >= 0) {
+                        printf("    task %lld (%d,%d,%d): %.6fs\n",
+                               total_task_timing.top_indices[i], pi, pj, pk,
+                               total_task_timing.top_times[i]);
+                    } else if (pj >= 0) {
+                        printf("    task %lld (%d,%d): %.6fs\n",
+                               total_task_timing.top_indices[i], pi, pj,
+                               total_task_timing.top_times[i]);
+                    } else {
+                        printf("    task %lld (%d): %.6fs\n",
+                               total_task_timing.top_indices[i], pi,
+                               total_task_timing.top_times[i]);
+                    }
+                } else {
+                    printf("    task %lld: %.6fs\n",
+                           total_task_timing.top_indices[i],
+                           total_task_timing.top_times[i]);
+                }
             }
         }
+    }
+
+    if (g_task_times_out_path) {
+        write_task_times_file(g_task_times_out_path);
+        printf("Task timing CSV: %s\n", g_task_times_out_path);
     }
     
     printf("\nChromatic Polynomial P(x):\n");
@@ -5695,6 +5862,17 @@ int main(int argc, char** argv) {
         write_poly_file(poly_out_path, &global_poly, &meta);
         printf("\nWrote polynomial shard to %s\n", poly_out_path);
     }
+
+    free(prefix_i);
+    free(prefix_j);
+    free(prefix_k);
+    free(prefix_l);
+    free(prefix2_batches);
+    free(prefix2_batch_js);
+    free(prefix2_batch_ps);
+    free(g_task_times_values);
+    g_task_times_values = NULL;
+    free_row_dependent_tables();
 
     return 0;
 }
