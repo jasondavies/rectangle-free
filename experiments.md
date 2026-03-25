@@ -1026,3 +1026,25 @@
   - `P(4) mod 18446744073709551557 = 27028285369344000`
 - Interpretation: the modular-evaluation path is correct on the tested exact and sampled cases, and it cuts the sampled `7x5` worker phase sharply by replacing coefficient polynomials with scalar field arithmetic. This is the right production building block for reconstructing full chromatic polynomials by modular evaluations and interpolation.
 - Outcome: accepted.
+
+### Experiment 47: Reconstruct full chromatic polynomials by CRT over modular evaluations
+- Goal: build the next production layer above `--eval-q/--mod`, so full chromatic polynomials can be recovered without carrying coefficient polynomials through the hot path.
+- Change:
+  - added `reconstruct_poly.py`
+  - the script:
+    - evaluates `P(q)` modulo several 64-bit primes for `q = 0..degree`
+    - combines those point values with CRT until the modulus product exceeds the trivial bound `degree^degree`
+    - interpolates the exact integer polynomial from the recovered values
+    - can write a `RECT_BIG_POLY_V1` output file
+  - extra solver arguments are passed through after `--`
+- Validation command:
+  - `python3 reconstruct_poly.py 6 3 --solver ./partition_poly_7 --threads 1 --poly-out /tmp/reconstruct_6x3.bigpoly`
+- Validation result:
+  - chose 2 primes automatically
+  - reconstructed:
+    - `P(x) = x^18 - 45*x^15 + 150*x^13 + 765*x^12 - 990*x^11 - 3860*x^10 + 2187*x^9 + 13950*x^8 - 8370*x^7 - 24300*x^6 + 19380*x^5 + 24012*x^4 - 38040*x^3 + 18160*x^2 - 3000*x`
+    - `P(4) = 36376835616`
+    - `P(5) = 2734002504000`
+  - these match the direct `OMP_NUM_THREADS=1 ./partition_poly_7 6 3 --prefix-depth 2` run exactly
+- Interpretation: this completes the first full end-to-end modular path. The solver can now produce exact chromatic polynomials via modular evaluations and interpolation, with no coefficient-polynomial arithmetic on the hot path.
+- Outcome: accepted.
