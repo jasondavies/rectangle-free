@@ -3,7 +3,7 @@
 This is a tiny pull-based shard coordinator for distributed `partition_poly` runs.
 
 It uses:
-- `node:http` for the REST server
+- `node:http` or `node:https` for the REST server
 - `node:sqlite` for local state
 - interleaved shards, not contiguous ranges
 
@@ -21,6 +21,19 @@ That is the right shape for `7x7`:
 ```bash
 node coordinator/server.mjs serve --db coordinator/coordinator.sqlite --port 3000 --lease-seconds 86400
 ```
+
+To serve HTTPS directly:
+
+```bash
+node coordinator/server.mjs serve \
+  --db coordinator/coordinator.sqlite \
+  --port 3443 \
+  --lease-seconds 86400 \
+  --tls-cert /path/to/fullchain.pem \
+  --tls-key /path/to/privkey.pem
+```
+
+The in-process C coordinator worker now accepts both `http://...` and `https://...` URLs.
 
 ## Seed a run
 

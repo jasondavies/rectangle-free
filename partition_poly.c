@@ -10,6 +10,9 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <time.h>
+#include <stdatomic.h>
+#include <openssl/err.h>
+#include <openssl/ssl.h>
 #include <omp.h>
 #include "progress_util.h"
 
@@ -226,6 +229,7 @@ typedef struct {
     char host[256];
     char port[32];
     char path_prefix[256];
+    int use_tls;
 } CoordinatorEndpoint;
 
 typedef struct {
@@ -236,6 +240,42 @@ typedef struct {
     long long full_tasks;
     CoordinatorQueue* queue;
 } CoordinatorFeederArgs;
+
+typedef struct {
+    uint8_t depth;
+    PrefixId prefix[MAX_COLS];
+    int shard_slot;
+} RuntimeWorkItem;
+
+typedef struct {
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+    RuntimeWorkItem* tasks;
+    int capacity;
+    int head;
+    int tail;
+    int count;
+    int inflight_tasks;
+    int stop;
+    int no_more_work;
+    int fatal_error;
+    char fatal_message[512];
+    int low_watermark;
+    int high_watermark;
+    atomic_int outstanding_tasks;
+    atomic_long donated_tasks;
+    atomic_long max_outstanding_tasks;
+    CoordinatorShard shards[COORD_MAX_ACTIVE_SHARDS];
+} RuntimeDonateQueue;
+
+typedef struct {
+    CoordinatorEndpoint endpoint;
+    char worker_id[128];
+    long long run_id;
+    int heartbeat_seconds;
+    long long full_tasks;
+    RuntimeDonateQueue* queue;
+} RuntimeDonateFeederArgs;
 
 // --- GLOBALS ---
 static int num_partitions = 0;
@@ -270,6 +310,9 @@ static long long g_run_id = -1;
 static int g_coord_low_watermark = 0;
 static int g_coord_high_watermark = 0;
 static int g_coord_heartbeat_seconds = 600;
+static int g_runtime_donate = 0;
+static int g_runtime_donate_min_depth = 3;
+static int g_runtime_donate_max_depth = 4;
 
 static inline uint16_t perm_table_get(int partition_id, int perm_id) {
     return perm_table[(size_t)partition_id * (size_t)perm_count + (size_t)perm_id];
@@ -800,7 +843,7 @@ void print_poly(Poly p) {
 static void usage(const char* prog) {
     fprintf(stderr,
             "Usage:\n"
-            "  %s [rows cols] [--task-start N] [--task-end N] [--task-stride N] [--task-offset N] [--prefix-depth N] [--adaptive-subdivide] [--adaptive-threshold N] [--adaptive-max-depth N] [--coordinator-url URL] [--worker-id ID] [--run-id N] [--coord-low-watermark N] [--coord-high-watermark N] [--coord-heartbeat-seconds N] [--poly-out FILE] [--profile]\n"
+            "  %s [rows cols] [--task-start N] [--task-end N] [--task-stride N] [--task-offset N] [--prefix-depth N] [--adaptive-subdivide] [--adaptive-threshold N] [--adaptive-max-depth N] [--coordinator-url URL] [--worker-id ID] [--run-id N] [--coord-low-watermark N] [--coord-high-watermark N] [--coord-heartbeat-seconds N] [--runtime-donate] [--runtime-donate-min-depth N] [--runtime-donate-max-depth N] [--poly-out FILE] [--profile]\n"
             "  %s --merge [--poly-out FILE] INPUT...\n"
             "\n"
             "Notes:\n"
@@ -809,6 +852,7 @@ static void usage(const char* prog) {
             "  --prefix-depth may be 2, 3, or 4.\n"
             "  Adaptive subdivision currently supports depth 2 split to depth 3 only.\n"
             "  Coordinator mode currently supports only fixed prefix-depth 2 work queues.\n"
+            "  --runtime-donate enables experimental subtree donation in coordinator mode.\n"
             "  --profile prints coarse timing counters for the main phases.\n",
             prog, prog);
 }
@@ -1026,9 +1070,17 @@ static char* json_quote_string(const char* text) {
 }
 
 static int parse_coordinator_endpoint(const char* url, CoordinatorEndpoint* endpoint) {
-    const char* prefix = "http://";
+    const char* prefix = NULL;
+    if (strncmp(url, "http://", 7) == 0) {
+        prefix = "http://";
+        endpoint->use_tls = 0;
+    } else if (strncmp(url, "https://", 8) == 0) {
+        prefix = "https://";
+        endpoint->use_tls = 1;
+    } else {
+        return 0;
+    }
     size_t prefix_len = strlen(prefix);
-    if (strncmp(url, prefix, prefix_len) != 0) return 0;
     const char* host_start = url + prefix_len;
     const char* slash = strchr(host_start, '/');
     const char* host_end = slash ? slash : url + strlen(url);
@@ -1037,7 +1089,8 @@ static int parse_coordinator_endpoint(const char* url, CoordinatorEndpoint* endp
         if (*p == ':') colon = p;
     }
     size_t host_len = colon ? (size_t)(colon - host_start) : (size_t)(host_end - host_start);
-    size_t port_len = colon ? (size_t)(host_end - colon - 1) : strlen("80");
+    const char* default_port = endpoint->use_tls ? "443" : "80";
+    size_t port_len = colon ? (size_t)(host_end - colon - 1) : strlen(default_port);
     if (host_len == 0 || host_len >= sizeof(endpoint->host) || port_len == 0 || port_len >= sizeof(endpoint->port)) {
         return 0;
     }
@@ -1047,7 +1100,7 @@ static int parse_coordinator_endpoint(const char* url, CoordinatorEndpoint* endp
         memcpy(endpoint->port, colon + 1, port_len);
         endpoint->port[port_len] = '\0';
     } else {
-        strcpy(endpoint->port, "80");
+        strcpy(endpoint->port, default_port);
     }
     if (slash) {
         snprintf(endpoint->path_prefix, sizeof(endpoint->path_prefix), "%s", slash);
@@ -1055,6 +1108,31 @@ static int parse_coordinator_endpoint(const char* url, CoordinatorEndpoint* endp
         strcpy(endpoint->path_prefix, "");
     }
     return 1;
+}
+
+static void write_all_fd(int fd, const char* buf, size_t len, const char* what) {
+    size_t off = 0;
+    while (off < len) {
+        ssize_t written = write(fd, buf + off, len - off);
+        if (written <= 0) {
+            fprintf(stderr, "Failed to send coordinator %s\n", what);
+            exit(1);
+        }
+        off += (size_t)written;
+    }
+}
+
+static void write_all_ssl(SSL* ssl, const char* buf, size_t len, const char* what) {
+    size_t off = 0;
+    while (off < len) {
+        int written = SSL_write(ssl, buf + off, (int)(len - off));
+        if (written <= 0) {
+            fprintf(stderr, "Failed to send coordinator %s over TLS\n", what);
+            ERR_print_errors_fp(stderr);
+            exit(1);
+        }
+        off += (size_t)written;
+    }
 }
 
 static char* http_post_json(const CoordinatorEndpoint* endpoint, const char* path, const char* body) {
@@ -1084,6 +1162,57 @@ static char* http_post_json(const CoordinatorEndpoint* endpoint, const char* pat
         exit(1);
     }
 
+    SSL_CTX* ssl_ctx = NULL;
+    SSL* ssl = NULL;
+    if (endpoint->use_tls) {
+        if (OPENSSL_init_ssl(0, NULL) != 1) {
+            fprintf(stderr, "Failed to initialise OpenSSL\n");
+            close(sock);
+            exit(1);
+        }
+        ssl_ctx = SSL_CTX_new(TLS_client_method());
+        if (!ssl_ctx) {
+            fprintf(stderr, "Failed to create OpenSSL client context\n");
+            ERR_print_errors_fp(stderr);
+            close(sock);
+            exit(1);
+        }
+        if (SSL_CTX_set_default_verify_paths(ssl_ctx) != 1) {
+            fprintf(stderr, "Failed to load default OpenSSL trust store\n");
+            ERR_print_errors_fp(stderr);
+            SSL_CTX_free(ssl_ctx);
+            close(sock);
+            exit(1);
+        }
+        ssl = SSL_new(ssl_ctx);
+        if (!ssl) {
+            fprintf(stderr, "Failed to create OpenSSL connection object\n");
+            ERR_print_errors_fp(stderr);
+            SSL_CTX_free(ssl_ctx);
+            close(sock);
+            exit(1);
+        }
+        if (SSL_set_tlsext_host_name(ssl, endpoint->host) != 1 ||
+            SSL_set1_host(ssl, endpoint->host) != 1 ||
+            SSL_set_fd(ssl, sock) != 1) {
+            fprintf(stderr, "Failed to configure TLS connection for coordinator %s\n", endpoint->host);
+            ERR_print_errors_fp(stderr);
+            SSL_free(ssl);
+            SSL_CTX_free(ssl_ctx);
+            close(sock);
+            exit(1);
+        }
+        SSL_set_verify(ssl, SSL_VERIFY_PEER, NULL);
+        if (SSL_connect(ssl) != 1) {
+            fprintf(stderr, "TLS handshake failed for coordinator %s:%s\n", endpoint->host, endpoint->port);
+            ERR_print_errors_fp(stderr);
+            SSL_free(ssl);
+            SSL_CTX_free(ssl_ctx);
+            close(sock);
+            exit(1);
+        }
+    }
+
     char request_head[1024];
     int head_len = snprintf(request_head, sizeof(request_head),
                             "POST %s%s HTTP/1.1\r\n"
@@ -1094,13 +1223,17 @@ static char* http_post_json(const CoordinatorEndpoint* endpoint, const char* pat
                             endpoint->path_prefix, path, endpoint->host, endpoint->port, strlen(body));
     if (head_len <= 0 || head_len >= (int)sizeof(request_head)) {
         fprintf(stderr, "Coordinator request header too large\n");
-        exit(1);
-    }
-    if (write(sock, request_head, (size_t)head_len) != head_len ||
-        write(sock, body, strlen(body)) != (ssize_t)strlen(body)) {
-        fprintf(stderr, "Failed to send coordinator request\n");
+        if (ssl) SSL_free(ssl);
+        if (ssl_ctx) SSL_CTX_free(ssl_ctx);
         close(sock);
         exit(1);
+    }
+    if (endpoint->use_tls) {
+        write_all_ssl(ssl, request_head, (size_t)head_len, "request header");
+        write_all_ssl(ssl, body, strlen(body), "request body");
+    } else {
+        write_all_fd(sock, request_head, (size_t)head_len, "request header");
+        write_all_fd(sock, body, strlen(body), "request body");
     }
 
     size_t cap = 8192;
@@ -1108,22 +1241,61 @@ static char* http_post_json(const CoordinatorEndpoint* endpoint, const char* pat
     char* response = malloc(cap);
     if (!response) {
         fprintf(stderr, "Failed to allocate coordinator response buffer\n");
+        if (ssl) SSL_free(ssl);
+        if (ssl_ctx) SSL_CTX_free(ssl_ctx);
         close(sock);
         exit(1);
     }
-    ssize_t nread = 0;
-    while ((nread = read(sock, response + len, cap - len - 1)) > 0) {
-        len += (size_t)nread;
-        if (len + 1 >= cap) {
-            cap *= 2;
-            response = realloc(response, cap);
-            if (!response) {
-                fprintf(stderr, "Failed to grow coordinator response buffer\n");
+    if (endpoint->use_tls) {
+        for (;;) {
+            int nread = SSL_read(ssl, response + len, (int)(cap - len - 1));
+            if (nread <= 0) {
+                int ssl_err = SSL_get_error(ssl, nread);
+                if (ssl_err == SSL_ERROR_ZERO_RETURN) break;
+                if (ssl_err == SSL_ERROR_WANT_READ || ssl_err == SSL_ERROR_WANT_WRITE) continue;
+                fprintf(stderr, "Failed to read coordinator TLS response\n");
+                ERR_print_errors_fp(stderr);
+                free(response);
+                SSL_shutdown(ssl);
+                SSL_free(ssl);
+                SSL_CTX_free(ssl_ctx);
                 close(sock);
                 exit(1);
             }
+            len += (size_t)nread;
+            if (len + 1 >= cap) {
+                cap *= 2;
+                response = realloc(response, cap);
+                if (!response) {
+                    fprintf(stderr, "Failed to grow coordinator response buffer\n");
+                    SSL_shutdown(ssl);
+                    SSL_free(ssl);
+                    SSL_CTX_free(ssl_ctx);
+                    close(sock);
+                    exit(1);
+                }
+            }
+        }
+    } else {
+        ssize_t nread = 0;
+        while ((nread = read(sock, response + len, cap - len - 1)) > 0) {
+            len += (size_t)nread;
+            if (len + 1 >= cap) {
+                cap *= 2;
+                response = realloc(response, cap);
+                if (!response) {
+                    fprintf(stderr, "Failed to grow coordinator response buffer\n");
+                    close(sock);
+                    exit(1);
+                }
+            }
         }
     }
+    if (ssl) {
+        SSL_shutdown(ssl);
+        SSL_free(ssl);
+    }
+    if (ssl_ctx) SSL_CTX_free(ssl_ctx);
     close(sock);
     response[len] = '\0';
     if (strncmp(response, "HTTP/1.1 200", 12) != 0 && strncmp(response, "HTTP/1.0 200", 12) != 0) {
@@ -1647,6 +1819,19 @@ typedef struct {
     uint16_t changed_first_greater_count;
     uint16_t* prepared_rows;
 } CanonScratch;
+
+typedef struct {
+    GraphCache cache;
+    GraphCache raw_cache;
+    NautyWorkspace ws;
+    CanonState canon_state;
+    CanonScratch canon_scratch;
+    PartialGraphState partial_graph;
+    int stack[MAX_COLS];
+    long long local_canon_calls;
+    long long local_cache_hits;
+    long long local_raw_cache_hits;
+} WorkerCtx;
 
 static inline uint16_t* canon_state_row(CanonState* st, int perm_id) {
     return st->transformed + (size_t)perm_id * (size_t)st->cols;
@@ -2710,6 +2895,224 @@ static void execute_prefix2_fixed_task(long long p,
     canon_state_pop(canon_state);
 }
 
+static void runtime_queue_set_fatal(RuntimeDonateQueue* queue, const char* message) {
+    pthread_mutex_lock(&queue->mutex);
+    if (!queue->fatal_error) {
+        queue->fatal_error = 1;
+        snprintf(queue->fatal_message, sizeof(queue->fatal_message), "%s", message);
+        queue->stop = 1;
+    }
+    pthread_cond_broadcast(&queue->cond);
+    pthread_mutex_unlock(&queue->mutex);
+}
+
+static void runtime_queue_init(RuntimeDonateQueue* queue, int capacity, int low_watermark,
+                               int high_watermark) {
+    memset(queue, 0, sizeof(*queue));
+    pthread_mutex_init(&queue->mutex, NULL);
+    pthread_cond_init(&queue->cond, NULL);
+    queue->tasks = checked_calloc((size_t)capacity, sizeof(*queue->tasks), "runtime_donate_queue");
+    queue->capacity = capacity;
+    queue->low_watermark = low_watermark;
+    queue->high_watermark = high_watermark;
+    atomic_init(&queue->outstanding_tasks, 0);
+    atomic_init(&queue->donated_tasks, 0);
+    atomic_init(&queue->max_outstanding_tasks, 0);
+}
+
+static void runtime_queue_free(RuntimeDonateQueue* queue) {
+    free(queue->tasks);
+    pthread_cond_destroy(&queue->cond);
+    pthread_mutex_destroy(&queue->mutex);
+}
+
+static int runtime_queue_find_free_slot(RuntimeDonateQueue* queue) {
+    for (int i = 0; i < COORD_MAX_ACTIVE_SHARDS; i++) {
+        if (!queue->shards[i].active && !queue->shards[i].submitting) return i;
+    }
+    return -1;
+}
+
+static int runtime_queue_active_shards(const RuntimeDonateQueue* queue) {
+    int active = 0;
+    for (int i = 0; i < COORD_MAX_ACTIVE_SHARDS; i++) {
+        if (queue->shards[i].active || queue->shards[i].submitting) active++;
+    }
+    return active;
+}
+
+static inline int runtime_queue_outstanding_relaxed(const RuntimeDonateQueue* queue) {
+    return atomic_load_explicit(&queue->outstanding_tasks, memory_order_relaxed);
+}
+
+static void runtime_queue_note_outstanding(RuntimeDonateQueue* queue, int outstanding) {
+    long current = atomic_load_explicit(&queue->max_outstanding_tasks, memory_order_relaxed);
+    while ((long)outstanding > current &&
+           !atomic_compare_exchange_weak_explicit(&queue->max_outstanding_tasks, &current, outstanding,
+                                                  memory_order_relaxed, memory_order_relaxed)) {
+    }
+}
+
+static int runtime_queue_pop(RuntimeDonateQueue* queue, RuntimeWorkItem* task) {
+    pthread_mutex_lock(&queue->mutex);
+    while (queue->count == 0 && !queue->stop) {
+        pthread_cond_wait(&queue->cond, &queue->mutex);
+    }
+    if (queue->count == 0 && queue->stop) {
+        pthread_mutex_unlock(&queue->mutex);
+        return 0;
+    }
+    *task = queue->tasks[queue->head];
+    queue->head = (queue->head + 1) % queue->capacity;
+    queue->count--;
+    queue->inflight_tasks++;
+    pthread_cond_broadcast(&queue->cond);
+    pthread_mutex_unlock(&queue->mutex);
+    return 1;
+}
+
+static void runtime_queue_push(RuntimeDonateQueue* queue, RuntimeWorkItem task) {
+    pthread_mutex_lock(&queue->mutex);
+    while (queue->count == queue->capacity && !queue->fatal_error) {
+        pthread_cond_wait(&queue->cond, &queue->mutex);
+    }
+    if (queue->fatal_error) {
+        pthread_mutex_unlock(&queue->mutex);
+        return;
+    }
+    queue->tasks[queue->tail] = task;
+    queue->tail = (queue->tail + 1) % queue->capacity;
+    queue->count++;
+    pthread_cond_broadcast(&queue->cond);
+    pthread_mutex_unlock(&queue->mutex);
+    int outstanding = atomic_fetch_add_explicit(&queue->outstanding_tasks, 1, memory_order_relaxed) + 1;
+    runtime_queue_note_outstanding(queue, outstanding);
+}
+
+static void runtime_queue_increment_shard_remaining(RuntimeDonateQueue* queue, int shard_slot) {
+    pthread_mutex_lock(&queue->mutex);
+    queue->shards[shard_slot].remaining_tasks++;
+    pthread_cond_broadcast(&queue->cond);
+    pthread_mutex_unlock(&queue->mutex);
+}
+
+static void runtime_queue_push_donated(RuntimeDonateQueue* queue, const RuntimeWorkItem* item) {
+    runtime_queue_increment_shard_remaining(queue, item->shard_slot);
+    atomic_fetch_add_explicit(&queue->donated_tasks, 1, memory_order_relaxed);
+    runtime_queue_push(queue, *item);
+}
+
+static void runtime_dfs(int depth, int min_idx, int* stack, CanonState* canon_state,
+                        const PartialGraphState* partial_graph, GraphCache* cache, GraphCache* raw_cache,
+                        NautyWorkspace* ws, Poly* local_total, long long* local_canon_calls,
+                        long long* local_cache_hits, long long* local_raw_cache_hits,
+                        const Poly* weight_prod, long long mult_coeff, int run_len,
+                        CanonScratch* canon_scratch, RuntimeDonateQueue* queue, int shard_slot) {
+    if (depth == g_cols) {
+        Poly res = solve_structure(stack, &partial_graph->g, canon_state, cache, raw_cache, ws,
+                                   local_canon_calls, local_cache_hits, local_raw_cache_hits,
+                                   weight_prod, mult_coeff, NULL);
+        *local_total = poly_add_ref(local_total, &res);
+        return;
+    }
+
+    int next_stabilizer = 0;
+    int kept_local = 0;
+    int allow_donate = queue &&
+                       depth >= g_runtime_donate_min_depth &&
+                       depth < g_runtime_donate_max_depth &&
+                       runtime_queue_outstanding_relaxed(queue) < queue->low_watermark;
+    for (int i = min_idx; i < num_partitions; i++) {
+        if (!canon_state_prepare_push(canon_state, i, canon_scratch, &next_stabilizer)) {
+            continue;
+        }
+        stack[depth] = i;
+        Poly next_weight_prod = poly_mul_ref(weight_prod, &partition_weight_poly[i]);
+        long long next_mult_coeff = mult_coeff * (depth + 1);
+        int next_run_len = 1;
+        if (depth > 0 && i == stack[depth - 1]) {
+            next_run_len = run_len + 1;
+            next_mult_coeff /= next_run_len;
+        }
+        canon_state_commit_push(canon_state, i, canon_scratch, next_stabilizer);
+        PartialGraphState next_graph = *partial_graph;
+        int ok = partial_graph_append(&next_graph, depth, i, stack);
+        if (ok) {
+            int should_donate = allow_donate &&
+                                kept_local &&
+                                runtime_queue_outstanding_relaxed(queue) < queue->low_watermark;
+            if (should_donate) {
+                RuntimeWorkItem item = {.depth = (uint8_t)(depth + 1), .shard_slot = shard_slot};
+                for (int d = 0; d <= depth; d++) item.prefix[d] = (PrefixId)stack[d];
+                runtime_queue_push_donated(queue, &item);
+            } else {
+                runtime_dfs(depth + 1, i, stack, canon_state, &next_graph, cache, raw_cache, ws,
+                            local_total, local_canon_calls, local_cache_hits, local_raw_cache_hits,
+                            &next_weight_prod, next_mult_coeff, next_run_len, canon_scratch,
+                            queue, shard_slot);
+                kept_local = 1;
+            }
+        }
+        canon_state_pop(canon_state);
+    }
+}
+
+static void execute_runtime_work_item(const RuntimeWorkItem* item, WorkerCtx* ctx,
+                                      RuntimeDonateQueue* queue, Poly* task_total) {
+    int next_stabilizer = 0;
+    Poly prefix_weight = poly_one();
+    long long prefix_mult = 1;
+    int prefix_run = 0;
+    poly_zero(task_total);
+
+    canon_state_reset(&ctx->canon_state, perm_count);
+    partial_graph_reset(&ctx->partial_graph);
+
+    for (int depth = 0; depth < item->depth; depth++) {
+        int pid = (int)item->prefix[depth];
+        ctx->stack[depth] = pid;
+        if (!canon_state_prepare_push(&ctx->canon_state, pid, &ctx->canon_scratch, &next_stabilizer)) {
+            for (int d = depth - 1; d >= 0; d--) canon_state_pop(&ctx->canon_state);
+            return;
+        }
+        canon_state_commit_push(&ctx->canon_state, pid, &ctx->canon_scratch, next_stabilizer);
+        if (!partial_graph_append(&ctx->partial_graph, depth, pid, ctx->stack)) {
+            canon_state_pop(&ctx->canon_state);
+            for (int d = depth - 1; d >= 0; d--) canon_state_pop(&ctx->canon_state);
+            return;
+        }
+        prefix_weight = poly_mul_ref(&prefix_weight, &partition_weight_poly[pid]);
+        if (depth == 0) {
+            prefix_mult = 1;
+            prefix_run = 1;
+        } else if (pid == ctx->stack[depth - 1]) {
+            prefix_mult = prefix_mult * (depth + 1) / (prefix_run + 1);
+            prefix_run++;
+        } else {
+            prefix_mult *= (depth + 1);
+            prefix_run = 1;
+        }
+    }
+
+    if (item->depth == g_cols) {
+        *task_total = solve_structure(ctx->stack, &ctx->partial_graph.g, &ctx->canon_state,
+                                      &ctx->cache, &ctx->raw_cache, &ctx->ws,
+                                      &ctx->local_canon_calls, &ctx->local_cache_hits,
+                                      &ctx->local_raw_cache_hits, &prefix_weight, prefix_mult, NULL);
+    } else {
+        int min_idx = (int)item->prefix[item->depth - 1];
+        runtime_dfs(item->depth, min_idx, ctx->stack, &ctx->canon_state, &ctx->partial_graph,
+                    &ctx->cache, &ctx->raw_cache, &ctx->ws, task_total,
+                    &ctx->local_canon_calls, &ctx->local_cache_hits, &ctx->local_raw_cache_hits,
+                    &prefix_weight, prefix_mult, prefix_run, &ctx->canon_scratch, queue,
+                    item->shard_slot);
+    }
+
+    for (int depth = (int)item->depth - 1; depth >= 0; depth--) {
+        canon_state_pop(&ctx->canon_state);
+    }
+}
+
 static int coordinator_queue_find_free_slot(CoordinatorQueue* queue) {
     for (int i = 0; i < COORD_MAX_ACTIVE_SHARDS; i++) {
         if (!queue->shards[i].active && !queue->shards[i].submitting) return i;
@@ -2993,6 +3396,230 @@ static int run_coordinator_worker(long long full_tasks, int num_threads, int gra
     return rc;
 }
 
+static void* runtime_donate_feeder_main(void* opaque) {
+    RuntimeDonateFeederArgs* args = (RuntimeDonateFeederArgs*)opaque;
+    RuntimeDonateQueue* queue = args->queue;
+    time_t last_renew = time(NULL);
+    for (;;) {
+        pthread_mutex_lock(&queue->mutex);
+        if (queue->fatal_error) {
+            pthread_mutex_unlock(&queue->mutex);
+            break;
+        }
+        int active_shards = runtime_queue_active_shards(queue);
+        int buffered_tasks = queue->count + queue->inflight_tasks;
+        if (queue->no_more_work && queue->count == 0 && active_shards == 0) {
+            queue->stop = 1;
+            pthread_cond_broadcast(&queue->cond);
+            pthread_mutex_unlock(&queue->mutex);
+            break;
+        }
+        int should_fetch = !queue->no_more_work &&
+                           buffered_tasks < queue->low_watermark &&
+                           active_shards < COORD_MAX_ACTIVE_SHARDS;
+        pthread_mutex_unlock(&queue->mutex);
+
+        time_t now = time(NULL);
+        if (args->heartbeat_seconds > 0 && now - last_renew >= args->heartbeat_seconds / 2) {
+            pthread_mutex_lock(&queue->mutex);
+            for (int i = 0; i < COORD_MAX_ACTIVE_SHARDS; i++) {
+                if (queue->shards[i].active && queue->shards[i].remaining_tasks > 0) {
+                    CoordinatorShard shard = queue->shards[i];
+                    pthread_mutex_unlock(&queue->mutex);
+                    coordinator_renew_shard(&args->endpoint, args->worker_id, &shard);
+                    pthread_mutex_lock(&queue->mutex);
+                }
+            }
+            pthread_mutex_unlock(&queue->mutex);
+            last_renew = now;
+        }
+
+        if (should_fetch) {
+            for (;;) {
+                pthread_mutex_lock(&queue->mutex);
+                active_shards = runtime_queue_active_shards(queue);
+                buffered_tasks = queue->count + queue->inflight_tasks;
+                int keep_fetching = !queue->fatal_error &&
+                                    !queue->no_more_work &&
+                                    buffered_tasks < queue->high_watermark &&
+                                    active_shards < COORD_MAX_ACTIVE_SHARDS;
+                pthread_mutex_unlock(&queue->mutex);
+                if (!keep_fetching) break;
+
+                CoordinatorShard shard;
+                if (!coordinator_fetch_shard(&args->endpoint, args->worker_id, args->run_id,
+                                             args->full_tasks, &shard)) {
+                    pthread_mutex_lock(&queue->mutex);
+                    queue->no_more_work = 1;
+                    pthread_cond_broadcast(&queue->cond);
+                    pthread_mutex_unlock(&queue->mutex);
+                    break;
+                }
+                pthread_mutex_lock(&queue->mutex);
+                int slot = runtime_queue_find_free_slot(queue);
+                if (slot < 0) {
+                    pthread_mutex_unlock(&queue->mutex);
+                    runtime_queue_set_fatal(queue, "No free runtime donation shard slot");
+                    break;
+                }
+                queue->shards[slot] = shard;
+                pthread_mutex_unlock(&queue->mutex);
+
+                if (shard.remaining_tasks == 0) {
+                    coordinator_submit_shard(&args->endpoint, args->worker_id, &shard);
+                    pthread_mutex_lock(&queue->mutex);
+                    queue->shards[slot].active = 0;
+                    pthread_cond_broadcast(&queue->cond);
+                    pthread_mutex_unlock(&queue->mutex);
+                    continue;
+                }
+
+                long long first = first_selected_task(shard.task_start, shard.task_end,
+                                                      shard.task_stride, shard.task_offset);
+                for (long long p = first; p < shard.task_end; p += shard.task_stride) {
+                    int i = 0;
+                    int j = 0;
+                    unrank_prefix2(p, &i, &j);
+                    RuntimeWorkItem item = {.depth = 2, .shard_slot = slot};
+                    item.prefix[0] = (PrefixId)i;
+                    item.prefix[1] = (PrefixId)j;
+                    runtime_queue_push(queue, item);
+                }
+            }
+            continue;
+        }
+
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_sec += 1;
+        pthread_mutex_lock(&queue->mutex);
+        if (!queue->fatal_error && !queue->stop) {
+            pthread_cond_timedwait(&queue->cond, &queue->mutex, &ts);
+        }
+        pthread_mutex_unlock(&queue->mutex);
+    }
+    return NULL;
+}
+
+static int run_coordinator_worker_runtime_donate(long long full_tasks, int num_threads,
+                                                 int graph_poly_len) {
+    CoordinatorEndpoint endpoint;
+    if (!parse_coordinator_endpoint(g_coordinator_url, &endpoint)) {
+        fprintf(stderr, "Invalid --coordinator-url: %s\n", g_coordinator_url);
+        return 1;
+    }
+    RuntimeDonateQueue queue;
+    int low_watermark = g_coord_low_watermark > 0 ? g_coord_low_watermark : (num_threads * 2);
+    int high_watermark = g_coord_high_watermark > 0 ? g_coord_high_watermark : (num_threads * 8);
+    if (high_watermark < low_watermark) high_watermark = low_watermark;
+    int queue_capacity = high_watermark * 32;
+    if (queue_capacity < 1024) queue_capacity = 1024;
+    runtime_queue_init(&queue, queue_capacity, low_watermark, high_watermark);
+
+    RuntimeDonateFeederArgs feeder_args;
+    memset(&feeder_args, 0, sizeof(feeder_args));
+    feeder_args.endpoint = endpoint;
+    snprintf(feeder_args.worker_id, sizeof(feeder_args.worker_id), "%s", g_worker_id);
+    feeder_args.run_id = g_run_id;
+    feeder_args.heartbeat_seconds = g_coord_heartbeat_seconds;
+    feeder_args.full_tasks = full_tasks;
+    feeder_args.queue = &queue;
+
+    pthread_t feeder_thread;
+    if (pthread_create(&feeder_thread, NULL, runtime_donate_feeder_main, &feeder_args) != 0) {
+        fprintf(stderr, "Failed to start runtime donation feeder thread\n");
+        runtime_queue_free(&queue);
+        return 1;
+    }
+
+    #pragma omp parallel num_threads(num_threads)
+    {
+        WorkerCtx ctx;
+        memset(&ctx, 0, sizeof(ctx));
+        ctx.cache.mask = CACHE_MASK;
+        ctx.cache.probe = CACHE_PROBE;
+        ctx.cache.poly_len = graph_poly_len;
+        ctx.cache.keys = checked_aligned_alloc(64, sizeof(CacheKey) * CACHE_SIZE, "cache_keys");
+        ctx.cache.adj = checked_aligned_alloc(64, sizeof(AdjWord) * CACHE_SIZE * MAXN_NAUTY, "cache_adj");
+        ctx.cache.degs = checked_aligned_alloc(64, sizeof(uint8_t) * CACHE_SIZE, "cache_degs");
+        ctx.cache.coeffs = checked_aligned_alloc(64, sizeof(PolyCoeff) * CACHE_SIZE * (size_t)graph_poly_len,
+                                                 "cache_coeffs");
+        ctx.raw_cache.mask = RAW_CACHE_MASK;
+        ctx.raw_cache.probe = RAW_CACHE_PROBE;
+        ctx.raw_cache.poly_len = graph_poly_len;
+        ctx.raw_cache.keys = checked_aligned_alloc(64, sizeof(CacheKey) * RAW_CACHE_SIZE, "raw_cache_keys");
+        ctx.raw_cache.adj =
+            checked_aligned_alloc(64, sizeof(AdjWord) * RAW_CACHE_SIZE * MAXN_NAUTY, "raw_cache_adj");
+        ctx.raw_cache.degs = checked_aligned_alloc(64, sizeof(uint8_t) * RAW_CACHE_SIZE, "raw_cache_degs");
+        ctx.raw_cache.coeffs =
+            checked_aligned_alloc(64, sizeof(PolyCoeff) * RAW_CACHE_SIZE * (size_t)graph_poly_len,
+                                  "raw_cache_coeffs");
+        memset(ctx.cache.keys, 0, sizeof(CacheKey) * CACHE_SIZE);
+        memset(ctx.raw_cache.keys, 0, sizeof(CacheKey) * RAW_CACHE_SIZE);
+        canon_state_init(&ctx.canon_state, perm_count);
+        canon_scratch_init(&ctx.canon_scratch, perm_count);
+        canon_state_reset(&ctx.canon_state, perm_count);
+        partial_graph_reset(&ctx.partial_graph);
+
+        for (;;) {
+            RuntimeWorkItem task;
+            if (!runtime_queue_pop(&queue, &task)) break;
+            Poly task_total;
+            execute_runtime_work_item(&task, &ctx, &queue, &task_total);
+
+            CoordinatorShard shard_copy;
+            int should_submit = 0;
+            pthread_mutex_lock(&queue.mutex);
+            atomic_fetch_sub_explicit(&queue.outstanding_tasks, 1, memory_order_relaxed);
+            queue.inflight_tasks--;
+            CoordinatorShard* shard = &queue.shards[task.shard_slot];
+            shard->total = poly_add_ref(&shard->total, &task_total);
+            shard->remaining_tasks--;
+            if (shard->remaining_tasks == 0 && shard->active && !shard->submitting) {
+                shard->submitting = 1;
+                shard_copy = *shard;
+                should_submit = 1;
+            }
+            pthread_cond_broadcast(&queue.cond);
+            pthread_mutex_unlock(&queue.mutex);
+
+            if (should_submit) {
+                coordinator_submit_shard(&endpoint, g_worker_id, &shard_copy);
+                pthread_mutex_lock(&queue.mutex);
+                queue.shards[task.shard_slot].active = 0;
+                queue.shards[task.shard_slot].submitting = 0;
+                pthread_cond_broadcast(&queue.cond);
+                pthread_mutex_unlock(&queue.mutex);
+            }
+        }
+
+        canon_state_free(&ctx.canon_state);
+        canon_scratch_free(&ctx.canon_scratch);
+        nauty_workspace_free(&ctx.ws);
+        free(ctx.cache.keys);
+        free(ctx.cache.adj);
+        free(ctx.cache.degs);
+        free(ctx.cache.coeffs);
+        free(ctx.raw_cache.keys);
+        free(ctx.raw_cache.adj);
+        free(ctx.raw_cache.degs);
+        free(ctx.raw_cache.coeffs);
+    }
+
+    pthread_join(feeder_thread, NULL);
+    printf("Runtime donation stats: donated=%lld, max outstanding=%lld\n",
+           (long long)atomic_load_explicit(&queue.donated_tasks, memory_order_relaxed),
+           (long long)atomic_load_explicit(&queue.max_outstanding_tasks, memory_order_relaxed));
+
+    int rc = 0;
+    if (queue.fatal_error) {
+        fprintf(stderr, "Runtime donation worker fatal error: %s\n", queue.fatal_message);
+        rc = 1;
+    }
+    runtime_queue_free(&queue);
+    return rc;
+}
+
 int main(int argc, char** argv) {
     long long task_start = 0;
     long long task_end = -1;
@@ -3112,6 +3739,22 @@ int main(int argc, char** argv) {
                 return 1;
             }
             g_coord_heartbeat_seconds = (int)parse_ll_or_die(argv[++i], "--coord-heartbeat-seconds");
+        } else if (strcmp(argv[i], "--runtime-donate") == 0) {
+            g_runtime_donate = 1;
+        } else if (strcmp(argv[i], "--runtime-donate-min-depth") == 0) {
+            if (i + 1 >= argc) {
+                usage(argv[0]);
+                free(merge_inputs);
+                return 1;
+            }
+            g_runtime_donate_min_depth = (int)parse_ll_or_die(argv[++i], "--runtime-donate-min-depth");
+        } else if (strcmp(argv[i], "--runtime-donate-max-depth") == 0) {
+            if (i + 1 >= argc) {
+                usage(argv[0]);
+                free(merge_inputs);
+                return 1;
+            }
+            g_runtime_donate_max_depth = (int)parse_ll_or_die(argv[++i], "--runtime-donate-max-depth");
         } else if (strcmp(argv[i], "--profile") == 0) {
             g_profile = 1;
         } else if (merge_mode) {
@@ -3134,7 +3777,9 @@ int main(int argc, char** argv) {
             task_stride != 1 || task_offset != 0 || prefix_depth_override != -1 ||
             g_adaptive_subdivide || g_adaptive_threshold != 128 || g_adaptive_max_depth != 3 ||
             g_coordinator_url || g_worker_id || g_run_id != -1 || g_coord_low_watermark != 0 ||
-            g_coord_high_watermark != 0 || g_coord_heartbeat_seconds != 600 || g_profile) {
+            g_coord_high_watermark != 0 || g_coord_heartbeat_seconds != 600 ||
+            g_runtime_donate || g_runtime_donate_min_depth != 3 || g_runtime_donate_max_depth != 4 ||
+            g_profile) {
             usage(argv[0]);
             free(merge_inputs);
             return 1;
@@ -3222,6 +3867,18 @@ int main(int argc, char** argv) {
         fprintf(stderr, "--coord-heartbeat-seconds must be positive\n");
         return 1;
     }
+    if (g_runtime_donate_min_depth < 1) {
+        fprintf(stderr, "--runtime-donate-min-depth must be positive\n");
+        return 1;
+    }
+    if (g_runtime_donate_max_depth < 1) {
+        fprintf(stderr, "--runtime-donate-max-depth must be positive\n");
+        return 1;
+    }
+    if (g_runtime_donate_min_depth > g_runtime_donate_max_depth) {
+        fprintf(stderr, "--runtime-donate-min-depth must not exceed --runtime-donate-max-depth\n");
+        return 1;
+    }
 
     if (task_start < 0) {
         fprintf(stderr, "--task-start must be non-negative\n");
@@ -3255,6 +3912,10 @@ int main(int argc, char** argv) {
             fprintf(stderr, "Coordinator mode does not support --poly-out; results are submitted to the coordinator\n");
             return 1;
         }
+        if (g_runtime_donate && g_profile) {
+            fprintf(stderr, "--runtime-donate does not support --profile in coordinator mode\n");
+            return 1;
+        }
     }
 
     int graph_poly_len = g_cols * (g_rows / 2) + 1;
@@ -3268,6 +3929,12 @@ int main(int argc, char** argv) {
         printf("Coordinator URL: %s\n", g_coordinator_url);
         printf("Run ID: %lld\n", g_run_id);
         printf("Fixed prefix depth: 2 (%lld tasks)\n", full_tasks);
+        if (g_runtime_donate) {
+            printf("Runtime donation: enabled (min depth %d, max depth %d)\n",
+                   g_runtime_donate_min_depth, g_runtime_donate_max_depth);
+            return run_coordinator_worker_runtime_donate(full_tasks, omp_get_max_threads(),
+                                                         graph_poly_len);
+        }
         return run_coordinator_worker(full_tasks, omp_get_max_threads(), graph_poly_len);
     }
 

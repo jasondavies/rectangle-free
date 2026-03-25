@@ -683,3 +683,86 @@
   - `./partition_poly_7 7 3 --adaptive-subdivide --adaptive-threshold 0 --task-end 0` now fails with `--adaptive-threshold must be positive`
 - Interpretation: this is a strong win. The main gain comes from cutting dead adaptive tasks out of the task space entirely, which improves both prefix generation and shard balance. Restoring `OMP_SCHEDULE` control is primarily a tuning fix rather than a measured speedup.
 - Outcome: accepted.
+
+### Experiment 35: Shrink CanonState scans with a subtree frontier
+- Goal: attack the remaining `canon_state_prepare_push()` hotspot by carrying only permutations that might still matter in the current subtree, instead of scanning all current candidates every time.
+- Change:
+  - added a temporary frontier list to `CanonState`
+  - precomputed a suffix-min image table over `perm_table`
+  - when `prepare_push()` quick-skipped a permutation, carried it into the child frontier only if some future candidate in the subtree could still reactivate it
+- One-thread benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235 --profile`
+- Baseline from accepted code:
+  - `Prefix generation 1.36s`
+  - `Worker Complete 7.02s`
+  - `canon_state_prepare_push 4.125s`
+  - depth 4 `avg active 273.6/2069`
+- Experiment result:
+  - `Prefix generation 1.69s`
+  - `Worker Complete 8.69s`
+  - `canon_state_prepare_push 5.912s`
+  - depth 4 `avg active 1257.1/1684`
+- Interpretation: although the frontier cut the scanned denominator somewhat, it carried far too many permutations forward and the extra suffix-min / frontier bookkeeping outweighed the reduction. The implementation was correctness-safe on small checks, but it is not a performance win.
+- Outcome: rejected and reverted.
+
+### Experiment 36: Add adaptive depth-4 subdivision for heavy `(i,j,k)` prefixes
+- Goal: reduce the remaining elephant tasks by allowing adaptive subdivision to split heavy depth-3 prefixes `(i,j,k)` into explicit `(i,j,k,l)` tasks when `--adaptive-max-depth 4` is requested.
+- Change:
+  - extended adaptive prefix generation to emit mixed `(i,j,-1)`, `(i,j,k,-1)`, and `(i,j,k,l)` tasks
+  - added the corresponding worker-side continuation from a materialised `(i,j,k,l)` prefix
+  - temporarily added validation for `--adaptive-max-depth <= cols`
+- 32-thread benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --adaptive-max-depth 4 --task-stride 3235`
+- Baseline from accepted code:
+  - `Prefix depth: 2 (23092 tasks)`
+  - `Prefix generation 1.36s`
+  - `Worker Complete 2.41s`
+  - `Total elapsed 3.77s`
+- Experiment result:
+  - `Prefix depth: 2 (360249 tasks)`
+  - `Prefix generation 14.64s`
+  - `Worker Complete 1.71s`
+  - `Total elapsed 16.34s`
+- Interpretation: deeper subdivision did cut sampled worker time, but it exploded the adaptive task space and made prefix generation an order of magnitude more expensive. The net effect is a large regression, so the current threshold-based depth-3 adaptive splitter should remain as-is.
+- Outcome: rejected and reverted.
+
+### Experiment 37: Runtime subtree donation in coordinator worker mode
+- Goal: replace one-shot shard-only balancing with a compact-prefix runtime queue inside the coordinator worker, so threads can donate deeper sibling subtrees when the queue runs low.
+- Change:
+  - replaced raw depth-2 task ids in coordinator mode with compact prefix work items
+  - rebuilt `CanonState` / `PartialGraphState` from the popped prefix locally instead of queueing large snapshots
+  - added runtime sibling donation inside `dfs()` for coordinator mode when queue pressure is low
+  - tracked donated work against shard completion counts so shards still submit exactly once
+- Correctness checks:
+  - coordinator-backed `6x2` run still completed and merged correctly
+  - forced-donation `6x3` coordinator run matched the direct `6x3` polynomial exactly
+- Fast A/B benchmark:
+  - command (new): `/usr/bin/time -f 'REAL %e' env OMP_NUM_THREADS=32 ./partition_poly_7 7 4 --prefix-depth 2 --coordinator-url http://127.0.0.1:3013 --worker-id bench-new --run-id 4`
+  - command (old): `/usr/bin/time -f 'REAL %e' env OMP_NUM_THREADS=32 /tmp/partition_poly_7_pre 7 4 --prefix-depth 2 --coordinator-url http://127.0.0.1:3013 --worker-id bench-old --run-id 5`
+  - result:
+    - new `REAL 12.37`
+    - old `REAL 11.75`
+- Additional note:
+  - attempted larger `7x5` coordinator slices (`task_end 50000`, then `task_end 10000`, then `task_end 3000`) were too slow for a quick A/B loop on this machine, so I stopped them rather than burn more benchmark time without a clean comparison.
+- Interpretation: the mechanism is correctness-safe, but the extra runtime queue/donation machinery is not paying for itself on the only clean comparison I gathered. Until there is stronger evidence on a representative hard case, this should not stay in the mainline.
+- Outcome: rejected and reverted.
+
+### Experiment 38: Reintroduce runtime donation as an opt-in coordinator mode
+- Goal: keep the runtime subtree donation idea available for hard coordinator runs without regressing the accepted baseline.
+- Change:
+  - added `--runtime-donate`
+  - added `--runtime-donate-min-depth` and `--runtime-donate-max-depth`
+  - kept the existing coordinator worker path unchanged by default
+  - added a second coordinator worker path that:
+    - seeds depth-2 prefixes into a compact prefix queue
+    - rebuilds local `CanonState` / `PartialGraphState` on pop
+    - donates deeper sibling prefixes only when the runtime queue is below the low watermark
+    - prints simple runtime donation counters at the end
+- Correctness checks:
+  - forced-donation run:
+    - command: `OMP_NUM_THREADS=4 ./partition_poly_7 6 3 --prefix-depth 2 --coordinator-url http://127.0.0.1:3014 --worker-id donate-optin --run-id 1 --runtime-donate --runtime-donate-min-depth 2 --runtime-donate-max-depth 3 --coord-low-watermark 25000 --coord-high-watermark 25032`
+    - result: `Runtime donation stats: donated=3883, max outstanding=21979`
+    - merged coordinator output matched direct `./partition_poly_7 6 3 --prefix-depth 2 --poly-out ...` exactly
+  - default-path smoke test:
+    - command: `OMP_NUM_THREADS=4 ./partition_poly_7 6 2 --prefix-depth 2 --coordinator-url http://127.0.0.1:3015 --worker-id noflag-ok --run-id 1`
+    - result: coordinator run completed with run stats `done=4, queued=0, leased=0, failed=0`
+- Interpretation: the narrower shape is acceptable. The default path stays untouched, while hard coordinator runs now have an experimental donation mode that can be profiled and tuned separately.
+- Outcome: accepted as experimental opt-in only.

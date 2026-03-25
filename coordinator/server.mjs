@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import http from 'node:http';
+import https from 'node:https';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -17,7 +18,7 @@ function usage() {
   console.error(
     [
       'usage:',
-      '  node coordinator/server.mjs serve [--db PATH] [--host HOST] [--port PORT] [--lease-seconds N]',
+      '  node coordinator/server.mjs serve [--db PATH] [--host HOST] [--port PORT] [--lease-seconds N] [--tls-cert FILE --tls-key FILE]',
       '  node coordinator/server.mjs create-run --rows R --cols C --prefix-depth D --task-stride S [options]',
       '  node coordinator/server.mjs list-runs [--db PATH]',
       '  node coordinator/server.mjs show-run --run-id ID [--db PATH]',
@@ -60,6 +61,8 @@ function parseArgs(argv) {
     name: null,
     runId: null,
     output: null,
+    tlsCert: null,
+    tlsKey: null,
   };
   const positionals = [];
   for (let i = 2; i < argv.length; i++) {
@@ -76,6 +79,12 @@ function parseArgs(argv) {
         break;
       case '--lease-seconds':
         args.leaseSeconds = Number(argv[++i]);
+        break;
+      case '--tls-cert':
+        args.tlsCert = path.resolve(argv[++i]);
+        break;
+      case '--tls-key':
+        args.tlsKey = path.resolve(argv[++i]);
         break;
       case '--rows':
         args.rows = Number(argv[++i]);
@@ -452,7 +461,10 @@ function statsForRun(db, runId) {
 
 function serve(args) {
   const db = openDb(args.db);
-  const server = http.createServer(async (req, res) => {
+  if ((args.tlsCert && !args.tlsKey) || (!args.tlsCert && args.tlsKey)) {
+    throw new Error('serve requires both --tls-cert and --tls-key when either is set');
+  }
+  const handler = async (req, res) => {
     try {
       if (req.method === 'GET' && req.url === '/healthz') {
         json(res, 200, { ok: true });
@@ -490,11 +502,24 @@ function serve(args) {
     } catch (err) {
       json(res, 500, { error: String(err?.message ?? err) });
     }
-  });
+  };
+  const server = args.tlsCert
+    ? https.createServer(
+        {
+          cert: fs.readFileSync(args.tlsCert),
+          key: fs.readFileSync(args.tlsKey),
+        },
+        handler
+      )
+    : http.createServer(handler);
 
   server.listen(args.port, args.host, () => {
-    console.log(`coordinator listening on http://${args.host}:${args.port}`);
+    console.log(`coordinator listening on ${args.tlsCert ? 'https' : 'http'}://${args.host}:${args.port}`);
     console.log(`database: ${args.db}`);
+    if (args.tlsCert) {
+      console.log(`tls cert: ${args.tlsCert}`);
+      console.log(`tls key: ${args.tlsKey}`);
+    }
   });
 }
 
