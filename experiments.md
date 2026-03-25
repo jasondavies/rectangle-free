@@ -1087,3 +1087,36 @@
   - but full reconstruction is about `28.5x` slower wall-clock than the direct symbolic sampled `7x5` run on the same 32 cores
   - so the modular path is currently a correctness/scalability path, not a speed win, at least on this sampled `7x5` workload
 - Outcome: benchmark accepted; no optimisation win.
+
+### Experiment 50: Compare `1x32`, `2x16`, and `4x8` process layouts on the same sampled `7x5` work set
+- Goal: test whether splitting a 32-core node into multiple smaller OpenMP processes improves tail utilisation enough to beat the current `1x32` layout on the same selected top-level tasks.
+- Shared work set:
+  - the same 8 sampled tasks from `task_stride=3235, task_offset=0`
+  - `2x16` split those 8 tasks into two disjoint `task_stride=6470` shards
+  - `4x8` split them into four disjoint `task_stride=12940` shards
+- Baseline `1x32` command:
+  - `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235`
+- Baseline `1x32` result:
+  - `Total elapsed 3.74s`
+- `2x16` result:
+  - two concurrent processes
+  - per-process totals:
+    - `3.65s`
+    - `3.66s`
+  - overall wall time:
+    - `3.78s`
+- `4x8` result:
+  - four concurrent processes
+  - per-process totals:
+    - `3.00s`
+    - `3.77s`
+    - `3.76s`
+    - `1.41s`
+  - overall wall time:
+    - `3.89s`
+- Interpretation:
+  - on this sampled `7x5` work set, splitting the node into more processes does not beat the current `1x32` layout
+  - `2x16` is essentially neutral but slightly worse
+  - `4x8` adds enough duplicate setup/prefix cost that it loses clearly
+  - this does not rule out benefits on harder `7x7` tails, but there is no evidence of a general win from smaller process layouts on the sampled `7x5` case
+- Outcome: benchmark accepted; no optimisation win.
