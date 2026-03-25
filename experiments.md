@@ -766,3 +766,70 @@
     - result: coordinator run completed with run stats `done=4, queued=0, leased=0, failed=0`
 - Interpretation: the narrower shape is acceptable. The default path stays untouched, while hard coordinator runs now have an experimental donation mode that can be profiled and tuned separately.
 - Outcome: accepted as experimental opt-in only.
+
+### Experiment 39: Pick the deletion-contraction edge by triangle count
+- Goal: reduce the `solve_graph_poly()` recursion tree by keeping the existing max-degree pivot `u`, but choosing the neighbour `v` that shares the most common neighbours with `u` instead of the first neighbour.
+- Change:
+  - replaced the first-neighbour choice in `solve_graph_poly()` with a scan over `u`'s neighbours
+  - scored each candidate `v` by `popcount(g.adj[u] & g.adj[v])`
+  - chose the neighbour with the largest triangle count
+- 32-thread benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235`
+- Baseline from accepted code:
+  - `Prefix generation 1.36s`
+  - `Worker Complete 2.41s`
+  - `Total elapsed 3.77s`
+- Experiment result:
+  - `Prefix generation 1.31s`
+  - `Worker Complete 2.76s`
+  - `Total elapsed 4.07s`
+  - `Canonicalisation calls 337775`
+  - `Canonical cache hits 175012`
+  - `Raw cache hits 179799`
+- One-thread profile command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235 --profile`
+- One-thread profile result:
+  - `Prefix generation 1.34s`
+  - `Worker Complete 7.25s`
+  - `Total elapsed 8.59s`
+  - `solve_graph_poly 523236 calls, 6.150s`
+  - `canon_state_prepare_push 557045 calls, 4.053s`
+- Interpretation: on the sampled workload, the triangle-heavy neighbour choice makes the graph solver do more overall work rather than less. It regresses both the 32-thread wall-clock benchmark and the 1-thread profiled worker time, so the extra edge-selection cost is not buying a smaller recursion tree here.
+- Outcome: rejected and reverted.
+
+### Experiment 40: Refactor hot polynomial operations and `solve_graph_poly()` to out-parameters
+- Goal: remove repeated by-value copies of large `Poly` values from the solver hot path by switching the hot arithmetic and recursive graph solver to explicit output parameters.
+- Change:
+  - added alias-safe out-parameter forms for:
+    - `poly_add_ref`
+    - `poly_sub_ref`
+    - `poly_mul_ref`
+    - `poly_scale_ref`
+    - `poly_mul_linear_ref`
+    - `poly_mul_falling_ref`
+  - changed `solve_graph_poly()` to `void` with an explicit `Poly* out_result`
+  - changed `solve_structure()` to `void` with an explicit output parameter
+  - threaded the new forms through the DFS, fixed-prefix execution path, runtime donation path, shard accumulation, and final thread-result merge
+  - changed `solve_graph_poly()` to take `const Graph*` and copy locally only once on entry instead of passing `Graph` by value through the recursive interface
+- 32-thread benchmark command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235`
+- Baseline from accepted code:
+  - `Prefix generation 1.36s`
+  - `Worker Complete 2.41s`
+  - `Total elapsed 3.77s`
+- Experiment result:
+  - `Prefix generation 1.36s`
+  - `Worker Complete 2.39s`
+  - `Total elapsed 3.75s`
+  - `Canonicalisation calls 223970`
+  - `Canonical cache hits 111299`
+  - `Raw cache hits 193251`
+- One-thread profile command: `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235 --profile`
+- One-thread profile result:
+  - `Prefix generation 1.31s`
+  - `Worker Complete 6.86s`
+  - `Total elapsed 8.17s`
+  - `solve_graph_poly 430118 calls, 3.350s`
+  - `canon_state_prepare_push 557045 calls, 4.061s`
+- Additional smoke check:
+  - `OMP_NUM_THREADS=1 ./partition_poly_7 7 2 --prefix-depth 2`
+  - completed successfully and produced the expected polynomial output
+- Interpretation: the wall-clock win on the sampled 32-thread case is small but real, while the one-thread profile shows a much larger reduction in graph-solver time. The out-parameter refactor removes a meaningful amount of `Poly`/`Graph` copy overhead from the recursive solver path without changing results.
+- Outcome: accepted.
