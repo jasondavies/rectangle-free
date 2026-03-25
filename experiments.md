@@ -1065,3 +1065,25 @@
     - with no solver re-execution
 - Interpretation: the reconstruction driver is now operationally useful for larger runs. Work can be parallelised at the evaluation-call level and resumed safely after interruption without losing completed modular samples.
 - Outcome: accepted.
+
+### Experiment 49: Compare direct full-poly solving against full modular reconstruction on sampled `7x5`
+- Goal: answer whether the new modular reconstruction path is actually faster end to end, not just faster per single `--eval-q/--mod` call.
+- Direct baseline command:
+  - `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235`
+- Direct baseline result:
+  - `Worker Complete 2.40s`
+  - `Total elapsed 3.74s`
+  - `P(4) = 27028285369344000`
+- Reconstruction command:
+  - `python3 reconstruct_poly.py 7 5 --solver ./partition_poly_7 --threads 8 --jobs 4 --state-file /tmp/reconstruct_7x5_sample.json -- --adaptive-subdivide --task-stride 3235`
+- Reconstruction result:
+  - degree `35`, so `36` q-values
+  - `3` primes were required by the current bound logic
+  - each prime batch took about `35.5s`
+  - `Total elapsed: 106.69s`
+  - reconstructed polynomial matched the direct symbolic result exactly
+- Interpretation:
+  - a single modular evaluation is still much faster than the full-polynomial hot path
+  - but full reconstruction is about `28.5x` slower wall-clock than the direct symbolic sampled `7x5` run on the same 32 cores
+  - so the modular path is currently a correctness/scalability path, not a speed win, at least on this sampled `7x5` workload
+- Outcome: benchmark accepted; no optimisation win.

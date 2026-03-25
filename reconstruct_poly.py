@@ -418,6 +418,7 @@ def write_big_poly_file(
 
 
 def main() -> int:
+    overall_t0 = time.time()
     args = parse_args()
     degree = args.degree if args.degree is not None else args.rows * args.cols
     solver = args.solver or choose_default_solver(args.rows)
@@ -479,6 +480,8 @@ def main() -> int:
             args.solver_args,
         )
         print(f"\nWrote reconstructed polynomial to {args.poly_out}")
+
+    print(f"\nTotal elapsed: {time.time() - overall_t0:.2f}s")
 
     return 0
 
