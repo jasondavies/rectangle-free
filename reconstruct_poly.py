@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 
 import argparse
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from fractions import Fraction
+import json
 import os
 from pathlib import Path
 import re
@@ -46,6 +48,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("cols", type=int)
     parser.add_argument("--solver", default=None, help="Solver binary to run")
     parser.add_argument("--threads", type=int, default=1, help="OMP_NUM_THREADS for each evaluation")
+    parser.add_argument("--jobs", type=int, default=1, help="Concurrent solver evaluations to run")
     parser.add_argument("--prefix-depth", type=int, default=2)
     parser.add_argument(
         "--degree",
@@ -71,8 +74,15 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print the reconstructed values P(q) for q=0..degree",
     )
+    parser.add_argument(
+        "--state-file",
+        default=None,
+        help="Checkpoint file for completed modular evaluations",
+    )
     args = parser.parse_args(argv)
     args.solver_args = solver_args
+    if args.jobs <= 0:
+        parser.error("--jobs must be positive")
     return args
 
 
@@ -146,6 +156,122 @@ def crt_combine(current: int, modulus: int, residue: int, prime: int) -> int:
     return current + modulus * step
 
 
+def build_state_template(
+    rows: int,
+    cols: int,
+    degree: int,
+    solver: str,
+    prefix_depth: int,
+    solver_args: list[str],
+    primes: list[int],
+) -> dict:
+    return {
+        "version": 1,
+        "rows": rows,
+        "cols": cols,
+        "degree": degree,
+        "solver": solver,
+        "prefix_depth": prefix_depth,
+        "solver_args": list(solver_args),
+        "primes": list(primes),
+        "results": {},
+    }
+
+
+def load_state(
+    state_file: str | None,
+    rows: int,
+    cols: int,
+    degree: int,
+    solver: str,
+    prefix_depth: int,
+    solver_args: list[str],
+    primes: list[int],
+) -> dict:
+    template = build_state_template(rows, cols, degree, solver, prefix_depth, solver_args, primes)
+    if not state_file:
+        return template
+    path = Path(state_file)
+    if not path.exists():
+        return template
+    with path.open("r", encoding="ascii") as handle:
+        state = json.load(handle)
+    required = ["version", "rows", "cols", "degree", "solver", "prefix_depth", "solver_args", "primes", "results"]
+    for key in required:
+        if key not in state:
+            raise ValueError(f"state file missing key {key}")
+    checks = {
+        "rows": rows,
+        "cols": cols,
+        "degree": degree,
+        "solver": solver,
+        "prefix_depth": prefix_depth,
+        "solver_args": list(solver_args),
+        "primes": list(primes),
+    }
+    for key, expected in checks.items():
+        if state[key] != expected:
+            raise ValueError(f"state file mismatch for {key}: {state[key]!r} != {expected!r}")
+    return state
+
+
+def save_state(state_file: str | None, state: dict) -> None:
+    if not state_file:
+        return
+    path = Path(state_file)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w", encoding="ascii") as handle:
+        json.dump(state, handle, sort_keys=True, indent=2)
+        handle.write("\n")
+    tmp.replace(path)
+
+
+def evaluate_prime_values(
+    solver: str,
+    rows: int,
+    cols: int,
+    prefix_depth: int,
+    degree: int,
+    prime: int,
+    threads: int,
+    jobs: int,
+    solver_args: list[str],
+    state: dict,
+    state_file: str | None,
+) -> list[int]:
+    prime_key = str(prime)
+    prime_results = state["results"].setdefault(prime_key, {})
+    values: list[int | None] = [None] * (degree + 1)
+    missing = []
+    for q in range(degree + 1):
+        key = str(q)
+        if key in prime_results:
+            values[q] = int(prime_results[key])
+        else:
+            missing.append(q)
+
+    if not missing:
+        return [int(v) for v in values]
+
+    def worker(q: int) -> tuple[int, int]:
+        return q, run_eval(solver, rows, cols, prefix_depth, q, prime, threads, solver_args)
+
+    max_workers = min(jobs, len(missing))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        pending = {executor.submit(worker, q): q for q in missing}
+        while pending:
+            done, _ = wait(pending, return_when=FIRST_COMPLETED)
+            for future in done:
+                q, value = future.result()
+                values[q] = value
+                prime_results[str(q)] = value
+                save_state(state_file, state)
+                print(f"  mod {prime}: completed q={q} ({len(prime_results)}/{degree + 1})", flush=True)
+                del pending[future]
+
+    return [int(v) for v in values]
+
+
 def reconstruct_values(
     solver: str,
     rows: int,
@@ -154,16 +280,29 @@ def reconstruct_values(
     degree: int,
     primes: list[int],
     threads: int,
+    jobs: int,
     solver_args: list[str],
+    state_file: str | None,
 ) -> tuple[list[int], int]:
+    state = load_state(state_file, rows, cols, degree, solver, prefix_depth, solver_args, primes)
+    save_state(state_file, state)
     values = [0] * (degree + 1)
     modulus = 1
     for prime_index, prime in enumerate(primes, start=1):
         t0 = time.time()
-        prime_values = []
-        for q in range(degree + 1):
-            value = run_eval(solver, rows, cols, prefix_depth, q, prime, threads, solver_args)
-            prime_values.append(value)
+        prime_values = evaluate_prime_values(
+            solver=solver,
+            rows=rows,
+            cols=cols,
+            prefix_depth=prefix_depth,
+            degree=degree,
+            prime=prime,
+            threads=threads,
+            jobs=jobs,
+            solver_args=solver_args,
+            state=state,
+            state_file=state_file,
+        )
         if modulus == 1:
             values = prime_values
             modulus = prime
@@ -293,8 +432,11 @@ def main() -> int:
     print(f"Grid: {args.rows}x{args.cols}")
     print(f"Degree: {degree}")
     print(f"Threads per evaluation: {args.threads}")
+    print(f"Concurrent evaluations: {args.jobs}")
     print(f"Extra solver args: {args.solver_args if args.solver_args else '[]'}")
     print(f"Primes: {len(primes)}")
+    if args.state_file:
+        print(f"State file: {args.state_file}")
 
     values, modulus = reconstruct_values(
         solver=solver,
@@ -304,7 +446,9 @@ def main() -> int:
         degree=degree,
         primes=primes,
         threads=args.threads,
+        jobs=args.jobs,
         solver_args=args.solver_args,
+        state_file=args.state_file,
     )
 
     coeffs = interpolate_integer_values(values)

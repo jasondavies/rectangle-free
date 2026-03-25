@@ -1048,3 +1048,20 @@
   - these match the direct `OMP_NUM_THREADS=1 ./partition_poly_7 6 3 --prefix-depth 2` run exactly
 - Interpretation: this completes the first full end-to-end modular path. The solver can now produce exact chromatic polynomials via modular evaluations and interpolation, with no coefficient-polynomial arithmetic on the hot path.
 - Outcome: accepted.
+
+### Experiment 48: Add parallel and resumable evaluation scheduling to `reconstruct_poly.py`
+- Goal: make the reconstruction driver usable for longer runs by allowing multiple independent `(prime, q)` evaluations in flight and by checkpointing completed results for resume.
+- Change:
+  - added `--jobs N` to run up to `N` evaluation subprocesses concurrently
+  - added `--state-file FILE` to checkpoint each completed `(prime, q)` value in JSON
+  - reruns now load the checkpointed values and skip already-completed solver work
+- Validation command:
+  - `python3 reconstruct_poly.py 6 3 --solver ./partition_poly_7 --threads 1 --jobs 2 --state-file /tmp/reconstruct_6x3_state.json`
+- Validation result:
+  - first run completed all 38 evaluations across 2 primes and reconstructed the same `6x3` polynomial as before
+  - immediate rerun against the same state file reported:
+    - `Prime 1/2 ... in 0.00s`
+    - `Prime 2/2 ... in 0.00s`
+    - with no solver re-execution
+- Interpretation: the reconstruction driver is now operationally useful for larger runs. Work can be parallelised at the evaluation-call level and resumed safely after interruption without losing completed modular samples.
+- Outcome: accepted.
