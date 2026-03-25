@@ -1120,3 +1120,25 @@
   - `4x8` adds enough duplicate setup/prefix cost that it loses clearly
   - this does not rule out benefits on harder `7x7` tails, but there is no evidence of a general win from smaller process layouts on the sampled `7x5` case
 - Outcome: benchmark accepted; no optimisation win.
+
+### Experiment 51: Batch fixed depth-2 tasks by `i` to reuse first-column state
+- Goal: improve locality for fixed `prefix-depth 2` work by changing the work unit from one `(i,j)` task to small batches of selected `j` values sharing the same `i`, so `CanonState` and `PartialGraphState` for the first column are built once per batch.
+- Implementation:
+  - added fixed-size `Prefix2Batch` descriptors for non-adaptive depth-2 runs
+  - grouped selected shard tasks by `i`
+  - executed each batch by committing the first column once, then replaying each `j` child inside the batch
+- Sampled command set:
+  - `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 5 --prefix-depth 2 --task-stride 3235 --profile`
+  - `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly_7 7 5 --prefix-depth 2 --task-stride 3235`
+- Previous baseline:
+  - `OMP_NUM_THREADS=1`: `Worker Complete 1.76s`, `Total elapsed 1.76s`
+  - `OMP_NUM_THREADS=32`: `Worker Complete 1.75s`, `Total elapsed 1.75s`
+- Batched result:
+  - `OMP_NUM_THREADS=1`: `Worker Complete 1.71s`, `Total elapsed 1.71s`
+  - `OMP_NUM_THREADS=32`: `Worker Complete 1.70s`, `Total elapsed 1.70s`
+  - output polynomial unchanged
+- Interpretation:
+  - the win is modest, about `3%`, but it is real and consistent across 1-thread and 32-thread runs
+  - this is exactly the locality win expected from reusing the depth-1 `i` state across multiple `j` children
+  - it only affects the fixed non-adaptive depth-2 path; adaptive and coordinator execution are unchanged
+- Outcome: accepted.

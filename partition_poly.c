@@ -73,6 +73,10 @@ typedef uint64_t AdjWord;
 #define RAW_CACHE_PROBE 8
 #endif
 
+#ifndef FIXED_PREFIX2_BATCH_SIZE
+#define FIXED_PREFIX2_BATCH_SIZE 16
+#endif
+
 // --- DATA TYPES ---
 
 typedef __int128_t PolyCoeff;
@@ -191,6 +195,12 @@ typedef struct {
     long long capacity;
     int with_l;
 } PrefixTaskBuffer;
+
+typedef struct {
+    PrefixId i;
+    uint32_t start;
+    uint16_t count;
+} Prefix2Batch;
 
 typedef struct {
     int shard_slot;
@@ -516,6 +526,9 @@ static inline int task_matches_selection(long long task_index, long long task_st
     return remainder == task_offset;
 }
 
+static long long first_selected_task(long long task_start, long long task_end,
+                                     long long task_stride, long long task_offset);
+
 static void prefix_task_buffer_append3_selected_batch(PrefixTaskBuffer* buf, int i, int j,
                                                       const uint16_t* ks, int count,
                                                       long long first_task_index,
@@ -572,6 +585,72 @@ static void unrank_prefix2(long long rank, int* i, int* j) {
     }
     fprintf(stderr, "Depth-2 prefix rank out of range\n");
     exit(1);
+}
+
+static void build_fixed_prefix2_batches(long long task_start, long long task_end,
+                                        long long task_stride, long long task_offset,
+                                        long long total_tasks, Prefix2Batch** batches_out,
+                                        long long* batch_count_out, PrefixId** js_out,
+                                        long long** ps_out) {
+    int* counts = checked_calloc((size_t)num_partitions, sizeof(*counts), "prefix2_batch_counts");
+    int* offsets = checked_calloc((size_t)num_partitions, sizeof(*offsets), "prefix2_batch_offsets");
+    int* cursor = checked_calloc((size_t)num_partitions, sizeof(*cursor), "prefix2_batch_cursor");
+
+    long long first_task = first_selected_task(task_start, task_end, task_stride, task_offset);
+    for (long long t = 0; t < total_tasks; t++) {
+        long long p = first_task + t * task_stride;
+        int i = 0;
+        int j = 0;
+        (void)j;
+        unrank_prefix2(p, &i, &j);
+        counts[i]++;
+    }
+
+    long long batch_count = 0;
+    int running = 0;
+    for (int i = 0; i < num_partitions; i++) {
+        offsets[i] = running;
+        cursor[i] = running;
+        running += counts[i];
+        if (counts[i] > 0) {
+            batch_count += (counts[i] + FIXED_PREFIX2_BATCH_SIZE - 1) / FIXED_PREFIX2_BATCH_SIZE;
+        }
+    }
+
+    PrefixId* js = checked_calloc((size_t)total_tasks, sizeof(*js), "prefix2_batch_js");
+    long long* ps = checked_calloc((size_t)total_tasks, sizeof(*ps), "prefix2_batch_ps");
+    Prefix2Batch* batches = checked_calloc((size_t)batch_count, sizeof(*batches), "prefix2_batches");
+
+    for (long long t = 0; t < total_tasks; t++) {
+        long long p = first_task + t * task_stride;
+        int i = 0;
+        int j = 0;
+        unrank_prefix2(p, &i, &j);
+        int pos = cursor[i]++;
+        js[pos] = (PrefixId)j;
+        ps[pos] = p;
+    }
+
+    long long batch_index = 0;
+    for (int i = 0; i < num_partitions; i++) {
+        for (int pos = offsets[i]; pos < offsets[i] + counts[i]; pos += FIXED_PREFIX2_BATCH_SIZE) {
+            int remaining = offsets[i] + counts[i] - pos;
+            int batch_size = remaining < FIXED_PREFIX2_BATCH_SIZE ? remaining : FIXED_PREFIX2_BATCH_SIZE;
+            batches[batch_index].i = (PrefixId)i;
+            batches[batch_index].start = (uint32_t)pos;
+            batches[batch_index].count = (uint16_t)batch_size;
+            batch_index++;
+        }
+    }
+
+    free(counts);
+    free(offsets);
+    free(cursor);
+
+    *batches_out = batches;
+    *batch_count_out = batch_count;
+    *js_out = js;
+    *ps_out = ps;
 }
 
 static void unrank_prefix3(long long rank, int* i, int* j, int* k) {
@@ -3310,6 +3389,106 @@ static void execute_prefix2_fixed_task(long long p,
     canon_state_pop(canon_state);
 }
 
+static void execute_prefix2_fixed_batch(PrefixId i, const PrefixId* js, const long long* ps, int count,
+                                        GraphCache* cache, GraphCache* raw_cache, NautyWorkspace* ws,
+                                        CanonState* canon_state, CanonScratch* canon_scratch,
+                                        PartialGraphState* partial_graph, int* stack, Poly* local_total,
+                                        long long* local_canon_calls, long long* local_cache_hits,
+                                        long long* local_raw_cache_hits, ProfileStats* profile,
+                                        long long total_tasks, long long progress_report_step,
+                                        double start_time, long long* pending_completed,
+                                        TaskTimingStats* task_timing) {
+    double t0 = 0.0;
+    int next_stabilizer = 0;
+
+    canon_state_reset(canon_state, perm_count);
+    partial_graph_reset(partial_graph);
+
+    stack[0] = (int)i;
+    if (g_profile) {
+        profile->canon_prepare_calls++;
+        profile->canon_prepare_calls_by_depth[0]++;
+        t0 = omp_get_wtime();
+    }
+    if (!canon_state_prepare_push(canon_state, (int)i, canon_scratch, &next_stabilizer)) {
+        if (g_profile) profile->canon_prepare_time += omp_get_wtime() - t0;
+        return;
+    }
+    if (g_profile) {
+        profile->canon_prepare_time += omp_get_wtime() - t0;
+        profile->canon_prepare_accepts++;
+        profile->canon_prepare_accepts_by_depth[0]++;
+        profile->stabilizer_sum_by_depth[0] += next_stabilizer;
+        profile->canon_commit_calls++;
+        t0 = omp_get_wtime();
+    }
+    canon_state_commit_push(canon_state, (int)i, canon_scratch, next_stabilizer);
+    if (g_profile) profile->canon_commit_time += omp_get_wtime() - t0;
+    if (g_profile) {
+        profile->partial_append_calls++;
+        t0 = omp_get_wtime();
+    }
+    if (!partial_graph_append(partial_graph, 0, (int)i, stack)) {
+        if (g_profile) profile->partial_append_time += omp_get_wtime() - t0;
+        canon_state_pop(canon_state);
+        return;
+    }
+    if (g_profile) profile->partial_append_time += omp_get_wtime() - t0;
+
+    for (int idx = 0; idx < count; idx++) {
+        long long p = ps[idx];
+        double task_t0 = g_profile ? omp_get_wtime() : 0.0;
+        PrefixId j = js[idx];
+        Poly task_total;
+        poly_zero(&task_total);
+
+        stack[1] = (int)j;
+        if (g_profile) {
+            profile->canon_prepare_calls++;
+            profile->canon_prepare_calls_by_depth[1]++;
+            t0 = omp_get_wtime();
+        }
+        if (!canon_state_prepare_push(canon_state, (int)j, canon_scratch, &next_stabilizer)) {
+            if (g_profile) profile->canon_prepare_time += omp_get_wtime() - t0;
+            complete_task_report_and_time(total_tasks, progress_report_step, start_time,
+                                          pending_completed, task_timing, p, task_t0);
+            continue;
+        }
+        if (g_profile) {
+            profile->canon_prepare_time += omp_get_wtime() - t0;
+            profile->canon_prepare_accepts++;
+            profile->canon_prepare_accepts_by_depth[1]++;
+            profile->stabilizer_sum_by_depth[1] += next_stabilizer;
+            profile->canon_commit_calls++;
+            t0 = omp_get_wtime();
+        }
+        canon_state_commit_push(canon_state, (int)j, canon_scratch, next_stabilizer);
+        if (g_profile) profile->canon_commit_time += omp_get_wtime() - t0;
+        PartialGraphState prefix_graph = *partial_graph;
+        if (g_profile) {
+            profile->partial_append_calls++;
+            t0 = omp_get_wtime();
+        }
+        int ok = partial_graph_append(&prefix_graph, 1, (int)j, stack);
+        if (g_profile) profile->partial_append_time += omp_get_wtime() - t0;
+        if (ok) {
+            Poly prefix_weight;
+            poly_mul_ref(&partition_weight_poly[i], &partition_weight_poly[j], &prefix_weight);
+            long long prefix_mult = (i == j) ? 1 : 2;
+            int prefix_run = (i == j) ? 2 : 1;
+            dfs(2, (int)j, stack, canon_state, &prefix_graph, cache, raw_cache, ws, &task_total,
+                local_canon_calls, local_cache_hits, local_raw_cache_hits,
+                &prefix_weight, prefix_mult, prefix_run, profile, canon_scratch);
+            poly_add_ref(local_total, &task_total, local_total);
+        }
+        canon_state_pop(canon_state);
+        complete_task_report_and_time(total_tasks, progress_report_step, start_time,
+                                      pending_completed, task_timing, p, task_t0);
+    }
+
+    canon_state_pop(canon_state);
+}
+
 static void execute_prefix2_eval_task(int i, int j, int k,
                                       EvalCache* cache, EvalCache* raw_cache, NautyWorkspace* ws,
                                       CanonState* canon_state, CanonScratch* canon_scratch,
@@ -4509,6 +4688,10 @@ int main(int argc, char** argv) {
     long long total_prefixes = 0;
     long long materialized_prefixes = 0;
     PrefixId *prefix_i = NULL, *prefix_j = NULL, *prefix_k = NULL, *prefix_l = NULL;
+    Prefix2Batch* prefix2_batches = NULL;
+    PrefixId* prefix2_batch_js = NULL;
+    long long* prefix2_batch_ps = NULL;
+    long long prefix2_batch_count = 0;
     double prefix_generation_time = 0.0;
 
     if (prefix_depth > 0) {
@@ -4644,6 +4827,13 @@ int main(int argc, char** argv) {
         fprintf(stderr, "Internal error: adaptive prefix selection mismatch\n");
         return 1;
     }
+    if (prefix_depth == 2 && !g_adaptive_subdivide && total_tasks > 0) {
+        double batch_start_time = omp_get_wtime();
+        build_fixed_prefix2_batches(active_task_start, active_task_end, task_stride, task_offset,
+                                    total_tasks, &prefix2_batches, &prefix2_batch_count,
+                                    &prefix2_batch_js, &prefix2_batch_ps);
+        prefix_generation_time += omp_get_wtime() - batch_start_time;
+    }
     printf("Prefix depth: %d (%lld tasks)\n", prefix_depth, total_prefixes);
     if (g_adaptive_subdivide) {
         printf("Adaptive subdivision: threshold %d, max depth %d\n",
@@ -4656,6 +4846,15 @@ int main(int argc, char** argv) {
             printf("Selected prefix task bytes: %zu each, %.2f MiB total\n",
                    bytes_per_task,
                    ((double)bytes_per_task * (double)materialized_prefixes) / (1024.0 * 1024.0));
+        } else if (prefix_depth == 2 && prefix2_batch_count > 0) {
+            size_t bytes_per_task = sizeof(PrefixId) + sizeof(long long);
+            size_t bytes_per_batch = sizeof(*prefix2_batches);
+            double total_mib =
+                (((double)bytes_per_task * (double)total_tasks) +
+                 ((double)bytes_per_batch * (double)prefix2_batch_count)) /
+                (1024.0 * 1024.0);
+            printf("Fixed depth-2 batching: %lld batches, %.2f MiB total\n",
+                   prefix2_batch_count, total_mib);
         } else {
             printf("Prefix task storage: unranked on demand for selected tasks\n");
         }
@@ -4969,156 +5168,173 @@ int main(int argc, char** argv) {
                                               &pending_completed, task_timing, i, task_t0);
             }
         } else if (prefix_depth == 2) {
-            #pragma omp for schedule(runtime)
-            for (long long t = 0; t < total_tasks; t++) {
-                double task_t0 = g_profile ? omp_get_wtime() : 0.0;
-                double t0 = 0.0;
-                long long p = first_task + t * task_stride;
-                int i = 0;
-                int j = 0;
-                int k = -1;
-                if (g_adaptive_subdivide) {
-                    i = (int)prefix_i[t];
-                    j = (int)prefix_j[t];
-                    k = (prefix_k[t] == PREFIX_ID_NONE) ? -1 : (int)prefix_k[t];
-                } else {
-                    unrank_prefix2(p, &i, &j);
+            if (!g_adaptive_subdivide && prefix2_batch_count > 0) {
+                #pragma omp for schedule(runtime)
+                for (long long b = 0; b < prefix2_batch_count; b++) {
+                    Prefix2Batch batch = prefix2_batches[b];
+                    execute_prefix2_fixed_batch(batch.i,
+                                                prefix2_batch_js + batch.start,
+                                                prefix2_batch_ps + batch.start,
+                                                batch.count,
+                                                &cache, &raw_cache, &ws, &canon_state,
+                                                &canon_scratch, &partial_graph, stack, &thread_polys[tid],
+                                                &local_canon_calls, &local_cache_hits,
+                                                &local_raw_cache_hits, profile,
+                                                total_tasks, progress_report_step, start_time,
+                                                &pending_completed, task_timing);
                 }
-                int next_stabilizer = 0;
-
-                canon_state_reset(&canon_state, perm_count);
-                partial_graph_reset(&partial_graph);
-
-                stack[0] = i;
-                if (g_profile) {
-                    profile->canon_prepare_calls++;
-                    profile->canon_prepare_calls_by_depth[0]++;
-                    t0 = omp_get_wtime();
-                }
-                if (!canon_state_prepare_push(&canon_state, i, &canon_scratch, &next_stabilizer)) {
-                    if (g_profile) profile->canon_prepare_time += omp_get_wtime() - t0;
-                    complete_task_report_and_time(total_tasks, progress_report_step, start_time,
-                                                  &pending_completed, task_timing, p, task_t0);
-                    continue;
-                }
-                if (g_profile) {
-                    profile->canon_prepare_time += omp_get_wtime() - t0;
-                    profile->canon_prepare_accepts++;
-                    profile->canon_prepare_accepts_by_depth[0]++;
-                    profile->stabilizer_sum_by_depth[0] += next_stabilizer;
-                    profile->canon_commit_calls++;
-                    t0 = omp_get_wtime();
-                }
-                canon_state_commit_push(&canon_state, i, &canon_scratch, next_stabilizer);
-                if (g_profile) profile->canon_commit_time += omp_get_wtime() - t0;
-                if (g_profile) {
-                    profile->partial_append_calls++;
-                    t0 = omp_get_wtime();
-                }
-                int ok = partial_graph_append(&partial_graph, 0, i, stack);
-                if (g_profile) profile->partial_append_time += omp_get_wtime() - t0;
-                if (!ok) {
-                    canon_state_pop(&canon_state);
-                    complete_task_report_and_time(total_tasks, progress_report_step, start_time,
-                                                  &pending_completed, task_timing, p, task_t0);
-                    continue;
-                }
-
-                stack[1] = j;
-                if (g_profile) {
-                    profile->canon_prepare_calls++;
-                    profile->canon_prepare_calls_by_depth[1]++;
-                    t0 = omp_get_wtime();
-                }
-                if (!canon_state_prepare_push(&canon_state, j, &canon_scratch, &next_stabilizer)) {
-                    if (g_profile) profile->canon_prepare_time += omp_get_wtime() - t0;
-                    canon_state_pop(&canon_state);
-                    complete_task_report_and_time(total_tasks, progress_report_step, start_time,
-                                                  &pending_completed, task_timing, p, task_t0);
-                    continue;
-                }
-                if (g_profile) {
-                    profile->canon_prepare_time += omp_get_wtime() - t0;
-                    profile->canon_prepare_accepts++;
-                    profile->canon_prepare_accepts_by_depth[1]++;
-                    profile->stabilizer_sum_by_depth[1] += next_stabilizer;
-                    profile->canon_commit_calls++;
-                    t0 = omp_get_wtime();
-                }
-                canon_state_commit_push(&canon_state, j, &canon_scratch, next_stabilizer);
-                if (g_profile) profile->canon_commit_time += omp_get_wtime() - t0;
-                PartialGraphState prefix_graph = partial_graph;
-                if (g_profile) {
-                    profile->partial_append_calls++;
-                    t0 = omp_get_wtime();
-                }
-                ok = partial_graph_append(&prefix_graph, 1, j, stack);
-                if (g_profile) profile->partial_append_time += omp_get_wtime() - t0;
-                if (ok) {
-                    if (k < 0) {
-                        Poly prefix_weight;
-                        poly_mul_ref(&partition_weight_poly[i], &partition_weight_poly[j],
-                                     &prefix_weight);
-                        long long prefix_mult = (i == j) ? 1 : 2;
-                        int prefix_run = (i == j) ? 2 : 1;
-                        dfs(2, j, stack, &canon_state, &prefix_graph, &cache, &raw_cache, &ws,
-                            &thread_polys[tid], &local_canon_calls, &local_cache_hits, &local_raw_cache_hits,
-                            &prefix_weight, prefix_mult, prefix_run, profile, &canon_scratch);
+            } else {
+                #pragma omp for schedule(runtime)
+                for (long long t = 0; t < total_tasks; t++) {
+                    double task_t0 = g_profile ? omp_get_wtime() : 0.0;
+                    double t0 = 0.0;
+                    long long p = first_task + t * task_stride;
+                    int i = 0;
+                    int j = 0;
+                    int k = -1;
+                    if (g_adaptive_subdivide) {
+                        i = (int)prefix_i[t];
+                        j = (int)prefix_j[t];
+                        k = (prefix_k[t] == PREFIX_ID_NONE) ? -1 : (int)prefix_k[t];
                     } else {
-                        stack[2] = k;
-                        if (g_profile) {
-                            profile->canon_prepare_calls++;
-                            profile->canon_prepare_calls_by_depth[2]++;
-                            t0 = omp_get_wtime();
-                        }
-                        if (canon_state_prepare_push(&canon_state, k, &canon_scratch, &next_stabilizer)) {
+                        unrank_prefix2(p, &i, &j);
+                    }
+                    int next_stabilizer = 0;
+
+                    canon_state_reset(&canon_state, perm_count);
+                    partial_graph_reset(&partial_graph);
+
+                    stack[0] = i;
+                    if (g_profile) {
+                        profile->canon_prepare_calls++;
+                        profile->canon_prepare_calls_by_depth[0]++;
+                        t0 = omp_get_wtime();
+                    }
+                    if (!canon_state_prepare_push(&canon_state, i, &canon_scratch, &next_stabilizer)) {
+                        if (g_profile) profile->canon_prepare_time += omp_get_wtime() - t0;
+                        complete_task_report_and_time(total_tasks, progress_report_step, start_time,
+                                                      &pending_completed, task_timing, p, task_t0);
+                        continue;
+                    }
+                    if (g_profile) {
+                        profile->canon_prepare_time += omp_get_wtime() - t0;
+                        profile->canon_prepare_accepts++;
+                        profile->canon_prepare_accepts_by_depth[0]++;
+                        profile->stabilizer_sum_by_depth[0] += next_stabilizer;
+                        profile->canon_commit_calls++;
+                        t0 = omp_get_wtime();
+                    }
+                    canon_state_commit_push(&canon_state, i, &canon_scratch, next_stabilizer);
+                    if (g_profile) profile->canon_commit_time += omp_get_wtime() - t0;
+                    if (g_profile) {
+                        profile->partial_append_calls++;
+                        t0 = omp_get_wtime();
+                    }
+                    int ok = partial_graph_append(&partial_graph, 0, i, stack);
+                    if (g_profile) profile->partial_append_time += omp_get_wtime() - t0;
+                    if (!ok) {
+                        canon_state_pop(&canon_state);
+                        complete_task_report_and_time(total_tasks, progress_report_step, start_time,
+                                                      &pending_completed, task_timing, p, task_t0);
+                        continue;
+                    }
+
+                    stack[1] = j;
+                    if (g_profile) {
+                        profile->canon_prepare_calls++;
+                        profile->canon_prepare_calls_by_depth[1]++;
+                        t0 = omp_get_wtime();
+                    }
+                    if (!canon_state_prepare_push(&canon_state, j, &canon_scratch, &next_stabilizer)) {
+                        if (g_profile) profile->canon_prepare_time += omp_get_wtime() - t0;
+                        canon_state_pop(&canon_state);
+                        complete_task_report_and_time(total_tasks, progress_report_step, start_time,
+                                                      &pending_completed, task_timing, p, task_t0);
+                        continue;
+                    }
+                    if (g_profile) {
+                        profile->canon_prepare_time += omp_get_wtime() - t0;
+                        profile->canon_prepare_accepts++;
+                        profile->canon_prepare_accepts_by_depth[1]++;
+                        profile->stabilizer_sum_by_depth[1] += next_stabilizer;
+                        profile->canon_commit_calls++;
+                        t0 = omp_get_wtime();
+                    }
+                    canon_state_commit_push(&canon_state, j, &canon_scratch, next_stabilizer);
+                    if (g_profile) profile->canon_commit_time += omp_get_wtime() - t0;
+                    PartialGraphState prefix_graph = partial_graph;
+                    if (g_profile) {
+                        profile->partial_append_calls++;
+                        t0 = omp_get_wtime();
+                    }
+                    ok = partial_graph_append(&prefix_graph, 1, j, stack);
+                    if (g_profile) profile->partial_append_time += omp_get_wtime() - t0;
+                    if (ok) {
+                        if (k < 0) {
+                            Poly prefix_weight;
+                            poly_mul_ref(&partition_weight_poly[i], &partition_weight_poly[j],
+                                         &prefix_weight);
+                            long long prefix_mult = (i == j) ? 1 : 2;
+                            int prefix_run = (i == j) ? 2 : 1;
+                            dfs(2, j, stack, &canon_state, &prefix_graph, &cache, &raw_cache, &ws,
+                                &thread_polys[tid], &local_canon_calls, &local_cache_hits, &local_raw_cache_hits,
+                                &prefix_weight, prefix_mult, prefix_run, profile, &canon_scratch);
+                        } else {
+                            stack[2] = k;
                             if (g_profile) {
-                                profile->canon_prepare_time += omp_get_wtime() - t0;
-                                profile->canon_prepare_accepts++;
-                                profile->canon_prepare_accepts_by_depth[2]++;
-                                profile->stabilizer_sum_by_depth[2] += next_stabilizer;
-                                profile->canon_commit_calls++;
+                                profile->canon_prepare_calls++;
+                                profile->canon_prepare_calls_by_depth[2]++;
                                 t0 = omp_get_wtime();
                             }
-                            canon_state_commit_push(&canon_state, k, &canon_scratch, next_stabilizer);
-                            if (g_profile) profile->canon_commit_time += omp_get_wtime() - t0;
-                            PartialGraphState prefix_graph2 = prefix_graph;
-                            if (g_profile) {
-                                profile->partial_append_calls++;
-                                t0 = omp_get_wtime();
-                            }
-                            ok = partial_graph_append(&prefix_graph2, 2, k, stack);
-                            if (g_profile) profile->partial_append_time += omp_get_wtime() - t0;
-                            if (ok) {
-                                Poly prefix_weight;
-                                poly_mul_ref(&partition_weight_poly[i], &partition_weight_poly[j],
-                                             &prefix_weight);
-                                poly_mul_ref(&prefix_weight, &partition_weight_poly[k], &prefix_weight);
-                                long long prefix_mult = (i == j) ? 1 : 2;
-                                int prefix_run = (i == j) ? 2 : 1;
-                                if (k == j) {
-                                    prefix_mult = prefix_mult * 3 / (prefix_run + 1);
-                                    prefix_run += 1;
-                                } else {
-                                    prefix_mult *= 3;
-                                    prefix_run = 1;
+                            if (canon_state_prepare_push(&canon_state, k, &canon_scratch, &next_stabilizer)) {
+                                if (g_profile) {
+                                    profile->canon_prepare_time += omp_get_wtime() - t0;
+                                    profile->canon_prepare_accepts++;
+                                    profile->canon_prepare_accepts_by_depth[2]++;
+                                    profile->stabilizer_sum_by_depth[2] += next_stabilizer;
+                                    profile->canon_commit_calls++;
+                                    t0 = omp_get_wtime();
                                 }
-                                dfs(3, k, stack, &canon_state, &prefix_graph2, &cache, &raw_cache, &ws,
-                                    &thread_polys[tid], &local_canon_calls, &local_cache_hits, &local_raw_cache_hits,
-                                    &prefix_weight, prefix_mult, prefix_run, profile, &canon_scratch);
+                                canon_state_commit_push(&canon_state, k, &canon_scratch, next_stabilizer);
+                                if (g_profile) profile->canon_commit_time += omp_get_wtime() - t0;
+                                PartialGraphState prefix_graph2 = prefix_graph;
+                                if (g_profile) {
+                                    profile->partial_append_calls++;
+                                    t0 = omp_get_wtime();
+                                }
+                                ok = partial_graph_append(&prefix_graph2, 2, k, stack);
+                                if (g_profile) profile->partial_append_time += omp_get_wtime() - t0;
+                                if (ok) {
+                                    Poly prefix_weight;
+                                    poly_mul_ref(&partition_weight_poly[i], &partition_weight_poly[j],
+                                                 &prefix_weight);
+                                    poly_mul_ref(&prefix_weight, &partition_weight_poly[k], &prefix_weight);
+                                    long long prefix_mult = (i == j) ? 1 : 2;
+                                    int prefix_run = (i == j) ? 2 : 1;
+                                    if (k == j) {
+                                        prefix_mult = prefix_mult * 3 / (prefix_run + 1);
+                                        prefix_run += 1;
+                                    } else {
+                                        prefix_mult *= 3;
+                                        prefix_run = 1;
+                                    }
+                                    dfs(3, k, stack, &canon_state, &prefix_graph2, &cache, &raw_cache, &ws,
+                                        &thread_polys[tid], &local_canon_calls, &local_cache_hits, &local_raw_cache_hits,
+                                        &prefix_weight, prefix_mult, prefix_run, profile, &canon_scratch);
+                                }
+                                canon_state_pop(&canon_state);
+                            } else if (g_profile) {
+                                profile->canon_prepare_time += omp_get_wtime() - t0;
                             }
-                            canon_state_pop(&canon_state);
-                        } else if (g_profile) {
-                            profile->canon_prepare_time += omp_get_wtime() - t0;
                         }
                     }
+
+                    canon_state_pop(&canon_state);
+                    canon_state_pop(&canon_state);
+
+                    complete_task_report_and_time(total_tasks, progress_report_step, start_time,
+                                                  &pending_completed, task_timing, p, task_t0);
                 }
-
-                canon_state_pop(&canon_state);
-                canon_state_pop(&canon_state);
-
-                complete_task_report_and_time(total_tasks, progress_report_step, start_time,
-                                              &pending_completed, task_timing, p, task_t0);
             }
         } else if (prefix_depth == 3) {
             #pragma omp for schedule(runtime)
@@ -5383,6 +5599,9 @@ int main(int argc, char** argv) {
     free(prefix_j);
     free(prefix_k);
     free(prefix_l);
+    free(prefix2_batches);
+    free(prefix2_batch_js);
+    free(prefix2_batch_ps);
     free_row_dependent_tables();
     
     progress_reporter_finish(&progress_reporter);
