@@ -1172,3 +1172,31 @@
   - it gives the coordinator the right signal to prioritise heavier offsets first and makes slow prefixes visible in a machine-readable form
   - it preserves the existing interleaved shard model, so workers do not need a protocol change
 - Outcome: accepted.
+
+### Experiment 53: Compare unweighted vs weighted shard leasing on coordinator `7x4`
+- Goal: check whether the new weighted shard seeding actually improves coordinator makespan, rather than just exposing better metadata.
+- Setup:
+  - generated a full `7x4` fixed depth-2 timing CSV:
+    - `OMP_NUM_THREADS=32 ./partition_poly_7 7 4 --prefix-depth 2 --profile --task-times-out /tmp/task_times_7x4.csv`
+  - seeded two otherwise identical runs on the same coordinator DB:
+    - unweighted: `task_stride=16`, `threads=8`
+    - weighted: same, plus `--weights-file /tmp/task_times_7x4.csv`
+  - ran each with four concurrent `OMP_NUM_THREADS=8` coordinator workers on the same machine
+- Commands:
+  - unweighted:
+    - four concurrent `./partition_poly_7 7 4 --coordinator-url http://127.0.0.1:3022 --worker-id uw* --run-id 1`
+  - weighted:
+    - four concurrent `./partition_poly_7 7 4 --coordinator-url http://127.0.0.1:3022 --worker-id ww* --run-id 2`
+- Results:
+  - unweighted wall time: `11.15s`
+  - weighted wall time: `10.17s`
+  - improvement: about `8.8%`
+- Validation:
+  - both runs completed all `16` shards successfully
+  - weighted run stats reported total estimated weight `373640.0496`
+  - shard weights were all close but not identical, and the coordinator leased by `estimated_weight DESC`
+- Interpretation:
+  - even on a relatively small `7x4` coordinator run, using real task timings to bias shard order reduces the tail measurably
+  - this is the first direct evidence that weighted shard seeding improves distributed balance, not just observability
+  - the next useful step is to repeat the same comparison on a harder `7x5` or bounded `7x7` run
+- Outcome: accepted.
