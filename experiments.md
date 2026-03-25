@@ -1200,3 +1200,37 @@
   - this is the first direct evidence that weighted shard seeding improves distributed balance, not just observability
   - the next useful step is to repeat the same comparison on a harder `7x5` or bounded `7x7` run
 - Outcome: accepted.
+
+### Experiment 54: Retune runtime donation for depth-2 to depth-3 elephant splitting
+- Goal: test whether the experimental coordinator-mode runtime donation path becomes useful when it donates directly from the real elephant work unit, namely depth-2 `(i,j)` tasks, instead of waiting until depth 3.
+- Implementation:
+  - changed the default runtime-donation depths from `min=3, max=4` to `min=2, max=3`
+  - kept the feature opt-in behind `--runtime-donate`
+  - updated the usage text and the merge-mode validation to match the new defaults
+- Benchmark setup:
+  - isolated local coordinator on a temporary SQLite DB and port
+  - full bounded coordinator run:
+    - `7x5`, `prefix-depth 2`, `task-end 8`, `task-stride 1`, `threads 32`
+  - compared:
+    - baseline coordinator worker without runtime donation
+    - coordinator worker with `--runtime-donate`
+- Commands:
+  - baseline:
+    - `env OMP_NUM_THREADS=32 ./partition_poly_7 7 5 --coordinator-url http://127.0.0.1:3031 --worker-id base32 --run-id 1`
+  - donation:
+    - `env OMP_NUM_THREADS=32 ./partition_poly_7 7 5 --coordinator-url http://127.0.0.1:3032 --worker-id donate32 --run-id 1 --runtime-donate`
+- Results:
+  - baseline wall time: `14.68s`
+  - runtime donation wall time: `3.38s`
+  - donation stats:
+    - `donated=122`
+    - `max outstanding=64`
+- Validation:
+  - merged coordinator result matched a direct bounded `7x5` run exactly (`cmp` exit `0`)
+  - worker reported:
+    - `Runtime donation: enabled (min depth 2, max depth 3)`
+- Interpretation:
+  - for an elephant-dominated bounded `7x5` run, splitting depth-2 tasks into depth-3 work items is a major win
+  - this is the first convincing evidence that runtime donation helps when it targets the actual coarse work unit that causes the tail
+  - the feature remains opt-in, but the new defaults are now aligned with the likely production use case
+- Outcome: accepted.

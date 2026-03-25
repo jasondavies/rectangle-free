@@ -341,8 +341,8 @@ static int g_coord_low_watermark = 0;
 static int g_coord_high_watermark = 0;
 static int g_coord_heartbeat_seconds = 600;
 static int g_runtime_donate = 0;
-static int g_runtime_donate_min_depth = 3;
-static int g_runtime_donate_max_depth = 4;
+static int g_runtime_donate_min_depth = 2;
+static int g_runtime_donate_max_depth = 3;
 
 static inline uint16_t perm_table_get(int partition_id, int perm_id) {
     return perm_table[(size_t)partition_id * (size_t)perm_count + (size_t)perm_id];
@@ -1163,6 +1163,7 @@ static void usage(const char* prog) {
             "  Adaptive subdivision currently supports depth 2 split to depth 3 only.\n"
             "  Coordinator mode currently supports only fixed prefix-depth 2 work queues.\n"
             "  --runtime-donate enables experimental subtree donation in coordinator mode.\n"
+            "  The default donation split is depth 2 to depth 3.\n"
             "  --profile prints coarse timing counters for the main phases.\n",
             prog, prog);
 }
@@ -4630,7 +4631,7 @@ int main(int argc, char** argv) {
             g_adaptive_subdivide || g_adaptive_threshold != 128 || g_adaptive_max_depth != 3 ||
             g_coordinator_url || g_worker_id || g_run_id != -1 || g_coord_low_watermark != 0 ||
             g_coord_high_watermark != 0 || g_coord_heartbeat_seconds != 600 ||
-            g_runtime_donate || g_runtime_donate_min_depth != 3 || g_runtime_donate_max_depth != 4 ||
+            g_runtime_donate || g_runtime_donate_min_depth != 2 || g_runtime_donate_max_depth != 3 ||
             g_eval_mode || g_eval_q_set || g_eval_mod_set || g_profile || g_task_times_out_path) {
             usage(argv[0]);
             free(merge_inputs);
