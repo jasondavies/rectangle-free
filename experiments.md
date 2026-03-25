@@ -988,3 +988,41 @@
   - the same fault appeared on the tiny `task-end 8` slice, so this was not a long-run timing artefact
 - Interpretation: the direct `nauty()` conversion is not safe in the current form. The queue-accounting fix is independent and was kept, but the low-level canonicalisation change was reverted.
 - Outcome: rejected and reverted.
+
+### Experiment 46: Add modular single-`q` evaluation mode for partition polynomial runs
+- Goal: replace hot-path coefficient arithmetic with scalar modular arithmetic when evaluating `P(q)` at a fixed `q`, while leaving the full chromatic-polynomial path intact.
+- Change:
+  - added `--eval-q Q --mod P`
+  - built `partition_weight_eval[pid]` alongside the existing polynomial weights
+  - added `EvalCache` and scalar modular graph solving via `solve_graph_eval()`
+  - added `dfs_eval()` / `solve_structure_eval()` / `execute_prefix2_eval_task()`
+  - restricted the first cut to local `--prefix-depth 2` execution and disallowed merge/coordinator/poly-file output in eval mode
+  - fixed a correctness bug in `solve_structure_eval()` where `mult_coeff` was reduced using `(long long)g_eval_mod`, which broke for moduli above `LLONG_MAX`
+- Exact validation command:
+  - `OMP_NUM_THREADS=1 ./partition_poly_7 6 3 --prefix-depth 2 --eval-q 4 --mod 18446744073709551557`
+- Exact validation result:
+  - `P(4) mod 18446744073709551557 = 36376835616`
+  - this matches the existing exact `6x3` value
+- Sampled shard comparison commands:
+  - full poly:
+    - `OMP_NUM_THREADS=1 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235`
+  - eval mode:
+    - `OMP_NUM_THREADS=1 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235 --eval-q 4 --mod 18446744073709551557`
+- Sampled shard comparison result:
+  - full poly:
+    - `Worker Complete 6.76s`
+    - `Total elapsed 8.13s`
+    - `P(4) = 27028285369344000`
+  - eval mode:
+    - `Worker Complete 5.26s`
+    - `Total elapsed 6.65s`
+    - `P(4) mod 18446744073709551557 = 27028285369344000`
+- 32-thread benchmark command:
+  - `RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235 --eval-q 4 --mod 18446744073709551557`
+- 32-thread benchmark result:
+  - `Prefix generation 1.41s`
+  - `Worker Complete 0.92s`
+  - `Total elapsed 2.33s`
+  - `P(4) mod 18446744073709551557 = 27028285369344000`
+- Interpretation: the modular-evaluation path is correct on the tested exact and sampled cases, and it cuts the sampled `7x5` worker phase sharply by replacing coefficient polynomials with scalar field arithmetic. This is the right production building block for reconstructing full chromatic polynomials by modular evaluations and interpolation.
+- Outcome: accepted.
