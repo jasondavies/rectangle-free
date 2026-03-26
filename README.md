@@ -270,23 +270,6 @@ This prints:
 - `P(4)` and `P(5)`,
 - cache statistics.
 
-For fast modular evaluation at a single `q`, use:
-
-```bash
-./partition_poly_7 7 5 --prefix-depth 2 --eval-q 4 --mod 18446744073709551557
-```
-
-To reconstruct a full polynomial from modular evaluations and exact interpolation:
-
-```bash
-python3 reconstruct_poly.py 6 3 --solver ./partition_poly_7 --threads 1
-python3 reconstruct_poly.py 7 5 --solver ./partition_poly_7 --threads 32 -- --adaptive-subdivide
-python3 reconstruct_poly.py 7 5 --solver ./partition_poly_7 --threads 8 --jobs 4 --state-file /tmp/7x5_reconstruct.json -- --adaptive-subdivide
-```
-
-Extra solver arguments for the reconstruction driver are passed after `--`.
-Use `--jobs` to run several evaluation subprocesses at once, and `--state-file` to checkpoint completed `(prime, q)` values for resume after interruption.
-
 It also supports sharding:
 
 ```bash
