@@ -1272,3 +1272,29 @@
   - depth-2 to depth-3 runtime donation is the mechanism that actually fixes the makespan here, cutting wall time by about `4.4x`
   - this is the clearest evidence so far that serious `7x7` balance will require elephant splitting, not just better shard ordering
 - Outcome: accepted.
+
+### Experiment 56: Probe whether depth 3 is enough for the first `7x7` elephant
+- Goal: test the earlier assumption that splitting a depth-2 `7x7` task into depth-3 work items might be sufficient, at least for the very first top-level prefix.
+- Setup:
+  - bounded coordinator run with exactly one top-level task:
+    - `7x7`, `prefix-depth 2`, `task-end 1`, `task-stride 1`, `threads 32`
+  - compared three variants inside one 32-thread coordinator worker:
+    - baseline without runtime donation
+    - `--runtime-donate` with the current default split (`min depth 2`, `max depth 3`)
+    - `--runtime-donate --runtime-donate-max-depth 4`
+- Results:
+  - baseline:
+    - manually stopped after crossing roughly six minutes without completion
+  - depth-3 donation:
+    - manually stopped after crossing roughly six minutes without completion
+  - depth-4 donation:
+    - capped with `timeout 360s`
+    - still did not finish:
+      - `WALL 360.19`
+      - exit status `124`
+- Interpretation:
+  - the first `7x7` top-level depth-2 task is already a genuine elephant on a 32-thread worker
+  - depth-2 to depth-3 runtime donation is not sufficient to make that task tractable in a short benchmark window
+  - even allowing donation to go one level deeper did not complete within six minutes, so depth 4 may still be insufficient for the worst early `7x7` prefixes
+  - this does not prove donation is useless for `7x7`, but it does show that “depth 3 is enough” is too optimistic
+- Outcome: informative lower-bound result; no code change.
