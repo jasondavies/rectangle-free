@@ -1609,3 +1609,51 @@
     - the late global tail is still unknown
   - but it is the first strong evidence that the local throughput side is now probably good enough, and that the remaining planning risk is the final worst-prefix tail rather than broad underutilisation
 - Outcome: accepted.
+
+### Experiment 67: Cooperative adaptive budget continuations
+- Goal: prototype a “rounds without wasted progress” mechanism for heavy adaptive tasks.
+- Implementation:
+  - added `--adaptive-budget-seconds S` for the local adaptive runtime queue
+  - each queued task gets a wall-clock budget when popped
+  - at safe DFS boundaries, if the budget has expired and the current node can still be split:
+    - keep the partial polynomial accumulated so far
+    - push the unexplored remainder back to the local queue as a continuation task
+    - return immediately
+  - this is cooperative continuation, not a hard timeout:
+    - no process kill
+    - no lost completed work
+    - continuation tasks resume from a compact prefix/range description
+- Exactness checks:
+  - easy adaptive case:
+    - `env OMP_NUM_THREADS=4 ./partition_poly_7 6 3 --prefix-depth 2 --adaptive-subdivide --adaptive-budget-seconds 0.001 --poly-out /tmp/budget_6x3.poly`
+    - matched `env OMP_NUM_THREADS=1 ./partition_poly_7 6 3 --prefix-depth 2 --poly-out /tmp/direct_budget_6x3.poly`
+    - no continuations were needed in this trivial case
+  - forced continuation case:
+    - `env OMP_NUM_THREADS=32 ./partition_poly_7 7 4 --prefix-depth 2 --adaptive-subdivide --adaptive-budget-seconds 0.01 --poly-out /tmp/budget_7x4.poly`
+    - matched `env OMP_NUM_THREADS=32 ./partition_poly_7 7 4 --prefix-depth 2 --adaptive-subdivide --poly-out /tmp/direct_budget_7x4.poly`
+- Results:
+  - full adaptive `7x4`, `OMP_NUM_THREADS=32`:
+    - baseline: `Worker 18.94s`, occupancy `28.99/32 = 90.6%`
+    - budget `0.01s`: `Worker 20.93s`, occupancy `30.63/32 = 95.7%`, budget continuations `25581`
+    - so aggressive budgeting is slower on this easy case, even though it raises occupancy
+  - bounded adaptive `7x7 --task-end 1`, `RECT_SHARED_CACHE_MERGE=1`, `OMP_NUM_THREADS=32`, `timeout 40s`:
+    - no budget:
+      - after `15.03s`: `active now 20/32, avg 4.83/32 = 15.1%`
+      - after `30.60s`: `active now 16/32, avg 11.03/32 = 34.5%`
+    - budget `5s`:
+      - after `15.00s`: `active now 29/32, avg 13.55/32 = 42.3%`
+      - after `30.54s`: `active now 32/32, avg 22.71/32 = 71.0%`
+    - budget `1s`:
+      - after `15.14s`: `active now 32/32, avg 25.35/32 = 79.2%`
+      - after `30.19s`: `active now 32/32, avg 28.67/32 = 89.6%`
+- Interpretation:
+  - this is not something to enable for the main first-pass run:
+    - on easy workloads like full `7x4`, it adds overhead and loses wall-clock time
+  - but it is a promising second-round tail tool:
+    - on a single heavy bounded `7x7` root, it dramatically increases occupancy
+    - it preserves partial work rather than restarting from scratch
+    - smaller budgets are more effective for one-root balancing than coarse ones
+  - the natural operational use is:
+    - run the main cluster job with the current fast path
+    - then rerun only the leftover monster roots with `--adaptive-budget-seconds` enabled and a much smaller budget
+- Outcome: accepted as an opt-in refinement tool, not as a new default.

@@ -377,6 +377,7 @@ typedef struct {
     atomic_int outstanding_tasks;
     atomic_int idle_threads;
     atomic_long donated_tasks;
+    atomic_long budget_continuations;
     atomic_long max_outstanding_tasks;
     RootTaskState* roots;
     long long root_count;
@@ -415,6 +416,7 @@ static long long progress_last_reported = 0;
 static int g_adaptive_subdivide = 0;
 static int g_adaptive_threshold = 128;
 static int g_adaptive_max_depth = 3;
+static double g_adaptive_budget_seconds = 0.0;
 static int g_profile = 0;
 static int g_eval_mode = 0;
 static uint64_t g_eval_q = 0;
@@ -780,6 +782,7 @@ static void local_queue_init(LocalTaskQueue* queue, int capacity, int low_waterm
     atomic_init(&queue->outstanding_tasks, 0);
     atomic_init(&queue->idle_threads, 0);
     atomic_init(&queue->donated_tasks, 0);
+    atomic_init(&queue->budget_continuations, 0);
     atomic_init(&queue->max_outstanding_tasks, 0);
     queue->profile_started_at = omp_get_wtime();
     queue->occupancy_last_at = queue->profile_started_at;
@@ -958,6 +961,10 @@ static void local_queue_print_occupancy_summary(LocalTaskQueue* queue) {
 
     printf("Runtime queue occupancy: avg active %.2f/%d (%.1f%%)\n",
            avg_active, queue->total_threads, util_pct);
+    if (g_adaptive_budget_seconds > 0.0) {
+        printf("Runtime queue budget continuations: %lld\n",
+               (long long)atomic_load_explicit(&queue->budget_continuations, memory_order_relaxed));
+    }
 }
 
 static void* checked_aligned_alloc(size_t alignment, size_t size, const char* label) {
@@ -1547,7 +1554,7 @@ void print_poly(Poly p) {
 static void usage(const char* prog) {
     fprintf(stderr,
             "Usage:\n"
-            "  %s [rows cols] [--task-start N] [--task-end N] [--task-stride N] [--task-offset N] [--prefix-depth N] [--adaptive-subdivide] [--adaptive-threshold N] [--adaptive-max-depth N] [--coordinator-url URL] [--worker-id ID] [--run-id N] [--coord-low-watermark N] [--coord-high-watermark N] [--coord-heartbeat-seconds N] [--runtime-donate] [--runtime-donate-min-depth N] [--runtime-donate-max-depth N] [--eval-q Q --mod P] [--poly-out FILE] [--profile] [--task-times-out FILE]\n"
+            "  %s [rows cols] [--task-start N] [--task-end N] [--task-stride N] [--task-offset N] [--prefix-depth N] [--adaptive-subdivide] [--adaptive-threshold N] [--adaptive-max-depth N] [--adaptive-budget-seconds S] [--coordinator-url URL] [--worker-id ID] [--run-id N] [--coord-low-watermark N] [--coord-high-watermark N] [--coord-heartbeat-seconds N] [--runtime-donate] [--runtime-donate-min-depth N] [--runtime-donate-max-depth N] [--eval-q Q --mod P] [--poly-out FILE] [--profile] [--task-times-out FILE]\n"
             "  %s --merge [--poly-out FILE] INPUT...\n"
             "\n"
             "Notes:\n"
@@ -4192,7 +4199,7 @@ static int replay_local_task_prefix(const LocalTask* task, WorkerCtx* ctx,
 static void dfs_runtime_split_local(int depth, int start_pid, int end_pid, long long root_id, WorkerCtx* ctx,
                                     Poly* local_total, const Poly* weight_prod,
                                     long long mult_coeff, int run_len, ProfileStats* profile,
-                                    LocalTaskQueue* queue) {
+                                    LocalTaskQueue* queue, double budget_deadline) {
     if (depth == g_cols) {
         Poly res;
         solve_structure(ctx->stack, &ctx->partial_graph.g, &ctx->canon_state,
@@ -4206,6 +4213,20 @@ static void dfs_runtime_split_local(int depth, int start_pid, int end_pid, long 
     int next_stabilizer = 0;
     int local_end = end_pid;
     for (int pid = start_pid; pid < local_end; pid++) {
+        if (budget_deadline > 0.0 &&
+            omp_get_wtime() >= budget_deadline &&
+            depth < g_adaptive_max_depth &&
+            (local_end - pid) >= 2) {
+            LocalTask continuation = {0};
+            local_task_from_stack(&continuation, root_id, depth, ctx->stack);
+            continuation.lo = (PrefixId)pid;
+            continuation.hi = (PrefixId)local_end;
+            if (local_queue_try_push(queue, &continuation)) {
+                atomic_fetch_add_explicit(&queue->budget_continuations, 1, memory_order_relaxed);
+                return;
+            }
+        }
+
         if ((depth + 1) <= g_adaptive_max_depth && depth >= 3 && depth <= 5 &&
             (local_end - pid) >= 16 &&
             atomic_load_explicit(&queue->idle_threads, memory_order_relaxed) > 0) {
@@ -4261,7 +4282,7 @@ static void dfs_runtime_split_local(int depth, int start_pid, int end_pid, long 
 
             dfs_runtime_split_local(depth + 1, pid, num_partitions, root_id, ctx, local_total,
                                     &next_weight_prod, next_mult_coeff, next_run_len,
-                                    profile, queue);
+                                    profile, queue, budget_deadline);
         } else if (g_profile) {
             tls_profile->partial_append_time += omp_get_wtime() - t0;
         }
@@ -4281,9 +4302,11 @@ static void execute_local_runtime_task(const LocalTask* task, WorkerCtx* ctx, Po
     long long mult_coeff = 1;
     int run_len = 0;
     int min_idx = 0;
-    double subtask_t0 = g_profile ? omp_get_wtime() : 0.0;
+    double subtask_t0 = (g_profile || g_adaptive_budget_seconds > 0.0) ? omp_get_wtime() : 0.0;
     long long solve_graph_before = g_profile ? profile->solve_graph_calls : 0;
     long long nauty_before = g_profile ? profile->nauty_calls : 0;
+    double budget_deadline =
+        (g_adaptive_budget_seconds > 0.0) ? (subtask_t0 + g_adaptive_budget_seconds) : 0.0;
     GraphHardStats subtask_hard = {0};
     GraphHardStats* prev_hard_stats = tls_hard_graph_stats;
     if (g_profile) tls_hard_graph_stats = &subtask_hard;
@@ -4302,7 +4325,8 @@ static void execute_local_runtime_task(const LocalTask* task, WorkerCtx* ctx, Po
             if (start_pid < min_idx) start_pid = min_idx;
             if (end_pid > num_partitions) end_pid = num_partitions;
             dfs_runtime_split_local(task->depth, start_pid, end_pid, task->root_id, ctx, thread_total,
-                                    &weight_prod, mult_coeff, run_len, profile, queue);
+                                    &weight_prod, mult_coeff, run_len, profile, queue,
+                                    budget_deadline);
         }
 
         for (int depth = (int)task->depth - 1; depth >= 0; depth--) {
@@ -5261,6 +5285,19 @@ int main(int argc, char** argv) {
                 return 1;
             }
             g_adaptive_max_depth = (int)parse_ll_or_die(argv[++i], "--adaptive-max-depth");
+        } else if (strcmp(argv[i], "--adaptive-budget-seconds") == 0) {
+            char* endptr = NULL;
+            if (i + 1 >= argc) {
+                usage(argv[0]);
+                free(merge_inputs);
+                return 1;
+            }
+            g_adaptive_budget_seconds = strtod(argv[++i], &endptr);
+            if (!endptr || *endptr != '\0') {
+                fprintf(stderr, "Invalid --adaptive-budget-seconds value: %s\n", argv[i]);
+                free(merge_inputs);
+                return 1;
+            }
         } else if (strcmp(argv[i], "--coordinator-url") == 0) {
             if (i + 1 >= argc) {
                 usage(argv[0]);
@@ -5365,6 +5402,7 @@ int main(int argc, char** argv) {
         if (positional_count != 0 || task_start != 0 || task_end != -1 ||
             task_stride != 1 || task_offset != 0 || prefix_depth_override != -1 ||
             g_adaptive_subdivide || g_adaptive_threshold != 128 || g_adaptive_max_depth != 3 ||
+            g_adaptive_budget_seconds != 0.0 ||
             g_coordinator_url || g_worker_id || g_run_id != -1 || g_coord_low_watermark != 0 ||
             g_coord_high_watermark != 0 || g_coord_heartbeat_seconds != 600 ||
             g_runtime_donate || g_runtime_donate_min_depth != 2 || g_runtime_donate_max_depth != 3 ||
@@ -5458,8 +5496,16 @@ int main(int argc, char** argv) {
         fprintf(stderr, "--adaptive-threshold must be positive\n");
         return 1;
     }
+    if (g_adaptive_budget_seconds < 0.0) {
+        fprintf(stderr, "--adaptive-budget-seconds must be non-negative\n");
+        return 1;
+    }
     if (g_adaptive_subdivide && g_adaptive_max_depth < 3) {
         fprintf(stderr, "--adaptive-max-depth must be at least 3 with --adaptive-subdivide\n");
+        return 1;
+    }
+    if (g_adaptive_budget_seconds > 0.0 && !g_adaptive_subdivide) {
+        fprintf(stderr, "--adaptive-budget-seconds requires --adaptive-subdivide\n");
         return 1;
     }
     if (g_coord_low_watermark < 0) {
@@ -5773,8 +5819,12 @@ int main(int argc, char** argv) {
     printf("Prefix depth: %d (%lld tasks)\n", prefix_depth, total_prefixes);
     if (g_adaptive_subdivide) {
         if (use_runtime_split_queue) {
-            printf("Runtime subdivision enabled: queue low watermark %d, max depth %d\n",
+            printf("Runtime subdivision enabled: queue low watermark %d, max depth %d",
                    g_adaptive_threshold, g_adaptive_max_depth);
+            if (g_adaptive_budget_seconds > 0.0) {
+                printf(", budget %.3fs", g_adaptive_budget_seconds);
+            }
+            printf("\n");
         } else {
             printf("Adaptive subdivision: threshold %d, max depth %d\n",
                    g_adaptive_threshold, g_adaptive_max_depth);
@@ -6043,8 +6093,12 @@ int main(int argc, char** argv) {
             local_queue_seed_push(&local_queue, &task);
         }
         local_queue_active = 1;
-        printf("Runtime queue: low=%d, high=%d, split-max-depth=%d\n",
+        printf("Runtime queue: low=%d, high=%d, split-max-depth=%d",
                low_watermark, high_watermark, g_adaptive_max_depth);
+        if (g_adaptive_budget_seconds > 0.0) {
+            printf(", budget %.3fs", g_adaptive_budget_seconds);
+        }
+        printf("\n");
     }
 
     Poly* thread_polys = checked_aligned_alloc(64, (size_t)num_threads * sizeof(Poly), "thread_polys");
