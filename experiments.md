@@ -1482,3 +1482,26 @@
   - the remaining monsters are not just a few isolated pathological leaves; they contain large numbers of connected, cache-missing deletion-contraction branch nodes
   - that makes prefix-side queue heuristics much less promising, and makes limited parallelism below the prefix layer the right next target
 - Outcome: accepted.
+
+### Experiment 63: Periodically merged shared canonical cache
+- Goal: revisit cross-thread cache sharing without the hot-path locking regression from the earlier live shared-cache attempt.
+- Implementation:
+  - added an opt-in path via `RECT_SHARED_CACHE_MERGE=1`
+  - each worker thread keeps its existing local raw and canonical caches
+  - newly computed canonical entries are appended to a small thread-local export buffer
+  - exports flush only at task boundaries into a process-wide shared canonical cache under a write lock
+  - `solve_graph_poly()` probes that shared canonical cache only after a local canonical miss
+- Results:
+  - full `7x4`, `OMP_NUM_THREADS=32`, `--prefix-depth 2`:
+    - baseline: `Worker 12.00s`, `Total 12.15s`, canonical cache hits `75.2%`
+    - shared merge: `Worker 11.38s`, `Total 11.54s`, canonical cache hits `92.8%`
+    - throughput improvement: about `5.0%`
+  - sampled adaptive `7x5`, `OMP_NUM_THREADS=32`, `--task-stride 3235`:
+    - baseline: `Worker 0.47s`
+    - shared merge: `Worker 0.45s`
+    - canonicalisation calls dropped to `7091`, with canonical cache hits `50.4%`
+- Interpretation:
+  - periodic merge behaves much better than the earlier always-live shared cache
+  - it is still a throughput optimisation, not a tail-killer, but it is a real positive result on the tested workloads
+  - this is the first shared-cache design that looks worth keeping around while we continue chasing the true `7x7` monsters below the prefix layer
+- Outcome: accepted.

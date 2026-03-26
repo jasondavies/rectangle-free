@@ -218,6 +218,27 @@ typedef struct {
     int max_degree;
 } GraphHardStats;
 
+#define SHARED_CACHE_EXPORT_CAP 64
+
+typedef struct {
+    uint64_t key_hash;
+    uint32_t key_n;
+    Graph g;
+    uint64_t row_mask;
+    Poly value;
+} SharedGraphCacheExportEntry;
+
+typedef struct {
+    SharedGraphCacheExportEntry entries[SHARED_CACHE_EXPORT_CAP];
+    int count;
+} SharedGraphCacheExporter;
+
+typedef struct {
+    GraphCache cache;
+    pthread_rwlock_t lock;
+    int enabled;
+} SharedGraphCache;
+
 typedef struct {
     PrefixId* i;
     PrefixId* j;
@@ -395,6 +416,7 @@ static int g_eval_q_set = 0;
 static int g_eval_mod_set = 0;
 static __thread ProfileStats* tls_profile = NULL;
 static __thread GraphHardStats* tls_hard_graph_stats = NULL;
+static __thread SharedGraphCacheExporter* tls_shared_cache_exporter = NULL;
 static const char* g_task_times_out_path = NULL;
 static long long g_task_times_first_task = 0;
 static long long g_task_times_stride = 1;
@@ -411,9 +433,16 @@ static int g_runtime_donate = 0;
 static int g_runtime_donate_min_depth = 2;
 static int g_runtime_donate_max_depth = 3;
 static double g_queue_profile_report_step = 0.0;
+static int g_shared_cache_merge = 0;
+static int g_shared_cache_bits = 16;
+static SharedGraphCache* g_shared_graph_cache = NULL;
 
 static void* checked_calloc(size_t count, size_t size, const char* label);
 static void* checked_aligned_alloc(size_t alignment, size_t size, const char* label);
+static void shared_graph_cache_flush_exports(void);
+static inline void graph_cache_load_poly(const GraphCache* cache, int slot, Poly* value);
+void store_graph_cache_entry(GraphCache* cache, uint64_t key_hash, uint32_t key_n, const Graph* g,
+                             uint64_t row_mask, const Poly* value);
 
 static inline uint16_t perm_table_get(int partition_id, int perm_id) {
     return perm_table[(size_t)partition_id * (size_t)perm_count + (size_t)perm_id];
@@ -688,6 +717,7 @@ static inline void flush_completed_tasks(long long total_tasks, long long report
 
 static inline void complete_task_and_report(long long total_tasks, long long report_step,
                                             double start_time, long long* pending_completed) {
+    shared_graph_cache_flush_exports();
     (*pending_completed)++;
     if (*pending_completed >= PROGRESS_FLUSH_BATCH) {
         flush_completed_tasks(total_tasks, report_step, start_time, pending_completed);
@@ -3116,11 +3146,97 @@ static inline PolyCoeff* graph_cache_coeff_slot(const GraphCache* cache, int slo
     return cache->coeffs + (size_t)slot * (size_t)cache->poly_len;
 }
 
+static int graph_cache_lookup_poly(const GraphCache* cache, uint64_t key_hash, uint32_t key_n,
+                                   const Graph* g, uint64_t row_mask, Poly* value) {
+    int cache_idx = (int)(key_hash & (uint64_t)cache->mask);
+    for (int k = 0; k < cache->probe; k++) {
+        int p = (cache_idx + k) & cache->mask;
+        if (cache->keys[p].used && cache->keys[p].key_hash == key_hash &&
+            cache->keys[p].key_n == key_n) {
+            int match = 1;
+            for (int i = 0; i < (int)key_n && match; i++) {
+                uint64_t row = g->adj[i] & row_mask;
+                if (cache->adj[(size_t)p * MAXN_NAUTY + i] != (AdjWord)row) match = 0;
+            }
+            if (match) {
+                graph_cache_load_poly(cache, p, value);
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
 static inline void graph_cache_load_poly(const GraphCache* cache, int slot, Poly* value) {
     int deg = cache->degs[slot];
     value->deg = deg;
     memcpy(value->coeffs, graph_cache_coeff_slot(cache, slot),
            (size_t)(deg + 1) * sizeof(value->coeffs[0]));
+}
+
+static void shared_graph_cache_init(SharedGraphCache* shared, int bits, int poly_len) {
+    size_t size = (size_t)1 << bits;
+    memset(shared, 0, sizeof(*shared));
+    pthread_rwlock_init(&shared->lock, NULL);
+    shared->cache.mask = (int)size - 1;
+    shared->cache.probe = CACHE_PROBE;
+    shared->cache.poly_len = poly_len;
+    shared->cache.keys = checked_aligned_alloc(64, sizeof(CacheKey) * size, "shared_cache_keys");
+    shared->cache.adj = checked_aligned_alloc(64, sizeof(AdjWord) * size * MAXN_NAUTY, "shared_cache_adj");
+    shared->cache.degs = checked_aligned_alloc(64, sizeof(uint8_t) * size, "shared_cache_degs");
+    shared->cache.coeffs =
+        checked_aligned_alloc(64, sizeof(PolyCoeff) * size * (size_t)poly_len, "shared_cache_coeffs");
+    memset(shared->cache.keys, 0, sizeof(CacheKey) * size);
+    shared->enabled = 1;
+}
+
+static void shared_graph_cache_free(SharedGraphCache* shared) {
+    if (!shared) return;
+    free(shared->cache.keys);
+    free(shared->cache.adj);
+    free(shared->cache.degs);
+    free(shared->cache.coeffs);
+    pthread_rwlock_destroy(&shared->lock);
+    memset(shared, 0, sizeof(*shared));
+}
+
+static int shared_graph_cache_lookup_poly(SharedGraphCache* shared, uint64_t key_hash, uint32_t key_n,
+                                          const Graph* g, uint64_t row_mask, Poly* value) {
+    if (!shared || !shared->enabled) return 0;
+    int found = 0;
+    pthread_rwlock_rdlock(&shared->lock);
+    found = graph_cache_lookup_poly(&shared->cache, key_hash, key_n, g, row_mask, value);
+    pthread_rwlock_unlock(&shared->lock);
+    return found;
+}
+
+static void shared_graph_cache_flush_exports(void) {
+    SharedGraphCacheExporter* exporter = tls_shared_cache_exporter;
+    SharedGraphCache* shared = g_shared_graph_cache;
+    if (!shared || !shared->enabled || !exporter || exporter->count <= 0) return;
+    pthread_rwlock_wrlock(&shared->lock);
+    for (int i = 0; i < exporter->count; i++) {
+        SharedGraphCacheExportEntry* e = &exporter->entries[i];
+        store_graph_cache_entry(&shared->cache, e->key_hash, e->key_n, &e->g, e->row_mask, &e->value);
+    }
+    pthread_rwlock_unlock(&shared->lock);
+    exporter->count = 0;
+}
+
+static void shared_graph_cache_export(uint64_t key_hash, uint32_t key_n, const Graph* g,
+                                      uint64_t row_mask, const Poly* value) {
+    SharedGraphCacheExporter* exporter = tls_shared_cache_exporter;
+    SharedGraphCache* shared = g_shared_graph_cache;
+    if (!shared || !shared->enabled || !exporter) return;
+    if (exporter->count >= SHARED_CACHE_EXPORT_CAP) {
+        shared_graph_cache_flush_exports();
+    }
+    SharedGraphCacheExportEntry* e = &exporter->entries[exporter->count++];
+    e->key_hash = key_hash;
+    e->key_n = key_n;
+    e->g = *g;
+    e->row_mask = row_mask;
+    e->value = *value;
 }
 
 static void store_eval_cache_entry(EvalCache* cache, uint64_t key_hash, uint32_t key_n, const Graph* g,
@@ -3362,6 +3478,16 @@ static void solve_graph_poly(const Graph* input_g, GraphCache* cache, GraphCache
             }
         }
 
+        if (shared_graph_cache_lookup_poly(g_shared_graph_cache, hash, (uint32_t)canon.n,
+                                           &canon, ADJWORD_MASK, &res)) {
+            store_graph_cache_entry(cache, hash, (uint32_t)canon.n, &canon, ADJWORD_MASK, &res);
+            (*local_cache_hits)++;
+            store_graph_cache_entry(raw_cache, raw_hash, (uint32_t)g.n, &g, row_mask, &res);
+            poly_mul_ref(&multiplier, &res, out_result);
+            if (g_profile && profile) profile->solve_graph_time += omp_get_wtime() - solve_t0;
+            return;
+        }
+
         // Deletion-contraction on original (non-canonical) graph
         int max_deg = -1, u = -1;
         for (int i = 0; i < g.n; i++) {
@@ -3413,6 +3539,7 @@ static void solve_graph_poly(const Graph* input_g, GraphCache* cache, GraphCache
         }
 
         store_graph_cache_entry(cache, hash, (uint32_t)canon.n, &canon, ADJWORD_MASK, &res);
+        shared_graph_cache_export(hash, (uint32_t)canon.n, &canon, ADJWORD_MASK, &res);
     }
 
     store_graph_cache_entry(raw_cache, raw_hash, (uint32_t)g.n, &g, row_mask, &res);
@@ -5310,6 +5437,18 @@ int main(int argc, char** argv) {
             g_queue_profile_report_step = strtod(queue_profile_step_env, NULL);
             if (g_queue_profile_report_step < 0.0) g_queue_profile_report_step = 0.0;
         }
+        const char* shared_cache_env = getenv("RECT_SHARED_CACHE_MERGE");
+        if (shared_cache_env && *shared_cache_env && strcmp(shared_cache_env, "0") != 0) {
+            g_shared_cache_merge = 1;
+        }
+        const char* shared_cache_bits_env = getenv("RECT_SHARED_CACHE_BITS");
+        if (shared_cache_bits_env && *shared_cache_bits_env) {
+            g_shared_cache_bits = (int)parse_ll_or_die(shared_cache_bits_env, "RECT_SHARED_CACHE_BITS");
+            if (g_shared_cache_bits < 10 || g_shared_cache_bits > 24) {
+                fprintf(stderr, "RECT_SHARED_CACHE_BITS must be between 10 and 24\n");
+                return 1;
+            }
+        }
     }
     if (g_eval_mode) {
         if (!g_eval_q_set || !g_eval_mod_set) {
@@ -5378,6 +5517,14 @@ int main(int argc, char** argv) {
     g_effective_prefix_depth = prefix_depth;
 
     int graph_poly_len = g_cols * (g_rows / 2) + 1;
+    SharedGraphCache shared_graph_cache;
+    int shared_graph_cache_active = 0;
+    if (g_shared_cache_merge && !coordinator_mode && !g_eval_mode) {
+        shared_graph_cache_init(&shared_graph_cache, g_shared_cache_bits, graph_poly_len);
+        g_shared_graph_cache = &shared_graph_cache;
+        shared_graph_cache_active = 1;
+        printf("Shared canonical cache merge enabled: 2^%d slots\n", g_shared_cache_bits);
+    }
     if (coordinator_mode) {
         long long full_tasks = (long long)num_partitions * (num_partitions + 1) / 2;
         printf("Coordinator worker mode\n");
@@ -5793,6 +5940,10 @@ int main(int argc, char** argv) {
         free(thread_values);
         free(thread_profiles);
         free(thread_task_timing);
+        if (shared_graph_cache_active) {
+            shared_graph_cache_free(&shared_graph_cache);
+            g_shared_graph_cache = NULL;
+        }
         return 0;
     }
 
@@ -5894,8 +6045,10 @@ int main(int argc, char** argv) {
         TaskTimingStats* task_timing = &thread_task_timing[tid];
         QueueSubtaskTimingStats* queue_subtask_timing =
             thread_queue_subtask_timing ? thread_queue_subtask_timing + (size_t)tid * (size_t)(MAX_COLS + 1) : NULL;
+        SharedGraphCacheExporter shared_cache_exporter = {0};
         long long pending_completed = 0;
         tls_profile = profile;
+        tls_shared_cache_exporter = g_shared_cache_merge ? &shared_cache_exporter : NULL;
         
         if (g_cols == 1) {
             // Original 1-column parallelism (nothing to prefix)
@@ -6332,8 +6485,10 @@ int main(int argc, char** argv) {
         }
 
         flush_completed_tasks(total_tasks, progress_report_step, start_time, &pending_completed);
+        shared_graph_cache_flush_exports();
         tls_profile = NULL;
-        
+        tls_shared_cache_exporter = NULL;
+
         total_canon_calls += local_canon_calls;
         total_cache_hits += local_cache_hits;
         total_raw_cache_hits += local_raw_cache_hits;
@@ -6575,6 +6730,10 @@ int main(int argc, char** argv) {
     free(prefix2_batch_ps);
     free(g_task_times_values);
     g_task_times_values = NULL;
+    if (shared_graph_cache_active) {
+        shared_graph_cache_free(&shared_graph_cache);
+        g_shared_graph_cache = NULL;
+    }
     free_row_dependent_tables();
 
     return 0;
