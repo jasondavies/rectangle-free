@@ -1365,3 +1365,38 @@
   - even before the correctness failure, the extra lookahead and replay overhead was enough to give back a large part of the `7x5` win
   - this suggests the next smarter split attempt needs a different state-management strategy, not just more scoring logic layered onto replay
 - Outcome: rejected and reverted.
+
+### Experiment 59: Add live queue-subtask profiling for bounded `7x7`
+- Goal: get useful partial diagnostics out of bounded `7x7` runs that time out before the normal end-of-run profile is printed.
+- Implementation:
+  - added `RECT_QUEUE_PROFILE_STEP=<seconds>` for the local adaptive runtime queue
+  - while `--profile` is active, completed queued subtasks are now aggregated by prefix depth with:
+    - elapsed time
+    - `solve_graph_poly` call deltas
+    - `nauty` call deltas
+    - slowest prefix per depth
+  - the queue prints a live summary at the requested interval
+- Probe command:
+  - `timeout 125s env RECT_QUEUE_PROFILE_STEP=30 RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly_7 7 7 --prefix-depth 2 --adaptive-subdivide --adaptive-max-depth 5 --task-end 1 --profile`
+- Partial results:
+  - after `30.19s`:
+    - depth `3`: `8` subtasks, avg `0.271s`, max `1.075s`, avg `solve_graph 18624.9`, avg `nauty 15248.0`, top `(0,0,30)`
+    - depth `4`: `50` subtasks, avg `2.580s`, max `18.194s`, avg `solve_graph 120161.0`, avg `nauty 86140.3`, top `(0,0,0,33)`
+    - depth `5`: `139` subtasks, avg `0.415s`, max `3.305s`, avg `solve_graph 28256.7`, avg `nauty 21868.4`
+  - after `60.89s`:
+    - depth `3`: top `(0,0,120)` at `51.306s`
+    - depth `4`: top `(0,0,51,120)` at `57.483s`
+    - depth `5`: max `5.286s`
+  - after `107.75s`:
+    - depth `4`: top `(0,0,1,4)` at `105.274s`
+    - depth `3` still topped out at `51.306s`
+  - run still timed out at `125s`
+- Interpretation:
+  - the bounded first `7x7` root is no longer an opaque “one huge task”
+  - the remaining pain is concentrated in a small number of depth-3 and especially depth-4 prefixes
+  - depth-5 subtasks are much smaller, so deeper prefix splitting is helping, but it has not eliminated the real monsters
+  - the heaviest subtasks are already dominated by `solve_graph_poly` and `nauty`, not by queue overhead
+  - that strongly suggests the next cut should be either:
+    - targeted further splitting of heavy depth-3/4 prefixes, or
+    - exposing parallelism lower in the graph solver
+- Outcome: accepted.

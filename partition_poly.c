@@ -341,6 +341,9 @@ typedef struct {
     atomic_long max_outstanding_tasks;
     RootTaskState* roots;
     long long root_count;
+    QueueSubtaskTimingStats profile_stats[MAX_COLS + 1];
+    double profile_started_at;
+    double next_profile_report_at;
 } LocalTaskQueue;
 
 // --- GLOBALS ---
@@ -391,6 +394,7 @@ static int g_coord_heartbeat_seconds = 600;
 static int g_runtime_donate = 0;
 static int g_runtime_donate_min_depth = 2;
 static int g_runtime_donate_max_depth = 3;
+static double g_queue_profile_report_step = 0.0;
 
 static void* checked_calloc(size_t count, size_t size, const char* label);
 static void* checked_aligned_alloc(size_t alignment, size_t size, const char* label);
@@ -502,6 +506,15 @@ static void queue_subtask_merge(QueueSubtaskTimingStats* dst, const QueueSubtask
         queue_subtask_insert_topk(dst, &task, src->top[i].elapsed,
                                   src->top[i].solve_graph_calls, src->top[i].nauty_calls);
     }
+}
+
+static void print_queue_subtask_prefix(const QueueSubtaskTopEntry* e) {
+    printf("(");
+    for (int p = 0; p < e->depth; p++) {
+        if (p > 0) printf(",");
+        printf("%u", (unsigned)e->prefix[p]);
+    }
+    printf(")");
 }
 
 static void record_task_time_value(long long task_index, double elapsed) {
@@ -688,6 +701,9 @@ static void local_queue_init(LocalTaskQueue* queue, int capacity, int low_waterm
     atomic_init(&queue->outstanding_tasks, 0);
     atomic_init(&queue->donated_tasks, 0);
     atomic_init(&queue->max_outstanding_tasks, 0);
+    queue->profile_started_at = omp_get_wtime();
+    queue->next_profile_report_at =
+        (g_queue_profile_report_step > 0.0) ? (queue->profile_started_at + g_queue_profile_report_step) : 0.0;
     for (long long i = 0; i < root_count; i++) {
         queue->roots[i].launched_at = -1.0;
     }
@@ -779,6 +795,36 @@ static void local_queue_finish_item(LocalTaskQueue* queue, long long root_id,
         pthread_cond_broadcast(&queue->cond);
     } else if (queue->count > 0) {
         pthread_cond_signal(&queue->cond);
+    }
+    pthread_mutex_unlock(&queue->mutex);
+}
+
+static void local_queue_record_profile(LocalTaskQueue* queue, const LocalTask* task,
+                                       double elapsed, long long solve_graph_calls,
+                                       long long nauty_calls) {
+    if (g_queue_profile_report_step <= 0.0 || task->depth < 0 || task->depth > MAX_COLS) return;
+
+    pthread_mutex_lock(&queue->mutex);
+    queue_subtask_record(&queue->profile_stats[task->depth], task, elapsed, solve_graph_calls, nauty_calls);
+    double now = omp_get_wtime();
+    if (queue->next_profile_report_at > 0.0 && now >= queue->next_profile_report_at) {
+        printf("Queue profile after %.2fs:\n", now - queue->profile_started_at);
+        for (int d = 0; d <= g_cols && d <= MAX_COLS; d++) {
+            QueueSubtaskTimingStats* qs = &queue->profile_stats[d];
+            if (qs->task_count == 0) continue;
+            printf("  depth %d: %lld subtasks, avg %.6fs, max %.6fs, avg solve_graph %.1f, avg nauty %.1f",
+                   d, qs->task_count, qs->task_time_sum / (double)qs->task_count, qs->task_time_max,
+                   (double)qs->solve_graph_call_sum / (double)qs->task_count,
+                   (double)qs->nauty_call_sum / (double)qs->task_count);
+            if (qs->top[0].elapsed > 0.0) {
+                printf(", top ");
+                print_queue_subtask_prefix(&qs->top[0]);
+                printf(" %.6fs", qs->top[0].elapsed);
+            }
+            printf("\n");
+        }
+        fflush(stdout);
+        queue->next_profile_report_at = now + g_queue_profile_report_step;
     }
     pthread_mutex_unlock(&queue->mutex);
 }
@@ -4023,9 +4069,13 @@ static void execute_local_runtime_task(const LocalTask* task, WorkerCtx* ctx, Po
 
     if (g_profile && queue_subtask_stats && task->depth >= 0 && task->depth <= MAX_COLS) {
         double elapsed = omp_get_wtime() - subtask_t0;
+        long long solve_graph_delta = profile->solve_graph_calls - solve_graph_before;
+        long long nauty_delta = profile->nauty_calls - nauty_before;
         queue_subtask_record(&queue_subtask_stats[task->depth], task, elapsed,
-                             profile->solve_graph_calls - solve_graph_before,
-                             profile->nauty_calls - nauty_before);
+                             solve_graph_delta, nauty_delta);
+        if (queue) {
+            local_queue_record_profile(queue, task, elapsed, solve_graph_delta, nauty_delta);
+        }
     }
 
     local_queue_finish_item(queue, task->root_id, total_tasks, report_step, start_time,
@@ -5195,6 +5245,13 @@ int main(int argc, char** argv) {
     if (g_task_times_out_path && !g_profile) {
         fprintf(stderr, "--task-times-out requires --profile\n");
         return 1;
+    }
+    {
+        const char* queue_profile_step_env = getenv("RECT_QUEUE_PROFILE_STEP");
+        if (queue_profile_step_env && *queue_profile_step_env) {
+            g_queue_profile_report_step = strtod(queue_profile_step_env, NULL);
+            if (g_queue_profile_report_step < 0.0) g_queue_profile_report_step = 0.0;
+        }
     }
     if (g_eval_mode) {
         if (!g_eval_q_set || !g_eval_mod_set) {
