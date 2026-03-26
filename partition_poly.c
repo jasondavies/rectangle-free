@@ -295,6 +295,37 @@ typedef struct {
     RuntimeDonateQueue* queue;
 } RuntimeDonateFeederArgs;
 
+typedef struct {
+    long long pending;
+    long long task_index;
+    double launched_at;
+} RootTaskState;
+
+typedef struct {
+    uint8_t depth;
+    PrefixId prefix[MAX_COLS];
+    long long root_id;
+} LocalTask;
+
+typedef struct {
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+    LocalTask* tasks;
+    int capacity;
+    int head;
+    int tail;
+    int count;
+    int inflight;
+    int stop;
+    int low_watermark;
+    int high_watermark;
+    atomic_int outstanding_tasks;
+    atomic_long donated_tasks;
+    atomic_long max_outstanding_tasks;
+    RootTaskState* roots;
+    long long root_count;
+} LocalTaskQueue;
+
 // --- GLOBALS ---
 static int num_partitions = 0;
 static int perm_count = 0;
@@ -343,6 +374,9 @@ static int g_coord_heartbeat_seconds = 600;
 static int g_runtime_donate = 0;
 static int g_runtime_donate_min_depth = 2;
 static int g_runtime_donate_max_depth = 3;
+
+static void* checked_calloc(size_t count, size_t size, const char* label);
+static void* checked_aligned_alloc(size_t alignment, size_t size, const char* label);
 
 static inline uint16_t perm_table_get(int partition_id, int perm_id) {
     return perm_table[(size_t)partition_id * (size_t)perm_count + (size_t)perm_id];
@@ -564,6 +598,127 @@ static inline void complete_task_report_and_time(long long total_tasks, long lon
         task_timing_record(task_timing, task_index, elapsed);
         record_task_time_value(task_index, elapsed);
     }
+}
+
+static void local_queue_note_outstanding(LocalTaskQueue* queue, int outstanding) {
+    long current = atomic_load_explicit(&queue->max_outstanding_tasks, memory_order_relaxed);
+    while ((long)outstanding > current &&
+           !atomic_compare_exchange_weak_explicit(&queue->max_outstanding_tasks, &current, outstanding,
+                                                  memory_order_relaxed, memory_order_relaxed)) {
+    }
+}
+
+static inline int local_queue_outstanding_relaxed(const LocalTaskQueue* queue) {
+    return atomic_load_explicit(&queue->outstanding_tasks, memory_order_relaxed);
+}
+
+static void local_queue_init(LocalTaskQueue* queue, int capacity, int low_watermark,
+                             int high_watermark, long long root_count) {
+    memset(queue, 0, sizeof(*queue));
+    pthread_mutex_init(&queue->mutex, NULL);
+    pthread_cond_init(&queue->cond, NULL);
+    queue->tasks = checked_calloc((size_t)capacity, sizeof(*queue->tasks), "local_task_queue");
+    queue->roots = checked_calloc((size_t)root_count, sizeof(*queue->roots), "local_root_state");
+    queue->capacity = capacity;
+    queue->low_watermark = low_watermark;
+    queue->high_watermark = high_watermark;
+    queue->root_count = root_count;
+    atomic_init(&queue->outstanding_tasks, 0);
+    atomic_init(&queue->donated_tasks, 0);
+    atomic_init(&queue->max_outstanding_tasks, 0);
+    for (long long i = 0; i < root_count; i++) {
+        queue->roots[i].launched_at = -1.0;
+    }
+}
+
+static void local_queue_free(LocalTaskQueue* queue) {
+    free(queue->tasks);
+    free(queue->roots);
+    pthread_cond_destroy(&queue->cond);
+    pthread_mutex_destroy(&queue->mutex);
+    memset(queue, 0, sizeof(*queue));
+}
+
+static inline void local_task_from_stack(LocalTask* task, long long root_id, int depth, const int* stack) {
+    task->depth = (uint8_t)depth;
+    task->root_id = root_id;
+    for (int i = 0; i < depth; i++) task->prefix[i] = (PrefixId)stack[i];
+}
+
+static int local_queue_try_push(LocalTaskQueue* queue, const LocalTask* task) {
+    int pushed = 0;
+    int outstanding = 0;
+    pthread_mutex_lock(&queue->mutex);
+    if (!queue->stop && queue->count < queue->capacity) {
+        __atomic_add_fetch(&queue->roots[task->root_id].pending, 1, __ATOMIC_RELAXED);
+        queue->tasks[queue->tail] = *task;
+        queue->tail = (queue->tail + 1) % queue->capacity;
+        queue->count++;
+        outstanding = atomic_fetch_add_explicit(&queue->outstanding_tasks, 1, memory_order_relaxed) + 1;
+        local_queue_note_outstanding(queue, outstanding);
+        pushed = 1;
+        pthread_cond_signal(&queue->cond);
+    }
+    pthread_mutex_unlock(&queue->mutex);
+    return pushed;
+}
+
+static void local_queue_seed_push(LocalTaskQueue* queue, const LocalTask* task) {
+    if (!local_queue_try_push(queue, task)) {
+        fprintf(stderr, "Failed to seed local task queue\n");
+        exit(1);
+    }
+}
+
+static int local_queue_pop(LocalTaskQueue* queue, LocalTask* task) {
+    pthread_mutex_lock(&queue->mutex);
+    for (;;) {
+        if (queue->count > 0) {
+            *task = queue->tasks[queue->head];
+            queue->head = (queue->head + 1) % queue->capacity;
+            queue->count--;
+            queue->inflight++;
+            if (queue->roots[task->root_id].launched_at < 0.0) {
+                queue->roots[task->root_id].launched_at = omp_get_wtime();
+            }
+            pthread_mutex_unlock(&queue->mutex);
+            return 1;
+        }
+        if (queue->inflight == 0) {
+            queue->stop = 1;
+            pthread_cond_broadcast(&queue->cond);
+            pthread_mutex_unlock(&queue->mutex);
+            return 0;
+        }
+        pthread_cond_wait(&queue->cond, &queue->mutex);
+    }
+}
+
+static void local_queue_finish_item(LocalTaskQueue* queue, long long root_id,
+                                    long long total_tasks, long long report_step,
+                                    double start_time, long long* pending_completed,
+                                    TaskTimingStats* task_timing) {
+    long long remaining =
+        __atomic_sub_fetch(&queue->roots[root_id].pending, 1, __ATOMIC_ACQ_REL);
+    atomic_fetch_sub_explicit(&queue->outstanding_tasks, 1, memory_order_relaxed);
+
+    if (remaining == 0) {
+        complete_task_and_report(total_tasks, report_step, start_time, pending_completed);
+        if (g_profile && task_timing && queue->roots[root_id].launched_at >= 0.0) {
+            double elapsed = omp_get_wtime() - queue->roots[root_id].launched_at;
+            task_timing_record(task_timing, queue->roots[root_id].task_index, elapsed);
+            record_task_time_value(queue->roots[root_id].task_index, elapsed);
+        }
+    }
+
+    pthread_mutex_lock(&queue->mutex);
+    queue->inflight--;
+    if (queue->count == 0 && queue->inflight == 0) {
+        pthread_cond_broadcast(&queue->cond);
+    } else if (queue->count > 0) {
+        pthread_cond_signal(&queue->cond);
+    }
+    pthread_mutex_unlock(&queue->mutex);
 }
 
 static void* checked_aligned_alloc(size_t alignment, size_t size, const char* label) {
@@ -1160,7 +1315,8 @@ static void usage(const char* prog) {
             "  --task-start/--task-end define a half-open task range [start, end).\n"
             "  --task-stride/--task-offset select interleaved tasks within that range.\n"
             "  --prefix-depth may be 2, 3, or 4.\n"
-            "  Adaptive subdivision currently supports depth 2 split to depth 3 only.\n"
+            "  Adaptive subdivision currently supports only --prefix-depth 2.\n"
+            "  In full polynomial mode it uses a local runtime queue of donated subtrees.\n"
             "  Coordinator mode currently supports only fixed prefix-depth 2 work queues.\n"
             "  --runtime-donate enables experimental subtree donation in coordinator mode.\n"
             "  The default donation split is depth 2 to depth 3.\n"
@@ -3614,6 +3770,195 @@ static void execute_prefix2_fixed_batch(PrefixId i, const PrefixId* js, const lo
     canon_state_pop(canon_state);
 }
 
+static int replay_local_task_prefix(const LocalTask* task, WorkerCtx* ctx,
+                                    Poly* weight_prod, long long* mult_coeff,
+                                    int* run_len, int* min_idx) {
+    int next_stabilizer = 0;
+    int prev_pid = -1;
+
+    canon_state_reset(&ctx->canon_state, perm_count);
+    partial_graph_reset(&ctx->partial_graph);
+    poly_one_ref(weight_prod);
+    *mult_coeff = 1;
+    *run_len = 0;
+    *min_idx = 0;
+
+    for (int depth = 0; depth < task->depth; depth++) {
+        int pid = (int)task->prefix[depth];
+        double t0 = 0.0;
+        ctx->stack[depth] = pid;
+
+        if (g_profile) {
+            tls_profile->canon_prepare_calls++;
+            tls_profile->canon_prepare_calls_by_depth[depth]++;
+            t0 = omp_get_wtime();
+        }
+        if (!canon_state_prepare_push(&ctx->canon_state, pid,
+                                      &ctx->canon_scratch, &next_stabilizer)) {
+            if (g_profile) tls_profile->canon_prepare_time += omp_get_wtime() - t0;
+            return 0;
+        }
+        if (g_profile) {
+            tls_profile->canon_prepare_time += omp_get_wtime() - t0;
+            tls_profile->canon_prepare_accepts++;
+            tls_profile->canon_prepare_accepts_by_depth[depth]++;
+            tls_profile->stabilizer_sum_by_depth[depth] += next_stabilizer;
+            tls_profile->canon_commit_calls++;
+            t0 = omp_get_wtime();
+        }
+        canon_state_commit_push(&ctx->canon_state, pid,
+                                &ctx->canon_scratch, next_stabilizer);
+        if (g_profile) tls_profile->canon_commit_time += omp_get_wtime() - t0;
+
+        if (g_profile) {
+            tls_profile->partial_append_calls++;
+            t0 = omp_get_wtime();
+        }
+        if (!partial_graph_append(&ctx->partial_graph, depth, pid, ctx->stack)) {
+            if (g_profile) tls_profile->partial_append_time += omp_get_wtime() - t0;
+            canon_state_pop(&ctx->canon_state);
+            return 0;
+        }
+        if (g_profile) tls_profile->partial_append_time += omp_get_wtime() - t0;
+
+        poly_mul_ref(weight_prod, &partition_weight_poly[pid], weight_prod);
+
+        long long next_mult = (*mult_coeff) * (depth + 1);
+        int next_run = 1;
+        if (depth > 0 && pid == prev_pid) {
+            next_run = *run_len + 1;
+            next_mult /= next_run;
+        }
+        *mult_coeff = next_mult;
+        *run_len = next_run;
+        *min_idx = pid;
+        prev_pid = pid;
+    }
+
+    return 1;
+}
+
+static void dfs_runtime_split_local(int depth, int min_idx, long long root_id, WorkerCtx* ctx,
+                                    Poly* local_total, const Poly* weight_prod,
+                                    long long mult_coeff, int run_len, ProfileStats* profile,
+                                    LocalTaskQueue* queue) {
+    if (depth == g_cols) {
+        Poly res;
+        solve_structure(ctx->stack, &ctx->partial_graph.g, &ctx->canon_state,
+                        &ctx->cache, &ctx->raw_cache, &ctx->ws,
+                        &ctx->local_canon_calls, &ctx->local_cache_hits,
+                        &ctx->local_raw_cache_hits, weight_prod, mult_coeff, profile, &res);
+        poly_add_ref(local_total, &res, local_total);
+        return;
+    }
+
+    int outstanding = local_queue_outstanding_relaxed(queue);
+    int donate_budget = 0;
+    if ((depth + 1) <= g_adaptive_max_depth && outstanding < queue->low_watermark) {
+        donate_budget = queue->high_watermark - outstanding;
+        if (donate_budget < 0) donate_budget = 0;
+    }
+
+    int kept_local = 0;
+    int next_stabilizer = 0;
+    for (int pid = min_idx; pid < num_partitions; pid++) {
+        double t0 = 0.0;
+        ctx->stack[depth] = pid;
+        if (g_profile) {
+            tls_profile->canon_prepare_calls++;
+            tls_profile->canon_prepare_calls_by_depth[depth]++;
+            t0 = omp_get_wtime();
+        }
+        if (!canon_state_prepare_push(&ctx->canon_state, pid, &ctx->canon_scratch, &next_stabilizer)) {
+            if (g_profile) tls_profile->canon_prepare_time += omp_get_wtime() - t0;
+            continue;
+        }
+        if (g_profile) {
+            tls_profile->canon_prepare_time += omp_get_wtime() - t0;
+            tls_profile->canon_prepare_accepts++;
+            tls_profile->canon_prepare_accepts_by_depth[depth]++;
+            tls_profile->stabilizer_sum_by_depth[depth] += next_stabilizer;
+            tls_profile->canon_commit_calls++;
+            t0 = omp_get_wtime();
+        }
+
+        canon_state_commit_push(&ctx->canon_state, pid, &ctx->canon_scratch, next_stabilizer);
+        if (g_profile) tls_profile->canon_commit_time += omp_get_wtime() - t0;
+        PartialGraphState saved_graph = ctx->partial_graph;
+
+        if (g_profile) {
+            tls_profile->partial_append_calls++;
+            t0 = omp_get_wtime();
+        }
+        if (partial_graph_append(&ctx->partial_graph, depth, pid, ctx->stack)) {
+            if (g_profile) tls_profile->partial_append_time += omp_get_wtime() - t0;
+            Poly next_weight_prod;
+            poly_mul_ref(weight_prod, &partition_weight_poly[pid], &next_weight_prod);
+            long long next_mult_coeff = mult_coeff * (depth + 1);
+            int next_run_len = 1;
+            if (depth > 0 && pid == ctx->stack[depth - 1]) {
+                next_run_len = run_len + 1;
+                next_mult_coeff /= next_run_len;
+            }
+
+            if (donate_budget > 0 && kept_local) {
+                LocalTask child;
+                local_task_from_stack(&child, root_id, depth + 1, ctx->stack);
+                if (local_queue_try_push(queue, &child)) {
+                    donate_budget--;
+                    atomic_fetch_add_explicit(&queue->donated_tasks, 1, memory_order_relaxed);
+                } else {
+                    dfs_runtime_split_local(depth + 1, pid, root_id, ctx, local_total,
+                                            &next_weight_prod, next_mult_coeff, next_run_len,
+                                            profile, queue);
+                }
+            } else {
+                dfs_runtime_split_local(depth + 1, pid, root_id, ctx, local_total,
+                                        &next_weight_prod, next_mult_coeff, next_run_len,
+                                        profile, queue);
+                kept_local = 1;
+            }
+        } else if (g_profile) {
+            tls_profile->partial_append_time += omp_get_wtime() - t0;
+        }
+
+        ctx->partial_graph = saved_graph;
+        canon_state_pop(&ctx->canon_state);
+    }
+}
+
+static void execute_local_runtime_task(const LocalTask* task, WorkerCtx* ctx, Poly* thread_total,
+                                       LocalTaskQueue* queue, ProfileStats* profile,
+                                       long long total_tasks, long long report_step,
+                                       double start_time, long long* pending_completed,
+                                       TaskTimingStats* task_timing) {
+    Poly weight_prod;
+    long long mult_coeff = 1;
+    int run_len = 0;
+    int min_idx = 0;
+
+    if (replay_local_task_prefix(task, ctx, &weight_prod, &mult_coeff, &run_len, &min_idx)) {
+        if (task->depth == g_cols) {
+            Poly res;
+            solve_structure(ctx->stack, &ctx->partial_graph.g, &ctx->canon_state,
+                            &ctx->cache, &ctx->raw_cache, &ctx->ws,
+                            &ctx->local_canon_calls, &ctx->local_cache_hits,
+                            &ctx->local_raw_cache_hits, &weight_prod, mult_coeff, profile, &res);
+            poly_add_ref(thread_total, &res, thread_total);
+        } else {
+            dfs_runtime_split_local(task->depth, min_idx, task->root_id, ctx, thread_total,
+                                    &weight_prod, mult_coeff, run_len, profile, queue);
+        }
+
+        for (int depth = (int)task->depth - 1; depth >= 0; depth--) {
+            canon_state_pop(&ctx->canon_state);
+        }
+    }
+
+    local_queue_finish_item(queue, task->root_id, total_tasks, report_step, start_time,
+                            pending_completed, task_timing);
+}
+
 static void execute_prefix2_eval_task(int i, int j, int k,
                                       EvalCache* cache, EvalCache* raw_cache, NautyWorkspace* ws,
                                       CanonState* canon_state, CanonScratch* canon_scratch,
@@ -4708,6 +5053,10 @@ int main(int argc, char** argv) {
         fprintf(stderr, "--adaptive-threshold must be positive\n");
         return 1;
     }
+    if (g_adaptive_subdivide && g_adaptive_max_depth < 3) {
+        fprintf(stderr, "--adaptive-max-depth must be at least 3 with --adaptive-subdivide\n");
+        return 1;
+    }
     if (g_coord_low_watermark < 0) {
         fprintf(stderr, "--coord-low-watermark must be non-negative\n");
         return 1;
@@ -4834,14 +5183,15 @@ int main(int argc, char** argv) {
     long long* prefix2_batch_ps = NULL;
     long long prefix2_batch_count = 0;
     double prefix_generation_time = 0.0;
+    int use_runtime_split_queue = (prefix_depth == 2 && g_adaptive_subdivide && !g_eval_mode);
 
     if (prefix_depth > 0) {
         double prefix_start_time = omp_get_wtime();
         if (prefix_depth == 2) {
             long long base_prefixes = (long long)num_partitions * (num_partitions + 1) / 2;
-            if (g_adaptive_subdivide) {
+            if (g_adaptive_subdivide && !use_runtime_split_queue) {
                 if (g_adaptive_max_depth != 3) {
-                    fprintf(stderr, "Adaptive subdivision currently supports only --adaptive-max-depth 3\n");
+                    fprintf(stderr, "Adaptive subdivision currently supports only --adaptive-max-depth 3 in eval mode\n");
                     return 1;
                 }
                 PrefixTaskBuffer adaptive_prefixes;
@@ -4939,6 +5289,8 @@ int main(int argc, char** argv) {
                 prefix_i = adaptive_prefixes.i;
                 prefix_j = adaptive_prefixes.j;
                 prefix_k = adaptive_prefixes.k;
+            } else if (use_runtime_split_queue) {
+                total_prefixes = base_prefixes;
             } else {
                 total_prefixes = base_prefixes;
             }
@@ -4974,7 +5326,8 @@ int main(int argc, char** argv) {
             g_task_times_values[t] = -1.0;
         }
     }
-    if (g_adaptive_subdivide && prefix_depth == 2 && materialized_prefixes != total_tasks) {
+    if (g_adaptive_subdivide && prefix_depth == 2 && !use_runtime_split_queue &&
+        materialized_prefixes != total_tasks) {
         fprintf(stderr, "Internal error: adaptive prefix selection mismatch\n");
         return 1;
     }
@@ -4987,12 +5340,17 @@ int main(int argc, char** argv) {
     }
     printf("Prefix depth: %d (%lld tasks)\n", prefix_depth, total_prefixes);
     if (g_adaptive_subdivide) {
-        printf("Adaptive subdivision: threshold %d, max depth %d\n",
-               g_adaptive_threshold, g_adaptive_max_depth);
+        if (use_runtime_split_queue) {
+            printf("Runtime subdivision enabled: queue low watermark %d, max depth %d\n",
+                   g_adaptive_threshold, g_adaptive_max_depth);
+        } else {
+            printf("Adaptive subdivision: threshold %d, max depth %d\n",
+                   g_adaptive_threshold, g_adaptive_max_depth);
+        }
     }
     printf("Prefix generation: %.2f seconds\n", prefix_generation_time);
     if (prefix_depth > 0) {
-        if (g_adaptive_subdivide) {
+        if (g_adaptive_subdivide && !use_runtime_split_queue) {
             size_t bytes_per_task = sizeof(PrefixId) * 3;
             printf("Selected prefix task bytes: %zu each, %.2f MiB total\n",
                    bytes_per_task,
@@ -5216,6 +5574,40 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    LocalTaskQueue local_queue;
+    int local_queue_active = 0;
+    if (use_runtime_split_queue) {
+        int low_watermark = g_adaptive_threshold;
+        int high_watermark = 4 * low_watermark;
+        if (high_watermark < low_watermark) high_watermark = low_watermark;
+
+        long long queue_cap_ll = total_tasks + high_watermark + 64;
+        if (queue_cap_ll > INT_MAX) {
+            fprintf(stderr, "Local task queue too large\n");
+            return 1;
+        }
+
+        local_queue_init(&local_queue, (int)queue_cap_ll, low_watermark, high_watermark, total_tasks);
+        for (long long t = 0; t < total_tasks; t++) {
+            long long p = first_task + t * task_stride;
+            int i = 0;
+            int j = 0;
+            LocalTask task;
+            memset(&task, 0, sizeof(task));
+            unrank_prefix2(p, &i, &j);
+            task.depth = 2;
+            task.root_id = t;
+            task.prefix[0] = (PrefixId)i;
+            task.prefix[1] = (PrefixId)j;
+            local_queue.roots[t].pending = 0;
+            local_queue.roots[t].task_index = p;
+            local_queue_seed_push(&local_queue, &task);
+        }
+        local_queue_active = 1;
+        printf("Runtime queue: low=%d, high=%d, split-max-depth=%d\n",
+               low_watermark, high_watermark, g_adaptive_max_depth);
+    }
+
     Poly* thread_polys = checked_aligned_alloc(64, (size_t)num_threads * sizeof(Poly), "thread_polys");
     ProfileStats* thread_profiles =
         checked_aligned_alloc(64, (size_t)num_threads * sizeof(ProfileStats), "thread_profiles");
@@ -5334,6 +5726,29 @@ int main(int argc, char** argv) {
                                                 total_tasks, progress_report_step, start_time,
                                                 &pending_completed, task_timing);
                 }
+            } else if (use_runtime_split_queue) {
+                WorkerCtx ctx = {0};
+                ctx.cache = cache;
+                ctx.raw_cache = raw_cache;
+                ctx.ws = ws;
+                ctx.canon_state = canon_state;
+                ctx.canon_scratch = canon_scratch;
+                ctx.partial_graph = partial_graph;
+                ctx.local_canon_calls = 0;
+                ctx.local_cache_hits = 0;
+                ctx.local_raw_cache_hits = 0;
+
+                for (;;) {
+                    LocalTask task;
+                    if (!local_queue_pop(&local_queue, &task)) break;
+                    execute_local_runtime_task(&task, &ctx, &thread_polys[tid], &local_queue,
+                                               profile, total_tasks, progress_report_step,
+                                               start_time, &pending_completed, task_timing);
+                }
+
+                local_canon_calls += ctx.local_canon_calls;
+                local_cache_hits += ctx.local_cache_hits;
+                local_raw_cache_hits += ctx.local_raw_cache_hits;
             } else {
                 #pragma omp for schedule(runtime)
                 for (long long t = 0; t < total_tasks; t++) {
@@ -5699,6 +6114,10 @@ int main(int argc, char** argv) {
         free(raw_cache.adj);
         free(raw_cache.degs);
         free(raw_cache.coeffs);
+    }
+
+    if (local_queue_active) {
+        local_queue_free(&local_queue);
     }
     
     for(int i=0; i<num_threads; i++) {

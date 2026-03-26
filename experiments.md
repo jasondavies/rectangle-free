@@ -1298,3 +1298,44 @@
   - even allowing donation to go one level deeper did not complete within six minutes, so depth 4 may still be insufficient for the worst early `7x7` prefixes
   - this does not prove donation is useless for `7x7`, but it does show that “depth 3 is enough” is too optimistic
 - Outcome: informative lower-bound result; no code change.
+
+### Experiment 57: Replace local adaptive pre-splitting with a shared queue of donated prefixes
+- Goal: remove the one-shot materialised adaptive `(i,j,k)` task expansion in local mode and replace it with a runtime queue of compact prefix tasks, so workers can repeatedly donate deeper subtrees when the queue runs low.
+- Implementation:
+  - kept the existing fixed non-adaptive path unchanged
+  - scoped the new queue path to:
+    - local execution only
+    - `prefix_depth == 2`
+    - `g_adaptive_subdivide == 1`
+    - full polynomial mode
+  - seeded the queue with selected depth-2 roots `(i,j)`
+  - rebuilt `CanonState` / `PartialGraphState` from compact queued prefixes on pop
+  - donated deeper accepted siblings back to the queue when outstanding work dropped below the low watermark
+  - reinterpreted `--adaptive-threshold` as the local queue low watermark for this path
+- Validation:
+  - correctness:
+    - `env OMP_NUM_THREADS=1 ./partition_poly_7 6 3 --prefix-depth 2 --adaptive-subdivide --poly-out /tmp/adaptive_6x3.poly`
+    - `env OMP_NUM_THREADS=1 ./partition_poly_7 6 3 --prefix-depth 2 --poly-out /tmp/direct_6x3.poly`
+    - `cmp -s /tmp/adaptive_6x3.poly /tmp/direct_6x3.poly`
+    - result: `CMP_OK`
+  - sampled adaptive `7x5` benchmark:
+    - `env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235`
+    - new result:
+      - `Worker 0.50s`
+      - `Total 0.50s`
+    - previous accepted sampled baseline on the same command shape:
+      - `Worker 2.39s`
+      - `Total 3.75s`
+  - 1-thread profile on the same sampled `7x5` slice:
+    - `Worker 1.67s`
+    - `solve_graph_poly 0.234s`
+    - `canon_state_prepare_push 1.055s`
+  - bounded `7x7` lower bound:
+    - `timeout 360s env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly_7 7 7 --prefix-depth 2 --adaptive-subdivide --task-end 1`
+    - still timed out with exit `124`
+- Interpretation:
+  - the shared local queue is a major win on the sampled adaptive `7x5` workload, because it replaces one-shot pre-splitting with repeated demand-driven subtree donation
+  - it preserves correctness on a full `6x3` comparison
+  - it does not make the first `7x7` root easy; the worst early `7x7` elephants still need deeper or smarter splitting
+  - this is still worthwhile because it directly fixes the hard local adaptive path that was previously guessing splits up front
+- Outcome: accepted.
