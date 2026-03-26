@@ -187,6 +187,23 @@ typedef struct {
 } TaskTimingStats;
 
 typedef struct {
+    uint8_t depth;
+    PrefixId prefix[MAX_COLS];
+    double elapsed;
+    long long solve_graph_calls;
+    long long nauty_calls;
+} QueueSubtaskTopEntry;
+
+typedef struct {
+    long long task_count;
+    double task_time_sum;
+    double task_time_max;
+    long long solve_graph_call_sum;
+    long long nauty_call_sum;
+    QueueSubtaskTopEntry top[TASK_PROFILE_TOPK];
+} QueueSubtaskTimingStats;
+
+typedef struct {
     PrefixId* i;
     PrefixId* j;
     PrefixId* k;
@@ -439,6 +456,51 @@ static void task_timing_merge(TaskTimingStats* dst, const TaskTimingStats* src) 
     for (int i = 0; i < TASK_PROFILE_TOPK; i++) {
         if (src->top_times[i] <= 0.0) break;
         task_timing_insert_topk(dst, src->top_indices[i], src->top_times[i]);
+    }
+}
+
+static void queue_subtask_insert_topk(QueueSubtaskTimingStats* stats, const LocalTask* task,
+                                      double elapsed, long long solve_graph_calls,
+                                      long long nauty_calls) {
+    for (int i = 0; i < TASK_PROFILE_TOPK; i++) {
+        if (elapsed > stats->top[i].elapsed) {
+            for (int j = TASK_PROFILE_TOPK - 1; j > i; j--) {
+                stats->top[j] = stats->top[j - 1];
+            }
+            stats->top[i].depth = task->depth;
+            for (int d = 0; d < task->depth; d++) stats->top[i].prefix[d] = task->prefix[d];
+            stats->top[i].elapsed = elapsed;
+            stats->top[i].solve_graph_calls = solve_graph_calls;
+            stats->top[i].nauty_calls = nauty_calls;
+            break;
+        }
+    }
+}
+
+static void queue_subtask_record(QueueSubtaskTimingStats* stats, const LocalTask* task,
+                                 double elapsed, long long solve_graph_calls,
+                                 long long nauty_calls) {
+    stats->task_count++;
+    stats->task_time_sum += elapsed;
+    if (elapsed > stats->task_time_max) stats->task_time_max = elapsed;
+    stats->solve_graph_call_sum += solve_graph_calls;
+    stats->nauty_call_sum += nauty_calls;
+    queue_subtask_insert_topk(stats, task, elapsed, solve_graph_calls, nauty_calls);
+}
+
+static void queue_subtask_merge(QueueSubtaskTimingStats* dst, const QueueSubtaskTimingStats* src) {
+    dst->task_count += src->task_count;
+    dst->task_time_sum += src->task_time_sum;
+    if (src->task_time_max > dst->task_time_max) dst->task_time_max = src->task_time_max;
+    dst->solve_graph_call_sum += src->solve_graph_call_sum;
+    dst->nauty_call_sum += src->nauty_call_sum;
+    for (int i = 0; i < TASK_PROFILE_TOPK; i++) {
+        if (src->top[i].elapsed <= 0.0) break;
+        LocalTask task = {0};
+        task.depth = src->top[i].depth;
+        for (int d = 0; d < task.depth; d++) task.prefix[d] = src->top[i].prefix[d];
+        queue_subtask_insert_topk(dst, &task, src->top[i].elapsed,
+                                  src->top[i].solve_graph_calls, src->top[i].nauty_calls);
     }
 }
 
@@ -3931,11 +3993,15 @@ static void execute_local_runtime_task(const LocalTask* task, WorkerCtx* ctx, Po
                                        LocalTaskQueue* queue, ProfileStats* profile,
                                        long long total_tasks, long long report_step,
                                        double start_time, long long* pending_completed,
-                                       TaskTimingStats* task_timing) {
+                                       TaskTimingStats* task_timing,
+                                       QueueSubtaskTimingStats* queue_subtask_stats) {
     Poly weight_prod;
     long long mult_coeff = 1;
     int run_len = 0;
     int min_idx = 0;
+    double subtask_t0 = g_profile ? omp_get_wtime() : 0.0;
+    long long solve_graph_before = g_profile ? profile->solve_graph_calls : 0;
+    long long nauty_before = g_profile ? profile->nauty_calls : 0;
 
     if (replay_local_task_prefix(task, ctx, &weight_prod, &mult_coeff, &run_len, &min_idx)) {
         if (task->depth == g_cols) {
@@ -3953,6 +4019,13 @@ static void execute_local_runtime_task(const LocalTask* task, WorkerCtx* ctx, Po
         for (int depth = (int)task->depth - 1; depth >= 0; depth--) {
             canon_state_pop(&ctx->canon_state);
         }
+    }
+
+    if (g_profile && queue_subtask_stats && task->depth >= 0 && task->depth <= MAX_COLS) {
+        double elapsed = omp_get_wtime() - subtask_t0;
+        queue_subtask_record(&queue_subtask_stats[task->depth], task, elapsed,
+                             profile->solve_graph_calls - solve_graph_before,
+                             profile->nauty_calls - nauty_before);
     }
 
     local_queue_finish_item(queue, task->root_id, total_tasks, report_step, start_time,
@@ -5647,9 +5720,17 @@ int main(int argc, char** argv) {
         checked_aligned_alloc(64, (size_t)num_threads * sizeof(ProfileStats), "thread_profiles");
     TaskTimingStats* thread_task_timing =
         checked_aligned_alloc(64, (size_t)num_threads * sizeof(TaskTimingStats), "thread_task_timing");
+    QueueSubtaskTimingStats* thread_queue_subtask_timing = NULL;
     for(int i=0; i<num_threads; i++) poly_zero(&thread_polys[i]);
     memset(thread_profiles, 0, (size_t)num_threads * sizeof(ProfileStats));
     memset(thread_task_timing, 0, (size_t)num_threads * sizeof(TaskTimingStats));
+    if (use_runtime_split_queue && g_profile) {
+        thread_queue_subtask_timing = checked_aligned_alloc(
+            64, (size_t)num_threads * (size_t)(MAX_COLS + 1) * sizeof(QueueSubtaskTimingStats),
+            "thread_queue_subtask_timing");
+        memset(thread_queue_subtask_timing, 0,
+               (size_t)num_threads * (size_t)(MAX_COLS + 1) * sizeof(QueueSubtaskTimingStats));
+    }
 
     long long total_canon_calls = 0;
     long long total_cache_hits = 0;
@@ -5696,6 +5777,8 @@ int main(int argc, char** argv) {
         long long local_raw_cache_hits = 0;
         ProfileStats* profile = &thread_profiles[tid];
         TaskTimingStats* task_timing = &thread_task_timing[tid];
+        QueueSubtaskTimingStats* queue_subtask_timing =
+            thread_queue_subtask_timing ? thread_queue_subtask_timing + (size_t)tid * (size_t)(MAX_COLS + 1) : NULL;
         long long pending_completed = 0;
         tls_profile = profile;
         
@@ -5777,7 +5860,8 @@ int main(int argc, char** argv) {
                     if (!local_queue_pop(&local_queue, &task)) break;
                     execute_local_runtime_task(&task, &ctx, &thread_polys[tid], &local_queue,
                                                profile, total_tasks, progress_report_step,
-                                               start_time, &pending_completed, task_timing);
+                                               start_time, &pending_completed, task_timing,
+                                               queue_subtask_timing);
                 }
 
                 ws = ctx.ws;
@@ -6162,6 +6246,8 @@ int main(int argc, char** argv) {
 
     ProfileStats total_profile = {0};
     TaskTimingStats total_task_timing = {0};
+    QueueSubtaskTimingStats total_queue_subtask_timing[MAX_COLS + 1];
+    memset(total_queue_subtask_timing, 0, sizeof(total_queue_subtask_timing));
     for (int i = 0; i < num_threads; i++) {
         ProfileStats* src = &thread_profiles[i];
         total_profile.canon_prepare_calls += src->canon_prepare_calls;
@@ -6196,11 +6282,19 @@ int main(int argc, char** argv) {
                                     thread_task_timing[i].top_indices[k],
                                     thread_task_timing[i].top_times[k]);
         }
+        if (thread_queue_subtask_timing) {
+            QueueSubtaskTimingStats* src_sub =
+                thread_queue_subtask_timing + (size_t)i * (size_t)(MAX_COLS + 1);
+            for (int d = 0; d <= MAX_COLS; d++) {
+                queue_subtask_merge(&total_queue_subtask_timing[d], &src_sub[d]);
+            }
+        }
     }
 
     free(thread_polys);
     free(thread_profiles);
     free(thread_task_timing);
+    free(thread_queue_subtask_timing);
     progress_reporter_finish(&progress_reporter);
 
     double end_time = omp_get_wtime();
@@ -6281,6 +6375,28 @@ int main(int argc, char** argv) {
                     printf("    task %lld: %.6fs\n",
                            total_task_timing.top_indices[i],
                            total_task_timing.top_times[i]);
+                }
+            }
+        }
+        if (use_runtime_split_queue) {
+            printf("  Queue subtasks by depth:\n");
+            for (int d = 0; d <= g_cols && d <= MAX_COLS; d++) {
+                QueueSubtaskTimingStats* qs = &total_queue_subtask_timing[d];
+                if (qs->task_count == 0) continue;
+                printf("    depth %d: %lld subtasks, avg %.6fs, max %.6fs, avg solve_graph %.1f, avg nauty %.1f\n",
+                       d, qs->task_count, qs->task_time_sum / (double)qs->task_count, qs->task_time_max,
+                       (double)qs->solve_graph_call_sum / (double)qs->task_count,
+                       (double)qs->nauty_call_sum / (double)qs->task_count);
+                for (int i = 0; i < TASK_PROFILE_TOPK; i++) {
+                    QueueSubtaskTopEntry* e = &qs->top[i];
+                    if (e->elapsed <= 0.0) break;
+                    printf("      (");
+                    for (int p = 0; p < e->depth; p++) {
+                        if (p > 0) printf(",");
+                        printf("%u", (unsigned)e->prefix[p]);
+                    }
+                    printf("): %.6fs, solve_graph %lld, nauty %lld\n",
+                           e->elapsed, e->solve_graph_calls, e->nauty_calls);
                 }
             }
         }
