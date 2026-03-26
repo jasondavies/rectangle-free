@@ -1339,3 +1339,29 @@
   - it does not make the first `7x7` root easy; the worst early `7x7` elephants still need deeper or smarter splitting
   - this is still worthwhile because it directly fixes the hard local adaptive path that was previously guessing splits up front
 - Outcome: accepted.
+
+### Experiment 58: Smart local split scoring with deeper bounded `7x7` defaults
+- Goal: go beyond tail balancing in the local adaptive queue by:
+  - forcing deeper local split depth for tiny bounded `7x7` runs
+  - replacing “first accepted child local” with a scored split policy
+  - using a capped one-ply lookahead to donate heavier-looking children first
+- Implementation attempt:
+  - added a `LocalSplitCand` array in `dfs_runtime_split_local()`
+  - triggered smart splitting either when the queue was low or the root had been running for at least `1.0s`
+  - scored children using:
+    - capped accepted-grandchild lookahead
+    - current partial-graph size
+    - current stabiliser
+  - for bounded `7x7` with `total_tasks <= num_threads`, auto-raised local split depth from `3` to `5`
+- Results:
+  - sampled adaptive `7x5` slowed down:
+    - accepted baseline: `Worker 0.50s`, `Total 0.50s`
+    - experiment: `Worker 0.74s`, `Total 0.74s`
+  - bounded `7x7 --task-end 1` no longer crashed after a partial fix, but still timed out at `360s`
+  - full `6x3` adaptive correctness regressed badly:
+    - process aborted with `double free or corruption (!prev)`
+- Interpretation:
+  - the “run child prefixes from scratch, then restore parent state” version of smart splitting is too fragile in the current `CanonState` / `PartialGraphState` setup
+  - even before the correctness failure, the extra lookahead and replay overhead was enough to give back a large part of the `7x5` win
+  - this suggests the next smarter split attempt needs a different state-management strategy, not just more scoring logic layered onto replay
+- Outcome: rejected and reverted.
