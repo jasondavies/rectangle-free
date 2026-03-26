@@ -1448,3 +1448,37 @@
   - but on the current workloads it is not a decisive enough win to justify extra graph-solver complexity, especially given the already hot `solve_graph_poly()` path
   - the remaining `7x7` cost is still dominated by a few very expensive deep prefixes rather than a simple missing cut-vertex reduction
 - Outcome: rejected and reverted.
+
+### Experiment 62: Instrument hard graph-branch nodes inside `solve_graph_poly()`
+- Goal: distinguish between:
+  - a few individually pathological graph-solver nodes, and
+  - many expensive deletion-contraction branch nodes inside the slow donated prefixes
+- Implementation:
+  - defined a “hard graph node” as:
+    - graph still connected after simplification
+    - raw cache miss
+    - canonical cache miss
+    - enters deletion-contraction
+  - added counters for:
+    - hard-node count
+    - maximum `g.n` at hard-node entry
+    - maximum degree at hard-node entry
+  - threaded these through the existing local adaptive queue-subtask profiling and the global profile summary
+- Probe commands:
+  - `env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235 --profile`
+  - `timeout 40s env RECT_QUEUE_PROFILE_STEP=15 RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly_7 7 7 --prefix-depth 2 --adaptive-subdivide --adaptive-max-depth 5 --task-end 1 --profile`
+- Results:
+  - sampled adaptive `7x5`:
+    - global profile: `hard graph nodes: 2327, max n 11, max degree 10`
+    - slow depth-3 queued subtasks already separate into two classes:
+      - some have essentially no hard nodes despite nontrivial `solve_graph_poly` counts, e.g. `(0,0,34)` and `(0,0,30)`
+      - others are bad because they contain hundreds of hard nodes, e.g. `(0,0,9)` with `959`, `(0,0,3)` with `806`, `(0,0,33)` with `313`
+  - bounded adaptive `7x7 --task-end 1` after `26.49s`:
+    - depth `3`: avg hard nodes `8489.5`, max hard `n 14`, max hard degree `13`
+    - depth `4`: avg hard nodes `50161.8`, max hard `n 15`, max hard degree `14`
+    - depth `5`: avg hard nodes `10311.2`, max hard `n 13`, max hard degree `12`
+- Interpretation:
+  - this strongly supports the “many hard graph nodes” diagnosis, especially for the bad depth-4 `7x7` prefixes
+  - the remaining monsters are not just a few isolated pathological leaves; they contain large numbers of connected, cache-missing deletion-contraction branch nodes
+  - that makes prefix-side queue heuristics much less promising, and makes limited parallelism below the prefix layer the right next target
+- Outcome: accepted.

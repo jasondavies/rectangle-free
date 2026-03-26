@@ -162,11 +162,14 @@ typedef struct {
     long long solve_structure_calls;
     long long solve_graph_calls;
     long long nauty_calls;
+    long long hard_graph_nodes;
     long long canon_prepare_calls_by_depth[MAX_COLS + 1];
     long long canon_prepare_accepts_by_depth[MAX_COLS + 1];
     long long stabilizer_sum_by_depth[MAX_COLS + 1];
     long long canon_prepare_scanned_by_depth[MAX_COLS + 1];
     long long canon_prepare_active_by_depth[MAX_COLS + 1];
+    int hard_graph_max_n;
+    int hard_graph_max_degree;
     double canon_prepare_time;
     double canon_commit_time;
     double partial_append_time;
@@ -192,6 +195,9 @@ typedef struct {
     double elapsed;
     long long solve_graph_calls;
     long long nauty_calls;
+    long long hard_graph_nodes;
+    uint8_t max_hard_graph_n;
+    uint8_t max_hard_graph_degree;
 } QueueSubtaskTopEntry;
 
 typedef struct {
@@ -200,8 +206,17 @@ typedef struct {
     double task_time_max;
     long long solve_graph_call_sum;
     long long nauty_call_sum;
+    long long hard_graph_node_sum;
+    int max_hard_graph_n;
+    int max_hard_graph_degree;
     QueueSubtaskTopEntry top[TASK_PROFILE_TOPK];
 } QueueSubtaskTimingStats;
+
+typedef struct {
+    long long hard_graph_nodes;
+    int max_n;
+    int max_degree;
+} GraphHardStats;
 
 typedef struct {
     PrefixId* i;
@@ -379,6 +394,7 @@ static uint64_t g_eval_mod = 0;
 static int g_eval_q_set = 0;
 static int g_eval_mod_set = 0;
 static __thread ProfileStats* tls_profile = NULL;
+static __thread GraphHardStats* tls_hard_graph_stats = NULL;
 static const char* g_task_times_out_path = NULL;
 static long long g_task_times_first_task = 0;
 static long long g_task_times_stride = 1;
@@ -465,7 +481,8 @@ static void task_timing_merge(TaskTimingStats* dst, const TaskTimingStats* src) 
 
 static void queue_subtask_insert_topk(QueueSubtaskTimingStats* stats, const LocalTask* task,
                                       double elapsed, long long solve_graph_calls,
-                                      long long nauty_calls) {
+                                      long long nauty_calls, long long hard_graph_nodes,
+                                      int max_hard_graph_n, int max_hard_graph_degree) {
     for (int i = 0; i < TASK_PROFILE_TOPK; i++) {
         if (elapsed > stats->top[i].elapsed) {
             for (int j = TASK_PROFILE_TOPK - 1; j > i; j--) {
@@ -476,6 +493,9 @@ static void queue_subtask_insert_topk(QueueSubtaskTimingStats* stats, const Loca
             stats->top[i].elapsed = elapsed;
             stats->top[i].solve_graph_calls = solve_graph_calls;
             stats->top[i].nauty_calls = nauty_calls;
+            stats->top[i].hard_graph_nodes = hard_graph_nodes;
+            stats->top[i].max_hard_graph_n = (uint8_t)max_hard_graph_n;
+            stats->top[i].max_hard_graph_degree = (uint8_t)max_hard_graph_degree;
             break;
         }
     }
@@ -483,13 +503,18 @@ static void queue_subtask_insert_topk(QueueSubtaskTimingStats* stats, const Loca
 
 static void queue_subtask_record(QueueSubtaskTimingStats* stats, const LocalTask* task,
                                  double elapsed, long long solve_graph_calls,
-                                 long long nauty_calls) {
+                                 long long nauty_calls, long long hard_graph_nodes,
+                                 int max_hard_graph_n, int max_hard_graph_degree) {
     stats->task_count++;
     stats->task_time_sum += elapsed;
     if (elapsed > stats->task_time_max) stats->task_time_max = elapsed;
     stats->solve_graph_call_sum += solve_graph_calls;
     stats->nauty_call_sum += nauty_calls;
-    queue_subtask_insert_topk(stats, task, elapsed, solve_graph_calls, nauty_calls);
+    stats->hard_graph_node_sum += hard_graph_nodes;
+    if (max_hard_graph_n > stats->max_hard_graph_n) stats->max_hard_graph_n = max_hard_graph_n;
+    if (max_hard_graph_degree > stats->max_hard_graph_degree) stats->max_hard_graph_degree = max_hard_graph_degree;
+    queue_subtask_insert_topk(stats, task, elapsed, solve_graph_calls, nauty_calls,
+                              hard_graph_nodes, max_hard_graph_n, max_hard_graph_degree);
 }
 
 static void queue_subtask_merge(QueueSubtaskTimingStats* dst, const QueueSubtaskTimingStats* src) {
@@ -504,8 +529,14 @@ static void queue_subtask_merge(QueueSubtaskTimingStats* dst, const QueueSubtask
         task.depth = src->top[i].depth;
         for (int d = 0; d < task.depth; d++) task.prefix[d] = src->top[i].prefix[d];
         queue_subtask_insert_topk(dst, &task, src->top[i].elapsed,
-                                  src->top[i].solve_graph_calls, src->top[i].nauty_calls);
+                                  src->top[i].solve_graph_calls, src->top[i].nauty_calls,
+                                  src->top[i].hard_graph_nodes,
+                                  src->top[i].max_hard_graph_n,
+                                  src->top[i].max_hard_graph_degree);
     }
+    dst->hard_graph_node_sum += src->hard_graph_node_sum;
+    if (src->max_hard_graph_n > dst->max_hard_graph_n) dst->max_hard_graph_n = src->max_hard_graph_n;
+    if (src->max_hard_graph_degree > dst->max_hard_graph_degree) dst->max_hard_graph_degree = src->max_hard_graph_degree;
 }
 
 static void print_queue_subtask_prefix(const QueueSubtaskTopEntry* e) {
@@ -801,21 +832,25 @@ static void local_queue_finish_item(LocalTaskQueue* queue, long long root_id,
 
 static void local_queue_record_profile(LocalTaskQueue* queue, const LocalTask* task,
                                        double elapsed, long long solve_graph_calls,
-                                       long long nauty_calls) {
+                                       long long nauty_calls, long long hard_graph_nodes,
+                                       int max_hard_graph_n, int max_hard_graph_degree) {
     if (g_queue_profile_report_step <= 0.0 || task->depth < 0 || task->depth > MAX_COLS) return;
 
     pthread_mutex_lock(&queue->mutex);
-    queue_subtask_record(&queue->profile_stats[task->depth], task, elapsed, solve_graph_calls, nauty_calls);
+    queue_subtask_record(&queue->profile_stats[task->depth], task, elapsed, solve_graph_calls, nauty_calls,
+                         hard_graph_nodes, max_hard_graph_n, max_hard_graph_degree);
     double now = omp_get_wtime();
     if (queue->next_profile_report_at > 0.0 && now >= queue->next_profile_report_at) {
         printf("Queue profile after %.2fs:\n", now - queue->profile_started_at);
         for (int d = 0; d <= g_cols && d <= MAX_COLS; d++) {
             QueueSubtaskTimingStats* qs = &queue->profile_stats[d];
             if (qs->task_count == 0) continue;
-            printf("  depth %d: %lld subtasks, avg %.6fs, max %.6fs, avg solve_graph %.1f, avg nauty %.1f",
+            printf("  depth %d: %lld subtasks, avg %.6fs, max %.6fs, avg solve_graph %.1f, avg nauty %.1f, avg hard nodes %.1f, max hard n %d, max hard deg %d",
                    d, qs->task_count, qs->task_time_sum / (double)qs->task_count, qs->task_time_max,
                    (double)qs->solve_graph_call_sum / (double)qs->task_count,
-                   (double)qs->nauty_call_sum / (double)qs->task_count);
+                   (double)qs->nauty_call_sum / (double)qs->task_count,
+                   (double)qs->hard_graph_node_sum / (double)qs->task_count,
+                   qs->max_hard_graph_n, qs->max_hard_graph_degree);
             if (qs->top[0].elapsed > 0.0) {
                 printf(", top ");
                 print_queue_subtask_prefix(&qs->top[0]);
@@ -3193,6 +3228,19 @@ void remove_vertex(Graph* g, int i) {
     g->n--;
 }
 
+static inline void record_hard_graph_node(ProfileStats* profile, int n, int max_degree) {
+    if (g_profile && profile) {
+        profile->hard_graph_nodes++;
+        if (n > profile->hard_graph_max_n) profile->hard_graph_max_n = n;
+        if (max_degree > profile->hard_graph_max_degree) profile->hard_graph_max_degree = max_degree;
+    }
+    if (tls_hard_graph_stats) {
+        tls_hard_graph_stats->hard_graph_nodes++;
+        if (n > tls_hard_graph_stats->max_n) tls_hard_graph_stats->max_n = n;
+        if (max_degree > tls_hard_graph_stats->max_degree) tls_hard_graph_stats->max_degree = max_degree;
+    }
+}
+
 static void solve_graph_poly(const Graph* input_g, GraphCache* cache, GraphCache* raw_cache,
                              NautyWorkspace* ws, long long* local_canon_calls,
                              long long* local_cache_hits, long long* local_raw_cache_hits,
@@ -3320,6 +3368,7 @@ static void solve_graph_poly(const Graph* input_g, GraphCache* cache, GraphCache
             int d = __builtin_popcountll(g.adj[i]);
             if (d > max_deg) { max_deg = d; u = i; }
         }
+        if (u != -1 && max_deg > 0) record_hard_graph_node(profile, g.n, max_deg);
 
         int v = -1;
         if (u != -1) {
@@ -3470,6 +3519,7 @@ static uint64_t solve_graph_eval(const Graph* input_g, EvalCache* cache, EvalCac
                 u = i;
             }
         }
+        if (u != -1 && max_deg > 0) record_hard_graph_node(profile, g.n, max_deg);
 
         int v = -1;
         if (u != -1) {
@@ -4048,6 +4098,9 @@ static void execute_local_runtime_task(const LocalTask* task, WorkerCtx* ctx, Po
     double subtask_t0 = g_profile ? omp_get_wtime() : 0.0;
     long long solve_graph_before = g_profile ? profile->solve_graph_calls : 0;
     long long nauty_before = g_profile ? profile->nauty_calls : 0;
+    GraphHardStats subtask_hard = {0};
+    GraphHardStats* prev_hard_stats = tls_hard_graph_stats;
+    if (g_profile) tls_hard_graph_stats = &subtask_hard;
 
     if (replay_local_task_prefix(task, ctx, &weight_prod, &mult_coeff, &run_len, &min_idx)) {
         if (task->depth == g_cols) {
@@ -4066,15 +4119,20 @@ static void execute_local_runtime_task(const LocalTask* task, WorkerCtx* ctx, Po
             canon_state_pop(&ctx->canon_state);
         }
     }
+    tls_hard_graph_stats = prev_hard_stats;
 
     if (g_profile && queue_subtask_stats && task->depth >= 0 && task->depth <= MAX_COLS) {
         double elapsed = omp_get_wtime() - subtask_t0;
         long long solve_graph_delta = profile->solve_graph_calls - solve_graph_before;
         long long nauty_delta = profile->nauty_calls - nauty_before;
         queue_subtask_record(&queue_subtask_stats[task->depth], task, elapsed,
-                             solve_graph_delta, nauty_delta);
+                             solve_graph_delta, nauty_delta,
+                             subtask_hard.hard_graph_nodes, subtask_hard.max_n,
+                             subtask_hard.max_degree);
         if (queue) {
-            local_queue_record_profile(queue, task, elapsed, solve_graph_delta, nauty_delta);
+            local_queue_record_profile(queue, task, elapsed, solve_graph_delta, nauty_delta,
+                                       subtask_hard.hard_graph_nodes, subtask_hard.max_n,
+                                       subtask_hard.max_degree);
         }
     }
 
@@ -6314,12 +6372,19 @@ int main(int argc, char** argv) {
         total_profile.solve_structure_calls += src->solve_structure_calls;
         total_profile.solve_graph_calls += src->solve_graph_calls;
         total_profile.nauty_calls += src->nauty_calls;
+        total_profile.hard_graph_nodes += src->hard_graph_nodes;
         total_profile.canon_prepare_time += src->canon_prepare_time;
         total_profile.canon_commit_time += src->canon_commit_time;
         total_profile.partial_append_time += src->partial_append_time;
         total_profile.build_weight_time += src->build_weight_time;
         total_profile.solve_graph_time += src->solve_graph_time;
         total_profile.nauty_time += src->nauty_time;
+        if (src->hard_graph_max_n > total_profile.hard_graph_max_n) {
+            total_profile.hard_graph_max_n = src->hard_graph_max_n;
+        }
+        if (src->hard_graph_max_degree > total_profile.hard_graph_max_degree) {
+            total_profile.hard_graph_max_degree = src->hard_graph_max_degree;
+        }
         for (int d = 0; d <= MAX_COLS; d++) {
             total_profile.canon_prepare_calls_by_depth[d] += src->canon_prepare_calls_by_depth[d];
             total_profile.canon_prepare_accepts_by_depth[d] += src->canon_prepare_accepts_by_depth[d];
@@ -6380,6 +6445,10 @@ int main(int argc, char** argv) {
                total_profile.solve_graph_calls, total_profile.solve_graph_time);
         printf("  get_canonical_graph/densenauty: %lld calls, %.3fs\n",
                total_profile.nauty_calls, total_profile.nauty_time);
+        printf("  hard graph nodes: %lld, max n %d, max degree %d\n",
+               total_profile.hard_graph_nodes,
+               total_profile.hard_graph_max_n,
+               total_profile.hard_graph_max_degree);
         printf("  CanonState by depth:\n");
         for (int d = 0; d <= g_cols && d <= MAX_COLS; d++) {
             long long calls = total_profile.canon_prepare_calls_by_depth[d];
@@ -6440,10 +6509,12 @@ int main(int argc, char** argv) {
             for (int d = 0; d <= g_cols && d <= MAX_COLS; d++) {
                 QueueSubtaskTimingStats* qs = &total_queue_subtask_timing[d];
                 if (qs->task_count == 0) continue;
-                printf("    depth %d: %lld subtasks, avg %.6fs, max %.6fs, avg solve_graph %.1f, avg nauty %.1f\n",
+                printf("    depth %d: %lld subtasks, avg %.6fs, max %.6fs, avg solve_graph %.1f, avg nauty %.1f, avg hard nodes %.1f, max hard n %d, max hard deg %d\n",
                        d, qs->task_count, qs->task_time_sum / (double)qs->task_count, qs->task_time_max,
                        (double)qs->solve_graph_call_sum / (double)qs->task_count,
-                       (double)qs->nauty_call_sum / (double)qs->task_count);
+                       (double)qs->nauty_call_sum / (double)qs->task_count,
+                       (double)qs->hard_graph_node_sum / (double)qs->task_count,
+                       qs->max_hard_graph_n, qs->max_hard_graph_degree);
                 for (int i = 0; i < TASK_PROFILE_TOPK; i++) {
                     QueueSubtaskTopEntry* e = &qs->top[i];
                     if (e->elapsed <= 0.0) break;
@@ -6452,8 +6523,11 @@ int main(int argc, char** argv) {
                         if (p > 0) printf(",");
                         printf("%u", (unsigned)e->prefix[p]);
                     }
-                    printf("): %.6fs, solve_graph %lld, nauty %lld\n",
-                           e->elapsed, e->solve_graph_calls, e->nauty_calls);
+                    printf("): %.6fs, solve_graph %lld, nauty %lld, hard_nodes %lld, max_hard_n %u, max_hard_deg %u\n",
+                           e->elapsed, e->solve_graph_calls, e->nauty_calls,
+                           e->hard_graph_nodes,
+                           (unsigned)e->max_hard_graph_n,
+                           (unsigned)e->max_hard_graph_degree);
                 }
             }
         }
