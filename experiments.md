@@ -1424,3 +1424,27 @@
   - queue-pressure plus elapsed-time triggers are still not a true cost model for the worst `7x7` subtrees
   - the remaining hard cases are still dominated by a few very expensive depth-3/4/5 prefixes whose cost is mostly `solve_graph_poly` and `nauty`
 - Outcome: rejected and reverted.
+
+### Experiment 61: Articulation-point factorisation in `solve_graph_poly()`
+- Goal: add one more structural graph-solver reduction below the prefix tree by splitting connected graphs at a cut vertex before canonicalisation and deletion-contraction.
+- Implementation attempt:
+  - brute-force articulation detection on the tiny conflict graphs (`n <= 21`)
+  - if a connected graph split at articulation vertex `v` into `k` components after removing `v`, solve the `k` induced subgraphs that include `v`, multiply their chromatic polynomials, then divide by `x^(k-1)`
+  - added the analogous eval-mode path when `q mod p` was invertible
+- Correctness:
+  - `6x3` full polynomial stayed exact
+  - `6x3 --eval-q 4 --mod 18446744073709551557` also stayed exact
+- Results:
+  - sampled adaptive `7x5`:
+    - `OMP_NUM_THREADS=1`: `Worker 1.68s`
+    - `OMP_NUM_THREADS=32`: `Worker 0.47s`
+    - compared with the accepted baseline, this is effectively flat and not a meaningful speedup
+  - bounded adaptive `7x7 --task-end 1 --adaptive-max-depth 5` with live queue profiling:
+    - after `30.01s`, depth `4` average `solve_graph` and `nauty` deltas were somewhat lower than the earlier baseline (`97393.5` / `61227.6` vs roughly `120161.0` / `86140.3`)
+    - but by `73.56s`, the root still had very large depth-3 and depth-4 monsters (`45.68s` and `73.49s`)
+    - so the hardest bounded `7x7` root was still nowhere near finishing
+- Interpretation:
+  - articulation splitting is correct and occasionally helps individual graphs
+  - but on the current workloads it is not a decisive enough win to justify extra graph-solver complexity, especially given the already hot `solve_graph_poly()` path
+  - the remaining `7x7` cost is still dominated by a few very expensive deep prefixes rather than a simple missing cut-vertex reduction
+- Outcome: rejected and reverted.
