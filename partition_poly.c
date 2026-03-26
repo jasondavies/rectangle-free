@@ -396,6 +396,9 @@ static uint64_t factorial[20];
 static uint32_t* overlap_mask = NULL;
 static uint32_t* intra_mask = NULL;
 static Poly* partition_weight_poly = NULL;
+static PrefixId* g_live_prefix2_i = NULL;
+static PrefixId* g_live_prefix2_j = NULL;
+static long long g_live_prefix2_count = 0;
 
 static long long completed_tasks = 0;
 static Poly global_poly = {0}; 
@@ -589,6 +592,11 @@ static int decode_task_prefix(long long task_index, int* i, int* j, int* k, int*
     *k = -1;
     *l = -1;
     if (g_effective_prefix_depth == 2) {
+        if (!g_adaptive_subdivide && g_live_prefix2_i && task_index >= 0 && task_index < g_live_prefix2_count) {
+            *i = (int)g_live_prefix2_i[task_index];
+            *j = (int)g_live_prefix2_j[task_index];
+            return 1;
+        }
         long long rank = task_index;
         for (int a = 0; a < num_partitions; a++) {
             long long count = num_partitions - a;
@@ -1020,6 +1028,13 @@ static void prefix_task_buffer_push3(PrefixTaskBuffer* buf, int i, int j, int k)
     buf->count++;
 }
 
+static void prefix_task_buffer_push2(PrefixTaskBuffer* buf, int i, int j) {
+    prefix_task_buffer_reserve(buf, buf->count + 1);
+    buf->i[buf->count] = (PrefixId)i;
+    buf->j[buf->count] = (PrefixId)j;
+    buf->count++;
+}
+
 static void prefix_task_buffer_free(PrefixTaskBuffer* buf) {
     free(buf->i);
     free(buf->j);
@@ -1098,7 +1113,8 @@ static void unrank_prefix2(long long rank, int* i, int* j) {
     exit(1);
 }
 
-static void build_fixed_prefix2_batches(long long task_start, long long task_end,
+static void build_fixed_prefix2_batches(const PrefixId* live_i, const PrefixId* live_j,
+                                        long long task_start, long long task_end,
                                         long long task_stride, long long task_offset,
                                         long long total_tasks, Prefix2Batch** batches_out,
                                         long long* batch_count_out, PrefixId** js_out,
@@ -1110,10 +1126,7 @@ static void build_fixed_prefix2_batches(long long task_start, long long task_end
     long long first_task = first_selected_task(task_start, task_end, task_stride, task_offset);
     for (long long t = 0; t < total_tasks; t++) {
         long long p = first_task + t * task_stride;
-        int i = 0;
-        int j = 0;
-        (void)j;
-        unrank_prefix2(p, &i, &j);
+        int i = (int)live_i[p];
         counts[i]++;
     }
 
@@ -1134,9 +1147,8 @@ static void build_fixed_prefix2_batches(long long task_start, long long task_end
 
     for (long long t = 0; t < total_tasks; t++) {
         long long p = first_task + t * task_stride;
-        int i = 0;
-        int j = 0;
-        unrank_prefix2(p, &i, &j);
+        int i = (int)live_i[p];
+        int j = (int)live_j[p];
         int pos = cursor[i]++;
         js[pos] = (PrefixId)j;
         ps[pos] = p;
@@ -3553,6 +3565,57 @@ static int partial_graph_append(PartialGraphState* st, int depth, int pid, const
     return 1;
 }
 
+static void build_live_prefix2_tasks(PrefixId** live_i_out, PrefixId** live_j_out,
+                                     long long* live_count_out) {
+    PrefixTaskBuffer live = {0};
+    CanonState canon_state;
+    CanonScratch canon_scratch;
+    PartialGraphState partial_graph;
+    int stack[MAX_COLS];
+
+    prefix_task_buffer_init(&live, num_partitions, 0);
+    canon_state_init(&canon_state, perm_count);
+    canon_scratch_init(&canon_scratch, perm_count);
+
+    for (int i = 0; i < num_partitions; i++) {
+        int next_stabilizer = 0;
+        canon_state_reset(&canon_state, perm_count);
+        partial_graph_reset(&partial_graph);
+        stack[0] = i;
+        if (!canon_state_prepare_push(&canon_state, i, &canon_scratch, &next_stabilizer)) {
+            continue;
+        }
+        canon_state_commit_push(&canon_state, i, &canon_scratch, next_stabilizer);
+        if (!partial_graph_append(&partial_graph, 0, i, stack)) {
+            canon_state_pop(&canon_state);
+            continue;
+        }
+
+        for (int j = i; j < num_partitions; j++) {
+            stack[1] = j;
+            if (!canon_state_prepare_push(&canon_state, j, &canon_scratch, &next_stabilizer)) {
+                continue;
+            }
+            canon_state_commit_push(&canon_state, j, &canon_scratch, next_stabilizer);
+            PartialGraphState prefix_graph = partial_graph;
+            if (partial_graph_append(&prefix_graph, 1, j, stack)) {
+                prefix_task_buffer_push2(&live, i, j);
+            }
+            canon_state_pop(&canon_state);
+        }
+
+        canon_state_pop(&canon_state);
+    }
+
+    canon_state_free(&canon_state);
+    canon_scratch_free(&canon_scratch);
+    *live_i_out = live.i;
+    *live_j_out = live.j;
+    *live_count_out = live.count;
+    free(live.k);
+    free(live.l);
+}
+
 static void solve_structure(int* stack, const Graph* partial_graph, CanonState* canon_state,
                             GraphCache* cache, GraphCache* raw_cache, NautyWorkspace* ws,
                             long long* local_canon_calls, long long* local_cache_hits,
@@ -5151,6 +5214,7 @@ int main(int argc, char** argv) {
 
     long long total_prefixes = 0;
     long long materialized_prefixes = 0;
+    long long nominal_prefixes = 0;
     PrefixId *prefix_i = NULL, *prefix_j = NULL, *prefix_k = NULL, *prefix_l = NULL;
     Prefix2Batch* prefix2_batches = NULL;
     PrefixId* prefix2_batch_js = NULL;
@@ -5163,10 +5227,12 @@ int main(int argc, char** argv) {
         double prefix_start_time = omp_get_wtime();
         if (prefix_depth == 2) {
             long long base_prefixes = (long long)num_partitions * (num_partitions + 1) / 2;
+            nominal_prefixes = base_prefixes;
             if (use_runtime_split_queue) {
                 total_prefixes = base_prefixes;
             } else {
-                total_prefixes = base_prefixes;
+                build_live_prefix2_tasks(&g_live_prefix2_i, &g_live_prefix2_j, &g_live_prefix2_count);
+                total_prefixes = g_live_prefix2_count;
             }
         } else if (prefix_depth == 3) {
             total_prefixes = (long long)num_partitions * (num_partitions + 1) * (num_partitions + 2) / 6;
@@ -5202,12 +5268,16 @@ int main(int argc, char** argv) {
     }
     if (prefix_depth == 2 && !g_adaptive_subdivide && total_tasks > 0) {
         double batch_start_time = omp_get_wtime();
-        build_fixed_prefix2_batches(active_task_start, active_task_end, task_stride, task_offset,
+        build_fixed_prefix2_batches(g_live_prefix2_i, g_live_prefix2_j,
+                                    active_task_start, active_task_end, task_stride, task_offset,
                                     total_tasks, &prefix2_batches, &prefix2_batch_count,
                                     &prefix2_batch_js, &prefix2_batch_ps);
         prefix_generation_time += omp_get_wtime() - batch_start_time;
     }
     printf("Prefix depth: %d (%lld tasks)\n", prefix_depth, total_prefixes);
+    if (prefix_depth == 2 && !g_adaptive_subdivide && nominal_prefixes > 0) {
+        printf("Live fixed depth-2 prefixes: %lld of %lld nominal\n", total_prefixes, nominal_prefixes);
+    }
     if (g_adaptive_subdivide) {
         if (use_runtime_split_queue) {
             printf("Runtime subdivision enabled: queue low watermark %d, max depth %d",
@@ -6081,6 +6151,11 @@ int main(int argc, char** argv) {
     free(prefix_j);
     free(prefix_k);
     free(prefix_l);
+    free(g_live_prefix2_i);
+    free(g_live_prefix2_j);
+    g_live_prefix2_i = NULL;
+    g_live_prefix2_j = NULL;
+    g_live_prefix2_count = 0;
     free(prefix2_batches);
     free(prefix2_batch_js);
     free(prefix2_batch_ps);

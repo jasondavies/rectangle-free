@@ -1725,3 +1725,18 @@
   - it is cheaper on easy workloads because it does almost nothing unless a task really accumulates a large amount of structural work
   - it gives us an opt-in second-round tail tool that is more aligned with actual graph-solver cost than elapsed time
 - Outcome: accepted as an opt-in refinement tool.
+
+### Experiment 70: Fixed depth-2 live prefix indexing
+- Goal: stop treating all repeated-combination depth-2 prefixes as real work when most are dead at depth 1 or 2.
+- Implementation:
+  - fixed non-adaptive `prefix-depth 2` now precomputes the full live `(i,j)` list once
+  - task selection, batching, profiling CSV output, and sharding all operate on that live list instead of on the nominal `385003` repeated-combination ranks
+  - for fixed depth-2 decoding, task index `t` now means the `t`-th live `(i,j)` prefix
+- Results:
+  - for `7x3`, the fixed depth-2 task count dropped from `385003` nominal to `491` live tasks
+  - the timing CSV now has exactly `492` lines including the header, matching `491` live tasks
+  - the polynomial output for `7x3` stayed unchanged
+- Interpretation:
+  - the previous fixed depth-2 numbering was dominated by dead prefixes and gave very misleading task counts
+  - the live list is a much better basis for timing exports, shard sizing, and total-work estimates
+- Outcome: accepted.
