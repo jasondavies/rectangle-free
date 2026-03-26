@@ -1113,6 +1113,15 @@ static void unrank_prefix2(long long rank, int* i, int* j) {
     exit(1);
 }
 
+static void get_prefix2_task(long long task_index, int* i, int* j) {
+    if (g_live_prefix2_i && task_index >= 0 && task_index < g_live_prefix2_count) {
+        *i = (int)g_live_prefix2_i[task_index];
+        *j = (int)g_live_prefix2_j[task_index];
+        return;
+    }
+    unrank_prefix2(task_index, i, j);
+}
+
 static void build_fixed_prefix2_batches(const PrefixId* live_i, const PrefixId* live_j,
                                         long long task_start, long long task_end,
                                         long long task_stride, long long task_offset,
@@ -3718,7 +3727,7 @@ static void execute_prefix2_fixed_task(long long p,
     int j = 0;
     int next_stabilizer = 0;
     poly_zero(task_total);
-    unrank_prefix2(p, &i, &j);
+    get_prefix2_task(p, &i, &j);
 
     canon_state_reset(canon_state, perm_count);
     partial_graph_reset(partial_graph);
@@ -4691,7 +4700,7 @@ static void* runtime_donate_feeder_main(void* opaque) {
                 for (long long p = first; p < shard.task_end; p += shard.task_stride) {
                     int i = 0;
                     int j = 0;
-                    unrank_prefix2(p, &i, &j);
+                    get_prefix2_task(p, &i, &j);
                     RuntimeWorkItem item = {.depth = 2, .shard_slot = slot};
                     item.prefix[0] = (PrefixId)i;
                     item.prefix[1] = (PrefixId)j;
@@ -5194,7 +5203,8 @@ int main(int argc, char** argv) {
         printf("Shared canonical cache merge enabled: 2^%d slots\n", g_shared_cache_bits);
     }
     if (coordinator_mode) {
-        long long full_tasks = (long long)num_partitions * (num_partitions + 1) / 2;
+        build_live_prefix2_tasks(&g_live_prefix2_i, &g_live_prefix2_j, &g_live_prefix2_count);
+        long long full_tasks = g_live_prefix2_count;
         printf("Coordinator worker mode\n");
         printf("Grid: %dx%d\n", g_rows, g_cols);
         printf("Partitions: %d\n", num_partitions);
@@ -5202,14 +5212,23 @@ int main(int argc, char** argv) {
         printf("Using nauty for canonical graph caching\n");
         printf("Coordinator URL: %s\n", g_coordinator_url);
         printf("Run ID: %lld\n", g_run_id);
-        printf("Fixed prefix depth: 2 (%lld tasks)\n", full_tasks);
+        printf("Fixed prefix depth: 2 (%lld live tasks of %lld nominal)\n",
+               full_tasks, (long long)num_partitions * (num_partitions + 1) / 2);
+        int rc = 0;
         if (g_runtime_donate) {
             printf("Runtime donation: enabled (min depth %d, max depth %d)\n",
                    g_runtime_donate_min_depth, g_runtime_donate_max_depth);
-            return run_coordinator_worker_runtime_donate(full_tasks, omp_get_max_threads(),
-                                                         graph_poly_len);
+            rc = run_coordinator_worker_runtime_donate(full_tasks, omp_get_max_threads(),
+                                                       graph_poly_len);
+        } else {
+            rc = run_coordinator_worker(full_tasks, omp_get_max_threads(), graph_poly_len);
         }
-        return run_coordinator_worker(full_tasks, omp_get_max_threads(), graph_poly_len);
+        free(g_live_prefix2_i);
+        free(g_live_prefix2_j);
+        g_live_prefix2_i = NULL;
+        g_live_prefix2_j = NULL;
+        g_live_prefix2_count = 0;
+        return rc;
     }
 
     long long total_prefixes = 0;
