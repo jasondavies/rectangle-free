@@ -378,6 +378,7 @@ typedef struct {
     atomic_int idle_threads;
     atomic_long donated_tasks;
     atomic_long budget_continuations;
+    atomic_long work_budget_continuations;
     atomic_long max_outstanding_tasks;
     RootTaskState* roots;
     long long root_count;
@@ -417,6 +418,7 @@ static int g_adaptive_subdivide = 0;
 static int g_adaptive_threshold = 128;
 static int g_adaptive_max_depth = 3;
 static double g_adaptive_budget_seconds = 0.0;
+static long long g_adaptive_work_budget = 0;
 static int g_profile = 0;
 static int g_eval_mode = 0;
 static uint64_t g_eval_q = 0;
@@ -425,6 +427,7 @@ static int g_eval_q_set = 0;
 static int g_eval_mod_set = 0;
 static __thread ProfileStats* tls_profile = NULL;
 static __thread GraphHardStats* tls_hard_graph_stats = NULL;
+static __thread long long* tls_adaptive_work_counter = NULL;
 static __thread SharedGraphCacheExporter* tls_shared_cache_exporter = NULL;
 static const char* g_task_times_out_path = NULL;
 static long long g_task_times_first_task = 0;
@@ -783,6 +786,7 @@ static void local_queue_init(LocalTaskQueue* queue, int capacity, int low_waterm
     atomic_init(&queue->idle_threads, 0);
     atomic_init(&queue->donated_tasks, 0);
     atomic_init(&queue->budget_continuations, 0);
+    atomic_init(&queue->work_budget_continuations, 0);
     atomic_init(&queue->max_outstanding_tasks, 0);
     queue->profile_started_at = omp_get_wtime();
     queue->occupancy_last_at = queue->profile_started_at;
@@ -964,6 +968,10 @@ static void local_queue_print_occupancy_summary(LocalTaskQueue* queue) {
     if (g_adaptive_budget_seconds > 0.0) {
         printf("Runtime queue budget continuations: %lld\n",
                (long long)atomic_load_explicit(&queue->budget_continuations, memory_order_relaxed));
+    }
+    if (g_adaptive_work_budget > 0) {
+        printf("Runtime queue work-budget continuations: %lld\n",
+               (long long)atomic_load_explicit(&queue->work_budget_continuations, memory_order_relaxed));
     }
 }
 
@@ -1554,7 +1562,7 @@ void print_poly(Poly p) {
 static void usage(const char* prog) {
     fprintf(stderr,
             "Usage:\n"
-            "  %s [rows cols] [--task-start N] [--task-end N] [--task-stride N] [--task-offset N] [--prefix-depth N] [--adaptive-subdivide] [--adaptive-threshold N] [--adaptive-max-depth N] [--adaptive-budget-seconds S] [--coordinator-url URL] [--worker-id ID] [--run-id N] [--coord-low-watermark N] [--coord-high-watermark N] [--coord-heartbeat-seconds N] [--runtime-donate] [--runtime-donate-min-depth N] [--runtime-donate-max-depth N] [--eval-q Q --mod P] [--poly-out FILE] [--profile] [--task-times-out FILE]\n"
+            "  %s [rows cols] [--task-start N] [--task-end N] [--task-stride N] [--task-offset N] [--prefix-depth N] [--adaptive-subdivide] [--adaptive-threshold N] [--adaptive-max-depth N] [--adaptive-budget-seconds S] [--adaptive-work-budget N] [--coordinator-url URL] [--worker-id ID] [--run-id N] [--coord-low-watermark N] [--coord-high-watermark N] [--coord-heartbeat-seconds N] [--runtime-donate] [--runtime-donate-min-depth N] [--runtime-donate-max-depth N] [--eval-q Q --mod P] [--poly-out FILE] [--profile] [--task-times-out FILE]\n"
             "  %s --merge [--poly-out FILE] INPUT...\n"
             "\n"
             "Notes:\n"
@@ -3428,6 +3436,9 @@ static inline void record_hard_graph_node(ProfileStats* profile, int n, int max_
         if (n > tls_hard_graph_stats->max_n) tls_hard_graph_stats->max_n = n;
         if (max_degree > tls_hard_graph_stats->max_degree) tls_hard_graph_stats->max_degree = max_degree;
     }
+    if (tls_adaptive_work_counter) {
+        (*tls_adaptive_work_counter)++;
+    }
 }
 
 static void solve_graph_poly(const Graph* input_g, GraphCache* cache, GraphCache* raw_cache,
@@ -4226,6 +4237,21 @@ static void dfs_runtime_split_local(int depth, int start_pid, int end_pid, long 
                 return;
             }
         }
+        if (g_adaptive_work_budget > 0 &&
+            tls_adaptive_work_counter &&
+            *tls_adaptive_work_counter >= g_adaptive_work_budget &&
+            depth < g_adaptive_max_depth &&
+            (local_end - pid) >= 2 &&
+            atomic_load_explicit(&queue->idle_threads, memory_order_relaxed) > 0) {
+            LocalTask continuation = {0};
+            local_task_from_stack(&continuation, root_id, depth, ctx->stack);
+            continuation.lo = (PrefixId)pid;
+            continuation.hi = (PrefixId)local_end;
+            if (local_queue_try_push(queue, &continuation)) {
+                atomic_fetch_add_explicit(&queue->work_budget_continuations, 1, memory_order_relaxed);
+                return;
+            }
+        }
 
         if ((depth + 1) <= g_adaptive_max_depth && depth >= 3 && depth <= 5 &&
             (local_end - pid) >= 16 &&
@@ -4307,9 +4333,12 @@ static void execute_local_runtime_task(const LocalTask* task, WorkerCtx* ctx, Po
     long long nauty_before = g_profile ? profile->nauty_calls : 0;
     double budget_deadline =
         (g_adaptive_budget_seconds > 0.0) ? (subtask_t0 + g_adaptive_budget_seconds) : 0.0;
+    long long adaptive_work_counter = 0;
     GraphHardStats subtask_hard = {0};
     GraphHardStats* prev_hard_stats = tls_hard_graph_stats;
     if (g_profile) tls_hard_graph_stats = &subtask_hard;
+    long long* prev_work_counter = tls_adaptive_work_counter;
+    if (g_adaptive_work_budget > 0) tls_adaptive_work_counter = &adaptive_work_counter;
 
     if (replay_local_task_prefix(task, ctx, &weight_prod, &mult_coeff, &run_len, &min_idx)) {
         if (task->depth == g_cols) {
@@ -4334,6 +4363,7 @@ static void execute_local_runtime_task(const LocalTask* task, WorkerCtx* ctx, Po
         }
     }
     tls_hard_graph_stats = prev_hard_stats;
+    tls_adaptive_work_counter = prev_work_counter;
 
     if (g_profile && queue_subtask_stats && task->depth >= 0 && task->depth <= MAX_COLS) {
         double elapsed = omp_get_wtime() - subtask_t0;
@@ -5298,6 +5328,13 @@ int main(int argc, char** argv) {
                 free(merge_inputs);
                 return 1;
             }
+        } else if (strcmp(argv[i], "--adaptive-work-budget") == 0) {
+            if (i + 1 >= argc) {
+                usage(argv[0]);
+                free(merge_inputs);
+                return 1;
+            }
+            g_adaptive_work_budget = parse_ll_or_die(argv[++i], "--adaptive-work-budget");
         } else if (strcmp(argv[i], "--coordinator-url") == 0) {
             if (i + 1 >= argc) {
                 usage(argv[0]);
@@ -5402,7 +5439,7 @@ int main(int argc, char** argv) {
         if (positional_count != 0 || task_start != 0 || task_end != -1 ||
             task_stride != 1 || task_offset != 0 || prefix_depth_override != -1 ||
             g_adaptive_subdivide || g_adaptive_threshold != 128 || g_adaptive_max_depth != 3 ||
-            g_adaptive_budget_seconds != 0.0 ||
+            g_adaptive_budget_seconds != 0.0 || g_adaptive_work_budget != 0 ||
             g_coordinator_url || g_worker_id || g_run_id != -1 || g_coord_low_watermark != 0 ||
             g_coord_high_watermark != 0 || g_coord_heartbeat_seconds != 600 ||
             g_runtime_donate || g_runtime_donate_min_depth != 2 || g_runtime_donate_max_depth != 3 ||
@@ -5500,12 +5537,24 @@ int main(int argc, char** argv) {
         fprintf(stderr, "--adaptive-budget-seconds must be non-negative\n");
         return 1;
     }
+    if (g_adaptive_work_budget < 0) {
+        fprintf(stderr, "--adaptive-work-budget must be non-negative\n");
+        return 1;
+    }
     if (g_adaptive_subdivide && g_adaptive_max_depth < 3) {
         fprintf(stderr, "--adaptive-max-depth must be at least 3 with --adaptive-subdivide\n");
         return 1;
     }
     if (g_adaptive_budget_seconds > 0.0 && !g_adaptive_subdivide) {
         fprintf(stderr, "--adaptive-budget-seconds requires --adaptive-subdivide\n");
+        return 1;
+    }
+    if (g_adaptive_work_budget > 0 && !g_adaptive_subdivide) {
+        fprintf(stderr, "--adaptive-work-budget requires --adaptive-subdivide\n");
+        return 1;
+    }
+    if (g_adaptive_budget_seconds > 0.0 && g_adaptive_work_budget > 0) {
+        fprintf(stderr, "--adaptive-budget-seconds and --adaptive-work-budget are mutually exclusive\n");
         return 1;
     }
     if (g_coord_low_watermark < 0) {
@@ -5824,6 +5873,9 @@ int main(int argc, char** argv) {
             if (g_adaptive_budget_seconds > 0.0) {
                 printf(", budget %.3fs", g_adaptive_budget_seconds);
             }
+            if (g_adaptive_work_budget > 0) {
+                printf(", work budget %lld", g_adaptive_work_budget);
+            }
             printf("\n");
         } else {
             printf("Adaptive subdivision: threshold %d, max depth %d\n",
@@ -6097,6 +6149,9 @@ int main(int argc, char** argv) {
                low_watermark, high_watermark, g_adaptive_max_depth);
         if (g_adaptive_budget_seconds > 0.0) {
             printf(", budget %.3fs", g_adaptive_budget_seconds);
+        }
+        if (g_adaptive_work_budget > 0) {
+            printf(", work budget %lld", g_adaptive_work_budget);
         }
         printf("\n");
     }

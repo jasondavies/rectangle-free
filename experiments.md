@@ -1685,3 +1685,43 @@
   - that matches the expected caveat: if one immediate child is itself a monster, the budget is not checked until too late
   - it may still be a good fit later for a second-round refinement mode that starts from already-deeper prefixes, but it is not better as the main opt-in tail tool today
 - Outcome: rejected and reverted.
+
+### Experiment 69: Structural adaptive work budget
+- Goal: replace wall-clock-driven tail splitting with a cheaper structural trigger.
+- Implementation:
+  - added `--adaptive-work-budget N` for the local adaptive runtime queue
+  - each worker task keeps a thread-local work counter
+  - `record_hard_graph_node()` increments that counter once per hard graph node
+  - at the existing safe continuation boundary in `dfs_runtime_split_local()`, if:
+    - the work counter has reached the configured budget,
+    - another thread is idle,
+    - the current prefix is still splittable,
+    - and there is remaining sibling range,
+    - then the unexplored remainder is pushed back to the queue as a continuation task
+  - this is mutually exclusive with `--adaptive-budget-seconds`
+- Exactness checks:
+  - full adaptive `7x4` with a work budget matched the baseline output exactly
+  - command:
+    - `env OMP_NUM_THREADS=32 ./partition_poly_7 7 4 --prefix-depth 2 --adaptive-subdivide --adaptive-work-budget 100 --poly-out /tmp/work_budget_7x4.poly`
+  - matched direct baseline output from:
+    - `env OMP_NUM_THREADS=32 ./partition_poly_7 7 4 --prefix-depth 2 --adaptive-subdivide --poly-out /tmp/direct_budget_7x4.poly`
+- Results:
+  - full adaptive `7x4`, `OMP_NUM_THREADS=32`:
+    - work budget `1000`: `Worker 10.70s`, occupancy `30.41/32 = 95.0%`, continuations `1`
+    - work budget `100`: `Worker 10.69s`, occupancy `30.57/32 = 95.5%`, continuations `4`
+    - so on an easy workload, the structural budget is effectively inert, which is the desired behaviour
+  - bounded adaptive `7x7 --task-end 1`, `RECT_SHARED_CACHE_MERGE=1`, `OMP_NUM_THREADS=32`, `timeout 40s`:
+    - work budget `2000`:
+      - after `15.94s`: `active now 32/32, avg 29.39/32 = 91.8%`
+      - after `30.97s`: `active now 32/32, avg 30.16/32 = 94.3%`
+    - wall-clock budget `1s` on the same probe:
+      - after `15.10s`: `active now 32/32, avg 24.49/32 = 76.5%`
+      - after `30.33s`: `active now 32/32, avg 28.26/32 = 88.3%`
+    - no budget on the same probe shape remained far worse:
+      - after `15.03s`: `active now 20/32, avg 4.83/32 = 15.1%`
+      - after `30.60s`: `active now 16/32, avg 11.03/32 = 34.5%`
+- Interpretation:
+  - a hard-graph-node budget is a better trigger than wall-clock time for the worst bounded `7x7` tails we care about
+  - it is cheaper on easy workloads because it does almost nothing unless a task really accumulates a large amount of structural work
+  - it gives us an opt-in second-round tail tool that is more aligned with actual graph-solver cost than elapsed time
+- Outcome: accepted as an opt-in refinement tool.
