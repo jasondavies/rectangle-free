@@ -1657,3 +1657,31 @@
     - run the main cluster job with the current fast path
     - then rerun only the leftover monster roots with `--adaptive-budget-seconds` enabled and a much smaller budget
 - Outcome: accepted as an opt-in refinement tool, not as a new default.
+
+### Experiment 68: Exact cut-boundary budget wrapper
+- Goal: test the cleaner model where a budgeted task:
+  - fully solves one accepted child subtree at the current cut boundary
+  - checks time only after that child completes
+  - spills only the remaining accepted children as deeper continuation tasks
+- Rationale:
+  - this is the exact soft-budget model discussed after Experiment 67
+  - it is cheaper conceptually than checking budgets inside the recursive splitter
+  - but it has the known caveat that a single heavy child can overrun badly before the budget is checked
+- Results:
+  - correctness:
+    - full `7x4` with forced continuations still matched exactly:
+      - baseline output: `/tmp/direct_budget_7x4.poly`
+      - exact-budget output: `/tmp/budget_exact_7x4.poly`
+  - full adaptive `7x4`, `OMP_NUM_THREADS=32`:
+    - no budget: `Worker 10.67s`, occupancy `30.43/32 = 95.1%`
+    - exact cut-boundary budget `0.01s`: `Worker 11.04s`, occupancy `31.99/32 = 100.0%`, budget continuations `29381`
+    - so the exact wrapper was slightly slower than simply running the current fast path
+  - bounded adaptive `7x7 --task-end 1`, `RECT_SHARED_CACHE_MERGE=1`, `OMP_NUM_THREADS=32`, budget `1s`:
+    - unlike the earlier in-DFS budget continuation path, this version did not produce useful early subtask completions inside the short probe window
+    - operationally, that means the first depth-3 child under the raw depth-2 root was already too coarse for this exact model to rebalance quickly
+- Interpretation:
+  - the exact cut-boundary model is correct and conceptually clean
+  - but as a direct replacement for the current `--adaptive-budget-seconds` implementation it is too coarse for the worst raw depth-2 `7x7` roots
+  - that matches the expected caveat: if one immediate child is itself a monster, the budget is not checked until too late
+  - it may still be a good fit later for a second-round refinement mode that starts from already-deeper prefixes, but it is not better as the main opt-in tail tool today
+- Outcome: rejected and reverted.
