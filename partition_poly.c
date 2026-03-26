@@ -357,6 +357,8 @@ typedef struct {
 typedef struct {
     uint8_t depth;
     PrefixId prefix[MAX_COLS];
+    PrefixId lo;
+    PrefixId hi;
     long long root_id;
 } LocalTask;
 
@@ -373,6 +375,7 @@ typedef struct {
     int low_watermark;
     int high_watermark;
     atomic_int outstanding_tasks;
+    atomic_int idle_threads;
     atomic_long donated_tasks;
     atomic_long max_outstanding_tasks;
     RootTaskState* roots;
@@ -760,6 +763,7 @@ static void local_queue_init(LocalTaskQueue* queue, int capacity, int low_waterm
     queue->high_watermark = high_watermark;
     queue->root_count = root_count;
     atomic_init(&queue->outstanding_tasks, 0);
+    atomic_init(&queue->idle_threads, 0);
     atomic_init(&queue->donated_tasks, 0);
     atomic_init(&queue->max_outstanding_tasks, 0);
     queue->profile_started_at = omp_get_wtime();
@@ -811,8 +815,12 @@ static void local_queue_seed_push(LocalTaskQueue* queue, const LocalTask* task) 
 
 static int local_queue_pop(LocalTaskQueue* queue, LocalTask* task) {
     pthread_mutex_lock(&queue->mutex);
+    int marked_idle = 0;
     for (;;) {
         if (queue->count > 0) {
+            if (marked_idle) {
+                atomic_fetch_sub_explicit(&queue->idle_threads, 1, memory_order_relaxed);
+            }
             *task = queue->tasks[queue->head];
             queue->head = (queue->head + 1) % queue->capacity;
             queue->count--;
@@ -824,10 +832,17 @@ static int local_queue_pop(LocalTaskQueue* queue, LocalTask* task) {
             return 1;
         }
         if (queue->inflight == 0) {
+            if (marked_idle) {
+                atomic_fetch_sub_explicit(&queue->idle_threads, 1, memory_order_relaxed);
+            }
             queue->stop = 1;
             pthread_cond_broadcast(&queue->cond);
             pthread_mutex_unlock(&queue->mutex);
             return 0;
+        }
+        if (!marked_idle) {
+            atomic_fetch_add_explicit(&queue->idle_threads, 1, memory_order_relaxed);
+            marked_idle = 1;
         }
         pthread_cond_wait(&queue->cond, &queue->mutex);
     }
@@ -4123,7 +4138,7 @@ static int replay_local_task_prefix(const LocalTask* task, WorkerCtx* ctx,
     return 1;
 }
 
-static void dfs_runtime_split_local(int depth, int min_idx, long long root_id, WorkerCtx* ctx,
+static void dfs_runtime_split_local(int depth, int start_pid, int end_pid, long long root_id, WorkerCtx* ctx,
                                     Poly* local_total, const Poly* weight_prod,
                                     long long mult_coeff, int run_len, ProfileStats* profile,
                                     LocalTaskQueue* queue) {
@@ -4137,16 +4152,23 @@ static void dfs_runtime_split_local(int depth, int min_idx, long long root_id, W
         return;
     }
 
-    int outstanding = local_queue_outstanding_relaxed(queue);
-    int donate_budget = 0;
-    if ((depth + 1) <= g_adaptive_max_depth && outstanding < queue->low_watermark) {
-        donate_budget = queue->high_watermark - outstanding;
-        if (donate_budget < 0) donate_budget = 0;
-    }
-
-    int kept_local = 0;
     int next_stabilizer = 0;
-    for (int pid = min_idx; pid < num_partitions; pid++) {
+    int local_end = end_pid;
+    for (int pid = start_pid; pid < local_end; pid++) {
+        if ((depth + 1) <= g_adaptive_max_depth && depth >= 3 && depth <= 5 &&
+            (local_end - pid) >= 16 &&
+            atomic_load_explicit(&queue->idle_threads, memory_order_relaxed) > 0) {
+            int mid = pid + (local_end - pid) / 2;
+            LocalTask range_task = {0};
+            local_task_from_stack(&range_task, root_id, depth, ctx->stack);
+            range_task.lo = (PrefixId)mid;
+            range_task.hi = (PrefixId)local_end;
+            if (local_queue_try_push(queue, &range_task)) {
+                atomic_fetch_add_explicit(&queue->donated_tasks, 1, memory_order_relaxed);
+                local_end = mid;
+            }
+        }
+
         double t0 = 0.0;
         ctx->stack[depth] = pid;
         if (g_profile) {
@@ -4186,23 +4208,9 @@ static void dfs_runtime_split_local(int depth, int min_idx, long long root_id, W
                 next_mult_coeff /= next_run_len;
             }
 
-            if (donate_budget > 0 && kept_local) {
-                LocalTask child;
-                local_task_from_stack(&child, root_id, depth + 1, ctx->stack);
-                if (local_queue_try_push(queue, &child)) {
-                    donate_budget--;
-                    atomic_fetch_add_explicit(&queue->donated_tasks, 1, memory_order_relaxed);
-                } else {
-                    dfs_runtime_split_local(depth + 1, pid, root_id, ctx, local_total,
-                                            &next_weight_prod, next_mult_coeff, next_run_len,
-                                            profile, queue);
-                }
-            } else {
-                dfs_runtime_split_local(depth + 1, pid, root_id, ctx, local_total,
-                                        &next_weight_prod, next_mult_coeff, next_run_len,
-                                        profile, queue);
-                kept_local = 1;
-            }
+            dfs_runtime_split_local(depth + 1, pid, num_partitions, root_id, ctx, local_total,
+                                    &next_weight_prod, next_mult_coeff, next_run_len,
+                                    profile, queue);
         } else if (g_profile) {
             tls_profile->partial_append_time += omp_get_wtime() - t0;
         }
@@ -4238,7 +4246,11 @@ static void execute_local_runtime_task(const LocalTask* task, WorkerCtx* ctx, Po
                             &ctx->local_raw_cache_hits, &weight_prod, mult_coeff, profile, &res);
             poly_add_ref(thread_total, &res, thread_total);
         } else {
-            dfs_runtime_split_local(task->depth, min_idx, task->root_id, ctx, thread_total,
+            int start_pid = (int)task->lo;
+            int end_pid = (int)task->hi;
+            if (start_pid < min_idx) start_pid = min_idx;
+            if (end_pid > num_partitions) end_pid = num_partitions;
+            dfs_runtime_split_local(task->depth, start_pid, end_pid, task->root_id, ctx, thread_total,
                                     &weight_prod, mult_coeff, run_len, profile, queue);
         }
 
@@ -5972,6 +5984,8 @@ int main(int argc, char** argv) {
             task.root_id = t;
             task.prefix[0] = (PrefixId)i;
             task.prefix[1] = (PrefixId)j;
+            task.lo = (PrefixId)j;
+            task.hi = (PrefixId)num_partitions;
             local_queue.roots[t].pending = 0;
             local_queue.roots[t].task_index = p;
             local_queue_seed_push(&local_queue, &task);

@@ -1526,3 +1526,48 @@
   - growing to `2^17` keeps some benefit but is worse than `2^16`
   - the current default `RECT_SHARED_CACHE_BITS=16` is the right baseline for this experiment path
 - Outcome: accepted.
+
+### Experiment 65: Coarse sibling-range splitting for the local adaptive queue
+- Goal: reduce the cost of local rebalancing by donating coarse sibling ranges instead of single child prefixes.
+- Implementation:
+  - changed local adaptive queue tasks from:
+    - `depth + prefix`
+    - to `depth + prefix + [lo, hi)` sibling interval
+  - seeded each depth-2 root as one task covering its full `j`-child range
+  - added `idle_threads` tracking to the local queue
+  - allowed splitting only when:
+    - some worker is actually idle
+    - current split depth is in the heavy band `3..5`
+    - at least `16` siblings remain in the current range
+  - at a split point:
+    - donate the upper half `[mid, hi)`
+    - keep the lower half `[lo, mid)` locally
+  - deeper recursive calls still use the normal DFS and can split again later if needed
+- Commands:
+  - sampled adaptive `7x5`:
+    - `env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-stride 3235`
+  - bounded adaptive `7x7`, current experiment:
+    - `timeout 95s env RECT_QUEUE_PROFILE_STEP=30 RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly_7 7 7 --prefix-depth 2 --adaptive-subdivide --adaptive-max-depth 5 --task-end 1 --profile`
+  - bounded adaptive `7x7`, accepted baseline rebuilt from HEAD:
+    - `timeout 95s env RECT_QUEUE_PROFILE_STEP=30 RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 /tmp/partition_poly_7_head 7 7 --prefix-depth 2 --adaptive-subdivide --adaptive-max-depth 5 --task-end 1 --profile`
+- Results:
+  - sampled adaptive `7x5`:
+    - previous accepted local queue: `Worker 0.47s`, `Total 0.47s`
+    - coarse range split: `Worker 0.46s`, `Total 0.46s`
+  - bounded adaptive `7x7 --task-end 1`, both timed out at `95s`, but the subtask shape changed materially:
+    - previous accepted baseline after `71.84s`:
+      - depth `3`: `9` subtasks, avg `6.709715s`, max `58.235803s`
+      - depth `4`: `57` subtasks, avg `7.815839s`, max `56.869524s`
+      - depth `5`: `250` subtasks, avg `0.740981s`, max `4.109950s`
+    - coarse range split after `91.34s`:
+      - depth `3`: `123` subtasks, avg `0.166787s`, max `14.144469s`
+      - depth `4`: `1657` subtasks, avg `0.405215s`, max `30.780892s`
+      - depth `5`: no top slow depth-5 tail visible in the 90s snapshot
+- Interpretation:
+  - this is not a full solution to the worst `7x7` roots, since the bounded first root still did not finish inside `95s`
+  - but it does flatten the bad tail substantially:
+    - the old path still had a handful of `56` to `58` second depth-3/4 monsters
+    - the coarse range split cuts those down to about `14` to `31` seconds by turning them into many more medium-sized range tasks
+  - importantly, it does this without hurting the good sampled adaptive `7x5` path
+  - this makes coarse, idle-driven sibling-range splitting a better local tail rebalancer than the earlier single-child donation heuristics
+- Outcome: accepted.
