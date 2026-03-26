@@ -1571,3 +1571,41 @@
   - importantly, it does this without hurting the good sampled adaptive `7x5` path
   - this makes coarse, idle-driven sibling-range splitting a better local tail rebalancer than the earlier single-child donation heuristics
 - Outcome: accepted.
+
+### Experiment 66: Measure adaptive local-queue occupancy on a larger `7x7` slice
+- Goal: measure whether the current local adaptive queue can sustain enough utilisation on a multi-root `7x7` slice to make a week-long `64 x 32` core run plausible.
+- Context:
+  - a `64 x 32` core cluster provides `344064` core-hours in one week
+  - if the full `7x7` run costs about `250000` core-hours, the required average efficiency is about `72.7%`
+- Implementation:
+  - added occupancy accounting to the local adaptive queue:
+    - time-integrated idle-thread tracking
+    - live `Queue profile after ...` snapshots now print:
+      - current active threads
+      - average active threads since queue start
+      - utilisation percentage
+    - final local queue summary prints average active threads and utilisation
+- Probe command:
+  - `timeout 20m env RECT_SHARED_CACHE_MERGE=1 RECT_QUEUE_PROFILE_STEP=60 RECT_PROGRESS_STEP=1 OMP_NUM_THREADS=32 ./partition_poly_7 7 7 --prefix-depth 2 --adaptive-subdivide --adaptive-max-depth 5 --task-end 8 --profile`
+- Results:
+  - after `60.34s`:
+    - `active now 32/32, avg 28.56/32 = 89.3%`
+  - after `121.39s`:
+    - `active now 32/32, avg 30.06/32 = 93.9%`
+  - after `181.86s`:
+    - `active now 32/32, avg 30.35/32 = 94.8%`
+  - after `243.43s`:
+    - `active now 32/32, avg 30.65/32 = 95.8%`
+  - after `304.88s`:
+    - `active now 32/32, avg 30.89/32 = 96.5%`
+- Interpretation:
+  - on this first multi-root `7x7` slice, the current stack:
+    - local coarse range splitting
+    - shared canonical cache merge
+    - adaptive max depth `5`
+    keeps all `32` threads busy at every live snapshot and sustains average occupancy far above the `~72.7%` cluster-efficiency floor implied by the `250000` core-hour planning number
+  - this does **not** prove the full run finishes within a week:
+    - the slice did not complete
+    - the late global tail is still unknown
+  - but it is the first strong evidence that the local throughput side is now probably good enough, and that the remaining planning risk is the final worst-prefix tail rather than broad underutilisation
+- Outcome: accepted.

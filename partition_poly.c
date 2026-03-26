@@ -380,6 +380,10 @@ typedef struct {
     atomic_long max_outstanding_tasks;
     RootTaskState* roots;
     long long root_count;
+    int total_threads;
+    double occupancy_last_at;
+    int occupancy_idle_threads;
+    double idle_thread_seconds;
     QueueSubtaskTimingStats profile_stats[MAX_COLS + 1];
     double profile_started_at;
     double next_profile_report_at;
@@ -751,8 +755,18 @@ static inline int local_queue_outstanding_relaxed(const LocalTaskQueue* queue) {
     return atomic_load_explicit(&queue->outstanding_tasks, memory_order_relaxed);
 }
 
+static inline void local_queue_note_idle_locked(LocalTaskQueue* queue, int new_idle_threads) {
+    double now = omp_get_wtime();
+    if (queue->occupancy_last_at > 0.0) {
+        queue->idle_thread_seconds +=
+            (now - queue->occupancy_last_at) * (double)queue->occupancy_idle_threads;
+    }
+    queue->occupancy_last_at = now;
+    queue->occupancy_idle_threads = new_idle_threads;
+}
+
 static void local_queue_init(LocalTaskQueue* queue, int capacity, int low_watermark,
-                             int high_watermark, long long root_count) {
+                             int high_watermark, long long root_count, int total_threads) {
     memset(queue, 0, sizeof(*queue));
     pthread_mutex_init(&queue->mutex, NULL);
     pthread_cond_init(&queue->cond, NULL);
@@ -762,11 +776,15 @@ static void local_queue_init(LocalTaskQueue* queue, int capacity, int low_waterm
     queue->low_watermark = low_watermark;
     queue->high_watermark = high_watermark;
     queue->root_count = root_count;
+    queue->total_threads = total_threads;
     atomic_init(&queue->outstanding_tasks, 0);
     atomic_init(&queue->idle_threads, 0);
     atomic_init(&queue->donated_tasks, 0);
     atomic_init(&queue->max_outstanding_tasks, 0);
     queue->profile_started_at = omp_get_wtime();
+    queue->occupancy_last_at = queue->profile_started_at;
+    queue->occupancy_idle_threads = 0;
+    queue->idle_thread_seconds = 0.0;
     queue->next_profile_report_at =
         (g_queue_profile_report_step > 0.0) ? (queue->profile_started_at + g_queue_profile_report_step) : 0.0;
     for (long long i = 0; i < root_count; i++) {
@@ -819,7 +837,8 @@ static int local_queue_pop(LocalTaskQueue* queue, LocalTask* task) {
     for (;;) {
         if (queue->count > 0) {
             if (marked_idle) {
-                atomic_fetch_sub_explicit(&queue->idle_threads, 1, memory_order_relaxed);
+                int idle = atomic_fetch_sub_explicit(&queue->idle_threads, 1, memory_order_relaxed) - 1;
+                local_queue_note_idle_locked(queue, idle);
             }
             *task = queue->tasks[queue->head];
             queue->head = (queue->head + 1) % queue->capacity;
@@ -833,7 +852,8 @@ static int local_queue_pop(LocalTaskQueue* queue, LocalTask* task) {
         }
         if (queue->inflight == 0) {
             if (marked_idle) {
-                atomic_fetch_sub_explicit(&queue->idle_threads, 1, memory_order_relaxed);
+                int idle = atomic_fetch_sub_explicit(&queue->idle_threads, 1, memory_order_relaxed) - 1;
+                local_queue_note_idle_locked(queue, idle);
             }
             queue->stop = 1;
             pthread_cond_broadcast(&queue->cond);
@@ -841,7 +861,8 @@ static int local_queue_pop(LocalTaskQueue* queue, LocalTask* task) {
             return 0;
         }
         if (!marked_idle) {
-            atomic_fetch_add_explicit(&queue->idle_threads, 1, memory_order_relaxed);
+            int idle = atomic_fetch_add_explicit(&queue->idle_threads, 1, memory_order_relaxed) + 1;
+            local_queue_note_idle_locked(queue, idle);
             marked_idle = 1;
         }
         pthread_cond_wait(&queue->cond, &queue->mutex);
@@ -886,7 +907,19 @@ static void local_queue_record_profile(LocalTaskQueue* queue, const LocalTask* t
                          hard_graph_nodes, max_hard_graph_n, max_hard_graph_degree);
     double now = omp_get_wtime();
     if (queue->next_profile_report_at > 0.0 && now >= queue->next_profile_report_at) {
-        printf("Queue profile after %.2fs:\n", now - queue->profile_started_at);
+        double idle_thread_seconds =
+            queue->idle_thread_seconds + (now - queue->occupancy_last_at) * (double)queue->occupancy_idle_threads;
+        double occupancy_elapsed = now - queue->profile_started_at;
+        double avg_active = (occupancy_elapsed > 0.0)
+                                ? ((double)queue->total_threads - idle_thread_seconds / occupancy_elapsed)
+                                : (double)queue->total_threads;
+        int current_active = queue->total_threads - queue->occupancy_idle_threads;
+        double util_pct = (queue->total_threads > 0)
+                              ? (100.0 * avg_active / (double)queue->total_threads)
+                              : 0.0;
+        printf("Queue profile after %.2fs (active now %d/%d, avg %.2f/%d = %.1f%%):\n",
+               occupancy_elapsed, current_active, queue->total_threads,
+               avg_active, queue->total_threads, util_pct);
         for (int d = 0; d <= g_cols && d <= MAX_COLS; d++) {
             QueueSubtaskTimingStats* qs = &queue->profile_stats[d];
             if (qs->task_count == 0) continue;
@@ -907,6 +940,24 @@ static void local_queue_record_profile(LocalTaskQueue* queue, const LocalTask* t
         queue->next_profile_report_at = now + g_queue_profile_report_step;
     }
     pthread_mutex_unlock(&queue->mutex);
+}
+
+static void local_queue_print_occupancy_summary(LocalTaskQueue* queue) {
+    pthread_mutex_lock(&queue->mutex);
+    double now = omp_get_wtime();
+    double idle_thread_seconds =
+        queue->idle_thread_seconds + (now - queue->occupancy_last_at) * (double)queue->occupancy_idle_threads;
+    double occupancy_elapsed = now - queue->profile_started_at;
+    double avg_active = (occupancy_elapsed > 0.0)
+                            ? ((double)queue->total_threads - idle_thread_seconds / occupancy_elapsed)
+                            : (double)queue->total_threads;
+    double util_pct = (queue->total_threads > 0)
+                          ? (100.0 * avg_active / (double)queue->total_threads)
+                          : 0.0;
+    pthread_mutex_unlock(&queue->mutex);
+
+    printf("Runtime queue occupancy: avg active %.2f/%d (%.1f%%)\n",
+           avg_active, queue->total_threads, util_pct);
 }
 
 static void* checked_aligned_alloc(size_t alignment, size_t size, const char* label) {
@@ -5972,7 +6023,8 @@ int main(int argc, char** argv) {
             return 1;
         }
 
-        local_queue_init(&local_queue, (int)queue_cap_ll, low_watermark, high_watermark, total_tasks);
+        local_queue_init(&local_queue, (int)queue_cap_ll, low_watermark, high_watermark,
+                         total_tasks, num_threads);
         for (long long t = 0; t < total_tasks; t++) {
             long long p = first_task + t * task_stride;
             int i = 0;
@@ -6521,6 +6573,7 @@ int main(int argc, char** argv) {
     }
 
     if (local_queue_active) {
+        local_queue_print_occupancy_summary(&local_queue);
         local_queue_free(&local_queue);
     }
     
