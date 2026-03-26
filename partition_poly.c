@@ -457,8 +457,8 @@ static int decode_task_prefix(long long task_index, int* i, int* j, int* k, int*
     *j = -1;
     *k = -1;
     *l = -1;
-    if (g_adaptive_subdivide) return 0;
     if (g_effective_prefix_depth == 2) {
+        if (g_adaptive_subdivide && g_eval_mode) return 0;
         long long rank = task_index;
         for (int a = 0; a < num_partitions; a++) {
             long long count = num_partitions - a;
@@ -4158,17 +4158,32 @@ static void runtime_queue_push(RuntimeDonateQueue* queue, RuntimeWorkItem task) 
     pthread_mutex_unlock(&queue->mutex);
 }
 
+static int runtime_queue_try_push_donated(RuntimeDonateQueue* queue, const RuntimeWorkItem* item) {
+    int pushed = 0;
+    int outstanding = 0;
+    pthread_mutex_lock(&queue->mutex);
+    if (!queue->stop && !queue->fatal_error && queue->count < queue->capacity) {
+        queue->shards[item->shard_slot].remaining_tasks++;
+        queue->tasks[queue->tail] = *item;
+        queue->tail = (queue->tail + 1) % queue->capacity;
+        queue->count++;
+        outstanding = atomic_fetch_add_explicit(&queue->outstanding_tasks, 1, memory_order_relaxed) + 1;
+        runtime_queue_note_outstanding(queue, outstanding);
+        pushed = 1;
+        pthread_cond_signal(&queue->cond);
+    }
+    pthread_mutex_unlock(&queue->mutex);
+    if (pushed) {
+        atomic_fetch_add_explicit(&queue->donated_tasks, 1, memory_order_relaxed);
+    }
+    return pushed;
+}
+
 static void runtime_queue_increment_shard_remaining(RuntimeDonateQueue* queue, int shard_slot) {
     pthread_mutex_lock(&queue->mutex);
     queue->shards[shard_slot].remaining_tasks++;
     pthread_cond_broadcast(&queue->cond);
     pthread_mutex_unlock(&queue->mutex);
-}
-
-static void runtime_queue_push_donated(RuntimeDonateQueue* queue, const RuntimeWorkItem* item) {
-    runtime_queue_increment_shard_remaining(queue, item->shard_slot);
-    atomic_fetch_add_explicit(&queue->donated_tasks, 1, memory_order_relaxed);
-    runtime_queue_push(queue, *item);
 }
 
 static void runtime_dfs(int depth, int min_idx, int* stack, CanonState* canon_state,
@@ -4215,7 +4230,12 @@ static void runtime_dfs(int depth, int min_idx, int* stack, CanonState* canon_st
             if (should_donate) {
                 RuntimeWorkItem item = {.depth = (uint8_t)(depth + 1), .shard_slot = shard_slot};
                 for (int d = 0; d <= depth; d++) item.prefix[d] = (PrefixId)stack[d];
-                runtime_queue_push_donated(queue, &item);
+                if (!runtime_queue_try_push_donated(queue, &item)) {
+                    runtime_dfs(depth + 1, i, stack, canon_state, &next_graph, cache, raw_cache, ws,
+                                local_total, local_canon_calls, local_cache_hits, local_raw_cache_hits,
+                                &next_weight_prod, next_mult_coeff, next_run_len, canon_scratch,
+                                queue, shard_slot);
+                }
             } else {
                 runtime_dfs(depth + 1, i, stack, canon_state, &next_graph, cache, raw_cache, ws,
                             local_total, local_canon_calls, local_cache_hits, local_raw_cache_hits,
@@ -4992,6 +5012,20 @@ int main(int argc, char** argv) {
         fprintf(stderr, "Rows/cols must be in range 1..%d and 1..%d\n", MAX_ROWS, MAX_COLS);
         return 1;
     }
+    if ((g_eval_q_set || g_eval_mod_set) && !g_eval_mode) {
+        fprintf(stderr, "Internal error: inconsistent eval mode flags\n");
+        return 1;
+    }
+    if (g_eval_mode) {
+        if (!g_eval_q_set || !g_eval_mod_set) {
+            fprintf(stderr, "Modular evaluation mode requires both --eval-q and --mod\n");
+            return 1;
+        }
+        if (g_eval_mod <= 1) {
+            fprintf(stderr, "--mod must be greater than 1\n");
+            return 1;
+        }
+    }
 
     // Verify nauty build/runtime compatibility
     nauty_check(WORDSIZE, MAXN_NAUTY, MAXN_NAUTY, NAUTYVERSIONID);
@@ -5746,6 +5780,8 @@ int main(int argc, char** argv) {
                                                start_time, &pending_completed, task_timing);
                 }
 
+                ws = ctx.ws;
+                memset(&ctx.ws, 0, sizeof(ctx.ws));
                 local_canon_calls += ctx.local_canon_calls;
                 local_cache_hits += ctx.local_cache_hits;
                 local_raw_cache_hits += ctx.local_raw_cache_hits;
