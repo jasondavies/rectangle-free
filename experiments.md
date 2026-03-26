@@ -1234,3 +1234,41 @@
   - this is the first convincing evidence that runtime donation helps when it targets the actual coarse work unit that causes the tail
   - the feature remains opt-in, but the new defaults are now aligned with the likely production use case
 - Outcome: accepted.
+
+### Experiment 55: Compare unweighted, weighted, and weighted-plus-donation coordinator `7x5`
+- Goal: check whether the new weighted shard seeding remains useful once the workload contains genuine elephants, and whether runtime donation is the mechanism that actually removes the coordinator tail.
+- Setup:
+  - generated a fixed depth-2 timing CSV on the exact bounded slice under test:
+    - `env OMP_NUM_THREADS=32 ./partition_poly_7 7 5 --prefix-depth 2 --task-end 32 --profile --task-times-out /tmp/task_times_7x5_32.csv`
+  - bounded coordinator run:
+    - `7x5`, `prefix-depth 2`, `task-end 32`, `task-stride 16`, `threads 8`
+  - launched four concurrent coordinator workers with `OMP_NUM_THREADS=8`, so total machine pressure stayed at 32 threads
+  - compared three modes:
+    - unweighted shards
+    - weighted shards from `/tmp/task_times_7x5_32.csv`
+    - weighted shards plus `--runtime-donate`
+- Results:
+  - direct timing export on the same slice:
+    - total: `118.68s`
+    - max task: `49.972967s` at `(0,10)`
+    - next heaviest:
+      - `(0,30)`: `21.454916s`
+      - `(0,9)`: `19.307319s`
+      - `(0,14)`: `14.369624s`
+      - `(0,4)`: `14.099649s`
+      - `(0,3)`: `14.017669s`
+  - coordinator makespan:
+    - unweighted: `50.72s`
+    - weighted: `51.00s`
+    - weighted plus runtime donation: `11.50s`
+  - runtime-donation worker stats:
+    - worker `wr1`: `donated=76`, `max outstanding=16`
+    - worker `wr2`: `donated=29`, `max outstanding=16`
+    - worker `wr3`: `donated=69`, `max outstanding=16`
+    - worker `wr4`: `donated=45`, `max outstanding=17`
+- Interpretation:
+  - on this elephant-heavy `7x5` slice, shard ordering alone is not the bottleneck
+  - weighted seeding is effectively flat because the remaining tail is dominated by a few huge depth-2 tasks
+  - depth-2 to depth-3 runtime donation is the mechanism that actually fixes the makespan here, cutting wall time by about `4.4x`
+  - this is the clearest evidence so far that serious `7x7` balance will require elephant splitting, not just better shard ordering
+- Outcome: accepted.
