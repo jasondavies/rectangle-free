@@ -592,7 +592,7 @@ static int decode_task_prefix(long long task_index, int* i, int* j, int* k, int*
     *k = -1;
     *l = -1;
     if (g_effective_prefix_depth == 2) {
-        if (!g_adaptive_subdivide && g_live_prefix2_i && task_index >= 0 && task_index < g_live_prefix2_count) {
+        if (g_live_prefix2_i && task_index >= 0 && task_index < g_live_prefix2_count) {
             *i = (int)g_live_prefix2_i[task_index];
             *j = (int)g_live_prefix2_j[task_index];
             return 1;
@@ -5247,12 +5247,8 @@ int main(int argc, char** argv) {
         if (prefix_depth == 2) {
             long long base_prefixes = (long long)num_partitions * (num_partitions + 1) / 2;
             nominal_prefixes = base_prefixes;
-            if (use_runtime_split_queue) {
-                total_prefixes = base_prefixes;
-            } else {
-                build_live_prefix2_tasks(&g_live_prefix2_i, &g_live_prefix2_j, &g_live_prefix2_count);
-                total_prefixes = g_live_prefix2_count;
-            }
+            build_live_prefix2_tasks(&g_live_prefix2_i, &g_live_prefix2_j, &g_live_prefix2_count);
+            total_prefixes = g_live_prefix2_count;
         } else if (prefix_depth == 3) {
             total_prefixes = (long long)num_partitions * (num_partitions + 1) * (num_partitions + 2) / 6;
         } else if (prefix_depth == 4) {
@@ -5294,8 +5290,8 @@ int main(int argc, char** argv) {
         prefix_generation_time += omp_get_wtime() - batch_start_time;
     }
     printf("Prefix depth: %d (%lld tasks)\n", prefix_depth, total_prefixes);
-    if (prefix_depth == 2 && !g_adaptive_subdivide && nominal_prefixes > 0) {
-        printf("Live fixed depth-2 prefixes: %lld of %lld nominal\n", total_prefixes, nominal_prefixes);
+    if (prefix_depth == 2 && nominal_prefixes > 0) {
+        printf("Live depth-2 prefixes: %lld of %lld nominal\n", total_prefixes, nominal_prefixes);
     }
     if (g_adaptive_subdivide) {
         if (use_runtime_split_queue) {
@@ -5405,7 +5401,7 @@ int main(int argc, char** argv) {
             int j = 0;
             LocalTask task;
             memset(&task, 0, sizeof(task));
-            unrank_prefix2(p, &i, &j);
+            get_prefix2_task(p, &i, &j);
             task.depth = 2;
             task.root_id = t;
             task.prefix[0] = (PrefixId)i;
