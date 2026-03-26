@@ -1400,3 +1400,27 @@
     - targeted further splitting of heavy depth-3/4 prefixes, or
     - exposing parallelism lower in the graph solver
 - Outcome: accepted.
+
+### Experiment 60: Early-child donation and elapsed-time forced splitting for bounded `7x7`
+- Goal: attack the remaining bounded `7x7` stragglers without touching the good sampled adaptive `7x5` path.
+- Implementation attempt:
+  - local runtime queue only
+  - when the selected root set was tiny (`root_count <= omp_get_max_threads()`), let a split node donate a few early children before keeping one local
+  - add a time trigger so a long-running local subtask would keep splitting even when the queue was still healthy
+- Results:
+  - sampled adaptive `7x5` stayed essentially flat:
+    - accepted baseline: `Worker 0.48s` to `0.50s`
+    - experiment: `Worker 0.47s` to `0.51s`
+  - bounded `7x7 --task-end 1 --adaptive-max-depth 6` became more mixed:
+    - on one `40s` probe, the previous depth-4 monsters disappeared and the pain moved to depth-5:
+      - after `30.01s`, depth `5`: `141` subtasks, avg `2.325s`, max `15.318s`
+      - depth `6` subtasks stayed tiny
+    - but repeat longer probes were not stable:
+      - after `60.33s`, depth `3` max `43.372s`, depth `4` max `47.469s`
+      - after `90.54s`, depth `3` max `63.472s`, depth `4` max `75.351s`, depth `5` max `39.552s`
+      - the bounded root still did not finish within `95s`
+- Interpretation:
+  - the heuristics can sometimes push the hotspot deeper, but they do not do so reliably enough
+  - queue-pressure plus elapsed-time triggers are still not a true cost model for the worst `7x7` subtrees
+  - the remaining hard cases are still dominated by a few very expensive depth-3/4/5 prefixes whose cost is mostly `solve_graph_poly` and `nauty`
+- Outcome: rejected and reverted.
