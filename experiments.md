@@ -1505,3 +1505,24 @@
   - it is still a throughput optimisation, not a tail-killer, but it is a real positive result on the tested workloads
   - this is the first shared-cache design that looks worth keeping around while we continue chasing the true `7x7` monsters below the prefix layer
 - Outcome: accepted.
+
+### Experiment 64: Tune merged shared canonical cache size
+- Goal: tune the opt-in merged shared cache on a fast full-throughput workload before using it elsewhere.
+- Commands:
+  - baseline merged cache:
+    - `env RECT_SHARED_CACHE_MERGE=1 RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly_7 7 4 --prefix-depth 2`
+  - smaller cache:
+    - `env RECT_SHARED_CACHE_MERGE=1 RECT_SHARED_CACHE_BITS=15 RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly_7 7 4 --prefix-depth 2`
+  - larger cache:
+    - `env RECT_SHARED_CACHE_MERGE=1 RECT_SHARED_CACHE_BITS=17 RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly_7 7 4 --prefix-depth 2`
+- Results:
+  - baseline without merged cache (from Experiment 63): `Worker 12.00s`, `Total 12.15s`
+  - merged cache `2^16` slots: `Worker 11.38s`, `Total 11.54s`
+  - merged cache `2^15` slots: `Worker 12.11s`, `Total 12.26s`
+  - merged cache `2^17` slots: `Worker 11.92s`, `Total 12.08s`
+- Interpretation:
+  - `2^16` is the best of these quick settings
+  - shrinking to `2^15` loses the gain
+  - growing to `2^17` keeps some benefit but is worse than `2^16`
+  - the current default `RECT_SHARED_CACHE_BITS=16` is the right baseline for this experiment path
+- Outcome: accepted.
