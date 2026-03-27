@@ -77,8 +77,6 @@ typedef uint64_t AdjWord;
 typedef __int128_t PolyCoeff;
 typedef uint16_t PrefixId;
 
-#define PREFIX_ID_NONE UINT16_MAX
-
 typedef struct {
     int rows;
     int cols;
@@ -227,11 +225,8 @@ typedef struct {
 typedef struct {
     PrefixId* i;
     PrefixId* j;
-    PrefixId* k;
-    PrefixId* l;
     long long count;
     long long capacity;
-    int with_l;
 } PrefixTaskBuffer;
 
 typedef struct {
@@ -264,8 +259,6 @@ typedef struct {
     int count;
     int inflight;
     int stop;
-    int low_watermark;
-    int high_watermark;
     atomic_int outstanding_tasks;
     atomic_int idle_threads;
     atomic_long donated_tasks;
@@ -636,16 +629,14 @@ static inline void local_queue_note_idle_locked(LocalTaskQueue* queue, int new_i
     queue->occupancy_idle_threads = new_idle_threads;
 }
 
-static void local_queue_init(LocalTaskQueue* queue, int capacity, int low_watermark,
-                             int high_watermark, long long root_count, int total_threads) {
+static void local_queue_init(LocalTaskQueue* queue, int capacity,
+                             long long root_count, int total_threads) {
     memset(queue, 0, sizeof(*queue));
     pthread_mutex_init(&queue->mutex, NULL);
     pthread_cond_init(&queue->cond, NULL);
     queue->tasks = checked_calloc((size_t)capacity, sizeof(*queue->tasks), "local_task_queue");
     queue->roots = checked_calloc((size_t)root_count, sizeof(*queue->roots), "local_root_state");
     queue->capacity = capacity;
-    queue->low_watermark = low_watermark;
-    queue->high_watermark = high_watermark;
     queue->root_count = root_count;
     queue->total_threads = total_threads;
     atomic_init(&queue->outstanding_tasks, 0);
@@ -858,17 +849,12 @@ static void* checked_calloc(size_t count, size_t size, const char* label) {
     return ptr;
 }
 
-static void prefix_task_buffer_init(PrefixTaskBuffer* buf, long long initial_capacity, int with_l) {
+static void prefix_task_buffer_init(PrefixTaskBuffer* buf, long long initial_capacity) {
     memset(buf, 0, sizeof(*buf));
     if (initial_capacity < 16) initial_capacity = 16;
     buf->capacity = initial_capacity;
-    buf->with_l = with_l;
     buf->i = checked_calloc((size_t)buf->capacity, sizeof(*buf->i), "prefix_buffer_i");
     buf->j = checked_calloc((size_t)buf->capacity, sizeof(*buf->j), "prefix_buffer_j");
-    buf->k = checked_calloc((size_t)buf->capacity, sizeof(*buf->k), "prefix_buffer_k");
-    if (with_l) {
-        buf->l = checked_calloc((size_t)buf->capacity, sizeof(*buf->l), "prefix_buffer_l");
-    }
 }
 
 static void prefix_task_buffer_reserve(PrefixTaskBuffer* buf, long long needed) {
@@ -883,28 +869,13 @@ static void prefix_task_buffer_reserve(PrefixTaskBuffer* buf, long long needed) 
     }
     PrefixId* new_i = realloc(buf->i, (size_t)new_capacity * sizeof(*buf->i));
     PrefixId* new_j = realloc(buf->j, (size_t)new_capacity * sizeof(*buf->j));
-    PrefixId* new_k = realloc(buf->k, (size_t)new_capacity * sizeof(*buf->k));
-    PrefixId* new_l = buf->l;
-    if (buf->with_l) {
-        new_l = realloc(buf->l, (size_t)new_capacity * sizeof(*buf->l));
-    }
-    if (!new_i || !new_j || !new_k || (buf->with_l && !new_l)) {
+    if (!new_i || !new_j) {
         fprintf(stderr, "Failed to grow adaptive prefix buffers to %lld entries\n", new_capacity);
         exit(1);
     }
     buf->i = new_i;
     buf->j = new_j;
-    buf->k = new_k;
-    buf->l = new_l;
     buf->capacity = new_capacity;
-}
-
-static void prefix_task_buffer_push3(PrefixTaskBuffer* buf, int i, int j, int k) {
-    prefix_task_buffer_reserve(buf, buf->count + 1);
-    buf->i[buf->count] = (PrefixId)i;
-    buf->j[buf->count] = (PrefixId)j;
-    buf->k[buf->count] = (k < 0) ? PREFIX_ID_NONE : (PrefixId)k;
-    buf->count++;
 }
 
 static void prefix_task_buffer_push2(PrefixTaskBuffer* buf, int i, int j) {
@@ -912,14 +883,6 @@ static void prefix_task_buffer_push2(PrefixTaskBuffer* buf, int i, int j) {
     buf->i[buf->count] = (PrefixId)i;
     buf->j[buf->count] = (PrefixId)j;
     buf->count++;
-}
-
-static void prefix_task_buffer_free(PrefixTaskBuffer* buf) {
-    free(buf->i);
-    free(buf->j);
-    free(buf->k);
-    free(buf->l);
-    memset(buf, 0, sizeof(*buf));
 }
 
 static inline long long repeated_combo_count(int values, int slots) {
@@ -2889,7 +2852,7 @@ static void build_live_prefix2_tasks(PrefixId** live_i_out, PrefixId** live_j_ou
     PartialGraphState partial_graph;
     int stack[MAX_COLS];
 
-    prefix_task_buffer_init(&live, num_partitions, 0);
+    prefix_task_buffer_init(&live, num_partitions);
     canon_state_init(&canon_state, perm_count);
     canon_scratch_init(&canon_scratch, perm_count);
 
@@ -2928,8 +2891,6 @@ static void build_live_prefix2_tasks(PrefixId** live_i_out, PrefixId** live_j_ou
     *live_i_out = live.i;
     *live_j_out = live.j;
     *live_count_out = live.count;
-    free(live.k);
-    free(live.l);
 }
 
 static void solve_structure(const Graph* partial_graph, CanonState* canon_state,
@@ -3022,51 +2983,6 @@ PolyCoeff poly_eval(Poly p, long long x) {
         xp *= x;
     }
     return res;
-}
-
-static void execute_prefix2_fixed_task(long long p,
-                                       GraphCache* cache, GraphCache* raw_cache, NautyWorkspace* ws,
-                                       CanonState* canon_state, CanonScratch* canon_scratch,
-                                       PartialGraphState* partial_graph, int* stack, Poly* task_total,
-                                       long long* local_canon_calls, long long* local_cache_hits,
-                                       long long* local_raw_cache_hits) {
-    int i = 0;
-    int j = 0;
-    int next_stabilizer = 0;
-    poly_zero(task_total);
-    get_prefix2_task(p, &i, &j);
-
-    canon_state_reset(canon_state, perm_count);
-    partial_graph_reset(partial_graph);
-
-    stack[0] = i;
-    if (!canon_state_prepare_push(canon_state, i, canon_scratch, &next_stabilizer)) {
-        return;
-    }
-    canon_state_commit_push(canon_state, i, canon_scratch, next_stabilizer);
-    if (!partial_graph_append(partial_graph, 0, i, stack)) {
-        canon_state_pop(canon_state);
-        return;
-    }
-
-    stack[1] = j;
-    if (!canon_state_prepare_push(canon_state, j, canon_scratch, &next_stabilizer)) {
-        canon_state_pop(canon_state);
-        return;
-    }
-    canon_state_commit_push(canon_state, j, canon_scratch, next_stabilizer);
-    PartialGraphState prefix_graph = *partial_graph;
-    if (partial_graph_append(&prefix_graph, 1, j, stack)) {
-        Poly prefix_weight;
-        poly_mul_ref(&partition_weight_poly[i], &partition_weight_poly[j], &prefix_weight);
-        long long prefix_mult = (i == j) ? 1 : 2;
-        int prefix_run = (i == j) ? 2 : 1;
-        dfs(2, j, stack, canon_state, &prefix_graph, cache, raw_cache, ws, task_total,
-            local_canon_calls, local_cache_hits, local_raw_cache_hits,
-            &prefix_weight, prefix_mult, prefix_run, NULL, canon_scratch);
-    }
-    canon_state_pop(canon_state);
-    canon_state_pop(canon_state);
 }
 
 static void execute_prefix2_fixed_batch(PrefixId i, const PrefixId* js, const long long* ps, int count,
@@ -3619,7 +3535,6 @@ int main(int argc, char** argv) {
 
     long long total_prefixes = 0;
     long long nominal_prefixes = 0;
-    PrefixId *prefix_i = NULL, *prefix_j = NULL, *prefix_k = NULL, *prefix_l = NULL;
     Prefix2Batch* prefix2_batches = NULL;
     PrefixId* prefix2_batch_js = NULL;
     long long* prefix2_batch_ps = NULL;
@@ -3773,8 +3688,7 @@ int main(int argc, char** argv) {
             return 1;
         }
 
-        local_queue_init(&local_queue, (int)queue_cap_ll, low_watermark, high_watermark,
-                         total_tasks, num_threads);
+        local_queue_init(&local_queue, (int)queue_cap_ll, total_tasks, num_threads);
         for (long long t = 0; t < total_tasks; t++) {
             long long p = first_task + t;
             int i = 0;
@@ -3966,13 +3880,7 @@ int main(int argc, char** argv) {
                     int i = 0;
                     int j = 0;
                     int k = -1;
-                    if (g_adaptive_subdivide) {
-                        i = (int)prefix_i[t];
-                        j = (int)prefix_j[t];
-                        k = (prefix_k[t] == PREFIX_ID_NONE) ? -1 : (int)prefix_k[t];
-                    } else {
-                        unrank_prefix2(p, &i, &j);
-                    }
+                    get_prefix2_task(p, &i, &j);
                     int next_stabilizer = 0;
 
                     canon_state_reset(&canon_state, perm_count);
@@ -4540,10 +4448,6 @@ int main(int argc, char** argv) {
         printf("\nWrote polynomial shard to %s\n", poly_out_path);
     }
 
-    free(prefix_i);
-    free(prefix_j);
-    free(prefix_k);
-    free(prefix_l);
     free(g_live_prefix2_i);
     free(g_live_prefix2_j);
     g_live_prefix2_i = NULL;
