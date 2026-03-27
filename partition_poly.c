@@ -1134,6 +1134,23 @@ static inline void poly_add_ref(const Poly* a, const Poly* b, Poly* out) {
     if (r != out) *out = *r;
 }
 
+static inline void poly_add_ref_checked(const Poly* a, const Poly* b, Poly* out) {
+    Poly tmp;
+    Poly* r = out;
+    if (out == a || out == b) r = &tmp;
+    r->deg = (a->deg > b->deg) ? a->deg : b->deg;
+    for (int i = 0; i <= r->deg; i++) {
+        PolyCoeff av = (i <= a->deg) ? a->coeffs[i] : 0;
+        PolyCoeff bv = (i <= b->deg) ? b->coeffs[i] : 0;
+        if (__builtin_add_overflow(av, bv, &r->coeffs[i])) {
+            fprintf(stderr, "128-bit overflow in polynomial accumulation\n");
+            abort();
+        }
+    }
+    while (r->deg > 0 && r->coeffs[r->deg] == 0) r->deg--;
+    if (r != out) *out = *r;
+}
+
 Poly poly_add(Poly a, Poly b) {
     Poly r;
     poly_add_ref(&a, &b, &r);
@@ -2678,7 +2695,7 @@ void dfs(int depth, int min_idx, int* stack, CanonState* canon_state, const Part
         solve_structure(&partial_graph->g, canon_state, cache, raw_cache, ws,
                         local_canon_calls, local_cache_hits, local_raw_cache_hits,
                         weight_prod, mult_coeff, profile, &res);
-        poly_add_ref(local_total, &res, local_total);
+        poly_add_ref_checked(local_total, &res, local_total);
         return;
     }
 
@@ -2829,7 +2846,7 @@ static void execute_prefix2_fixed_batch(PrefixId i, const PrefixId* js, const lo
             dfs(2, (int)j, stack, canon_state, &prefix_graph, cache, raw_cache, ws, &task_total,
                 local_canon_calls, local_cache_hits, local_raw_cache_hits,
                 &prefix_weight, prefix_mult, prefix_run, profile, canon_scratch);
-            poly_add_ref(local_total, &task_total, local_total);
+            poly_add_ref_checked(local_total, &task_total, local_total);
         }
         canon_state_pop(canon_state);
         complete_task_report_and_time(total_tasks, progress_report_step, start_time,
@@ -2917,7 +2934,7 @@ static void dfs_runtime_split_local(int depth, int start_pid, int end_pid, long 
                         &ctx->cache, &ctx->raw_cache, &ctx->ws,
                         &ctx->local_canon_calls, &ctx->local_cache_hits,
                         &ctx->local_raw_cache_hits, weight_prod, mult_coeff, profile, &res);
-        poly_add_ref(local_total, &res, local_total);
+        poly_add_ref_checked(local_total, &res, local_total);
         return;
     }
 
@@ -3032,7 +3049,7 @@ static void execute_local_runtime_task(const LocalTask* task, WorkerCtx* ctx, Po
                             &ctx->cache, &ctx->raw_cache, &ctx->ws,
                             &ctx->local_canon_calls, &ctx->local_cache_hits,
                             &ctx->local_raw_cache_hits, &weight_prod, mult_coeff, profile, &res);
-            poly_add_ref(thread_total, &res, thread_total);
+            poly_add_ref_checked(thread_total, &res, thread_total);
         } else {
             int start_pid = (int)task->lo;
             int end_pid = (int)task->hi;
@@ -3908,7 +3925,7 @@ int main(int argc, char** argv) {
     }
     
     for(int i=0; i<num_threads; i++) {
-        poly_add_ref(&global_poly, &thread_polys[i], &global_poly);
+        poly_add_ref_checked(&global_poly, &thread_polys[i], &global_poly);
     }
 
     ProfileStats total_profile = {0};
