@@ -275,7 +275,7 @@ It also supports sharding:
 ```bash
 ./6xn_poly 6 8 --task-start 0 --task-end 100 --poly-out shard_a.poly
 ./6xn_poly 6 8 --task-start 100 --task-end 200 --poly-out shard_b.poly
-./6xn_poly --merge --poly-out merged.poly shard_a.poly shard_b.poly
+./merge_poly.py --poly-out merged.poly shard_a.poly shard_b.poly
 ```
 
 The shard file format starts with the header `RECT_POLY_V1`.

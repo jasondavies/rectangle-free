@@ -277,7 +277,7 @@ def merge_shards(inputs: list[Path], poly_out_path: Path | None) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Merge RECT_POLY_V1 shards using the same rules as partition_poly.c --merge.",
+        description="Merge RECT_POLY_V1 polynomial shards.",
     )
     parser.add_argument("--poly-out", dest="poly_out", help="write the merged shard to this file")
     parser.add_argument("inputs", nargs="+", help="input shard files")

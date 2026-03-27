@@ -1109,35 +1109,6 @@ Poly poly_one() {
 
 PolyCoeff poly_eval(Poly p, long long x);
 
-static PolyCoeff parse_i128_or_die(const char* text, const char* label) {
-    if (!text || !*text) {
-        fprintf(stderr, "Missing integer for %s\n", label);
-        exit(1);
-    }
-
-    int negative = 0;
-    const unsigned char* p = (const unsigned char*)text;
-    if (*p == '+' || *p == '-') {
-        negative = (*p == '-');
-        p++;
-    }
-    if (*p == '\0') {
-        fprintf(stderr, "Invalid integer for %s: %s\n", label, text);
-        exit(1);
-    }
-
-    PolyCoeff value = 0;
-    while (*p) {
-        if (*p < '0' || *p > '9') {
-            fprintf(stderr, "Invalid integer for %s: %s\n", label, text);
-            exit(1);
-        }
-        value = value * 10 + (*p - '0');
-        p++;
-    }
-    return negative ? -value : value;
-}
-
 static long long parse_ll_or_die(const char* text, const char* label) {
     char* end = NULL;
     errno = 0;
@@ -1147,14 +1118,6 @@ static long long parse_ll_or_die(const char* text, const char* label) {
         exit(1);
     }
     return value;
-}
-
-static void trim_newline(char* s) {
-    if (!s) return;
-    size_t len = strlen(s);
-    while (len > 0 && (s[len - 1] == '\n' || s[len - 1] == '\r')) {
-        s[--len] = '\0';
-    }
 }
 
 static inline void poly_add_ref(const Poly* a, const Poly* b, Poly* out) {
@@ -1330,7 +1293,6 @@ static void usage(const char* prog) {
     fprintf(stderr,
             "Usage:\n"
             "  %s [rows cols] [--task-start N] [--task-end N] [--prefix-depth N] [--adaptive-subdivide] [--adaptive-max-depth N] [--adaptive-work-budget N] [--poly-out FILE] [--profile] [--task-times-out FILE]\n"
-            "  %s --merge [--poly-out FILE] INPUT...\n"
             "\n"
             "Notes:\n"
             "  --task-start/--task-end define a half-open task range [start, end).\n"
@@ -1338,7 +1300,7 @@ static void usage(const char* prog) {
             "  Adaptive subdivision currently supports only --prefix-depth 2.\n"
             "  In full polynomial mode it uses a local runtime queue of donated subtrees.\n"
             "  --profile prints coarse timing counters for the main phases.\n",
-            prog, prog);
+            prog);
 }
 
 static void write_poly_file_stream(FILE* f, const Poly* poly, const PolyFileMeta* meta) {
@@ -1385,201 +1347,6 @@ static void write_poly_file(const char* path, const Poly* poly, const PolyFileMe
         fprintf(stderr, "Failed to close %s\n", path);
         exit(1);
     }
-}
-
-static void read_poly_file(const char* path, Poly* poly, PolyFileMeta* meta) {
-    FILE* f = fopen(path, "r");
-    if (!f) {
-        fprintf(stderr, "Failed to open %s for reading\n", path);
-        exit(1);
-    }
-
-    char line[512];
-    if (!fgets(line, sizeof(line), f)) {
-        fprintf(stderr, "Failed to read header from %s\n", path);
-        exit(1);
-    }
-    trim_newline(line);
-    if (strcmp(line, "RECT_POLY_V1") != 0) {
-        fprintf(stderr, "Invalid polynomial file header in %s\n", path);
-        exit(1);
-    }
-
-    poly_zero(poly);
-    meta->rows = -1;
-    meta->cols = -1;
-    meta->task_start = 0;
-    meta->task_end = 0;
-    meta->full_tasks = -1;
-
-    while (fgets(line, sizeof(line), f)) {
-        trim_newline(line);
-        if (strcmp(line, "end") == 0) break;
-        if (sscanf(line, "rows %d", &meta->rows) == 1) continue;
-        if (sscanf(line, "cols %d", &meta->cols) == 1) continue;
-        if (sscanf(line, "task_start %lld", &meta->task_start) == 1) continue;
-        if (sscanf(line, "task_end %lld", &meta->task_end) == 1) continue;
-        if (sscanf(line, "full_tasks %lld", &meta->full_tasks) == 1) continue;
-        if (strncmp(line, "deg ", 4) == 0) continue;
-        if (strncmp(line, "coeff ", 6) == 0) {
-            char* p = line + 6;
-            char* end = NULL;
-            long idx = strtol(p, &end, 10);
-            if (!end || *end != ' ' || idx < 0 || idx >= MAX_DEGREE) {
-                fprintf(stderr, "Invalid coefficient line in %s: %s\n", path, line);
-                exit(1);
-            }
-            while (*end == ' ') end++;
-            poly->coeffs[idx] = parse_i128_or_die(end, path);
-            if ((int)idx > poly->deg && poly->coeffs[idx] != 0) {
-                poly->deg = (int)idx;
-            }
-            continue;
-        }
-        fprintf(stderr, "Unrecognised line in %s: %s\n", path, line);
-        exit(1);
-    }
-
-    if (meta->rows < 0 || meta->cols < 0 || meta->full_tasks < 0) {
-        fprintf(stderr, "Incomplete metadata in %s\n", path);
-        exit(1);
-    }
-
-    if (fclose(f) != 0) {
-        fprintf(stderr, "Failed to close %s\n", path);
-        exit(1);
-    }
-}
-
-static int run_merge_mode(const char* prog, const char* poly_out_path, int input_count, char** inputs) {
-    if (input_count <= 0) {
-        usage(prog);
-        return 1;
-    }
-
-    Poly merged;
-    poly_zero(&merged);
-    PolyFileMeta merged_meta = {0};
-    long long covered_tasks = 0;
-    unsigned char* task_seen = NULL;
-
-    for (int i = 0; i < input_count; i++) {
-        Poly current;
-        PolyFileMeta current_meta;
-        read_poly_file(inputs[i], &current, &current_meta);
-
-        if (current_meta.task_start < 0 ||
-            current_meta.task_end < current_meta.task_start ||
-            current_meta.task_end > current_meta.full_tasks) {
-            fprintf(stderr, "Invalid task selection in shard: %s\n", inputs[i]);
-            free(task_seen);
-            return 1;
-        }
-
-        if (i == 0) {
-            merged_meta = current_meta;
-            task_seen = (unsigned char*)calloc((size_t)merged_meta.full_tasks, sizeof(unsigned char));
-            if (!task_seen) {
-                fprintf(stderr, "Failed to allocate merge task bitmap\n");
-                return 1;
-            }
-        } else if (current_meta.rows != merged_meta.rows ||
-                   current_meta.cols != merged_meta.cols ||
-                   current_meta.full_tasks != merged_meta.full_tasks) {
-            fprintf(stderr, "Incompatible polynomial shard: %s\n", inputs[i]);
-            free(task_seen);
-            return 1;
-        }
-
-        for (long long task = current_meta.task_start; task < current_meta.task_end; task++) {
-            if (task_seen[task]) {
-                fprintf(stderr, "Overlapping shard task %lld in %s\n", task, inputs[i]);
-                free(task_seen);
-                return 1;
-            }
-            task_seen[task] = 1;
-            covered_tasks++;
-        }
-
-        merged = poly_add(merged, current);
-    }
-
-    if (!task_seen) {
-        fprintf(stderr, "Failed to allocate merge task tracking\n");
-        return 1;
-    }
-
-    long long min_task = -1;
-    long long max_task = -1;
-    for (long long task = 0; task < merged_meta.full_tasks; task++) {
-        if (task_seen[task]) {
-            if (min_task < 0) min_task = task;
-            max_task = task + 1;
-        }
-    }
-    if (min_task < 0) {
-        min_task = 0;
-        max_task = 0;
-    }
-
-    merged_meta.task_start = min_task;
-    merged_meta.task_end = max_task;
-
-    int contiguous_cover = 1;
-    for (long long task = min_task; task < max_task; task++) {
-        if (!task_seen[task]) {
-            contiguous_cover = 0;
-            break;
-        }
-    }
-
-    if (covered_tasks == merged_meta.full_tasks) {
-        merged_meta.task_start = 0;
-        merged_meta.task_end = merged_meta.full_tasks;
-        contiguous_cover = 1;
-    }
-
-    if (!contiguous_cover && input_count == 1) {
-        PolyFileMeta single_meta;
-        read_poly_file(inputs[0], &merged, &single_meta);
-        merged_meta = single_meta;
-    } else if (!contiguous_cover && poly_out_path) {
-        fprintf(stderr,
-                "Cannot write merged shard %s: input tasks are non-contiguous and incomplete\n",
-                poly_out_path);
-        free(task_seen);
-        return 1;
-    }
-
-    if (covered_tasks == 0) {
-        for (int deg = merged.deg; deg >= 0; deg--) {
-            if (merged.coeffs[deg] != 0) {
-                merged.deg = deg;
-                break;
-            }
-        }
-    }
-
-    printf("Merged %d shard(s) for %dx%d\n", input_count, merged_meta.rows, merged_meta.cols);
-    printf("Covered tasks: %lld / %lld\n", covered_tasks, merged_meta.full_tasks);
-    printf("\nChromatic Polynomial P(x):\n");
-    print_poly(merged);
-
-    printf("\nValues:\n");
-    printf("P(4) = ");
-    print_u128(poly_eval(merged, 4));
-    printf("\n");
-    printf("P(5) = ");
-    print_u128(poly_eval(merged, 5));
-    printf("\n");
-
-    if (poly_out_path) {
-        write_poly_file(poly_out_path, &merged, &merged_meta);
-        printf("\nWrote merged polynomial to %s\n", poly_out_path);
-    }
-
-    free(task_seen);
-    return 0;
 }
 
 // --- INITIALISATION ---
@@ -3306,43 +3073,30 @@ int main(int argc, char** argv) {
     long long task_end = -1;
     const char* poly_out_path = NULL;
     int prefix_depth_override = -1;
-    int merge_mode = 0;
-    char** merge_inputs = (char**)malloc((size_t)argc * sizeof(char*));
-    if (!merge_inputs) {
-        fprintf(stderr, "Failed to allocate merge input list\n");
-        return 1;
-    }
-    int merge_input_count = 0;
     int positional_count = 0;
 
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--merge") == 0) {
-            merge_mode = 1;
-        } else if (strcmp(argv[i], "--poly-out") == 0) {
+        if (strcmp(argv[i], "--poly-out") == 0) {
             if (i + 1 >= argc) {
                 usage(argv[0]);
-                free(merge_inputs);
                 return 1;
             }
             poly_out_path = argv[++i];
         } else if (strcmp(argv[i], "--task-start") == 0) {
             if (i + 1 >= argc) {
                 usage(argv[0]);
-                free(merge_inputs);
                 return 1;
             }
             task_start = parse_ll_or_die(argv[++i], "--task-start");
         } else if (strcmp(argv[i], "--task-end") == 0) {
             if (i + 1 >= argc) {
                 usage(argv[0]);
-                free(merge_inputs);
                 return 1;
             }
             task_end = parse_ll_or_die(argv[++i], "--task-end");
         } else if (strcmp(argv[i], "--prefix-depth") == 0) {
             if (i + 1 >= argc) {
                 usage(argv[0]);
-                free(merge_inputs);
                 return 1;
             }
             prefix_depth_override = (int)parse_ll_or_die(argv[++i], "--prefix-depth");
@@ -3351,14 +3105,12 @@ int main(int argc, char** argv) {
         } else if (strcmp(argv[i], "--adaptive-max-depth") == 0) {
             if (i + 1 >= argc) {
                 usage(argv[0]);
-                free(merge_inputs);
                 return 1;
             }
             g_adaptive_max_depth = (int)parse_ll_or_die(argv[++i], "--adaptive-max-depth");
         } else if (strcmp(argv[i], "--adaptive-work-budget") == 0) {
             if (i + 1 >= argc) {
                 usage(argv[0]);
-                free(merge_inputs);
                 return 1;
             }
             g_adaptive_work_budget = parse_ll_or_die(argv[++i], "--adaptive-work-budget");
@@ -3367,12 +3119,9 @@ int main(int argc, char** argv) {
         } else if (strcmp(argv[i], "--task-times-out") == 0) {
             if (i + 1 >= argc) {
                 usage(argv[0]);
-                free(merge_inputs);
                 return 1;
             }
             g_task_times_out_path = argv[++i];
-        } else if (merge_mode) {
-            merge_inputs[merge_input_count++] = argv[i];
         } else if (positional_count == 0) {
             g_rows = (int)parse_ll_or_die(argv[i], "rows");
             positional_count++;
@@ -3381,26 +3130,9 @@ int main(int argc, char** argv) {
             positional_count++;
         } else {
             usage(argv[0]);
-            free(merge_inputs);
             return 1;
         }
     }
-
-    if (merge_mode) {
-        if (positional_count != 0 || task_start != 0 || task_end != -1 ||
-            prefix_depth_override != -1 ||
-            g_adaptive_subdivide || g_adaptive_max_depth != 3 ||
-            g_adaptive_work_budget != 0 ||
-            g_profile || g_task_times_out_path) {
-            usage(argv[0]);
-            free(merge_inputs);
-            return 1;
-        }
-        int rc = run_merge_mode(argv[0], poly_out_path, merge_input_count, merge_inputs);
-        free(merge_inputs);
-        return rc;
-    }
-    free(merge_inputs);
 
     if (g_rows < 1 || g_cols < 1 || g_rows > MAX_ROWS || g_cols > MAX_COLS) {
         fprintf(stderr, "Rows/cols must be in range 1..%d and 1..%d\n", MAX_ROWS, MAX_COLS);
