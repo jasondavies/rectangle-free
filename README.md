@@ -20,7 +20,7 @@ The repository currently contains:
 - a 5-row state-space solver in C,
 - partition / structure-graph solvers in C for exact counting and chromatic
   polynomial computation,
-- helper tools for merging polynomial shards and estimating `7 x 7` runtime,
+- helper tools for merging polynomial shards,
 - Lean notes under `lean/`,
 - recorded results in `results.txt`,
 - and longer experimental notes in `experiments.md`.
@@ -60,9 +60,6 @@ The repository currently contains:
 - `merge_poly.py`
   Merge `RECT_POLY_V1` shard files produced by `partition_poly` or
   `partition_poly_7`.
-
-- `estimate_7x7.py`
-  Sampled runtime estimator for the `partition_poly_7` task space.
 
 - `results.txt`
   Table of recorded exact counts.
@@ -259,24 +256,6 @@ Or pass the dimensions explicitly:
 ```bash
 ./partition_poly_7 7 7
 ```
-
-This is the executable used by `estimate_7x7.py`.
-
-## Estimating `7 x 7` runtime
-
-`estimate_7x7.py` samples the `partition_poly_7` task space and projects full
-runtime and core-hour costs.
-
-Examples:
-
-```bash
-python3 estimate_7x7.py --mode shards --stride 4096 --samples 8
-python3 estimate_7x7.py --mode tasks --samples 16
-python3 estimate_7x7.py --mode blocks --block-size 4 --samples 12
-```
-
-By default it drives `./partition_poly_7`. Override that with `--binary` if
-needed.
 
 ## Compile-time limits
 
