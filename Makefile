@@ -23,7 +23,7 @@ NVCCFLAGS ?= -O3 -arch=sm_89 -std=c++17 -I./inspiration/cpads/include
 
 CFLAGS_5XN ?= -O3 -march=native -std=c11
 
-all: 5xn_count4 partition_count4 partition_poly partition_poly_7 7xn_poly 7xn_poly_dc
+all: 5xn_count4 partition_count4 partition_poly partition_poly_7
 
 $(NAUTY_BUILD_DIR)/.prepared:
 	rm -rf $(NAUTY_BUILD_DIR)
@@ -49,16 +49,10 @@ partition_poly: partition_poly.c $(NAUTY_BUILD_DIR)/nautyT.a
 partition_poly_7: partition_poly.c $(NAUTY_BUILD_DIR)/nautyT.a
 	$(CC) $(PARTITION_CFLAGS) -DMAX_COLS=7 -DDEFAULT_ROWS=7 -DDEFAULT_COLS=7 -DCACHE_BITS=17 -o $@ $< $(LDFLAGS)
 
-7xn_poly: 7xn_poly.c $(NAUTY_BUILD_DIR)/nautyT.a
-	$(CC) $(PARTITION_CFLAGS) -o $@ $< $(LDFLAGS)
-
-7xn_poly_dc: 7xn_poly_dc.c $(NAUTY_BUILD_DIR)/nautyT.a
-	$(CC) $(PARTITION_CFLAGS) -o $@ $< $(LDFLAGS)
-
 clean:
-	rm -f 5xn_count4 partition_count4 partition_poly partition_poly_7 7xn_poly 7xn_poly_dc
+	rm -f 5xn_count4 partition_count4 partition_poly partition_poly_7
 
 clean-nauty:
 	rm -rf $(NAUTY_BUILD_DIR)
 
-.PHONY: all clean clean-nauty 5xn_count4 partition_count4 partition_poly partition_poly_7 7xn_poly 7xn_poly_dc
+.PHONY: all clean clean-nauty 5xn_count4 partition_count4 partition_poly partition_poly_7

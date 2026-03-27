@@ -1,6 +1,17 @@
 5xn
+5xn_count4
 6xn
 6xn_poly
+partition_count4
+partition_poly
+partition_poly_7
+*.o
+__pycache__/
+*.pyc
+ad-hoc/
+coordinator/
+gcloud/
+patch
 
 third_party/nauty/.configured-tls
 third_party/nauty/nautyT.a
