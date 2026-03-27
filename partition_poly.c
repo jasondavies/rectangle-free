@@ -85,8 +85,6 @@ typedef struct {
     long long task_start;
     long long task_end;
     long long full_tasks;
-    long long task_stride;
-    long long task_offset;
 } PolyFileMeta;
 
 typedef struct {
@@ -320,7 +318,6 @@ static __thread long long* tls_adaptive_work_counter = NULL;
 static __thread SharedGraphCacheExporter* tls_shared_cache_exporter = NULL;
 static const char* g_task_times_out_path = NULL;
 static long long g_task_times_first_task = 0;
-static long long g_task_times_stride = 1;
 static long long g_task_times_count = 0;
 static double* g_task_times_values = NULL;
 static int g_effective_prefix_depth = 0;
@@ -460,8 +457,7 @@ static void record_task_time_value(long long task_index, double elapsed) {
     if (!g_task_times_values || g_task_times_count <= 0) return;
     long long delta = task_index - g_task_times_first_task;
     if (delta < 0) return;
-    if (delta % g_task_times_stride != 0) return;
-    long long slot = delta / g_task_times_stride;
+    long long slot = delta;
     if (slot < 0 || slot >= g_task_times_count) return;
     g_task_times_values[slot] = elapsed;
 }
@@ -555,7 +551,7 @@ static void write_task_times_file(const char* path) {
     for (long long t = 0; t < g_task_times_count; t++) {
         double elapsed = g_task_times_values[t];
         if (elapsed < 0.0) continue;
-        long long task_index = g_task_times_first_task + t * g_task_times_stride;
+        long long task_index = g_task_times_first_task + t;
         int i, j, k, l;
         int have_prefix = decode_task_prefix(task_index, &i, &j, &k, &l);
         fprintf(f, "%lld,%.9f,", task_index, elapsed);
@@ -923,46 +919,6 @@ static void prefix_task_buffer_free(PrefixTaskBuffer* buf) {
     memset(buf, 0, sizeof(*buf));
 }
 
-static inline int task_matches_selection(long long task_index, long long task_start, long long task_end,
-                                         long long task_stride, long long task_offset) {
-    if (task_index < task_start) return 0;
-    if (task_end >= 0 && task_index >= task_end) return 0;
-    long long remainder = task_index % task_stride;
-    if (remainder < 0) remainder += task_stride;
-    return remainder == task_offset;
-}
-
-static long long first_selected_task(long long task_start, long long task_end,
-                                     long long task_stride, long long task_offset);
-
-static void prefix_task_buffer_append3_selected_batch(PrefixTaskBuffer* buf, int i, int j,
-                                                      const uint16_t* ks, int count,
-                                                      long long first_task_index,
-                                                      long long task_start, long long task_end,
-                                                      long long task_stride, long long task_offset) {
-    long long selected = 0;
-    for (int idx = 0; idx < count; idx++) {
-        if (task_matches_selection(first_task_index + idx, task_start, task_end,
-                                   task_stride, task_offset)) {
-            selected++;
-        }
-    }
-    if (selected == 0) return;
-
-    long long base = buf->count;
-    prefix_task_buffer_reserve(buf, base + selected);
-    for (int idx = 0; idx < count; idx++) {
-        if (!task_matches_selection(first_task_index + idx, task_start, task_end,
-                                    task_stride, task_offset)) {
-            continue;
-        }
-        buf->i[buf->count] = (PrefixId)i;
-        buf->j[buf->count] = (PrefixId)j;
-        buf->k[buf->count] = ks[idx];
-        buf->count++;
-    }
-}
-
 static inline long long repeated_combo_count(int values, int slots) {
     switch (slots) {
         case 0:
@@ -1003,8 +959,7 @@ static void get_prefix2_task(long long task_index, int* i, int* j) {
 }
 
 static void build_fixed_prefix2_batches(const PrefixId* live_i, const PrefixId* live_j,
-                                        long long task_start, long long task_end,
-                                        long long task_stride, long long task_offset,
+                                        long long task_start,
                                         long long total_tasks, Prefix2Batch** batches_out,
                                         long long* batch_count_out, PrefixId** js_out,
                                         long long** ps_out) {
@@ -1012,9 +967,8 @@ static void build_fixed_prefix2_batches(const PrefixId* live_i, const PrefixId* 
     int* offsets = checked_calloc((size_t)num_partitions, sizeof(*offsets), "prefix2_batch_offsets");
     int* cursor = checked_calloc((size_t)num_partitions, sizeof(*cursor), "prefix2_batch_cursor");
 
-    long long first_task = first_selected_task(task_start, task_end, task_stride, task_offset);
     for (long long t = 0; t < total_tasks; t++) {
-        long long p = first_task + t * task_stride;
+        long long p = task_start + t;
         int i = (int)live_i[p];
         counts[i]++;
     }
@@ -1035,7 +989,7 @@ static void build_fixed_prefix2_batches(const PrefixId* live_i, const PrefixId* 
     Prefix2Batch* batches = checked_calloc((size_t)batch_count, sizeof(*batches), "prefix2_batches");
 
     for (long long t = 0; t < total_tasks; t++) {
-        long long p = first_task + t * task_stride;
+        long long p = task_start + t;
         int i = (int)live_i[p];
         int j = (int)live_j[p];
         int pos = cursor[i]++;
@@ -1411,41 +1365,16 @@ void print_poly(Poly p) {
 static void usage(const char* prog) {
     fprintf(stderr,
             "Usage:\n"
-            "  %s [rows cols] [--task-start N] [--task-end N] [--task-stride N] [--task-offset N] [--prefix-depth N] [--adaptive-subdivide] [--adaptive-threshold N] [--adaptive-max-depth N] [--adaptive-work-budget N] [--poly-out FILE] [--profile] [--task-times-out FILE]\n"
+            "  %s [rows cols] [--task-start N] [--task-end N] [--prefix-depth N] [--adaptive-subdivide] [--adaptive-threshold N] [--adaptive-max-depth N] [--adaptive-work-budget N] [--poly-out FILE] [--profile] [--task-times-out FILE]\n"
             "  %s --merge [--poly-out FILE] INPUT...\n"
             "\n"
             "Notes:\n"
             "  --task-start/--task-end define a half-open task range [start, end).\n"
-            "  --task-stride/--task-offset select interleaved tasks within that range.\n"
             "  --prefix-depth may be 2, 3, or 4.\n"
             "  Adaptive subdivision currently supports only --prefix-depth 2.\n"
             "  In full polynomial mode it uses a local runtime queue of donated subtrees.\n"
             "  --profile prints coarse timing counters for the main phases.\n",
             prog, prog);
-}
-
-static long long normalise_task_offset(long long task_stride, long long task_offset) {
-    long long normalised = task_offset % task_stride;
-    if (normalised < 0) normalised += task_stride;
-    return normalised;
-}
-
-static long long first_selected_task(long long task_start, long long task_end,
-                                     long long task_stride, long long task_offset) {
-    if (task_start >= task_end) return task_end;
-    long long normalised_offset = normalise_task_offset(task_stride, task_offset);
-    long long remainder = task_start % task_stride;
-    if (remainder < 0) remainder += task_stride;
-    long long delta = (normalised_offset - remainder + task_stride) % task_stride;
-    long long first = task_start + delta;
-    return first < task_end ? first : task_end;
-}
-
-static long long count_selected_tasks(long long task_start, long long task_end,
-                                      long long task_stride, long long task_offset) {
-    long long first = first_selected_task(task_start, task_end, task_stride, task_offset);
-    if (first >= task_end) return 0;
-    return 1 + ((task_end - 1 - first) / task_stride);
 }
 
 static void write_poly_file_stream(FILE* f, const Poly* poly, const PolyFileMeta* meta) {
@@ -1455,8 +1384,6 @@ static void write_poly_file_stream(FILE* f, const Poly* poly, const PolyFileMeta
     fprintf(f, "task_start %lld\n", meta->task_start);
     fprintf(f, "task_end %lld\n", meta->task_end);
     fprintf(f, "full_tasks %lld\n", meta->full_tasks);
-    fprintf(f, "task_stride %lld\n", meta->task_stride);
-    fprintf(f, "task_offset %lld\n", meta->task_offset);
     fprintf(f, "deg %d\n", poly->deg);
     for (int i = 0; i <= poly->deg; i++) {
         fprintf(f, "coeff %d ", i);
@@ -1520,8 +1447,6 @@ static void read_poly_file(const char* path, Poly* poly, PolyFileMeta* meta) {
     meta->task_start = 0;
     meta->task_end = 0;
     meta->full_tasks = -1;
-    meta->task_stride = 1;
-    meta->task_offset = 0;
 
     while (fgets(line, sizeof(line), f)) {
         trim_newline(line);
@@ -1531,8 +1456,6 @@ static void read_poly_file(const char* path, Poly* poly, PolyFileMeta* meta) {
         if (sscanf(line, "task_start %lld", &meta->task_start) == 1) continue;
         if (sscanf(line, "task_end %lld", &meta->task_end) == 1) continue;
         if (sscanf(line, "full_tasks %lld", &meta->full_tasks) == 1) continue;
-        if (sscanf(line, "task_stride %lld", &meta->task_stride) == 1) continue;
-        if (sscanf(line, "task_offset %lld", &meta->task_offset) == 1) continue;
         if (strncmp(line, "deg ", 4) == 0) continue;
         if (strncmp(line, "coeff ", 6) == 0) {
             char* p = line + 6;
@@ -1553,12 +1476,10 @@ static void read_poly_file(const char* path, Poly* poly, PolyFileMeta* meta) {
         exit(1);
     }
 
-    if (meta->rows < 0 || meta->cols < 0 || meta->full_tasks < 0 ||
-        meta->task_stride <= 0) {
+    if (meta->rows < 0 || meta->cols < 0 || meta->full_tasks < 0) {
         fprintf(stderr, "Incomplete metadata in %s\n", path);
         exit(1);
     }
-    meta->task_offset = normalise_task_offset(meta->task_stride, meta->task_offset);
 
     if (fclose(f) != 0) {
         fprintf(stderr, "Failed to close %s\n", path);
@@ -1585,9 +1506,7 @@ static int run_merge_mode(const char* prog, const char* poly_out_path, int input
 
         if (current_meta.task_start < 0 ||
             current_meta.task_end < current_meta.task_start ||
-            current_meta.task_end > current_meta.full_tasks ||
-            current_meta.task_offset < 0 ||
-            current_meta.task_offset >= current_meta.task_stride) {
+            current_meta.task_end > current_meta.full_tasks) {
             fprintf(stderr, "Invalid task selection in shard: %s\n", inputs[i]);
             free(task_seen);
             return 1;
@@ -1608,10 +1527,7 @@ static int run_merge_mode(const char* prog, const char* poly_out_path, int input
             return 1;
         }
 
-        for (long long task = first_selected_task(current_meta.task_start, current_meta.task_end,
-                                                  current_meta.task_stride, current_meta.task_offset);
-             task < current_meta.task_end;
-             task += current_meta.task_stride) {
+        for (long long task = current_meta.task_start; task < current_meta.task_end; task++) {
             if (task_seen[task]) {
                 fprintf(stderr, "Overlapping shard task %lld in %s\n", task, inputs[i]);
                 free(task_seen);
@@ -1644,8 +1560,6 @@ static int run_merge_mode(const char* prog, const char* poly_out_path, int input
 
     merged_meta.task_start = min_task;
     merged_meta.task_end = max_task;
-    merged_meta.task_stride = 1;
-    merged_meta.task_offset = 0;
 
     int contiguous_cover = 1;
     for (long long task = min_task; task < max_task; task++) {
@@ -3473,8 +3387,6 @@ static void execute_local_runtime_task(const LocalTask* task, WorkerCtx* ctx, Po
 int main(int argc, char** argv) {
     long long task_start = 0;
     long long task_end = -1;
-    long long task_stride = 1;
-    long long task_offset = 0;
     const char* poly_out_path = NULL;
     int prefix_depth_override = -1;
     int merge_mode = 0;
@@ -3510,20 +3422,6 @@ int main(int argc, char** argv) {
                 return 1;
             }
             task_end = parse_ll_or_die(argv[++i], "--task-end");
-        } else if (strcmp(argv[i], "--task-stride") == 0) {
-            if (i + 1 >= argc) {
-                usage(argv[0]);
-                free(merge_inputs);
-                return 1;
-            }
-            task_stride = parse_ll_or_die(argv[++i], "--task-stride");
-        } else if (strcmp(argv[i], "--task-offset") == 0) {
-            if (i + 1 >= argc) {
-                usage(argv[0]);
-                free(merge_inputs);
-                return 1;
-            }
-            task_offset = parse_ll_or_die(argv[++i], "--task-offset");
         } else if (strcmp(argv[i], "--prefix-depth") == 0) {
             if (i + 1 >= argc) {
                 usage(argv[0]);
@@ -3580,7 +3478,7 @@ int main(int argc, char** argv) {
 
     if (merge_mode) {
         if (positional_count != 0 || task_start != 0 || task_end != -1 ||
-            task_stride != 1 || task_offset != 0 || prefix_depth_override != -1 ||
+            prefix_depth_override != -1 ||
             g_adaptive_subdivide || g_adaptive_threshold != 128 || g_adaptive_max_depth != 3 ||
             g_adaptive_work_budget != 0 ||
             g_profile || g_task_times_out_path) {
@@ -3698,15 +3596,10 @@ int main(int argc, char** argv) {
         fprintf(stderr, "--task-start must be non-negative\n");
         return 1;
     }
-    if (task_stride <= 0) {
-        fprintf(stderr, "--task-stride must be positive\n");
-        return 1;
-    }
     if (task_end >= 0 && task_end < task_start) {
         fprintf(stderr, "Task range must satisfy 0 <= start <= end\n");
         return 1;
     }
-    task_offset = normalise_task_offset(task_stride, task_offset);
     g_effective_prefix_depth = prefix_depth;
 
     int graph_poly_len = g_cols * (g_rows / 2) + 1;
@@ -3754,12 +3647,9 @@ int main(int argc, char** argv) {
     }
     long long active_task_start = task_start;
     long long active_task_end = task_end;
-    long long total_tasks = count_selected_tasks(active_task_start, active_task_end,
-                                                task_stride, task_offset);
-    long long first_task = first_selected_task(active_task_start, active_task_end,
-                                               task_stride, task_offset);
+    long long total_tasks = active_task_end - active_task_start;
+    long long first_task = active_task_start;
     g_task_times_first_task = first_task;
-    g_task_times_stride = task_stride;
     g_task_times_count = total_tasks;
     if (g_task_times_out_path && total_tasks > 0) {
         g_task_times_values = checked_calloc((size_t)total_tasks, sizeof(*g_task_times_values),
@@ -3771,7 +3661,7 @@ int main(int argc, char** argv) {
     if (prefix_depth == 2 && !g_adaptive_subdivide && total_tasks > 0) {
         double batch_start_time = omp_get_wtime();
         build_fixed_prefix2_batches(g_live_prefix2_i, g_live_prefix2_j,
-                                    active_task_start, active_task_end, task_stride, task_offset,
+                                    active_task_start,
                                     total_tasks, &prefix2_batches, &prefix2_batch_count,
                                     &prefix2_batch_js, &prefix2_batch_ps);
         prefix_generation_time += omp_get_wtime() - batch_start_time;
@@ -3832,7 +3722,6 @@ int main(int argc, char** argv) {
     }
     if (total_tasks > 0 && progress_report_step > total_tasks) progress_report_step = total_tasks;
     printf("Task range: [%lld, %lld) of %lld\n", active_task_start, active_task_end, full_tasks);
-    printf("Task selection: stride %lld, offset %lld\n", task_stride, task_offset);
     const char* omp_static_env = getenv("RECT_OMP_STATIC");
     int use_static_schedule =
         (omp_static_env && *omp_static_env && strcmp(omp_static_env, "0") != 0);
@@ -3883,7 +3772,7 @@ int main(int argc, char** argv) {
         local_queue_init(&local_queue, (int)queue_cap_ll, low_watermark, high_watermark,
                          total_tasks, num_threads);
         for (long long t = 0; t < total_tasks; t++) {
-            long long p = first_task + t * task_stride;
+            long long p = first_task + t;
             int i = 0;
             int j = 0;
             LocalTask task;
@@ -3980,7 +3869,7 @@ int main(int argc, char** argv) {
         if (g_cols == 1) {
             // Original 1-column parallelism (nothing to prefix)
             #pragma omp for schedule(runtime)
-            for (long long i = first_task; i < active_task_end; i += task_stride) {
+            for (long long i = first_task; i < active_task_end; i++) {
                 double task_t0 = g_profile ? omp_get_wtime() : 0.0;
                 double t0 = 0.0;
                 stack[0] = i;
@@ -4069,7 +3958,7 @@ int main(int argc, char** argv) {
                 for (long long t = 0; t < total_tasks; t++) {
                     double task_t0 = g_profile ? omp_get_wtime() : 0.0;
                     double t0 = 0.0;
-                    long long p = first_task + t * task_stride;
+                    long long p = first_task + t;
                     int i = 0;
                     int j = 0;
                     int k = -1;
@@ -4221,7 +4110,7 @@ int main(int argc, char** argv) {
             #pragma omp for schedule(runtime)
             for (long long t = 0; t < total_tasks; t++) {
                 double task_t0 = g_profile ? omp_get_wtime() : 0.0;
-                long long p = first_task + t * task_stride;
+                long long p = first_task + t;
                 int i = 0;
                 int j = 0;
                 int k = 0;
@@ -4302,7 +4191,7 @@ int main(int argc, char** argv) {
             #pragma omp for schedule(runtime)
             for (long long t = 0; t < total_tasks; t++) {
                 double task_t0 = g_profile ? omp_get_wtime() : 0.0;
-                long long p = first_task + t * task_stride;
+                long long p = first_task + t;
                 int i = 0;
                 int j = 0;
                 int k = 0;
@@ -4642,8 +4531,6 @@ int main(int argc, char** argv) {
             .task_start = active_task_start,
             .task_end = active_task_end,
             .full_tasks = full_tasks,
-            .task_stride = task_stride,
-            .task_offset = task_offset,
         };
         write_poly_file(poly_out_path, &global_poly, &meta);
         printf("\nWrote polynomial shard to %s\n", poly_out_path);

@@ -299,8 +299,7 @@ Useful options:
 - `--profile` prints counters and timing for the main pruning paths.
 - `--prefix-depth N` chooses the prefix-task depth explicitly.
 - `--count-out FILE` writes a shard file.
-- `--task-start`, `--task-end`, `--task-stride`, `--task-offset` support
-  distributed runs.
+- `--task-start` and `--task-end` support distributed runs over contiguous task ranges.
 
 Example:
 
