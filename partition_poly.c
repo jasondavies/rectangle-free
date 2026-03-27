@@ -308,7 +308,6 @@ static int g_cols = DEFAULT_COLS;
 static ProgressReporter progress_reporter;
 static long long progress_last_reported = 0;
 static int g_adaptive_subdivide = 0;
-static int g_adaptive_threshold = 128;
 static int g_adaptive_max_depth = 3;
 static long long g_adaptive_work_budget = 0;
 static int g_profile = 0;
@@ -847,6 +846,10 @@ static void* checked_aligned_alloc(size_t alignment, size_t size, const char* la
 }
 
 static void* checked_calloc(size_t count, size_t size, const char* label) {
+    if (count == 0 || size == 0) {
+        count = 1;
+        size = 1;
+    }
     void* ptr = calloc(count, size);
     if (!ptr) {
         fprintf(stderr, "Failed to allocate %s (%zu bytes)\n", label, count * size);
@@ -1251,6 +1254,12 @@ Poly poly_sub(Poly a, Poly b) {
 }
 
 static inline void poly_mul_ref(const Poly* a, const Poly* b, Poly* out) {
+    if ((a->deg == 0 && a->coeffs[0] == 0) ||
+        (b->deg == 0 && b->coeffs[0] == 0)) {
+        poly_zero(out);
+        return;
+    }
+
     Poly tmp;
     Poly* r = out;
     if (out == a || out == b) r = &tmp;
@@ -1265,6 +1274,7 @@ static inline void poly_mul_ref(const Poly* a, const Poly* b, Poly* out) {
             r->coeffs[i + j] += a->coeffs[i] * b->coeffs[j];
         }
     }
+    while (r->deg > 0 && r->coeffs[r->deg] == 0) r->deg--;
     if (r != out) *out = *r;
 }
 
@@ -1359,13 +1369,17 @@ void print_poly(Poly p) {
         }
         first = 0;
     }
+    if (first) {
+        printf("0\n");
+        return;
+    }
     printf("\n");
 }
 
 static void usage(const char* prog) {
     fprintf(stderr,
             "Usage:\n"
-            "  %s [rows cols] [--task-start N] [--task-end N] [--prefix-depth N] [--adaptive-subdivide] [--adaptive-threshold N] [--adaptive-max-depth N] [--adaptive-work-budget N] [--poly-out FILE] [--profile] [--task-times-out FILE]\n"
+            "  %s [rows cols] [--task-start N] [--task-end N] [--prefix-depth N] [--adaptive-subdivide] [--adaptive-max-depth N] [--adaptive-work-budget N] [--poly-out FILE] [--profile] [--task-times-out FILE]\n"
             "  %s --merge [--poly-out FILE] INPUT...\n"
             "\n"
             "Notes:\n"
@@ -3431,13 +3445,6 @@ int main(int argc, char** argv) {
             prefix_depth_override = (int)parse_ll_or_die(argv[++i], "--prefix-depth");
         } else if (strcmp(argv[i], "--adaptive-subdivide") == 0) {
             g_adaptive_subdivide = 1;
-        } else if (strcmp(argv[i], "--adaptive-threshold") == 0) {
-            if (i + 1 >= argc) {
-                usage(argv[0]);
-                free(merge_inputs);
-                return 1;
-            }
-            g_adaptive_threshold = (int)parse_ll_or_die(argv[++i], "--adaptive-threshold");
         } else if (strcmp(argv[i], "--adaptive-max-depth") == 0) {
             if (i + 1 >= argc) {
                 usage(argv[0]);
@@ -3479,7 +3486,7 @@ int main(int argc, char** argv) {
     if (merge_mode) {
         if (positional_count != 0 || task_start != 0 || task_end != -1 ||
             prefix_depth_override != -1 ||
-            g_adaptive_subdivide || g_adaptive_threshold != 128 || g_adaptive_max_depth != 3 ||
+            g_adaptive_subdivide || g_adaptive_max_depth != 3 ||
             g_adaptive_work_budget != 0 ||
             g_profile || g_task_times_out_path) {
             usage(argv[0]);
@@ -3497,8 +3504,10 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // Verify nauty build/runtime compatibility
-    nauty_check(WORDSIZE, MAXN_NAUTY, MAXN_NAUTY, NAUTYVERSIONID);
+    // Verify nauty build/runtime compatibility.
+    int max_n = MAXN_NAUTY;
+    int max_m = SETWORDSNEEDED(max_n);
+    nauty_check(WORDSIZE, max_m, max_n, NAUTYVERSIONID);
     
     // 1. Initialise maths tables
     factorial[0] = 1;
@@ -3551,10 +3560,6 @@ int main(int argc, char** argv) {
     }
     if (g_adaptive_subdivide && g_cols < 3) {
         fprintf(stderr, "--adaptive-subdivide requires cols >= 3\n");
-        return 1;
-    }
-    if (g_adaptive_threshold <= 0) {
-        fprintf(stderr, "--adaptive-threshold must be positive\n");
         return 1;
     }
     if (g_adaptive_work_budget < 0) {
@@ -3672,15 +3677,15 @@ int main(int argc, char** argv) {
     }
     if (g_adaptive_subdivide) {
         if (use_runtime_split_queue) {
-            printf("Runtime subdivision enabled: queue low watermark %d, max depth %d",
-                   g_adaptive_threshold, g_adaptive_max_depth);
+            printf("Runtime subdivision enabled: max depth %d",
+                   g_adaptive_max_depth);
             if (g_adaptive_work_budget > 0) {
                 printf(", work budget %lld", g_adaptive_work_budget);
             }
             printf("\n");
         } else {
-            printf("Adaptive subdivision: threshold %d, max depth %d\n",
-                   g_adaptive_threshold, g_adaptive_max_depth);
+            printf("Adaptive subdivision: max depth %d\n",
+                   g_adaptive_max_depth);
         }
     }
     printf("Prefix generation: %.2f seconds\n", prefix_generation_time);
@@ -3759,9 +3764,8 @@ int main(int argc, char** argv) {
     LocalTaskQueue local_queue;
     int local_queue_active = 0;
     if (use_runtime_split_queue) {
-        int low_watermark = g_adaptive_threshold;
+        int low_watermark = num_threads;
         int high_watermark = 4 * low_watermark;
-        if (high_watermark < low_watermark) high_watermark = low_watermark;
 
         long long queue_cap_ll = total_tasks + high_watermark + 64;
         if (queue_cap_ll > INT_MAX) {

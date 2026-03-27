@@ -44,7 +44,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--task-indices", default="")
     parser.add_argument("--block-size", type=int, default=4)
     parser.add_argument("--adaptive-subdivide", action="store_true")
-    parser.add_argument("--adaptive-threshold", type=int, default=128)
     parser.add_argument("--adaptive-max-depth", type=int, default=3)
     parser.add_argument("--cluster-machines", type=int, default=100)
     parser.add_argument("--cores-per-machine", type=int, default=64)
@@ -69,8 +68,6 @@ def build_base_command(args: argparse.Namespace) -> list[str]:
         cmd.extend(
             [
                 "--adaptive-subdivide",
-                "--adaptive-threshold",
-                str(args.adaptive_threshold),
                 "--adaptive-max-depth",
                 str(args.adaptive_max_depth),
             ]
