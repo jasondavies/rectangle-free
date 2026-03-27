@@ -325,10 +325,6 @@ static inline void graph_cache_load_poly(const GraphCache* cache, int slot, Poly
 void store_graph_cache_entry(GraphCache* cache, uint64_t key_hash, uint32_t key_n, const Graph* g,
                              uint64_t row_mask, const Poly* value);
 
-static inline uint16_t perm_table_get(int partition_id, int perm_id) {
-    return perm_table[(size_t)partition_id * (size_t)perm_count + (size_t)perm_id];
-}
-
 static inline uint32_t* intra_mask_row(int partition_id) {
     return intra_mask + (size_t)partition_id * (size_t)max_complex_per_partition;
 }
@@ -613,10 +609,6 @@ static void local_queue_note_outstanding(LocalTaskQueue* queue, int outstanding)
            !atomic_compare_exchange_weak_explicit(&queue->max_outstanding_tasks, &current, outstanding,
                                                   memory_order_relaxed, memory_order_relaxed)) {
     }
-}
-
-static inline int local_queue_outstanding_relaxed(const LocalTaskQueue* queue) {
-    return atomic_load_explicit(&queue->outstanding_tasks, memory_order_relaxed);
 }
 
 static inline void local_queue_note_idle_locked(LocalTaskQueue* queue, int new_idle_threads) {
@@ -1157,17 +1149,6 @@ static long long parse_ll_or_die(const char* text, const char* label) {
     return value;
 }
 
-static uint64_t parse_u64_or_die(const char* text, const char* label) {
-    char* end = NULL;
-    errno = 0;
-    unsigned long long value = strtoull(text, &end, 10);
-    if (!text || *text == '\0' || !end || *end != '\0' || errno != 0) {
-        fprintf(stderr, "Invalid unsigned integer for %s: %s\n", label, text ? text : "(null)");
-        exit(1);
-    }
-    return (uint64_t)value;
-}
-
 static void trim_newline(char* s) {
     if (!s) return;
     size_t len = strlen(s);
@@ -1263,6 +1244,11 @@ Poly poly_scale(Poly a, long long s) {
 }
 
 static inline void poly_mul_linear_ref(const Poly* a, int c, Poly* out) {
+    if (a->deg == 0 && a->coeffs[0] == 0) {
+        poly_zero(out);
+        return;
+    }
+
     Poly tmp;
     Poly* r = out;
     if (out == a) r = &tmp;
@@ -1274,6 +1260,7 @@ static inline void poly_mul_linear_ref(const Poly* a, int c, Poly* out) {
     if (c != 0) {
         for (int i = 0; i <= a->deg; i++) r->coeffs[i] -= a->coeffs[i] * (PolyCoeff)c;
     }
+    while (r->deg > 0 && r->coeffs[r->deg] == 0) r->deg--;
     if (r != out) *out = *r;
 }
 
@@ -3679,10 +3666,9 @@ int main(int argc, char** argv) {
     LocalTaskQueue local_queue;
     int local_queue_active = 0;
     if (use_runtime_split_queue) {
-        int low_watermark = num_threads;
-        int high_watermark = 4 * low_watermark;
+        int queue_capacity_slack = 4 * num_threads;
 
-        long long queue_cap_ll = total_tasks + high_watermark + 64;
+        long long queue_cap_ll = total_tasks + queue_capacity_slack + 64;
         if (queue_cap_ll > INT_MAX) {
             fprintf(stderr, "Local task queue too large\n");
             return 1;
@@ -3707,8 +3693,8 @@ int main(int argc, char** argv) {
             local_queue_seed_push(&local_queue, &task);
         }
         local_queue_active = 1;
-        printf("Runtime queue: low=%d, high=%d, split-max-depth=%d",
-               low_watermark, high_watermark, g_adaptive_max_depth);
+        printf("Runtime queue: capacity=%d, split-max-depth=%d",
+               (int)queue_cap_ll, g_adaptive_max_depth);
         if (g_adaptive_work_budget > 0) {
             printf(", work budget %lld", g_adaptive_work_budget);
         }
@@ -3879,7 +3865,6 @@ int main(int argc, char** argv) {
                     long long p = first_task + t;
                     int i = 0;
                     int j = 0;
-                    int k = -1;
                     get_prefix2_task(p, &i, &j);
                     int next_stabilizer = 0;
 
@@ -3952,63 +3937,14 @@ int main(int argc, char** argv) {
                     ok = partial_graph_append(&prefix_graph, 1, j, stack);
                     if (g_profile) profile->partial_append_time += omp_get_wtime() - t0;
                     if (ok) {
-                        if (k < 0) {
-                            Poly prefix_weight;
-                            poly_mul_ref(&partition_weight_poly[i], &partition_weight_poly[j],
-                                         &prefix_weight);
-                            long long prefix_mult = (i == j) ? 1 : 2;
-                            int prefix_run = (i == j) ? 2 : 1;
-                            dfs(2, j, stack, &canon_state, &prefix_graph, &cache, &raw_cache, &ws,
-                                &thread_polys[tid], &local_canon_calls, &local_cache_hits, &local_raw_cache_hits,
-                                &prefix_weight, prefix_mult, prefix_run, profile, &canon_scratch);
-                        } else {
-                            stack[2] = k;
-                            if (g_profile) {
-                                profile->canon_prepare_calls++;
-                                profile->canon_prepare_calls_by_depth[2]++;
-                                t0 = omp_get_wtime();
-                            }
-                            if (canon_state_prepare_push(&canon_state, k, &canon_scratch, &next_stabilizer)) {
-                                if (g_profile) {
-                                    profile->canon_prepare_time += omp_get_wtime() - t0;
-                                    profile->canon_prepare_accepts++;
-                                    profile->canon_prepare_accepts_by_depth[2]++;
-                                    profile->stabilizer_sum_by_depth[2] += next_stabilizer;
-                                    profile->canon_commit_calls++;
-                                    t0 = omp_get_wtime();
-                                }
-                                canon_state_commit_push(&canon_state, k, &canon_scratch, next_stabilizer);
-                                if (g_profile) profile->canon_commit_time += omp_get_wtime() - t0;
-                                PartialGraphState prefix_graph2 = prefix_graph;
-                                if (g_profile) {
-                                    profile->partial_append_calls++;
-                                    t0 = omp_get_wtime();
-                                }
-                                ok = partial_graph_append(&prefix_graph2, 2, k, stack);
-                                if (g_profile) profile->partial_append_time += omp_get_wtime() - t0;
-                                if (ok) {
-                                    Poly prefix_weight;
-                                    poly_mul_ref(&partition_weight_poly[i], &partition_weight_poly[j],
-                                                 &prefix_weight);
-                                    poly_mul_ref(&prefix_weight, &partition_weight_poly[k], &prefix_weight);
-                                    long long prefix_mult = (i == j) ? 1 : 2;
-                                    int prefix_run = (i == j) ? 2 : 1;
-                                    if (k == j) {
-                                        prefix_mult = prefix_mult * 3 / (prefix_run + 1);
-                                        prefix_run += 1;
-                                    } else {
-                                        prefix_mult *= 3;
-                                        prefix_run = 1;
-                                    }
-                                    dfs(3, k, stack, &canon_state, &prefix_graph2, &cache, &raw_cache, &ws,
-                                        &thread_polys[tid], &local_canon_calls, &local_cache_hits, &local_raw_cache_hits,
-                                        &prefix_weight, prefix_mult, prefix_run, profile, &canon_scratch);
-                                }
-                                canon_state_pop(&canon_state);
-                            } else if (g_profile) {
-                                profile->canon_prepare_time += omp_get_wtime() - t0;
-                            }
-                        }
+                        Poly prefix_weight;
+                        poly_mul_ref(&partition_weight_poly[i], &partition_weight_poly[j],
+                                     &prefix_weight);
+                        long long prefix_mult = (i == j) ? 1 : 2;
+                        int prefix_run = (i == j) ? 2 : 1;
+                        dfs(2, j, stack, &canon_state, &prefix_graph, &cache, &raw_cache, &ws,
+                            &thread_polys[tid], &local_canon_calls, &local_cache_hits, &local_raw_cache_hits,
+                            &prefix_weight, prefix_mult, prefix_run, profile, &canon_scratch);
                     }
 
                     canon_state_pop(&canon_state);
