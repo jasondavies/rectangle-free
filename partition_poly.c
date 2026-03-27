@@ -387,19 +387,6 @@ static void task_timing_record(TaskTimingStats* stats, long long task_index, dou
     task_timing_insert_topk(stats, task_index, elapsed);
 }
 
-static void task_timing_merge(TaskTimingStats* dst, const TaskTimingStats* src) {
-    dst->task_count += src->task_count;
-    dst->task_time_sum += src->task_time_sum;
-    if (src->task_time_max > dst->task_time_max) {
-        dst->task_time_max = src->task_time_max;
-        dst->task_max_index = src->task_max_index;
-    }
-    for (int i = 0; i < TASK_PROFILE_TOPK; i++) {
-        if (src->top_times[i] <= 0.0) break;
-        task_timing_insert_topk(dst, src->top_indices[i], src->top_times[i]);
-    }
-}
-
 static void queue_subtask_insert_topk(QueueSubtaskTimingStats* stats, const LocalTask* task,
                                       double elapsed, long long solve_graph_calls,
                                       long long nauty_calls, long long hard_graph_nodes,
@@ -790,7 +777,7 @@ static void local_queue_record_profile(LocalTaskQueue* queue, const LocalTask* t
                                        double elapsed, long long solve_graph_calls,
                                        long long nauty_calls, long long hard_graph_nodes,
                                        int max_hard_graph_n, int max_hard_graph_degree) {
-    if (g_queue_profile_report_step <= 0.0 || task->depth < 0 || task->depth > MAX_COLS) return;
+    if (g_queue_profile_report_step <= 0.0 || task->depth > MAX_COLS) return;
 
     pthread_mutex_lock(&queue->mutex);
     queue_subtask_record(&queue->profile_stats[task->depth], task, elapsed, solve_graph_calls, nauty_calls,
@@ -1509,22 +1496,6 @@ static void write_poly_file(const char* path, const Poly* poly, const PolyFileMe
     }
 }
 
-static char* build_poly_file_string(const Poly* poly, const PolyFileMeta* meta) {
-    char* buffer = NULL;
-    size_t size = 0;
-    FILE* f = open_memstream(&buffer, &size);
-    if (!f) {
-        fprintf(stderr, "Failed to open memory stream for polynomial output\n");
-        exit(1);
-    }
-    write_poly_file_stream(f, poly, meta);
-    if (fclose(f) != 0) {
-        fprintf(stderr, "Failed to close polynomial memory stream\n");
-        exit(1);
-    }
-    return buffer;
-}
-
 static void read_poly_file(const char* path, Poly* poly, PolyFileMeta* meta) {
     FILE* f = fopen(path, "r");
     if (!f) {
@@ -1593,60 +1564,6 @@ static void read_poly_file(const char* path, Poly* poly, PolyFileMeta* meta) {
         fprintf(stderr, "Failed to close %s\n", path);
         exit(1);
     }
-}
-
-static void json_append_escaped(char** dst, size_t* cap, size_t* len, const char* text) {
-    for (const unsigned char* p = (const unsigned char*)text; *p; p++) {
-        unsigned char c = *p;
-        const char* escape = NULL;
-        char tmp[8];
-        if (c == '\\') escape = "\\\\";
-        else if (c == '"') escape = "\\\"";
-        else if (c == '\n') escape = "\\n";
-        else if (c == '\r') escape = "\\r";
-        else if (c == '\t') escape = "\\t";
-        else if (c < 0x20) {
-            snprintf(tmp, sizeof(tmp), "\\u%04x", (unsigned)c);
-            escape = tmp;
-        }
-        const char* src = escape ? escape : (const char[]){(char)c, '\0'};
-        size_t add = strlen(src);
-        if (*len + add + 1 > *cap) {
-            while (*len + add + 1 > *cap) *cap *= 2;
-            *dst = realloc(*dst, *cap);
-            if (!*dst) {
-                fprintf(stderr, "Failed to grow JSON buffer\n");
-                exit(1);
-            }
-        }
-        memcpy(*dst + *len, src, add);
-        *len += add;
-        (*dst)[*len] = '\0';
-    }
-}
-
-static char* json_quote_string(const char* text) {
-    size_t cap = strlen(text) * 2 + 16;
-    char* out = malloc(cap);
-    if (!out) {
-        fprintf(stderr, "Failed to allocate JSON string buffer\n");
-        exit(1);
-    }
-    size_t len = 0;
-    out[len++] = '"';
-    out[len] = '\0';
-    json_append_escaped(&out, &cap, &len, text);
-    if (len + 2 > cap) {
-        cap = len + 2;
-        out = realloc(out, cap);
-        if (!out) {
-            fprintf(stderr, "Failed to grow JSON string buffer\n");
-            exit(1);
-        }
-    }
-    out[len++] = '"';
-    out[len] = '\0';
-    return out;
 }
 
 static int run_merge_mode(const char* prog, const char* poly_out_path, int input_count, char** inputs) {
@@ -3087,7 +3004,7 @@ static void build_live_prefix2_tasks(PrefixId** live_i_out, PrefixId** live_j_ou
     free(live.l);
 }
 
-static void solve_structure(int* stack, const Graph* partial_graph, CanonState* canon_state,
+static void solve_structure(const Graph* partial_graph, CanonState* canon_state,
                             GraphCache* cache, GraphCache* raw_cache, NautyWorkspace* ws,
                             long long* local_canon_calls, long long* local_cache_hits,
                             long long* local_raw_cache_hits, const Poly* weight_prod,
@@ -3115,7 +3032,7 @@ void dfs(int depth, int min_idx, int* stack, CanonState* canon_state, const Part
          int run_len, ProfileStats* profile, CanonScratch* canon_scratch) {
     if (depth == g_cols) {
         Poly res;
-        solve_structure(stack, &partial_graph->g, canon_state, cache, raw_cache, ws,
+        solve_structure(&partial_graph->g, canon_state, cache, raw_cache, ws,
                         local_canon_calls, local_cache_hits, local_raw_cache_hits,
                         weight_prod, mult_coeff, profile, &res);
         poly_add_ref(local_total, &res, local_total);
@@ -3398,7 +3315,7 @@ static void dfs_runtime_split_local(int depth, int start_pid, int end_pid, long 
                                     LocalTaskQueue* queue) {
     if (depth == g_cols) {
         Poly res;
-        solve_structure(ctx->stack, &ctx->partial_graph.g, &ctx->canon_state,
+        solve_structure(&ctx->partial_graph.g, &ctx->canon_state,
                         &ctx->cache, &ctx->raw_cache, &ctx->ws,
                         &ctx->local_canon_calls, &ctx->local_cache_hits,
                         &ctx->local_raw_cache_hits, weight_prod, mult_coeff, profile, &res);
@@ -3513,7 +3430,7 @@ static void execute_local_runtime_task(const LocalTask* task, WorkerCtx* ctx, Po
     if (replay_local_task_prefix(task, ctx, &weight_prod, &mult_coeff, &run_len, &min_idx)) {
         if (task->depth == g_cols) {
             Poly res;
-            solve_structure(ctx->stack, &ctx->partial_graph.g, &ctx->canon_state,
+            solve_structure(&ctx->partial_graph.g, &ctx->canon_state,
                             &ctx->cache, &ctx->raw_cache, &ctx->ws,
                             &ctx->local_canon_calls, &ctx->local_cache_hits,
                             &ctx->local_raw_cache_hits, &weight_prod, mult_coeff, profile, &res);
@@ -3534,7 +3451,7 @@ static void execute_local_runtime_task(const LocalTask* task, WorkerCtx* ctx, Po
     tls_hard_graph_stats = prev_hard_stats;
     tls_adaptive_work_counter = prev_work_counter;
 
-    if (g_profile && queue_subtask_stats && task->depth >= 0 && task->depth <= MAX_COLS) {
+    if (g_profile && queue_subtask_stats && task->depth <= MAX_COLS) {
         double elapsed = omp_get_wtime() - subtask_t0;
         long long solve_graph_delta = profile->solve_graph_calls - solve_graph_before;
         long long nauty_delta = profile->nauty_calls - nauty_before;
@@ -3803,7 +3720,6 @@ int main(int argc, char** argv) {
     }
 
     long long total_prefixes = 0;
-    long long materialized_prefixes = 0;
     long long nominal_prefixes = 0;
     PrefixId *prefix_i = NULL, *prefix_j = NULL, *prefix_k = NULL, *prefix_l = NULL;
     Prefix2Batch* prefix2_batches = NULL;
