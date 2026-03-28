@@ -161,6 +161,16 @@ typedef struct {
     long long stabilizer_sum_by_depth[MAX_COLS + 1];
     long long canon_prepare_scanned_by_depth[MAX_COLS + 1];
     long long canon_prepare_active_by_depth[MAX_COLS + 1];
+    long long solve_graph_calls_by_n[MAXN_NAUTY + 1];
+    long long solve_graph_raw_hits_by_n[MAXN_NAUTY + 1];
+    long long solve_graph_canon_hits_by_n[MAXN_NAUTY + 1];
+    long long hard_graph_nodes_by_n[MAXN_NAUTY + 1];
+    long long solve_graph_lookup_calls_by_n[MAXN_NAUTY + 1];
+    long long solve_graph_component_calls_by_n[MAXN_NAUTY + 1];
+    long long solve_graph_hard_misses_by_n[MAXN_NAUTY + 1];
+    long long hard_graph_articulation_by_n[MAXN_NAUTY + 1];
+    long long hard_graph_k2_separator_by_n[MAXN_NAUTY + 1];
+    long long hard_graph_nodes_by_n_degree[MAXN_NAUTY + 1][MAXN_NAUTY + 1];
     int hard_graph_max_n;
     int hard_graph_max_degree;
     double canon_prepare_time;
@@ -169,6 +179,12 @@ typedef struct {
     double build_weight_time;
     double solve_graph_time;
     double nauty_time;
+    double solve_graph_time_by_n[MAXN_NAUTY + 1];
+    double solve_graph_lookup_time_by_n[MAXN_NAUTY + 1];
+    double solve_graph_raw_hit_time_by_n[MAXN_NAUTY + 1];
+    double solve_graph_canon_hit_time_by_n[MAXN_NAUTY + 1];
+    double solve_graph_component_time_by_n[MAXN_NAUTY + 1];
+    double solve_graph_hard_miss_time_by_n[MAXN_NAUTY + 1];
 } ProfileStats;
 
 #define TASK_PROFILE_TOPK 8
@@ -2481,6 +2497,61 @@ static int graph_collect_components(const Graph* g, uint64_t* component_masks) {
     return count;
 }
 
+static int graph_has_articulation_point(const Graph* g) {
+    if (g->n <= 2) return 0;
+    uint64_t full = graph_row_mask(g->n);
+    for (int v = 0; v < g->n; v++) {
+        uint64_t remaining = full & ~(1ULL << v);
+        if (remaining == 0) return 0;
+        int start = __builtin_ctzll(remaining);
+        uint64_t visited = 0;
+        uint64_t frontier = 1ULL << start;
+        while (frontier) {
+            visited |= frontier;
+            uint64_t next = 0;
+            uint64_t current = frontier;
+            while (current) {
+                int u = __builtin_ctzll(current);
+                next |= g->adj[u] & remaining;
+                current &= current - 1;
+            }
+            frontier = next & remaining & ~visited;
+        }
+        if (visited != remaining) return 1;
+    }
+    return 0;
+}
+
+static int graph_has_k2_separator(const Graph* g) {
+    if (g->n <= 3) return 0;
+    uint64_t full = graph_row_mask(g->n);
+    for (int u = 0; u < g->n; u++) {
+        uint64_t nbrs = g->adj[u] & ~((1ULL << (u + 1)) - 1ULL);
+        while (nbrs) {
+            int v = __builtin_ctzll(nbrs);
+            nbrs &= nbrs - 1;
+            uint64_t remaining = full & ~(1ULL << u) & ~(1ULL << v);
+            if (remaining == 0) continue;
+            int start = __builtin_ctzll(remaining);
+            uint64_t visited = 0;
+            uint64_t frontier = 1ULL << start;
+            while (frontier) {
+                visited |= frontier;
+                uint64_t next = 0;
+                uint64_t current = frontier;
+                while (current) {
+                    int w = __builtin_ctzll(current);
+                    next |= g->adj[w] & remaining;
+                    current &= current - 1;
+                }
+                frontier = next & remaining & ~visited;
+            }
+            if (visited != remaining) return 1;
+        }
+    }
+    return 0;
+}
+
 uint64_t hash_graph(const Graph* g) {
     uint64_t row_mask = graph_row_mask(g->n);
     uint64_t h = 14695981039346656037ULL;
@@ -2702,6 +2773,10 @@ void remove_vertex(Graph* g, int i) {
 static inline void record_hard_graph_node(ProfileStats* profile, int n, int max_degree) {
     if (g_profile && profile) {
         profile->hard_graph_nodes++;
+        if (n >= 0 && n <= MAXN_NAUTY) profile->hard_graph_nodes_by_n[n]++;
+        if (n >= 0 && n <= MAXN_NAUTY && max_degree >= 0 && max_degree <= MAXN_NAUTY) {
+            profile->hard_graph_nodes_by_n_degree[n][max_degree]++;
+        }
         if (n > profile->hard_graph_max_n) profile->hard_graph_max_n = n;
         if (max_degree > profile->hard_graph_max_degree) profile->hard_graph_max_degree = max_degree;
     }
@@ -2721,6 +2796,15 @@ static void solve_graph_poly(const Graph* input_g, GraphCache* cache, GraphCache
                              ProfileStats* profile, GraphPoly* out_result) {
     Graph g = *input_g;
     double solve_t0 = 0.0;
+    int profile_n = 0;
+    enum {
+        SG_OUTCOME_NONE = 0,
+        SG_OUTCOME_LOOKUP,
+        SG_OUTCOME_RAW_HIT,
+        SG_OUTCOME_CANON_HIT,
+        SG_OUTCOME_COMPONENTS,
+        SG_OUTCOME_HARD_MISS,
+    } outcome = SG_OUTCOME_NONE;
     if (g_profile && profile) {
         profile->solve_graph_calls++;
         solve_t0 = omp_get_wtime();
@@ -2760,18 +2844,23 @@ static void solve_graph_poly(const Graph* input_g, GraphCache* cache, GraphCache
             }
         }
     }
+
+    profile_n = g.n;
+    if (g_profile && profile && profile_n >= 0 && profile_n <= MAXN_NAUTY) {
+        profile->solve_graph_calls_by_n[profile_n]++;
+    }
     
     if (g.n == 0) {
         *out_result = multiplier;
-        return;
+        goto done;
     }
 
     if (g.n <= SMALL_GRAPH_LOOKUP_MAX_N) {
         GraphPoly small_poly;
         small_graph_lookup_load_graph_poly(g.n, small_graph_pack_mask(&g), &small_poly);
         graph_poly_mul_ref(&multiplier, &small_poly, out_result);
-        if (g_profile && profile) profile->solve_graph_time += omp_get_wtime() - solve_t0;
-        return;
+        outcome = SG_OUTCOME_LOOKUP;
+        goto done;
     }
 
     uint64_t row_mask = graph_row_mask(g.n);
@@ -2786,11 +2875,14 @@ static void solve_graph_poly(const Graph* input_g, GraphCache* cache, GraphCache
         if (graph_cache_slot_matches_sig(raw_cache, p, raw_hash, (uint32_t)g.n, raw_sig)) {
             GraphPoly cached;
             (*local_raw_cache_hits)++;
+            if (g_profile && profile && g.n <= MAXN_NAUTY) {
+                profile->solve_graph_raw_hits_by_n[g.n]++;
+            }
             graph_cache_load_poly(raw_cache, p, &cached);
             graph_cache_touch_slot(raw_cache, p);
             graph_poly_mul_ref(&multiplier, &cached, out_result);
-            if (g_profile && profile) profile->solve_graph_time += omp_get_wtime() - solve_t0;
-            return;
+            outcome = SG_OUTCOME_RAW_HIT;
+            goto done;
         }
     }
 
@@ -2798,6 +2890,7 @@ static void solve_graph_poly(const Graph* input_g, GraphCache* cache, GraphCache
     uint64_t component_masks[MAXN_NAUTY];
     int component_count = graph_collect_components(&g, component_masks);
     if (component_count > 1) {
+        outcome = SG_OUTCOME_COMPONENTS;
         graph_poly_one_ref(&res);
         for (int i = 0; i < component_count; i++) {
             Graph subgraph;
@@ -2828,9 +2921,12 @@ static void solve_graph_poly(const Graph* input_g, GraphCache* cache, GraphCache
                 graph_cache_load_poly(cache, p, &cached);
                 graph_cache_touch_slot(cache, p);
                 store_graph_cache_entry(raw_cache, raw_hash, (uint32_t)g.n, &g, row_mask, &cached);
+                if (g_profile && profile && canon.n <= MAXN_NAUTY) {
+                    profile->solve_graph_canon_hits_by_n[canon.n]++;
+                }
                 graph_poly_mul_ref(&multiplier, &cached, out_result);
-                if (g_profile && profile) profile->solve_graph_time += omp_get_wtime() - solve_t0;
-                return;
+                outcome = SG_OUTCOME_CANON_HIT;
+                goto done;
             }
         }
 
@@ -2838,10 +2934,13 @@ static void solve_graph_poly(const Graph* input_g, GraphCache* cache, GraphCache
                                            &canon, ADJWORD_MASK, &res)) {
             store_graph_cache_entry(cache, hash, (uint32_t)canon.n, &canon, ADJWORD_MASK, &res);
             (*local_cache_hits)++;
+            if (g_profile && profile && canon.n <= MAXN_NAUTY) {
+                profile->solve_graph_canon_hits_by_n[canon.n]++;
+            }
             store_graph_cache_entry(raw_cache, raw_hash, (uint32_t)g.n, &g, row_mask, &res);
             graph_poly_mul_ref(&multiplier, &res, out_result);
-            if (g_profile && profile) profile->solve_graph_time += omp_get_wtime() - solve_t0;
-            return;
+            outcome = SG_OUTCOME_CANON_HIT;
+            goto done;
         }
 
         // Deletion-contraction on canonical graph
@@ -2852,6 +2951,15 @@ static void solve_graph_poly(const Graph* input_g, GraphCache* cache, GraphCache
             if (d > max_deg) { max_deg = d; u = i; }
         }
         if (u != -1 && max_deg > 0) record_hard_graph_node(profile, branch_g->n, max_deg);
+        outcome = SG_OUTCOME_HARD_MISS;
+        if (g_profile && profile && branch_g->n >= 10 && branch_g->n <= MAXN_NAUTY) {
+            if (graph_has_articulation_point(branch_g)) {
+                profile->hard_graph_articulation_by_n[branch_g->n]++;
+            }
+            if (graph_has_k2_separator(branch_g)) {
+                profile->hard_graph_k2_separator_by_n[branch_g->n]++;
+            }
+        }
 
         int v = -1;
         if (u != -1) {
@@ -2901,7 +3009,36 @@ static void solve_graph_poly(const Graph* input_g, GraphCache* cache, GraphCache
 
     store_graph_cache_entry(raw_cache, raw_hash, (uint32_t)g.n, &g, row_mask, &res);
     graph_poly_mul_ref(&multiplier, &res, out_result);
-    if (g_profile && profile) profile->solve_graph_time += omp_get_wtime() - solve_t0;
+done:
+    if (g_profile && profile) {
+        double dt = omp_get_wtime() - solve_t0;
+        profile->solve_graph_time += dt;
+        if (profile_n >= 0 && profile_n <= MAXN_NAUTY) {
+            profile->solve_graph_time_by_n[profile_n] += dt;
+            switch (outcome) {
+                case SG_OUTCOME_LOOKUP:
+                    profile->solve_graph_lookup_calls_by_n[profile_n]++;
+                    profile->solve_graph_lookup_time_by_n[profile_n] += dt;
+                    break;
+                case SG_OUTCOME_RAW_HIT:
+                    profile->solve_graph_raw_hit_time_by_n[profile_n] += dt;
+                    break;
+                case SG_OUTCOME_CANON_HIT:
+                    profile->solve_graph_canon_hit_time_by_n[profile_n] += dt;
+                    break;
+                case SG_OUTCOME_COMPONENTS:
+                    profile->solve_graph_component_calls_by_n[profile_n]++;
+                    profile->solve_graph_component_time_by_n[profile_n] += dt;
+                    break;
+                case SG_OUTCOME_HARD_MISS:
+                    profile->solve_graph_hard_misses_by_n[profile_n]++;
+                    profile->solve_graph_hard_miss_time_by_n[profile_n] += dt;
+                    break;
+                default:
+                    break;
+            }
+        }
+    }
 }
 
 static void partial_graph_reset(PartialGraphState* st) {
@@ -4365,6 +4502,27 @@ int main(int argc, char** argv) {
             total_profile.canon_prepare_scanned_by_depth[d] += src->canon_prepare_scanned_by_depth[d];
             total_profile.canon_prepare_active_by_depth[d] += src->canon_prepare_active_by_depth[d];
         }
+        for (int n = 0; n <= MAXN_NAUTY; n++) {
+            total_profile.solve_graph_calls_by_n[n] += src->solve_graph_calls_by_n[n];
+            total_profile.solve_graph_raw_hits_by_n[n] += src->solve_graph_raw_hits_by_n[n];
+            total_profile.solve_graph_canon_hits_by_n[n] += src->solve_graph_canon_hits_by_n[n];
+            total_profile.hard_graph_nodes_by_n[n] += src->hard_graph_nodes_by_n[n];
+            total_profile.solve_graph_lookup_calls_by_n[n] += src->solve_graph_lookup_calls_by_n[n];
+            total_profile.solve_graph_component_calls_by_n[n] += src->solve_graph_component_calls_by_n[n];
+            total_profile.solve_graph_hard_misses_by_n[n] += src->solve_graph_hard_misses_by_n[n];
+            total_profile.hard_graph_articulation_by_n[n] += src->hard_graph_articulation_by_n[n];
+            total_profile.hard_graph_k2_separator_by_n[n] += src->hard_graph_k2_separator_by_n[n];
+            total_profile.solve_graph_time_by_n[n] += src->solve_graph_time_by_n[n];
+            total_profile.solve_graph_lookup_time_by_n[n] += src->solve_graph_lookup_time_by_n[n];
+            total_profile.solve_graph_raw_hit_time_by_n[n] += src->solve_graph_raw_hit_time_by_n[n];
+            total_profile.solve_graph_canon_hit_time_by_n[n] += src->solve_graph_canon_hit_time_by_n[n];
+            total_profile.solve_graph_component_time_by_n[n] += src->solve_graph_component_time_by_n[n];
+            total_profile.solve_graph_hard_miss_time_by_n[n] += src->solve_graph_hard_miss_time_by_n[n];
+            for (int d = 0; d <= MAXN_NAUTY; d++) {
+                total_profile.hard_graph_nodes_by_n_degree[n][d] +=
+                    src->hard_graph_nodes_by_n_degree[n][d];
+            }
+        }
 
         total_task_timing.task_count += thread_task_timing[i].task_count;
         total_task_timing.task_time_sum += thread_task_timing[i].task_time_sum;
@@ -4422,6 +4580,57 @@ int main(int argc, char** argv) {
                total_profile.hard_graph_nodes,
                total_profile.hard_graph_max_n,
                total_profile.hard_graph_max_degree);
+        printf("  Graph solver by simplified n (inclusive time):\n");
+        for (int n = 0; n <= MAXN_NAUTY; n++) {
+            long long calls = total_profile.solve_graph_calls_by_n[n];
+            long long raw_hits = total_profile.solve_graph_raw_hits_by_n[n];
+            long long canon_hits = total_profile.solve_graph_canon_hits_by_n[n];
+            long long hard = total_profile.hard_graph_nodes_by_n[n];
+            double time_s = total_profile.solve_graph_time_by_n[n];
+            if (calls == 0 && raw_hits == 0 && canon_hits == 0 && hard == 0) continue;
+            printf("    n=%d: calls %lld, time %.3fs, raw hits %lld, canon hits %lld, hard nodes %lld\n",
+                   n, calls, time_s, raw_hits, canon_hits, hard);
+        }
+        printf("  Graph solver outcomes by simplified n:\n");
+        for (int n = 0; n <= MAXN_NAUTY; n++) {
+            long long lookup_calls = total_profile.solve_graph_lookup_calls_by_n[n];
+            long long raw_hits = total_profile.solve_graph_raw_hits_by_n[n];
+            long long canon_hits = total_profile.solve_graph_canon_hits_by_n[n];
+            long long component_calls = total_profile.solve_graph_component_calls_by_n[n];
+            long long hard_misses = total_profile.solve_graph_hard_misses_by_n[n];
+            if (lookup_calls == 0 && raw_hits == 0 && canon_hits == 0 &&
+                component_calls == 0 && hard_misses == 0) {
+                continue;
+            }
+            printf("    n=%d: lookup %lld/%.3fs, raw-hit %lld/%.3fs, canon-hit %lld/%.3fs, components %lld/%.3fs, hard-miss %lld/%.3fs\n",
+                   n,
+                   lookup_calls, total_profile.solve_graph_lookup_time_by_n[n],
+                   raw_hits, total_profile.solve_graph_raw_hit_time_by_n[n],
+                   canon_hits, total_profile.solve_graph_canon_hit_time_by_n[n],
+                   component_calls, total_profile.solve_graph_component_time_by_n[n],
+                   hard_misses, total_profile.solve_graph_hard_miss_time_by_n[n]);
+        }
+        printf("  Hard-miss separator detection by simplified n:\n");
+        for (int n = 0; n <= MAXN_NAUTY; n++) {
+            long long hard_misses = total_profile.solve_graph_hard_misses_by_n[n];
+            long long articulation = total_profile.hard_graph_articulation_by_n[n];
+            long long k2 = total_profile.hard_graph_k2_separator_by_n[n];
+            if (hard_misses == 0 && articulation == 0 && k2 == 0) continue;
+            printf("    n=%d: hard-miss %lld, articulation %lld, k2-separator %lld\n",
+                   n, hard_misses, articulation, k2);
+        }
+        printf("  Hard graph nodes by simplified n and max degree:\n");
+        for (int n = 10; n <= MAXN_NAUTY; n++) {
+            long long total_n = total_profile.hard_graph_nodes_by_n[n];
+            if (total_n == 0) continue;
+            printf("    n=%d:", n);
+            for (int d = 0; d <= MAXN_NAUTY; d++) {
+                long long count = total_profile.hard_graph_nodes_by_n_degree[n][d];
+                if (count == 0) continue;
+                printf(" deg%d=%lld", d, count);
+            }
+            printf("\n");
+        }
         printf("  CanonState by depth:\n");
         for (int d = 0; d <= g_cols && d <= MAX_COLS; d++) {
             long long calls = total_profile.canon_prepare_calls_by_depth[d];

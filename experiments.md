@@ -3595,3 +3595,116 @@
   - although the bounded `7x5` sample is slightly positive, the bounded `7x6` sample regresses catastrophically in the hot terminal-depth regime the specialisation was meant to help
   - the extra specialised control flow appears to be much worse for the compiler/runtime than the generic terminal helper
 - Outcome: rejected.
+
+### Experiment 106: Target a stronger branch edge only for hard graph sizes (`n >= 10`)
+- Goal: use the new graph-size profiling to revisit edge selection only in the true hard-miss band, instead of globally. The hypothesis was that a triangle-heavy score might help on the `n=10..14` hard misses that dominate adaptive `7x6`.
+- Change:
+  - kept the existing branching rule for smaller canonical graphs
+  - for canonical graphs with `n >= 10`, scanned all edges and chose the maximum of:
+    - `16 * popcount(adj[u] & adj[v]) + deg(u) + deg(v)`
+  - left the rest of the deletion-contraction code unchanged
+- Baseline binary:
+  - `/tmp/partition_poly_7_head106`, compiled from committed `HEAD`
+- Exactness checks:
+  - `7x2 --task-end 50` shard output matched exactly
+- `7x6 --adaptive-subdivide --task-end 1 --adaptive-work-budget 10 --adaptive-max-depth 5 --profile`:
+  - baseline:
+    - `Worker Complete in 6.23s`
+    - `solve_graph_poly: 8321927 calls, 402.205s`
+    - `get_canonical_graph/densenauty: 2446797 calls, 18.044s`
+    - `hard graph nodes: 1216698`
+  - experiment:
+    - `Worker Complete in 8.35s`
+    - `solve_graph_poly: 15879087 calls, 1862.538s`
+    - `get_canonical_graph/densenauty: 9679591 calls, 55.679s`
+    - `hard graph nodes: 4993180`
+- Interpretation:
+  - this is a catastrophic regression
+  - the targeted score does not improve the hard-miss band; it massively expands the deletion-contraction tree and drives many more canonical calls
+  - the result is strong enough to rule out this edge-scoring family even when restricted to the previously identified hard graph sizes
+- Outcome: rejected and reverted.
+
+### Experiment 107: Target `K2` separator factorisation only on hard misses with `n >= 10`
+- Goal: revisit size-2 clique-separator factorisation in the only regime where the new profiling suggested it might matter: hard misses in the `n=10..14` band, where `K2` separators show up in roughly `5%` to `9%` of cases.
+- Change:
+  - kept the new graph-size and hard-miss separator profiling
+  - on the canonical hard-miss path, before deletion-contraction:
+    - only if `canon.n >= 10`
+    - search for an edge `{u,v}` whose removal disconnects the remainder
+    - solve each induced subgraph on `component ∪ {u,v}`
+    - multiply the results
+    - divide exactly by `(x(x-1))^(k-1)`
+  - if no such separator is found, fall through to the existing deletion-contraction path
+- Baseline binary:
+  - `/tmp/partition_poly_7_pre107`, compiled from the current instrumented solver before the factorisation change
+- Exactness checks:
+  - `7x2 --task-end 50` shard output matched exactly
+- `7x6 --adaptive-subdivide --task-end 1 --adaptive-work-budget 10 --adaptive-max-depth 5 --profile`:
+  - first run:
+    - baseline:
+      - `Worker Complete in 6.66s`
+      - `solve_graph_poly: 8418293 calls, 460.003s`
+      - `get_canonical_graph/densenauty: 2547782 calls, 19.500s`
+      - `hard graph nodes: 1264901`
+    - experiment:
+      - `Worker Complete in 6.63s`
+      - `solve_graph_poly: 8259013 calls, 458.324s`
+      - `get_canonical_graph/densenauty: 2402276 calls, 18.181s`
+      - `hard graph nodes: 1165045`
+  - repeat:
+    - baseline:
+      - `Worker Complete in 6.32s`
+      - `solve_graph_poly: 8312499 calls, 427.473s`
+      - `get_canonical_graph/densenauty: 2435232 calls, 17.268s`
+      - `hard graph nodes: 1211988`
+    - experiment:
+      - `Worker Complete in 6.56s`
+      - `solve_graph_poly: 8228473 calls, 442.708s`
+      - `get_canonical_graph/densenauty: 2367582 calls, 17.861s`
+      - `hard graph nodes: 1149702`
+- Interpretation:
+  - the targeted factorisation does reduce hard graph nodes and canonical calls in the hard band
+  - but the end-to-end effect is too small and inconsistent to justify keeping
+  - the first run is slightly positive, while the repeat is clearly negative overall
+  - so even with the new profiling guidance, this remains too weak as a default solver change
+- Outcome: rejected and reverted.
+
+### Experiment 108: Top-3 one-ply branch selector only on hard misses with `10 <= n <= 12`
+- Goal: test the profile-guided branch-selection idea in its narrowest useful form:
+  - only on canonical hard misses
+  - only in the expensive `n=10..12` band
+  - cheap edge score to pick the top 3 candidates
+  - one-ply delete/contract plus simplification summaries to choose among those
+- Change:
+  - on hard misses with `10 <= n <= 12`, ranked edges by:
+    - `16 * popcount(adj[u] & adj[v]) + deg(u) + deg(v)`
+  - kept the top 3 edges only
+  - for each of those, simulated:
+    - delete edge, then run the existing simplification loop
+    - contract edge, then run the existing simplification loop
+  - chose the edge lexicographically by:
+    - decomposition opportunities
+    - total vertices removed by simplification
+    - smaller `max(n_del, n_cont)`
+    - smaller `n_del + n_cont`
+  - left the old max-degree + first-neighbour rule as fallback elsewhere
+- Baseline binary:
+  - `/tmp/partition_poly_7_pre108`, compiled from the current instrumented solver before the branch-selector change
+- Exactness checks:
+  - `7x2 --task-end 50` shard output matched exactly
+- `7x6 --adaptive-subdivide --task-end 1 --adaptive-work-budget 10 --adaptive-max-depth 5 --profile`:
+  - baseline:
+    - `Worker Complete in 6.87s`
+    - `solve_graph_poly: 8505655 calls, 482.647s`
+    - `get_canonical_graph/densenauty: 2636207 calls, 20.629s`
+    - `hard graph nodes: 1308566`
+  - experiment:
+    - `Worker Complete in 9.38s`
+    - `solve_graph_poly: 15685183 calls, 2215.535s`
+    - `get_canonical_graph/densenauty: 9357649 calls, 47.347s`
+    - `hard graph nodes: 4896550`
+- Interpretation:
+  - this is a catastrophic regression
+  - even with top-3 prefiltering and one-ply simplification summaries, the selector chooses dramatically worse branch edges for this graph family
+  - the hard band explodes instead of shrinking, so this branch-selection direction should be considered exhausted
+- Outcome: rejected and reverted.
