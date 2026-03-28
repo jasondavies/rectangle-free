@@ -3254,3 +3254,119 @@
   - the direct graph-solver time is mixed, but the smaller graph-side objects reduce enough overall traffic that total runtime still drops clearly
   - the main visible improvement is in the hot prefix-side path, which suggests the smaller graph/cached polynomial objects are helping overall locality rather than just the recursive graph solver
 - Outcome: accepted.
+
+### Experiment 98: Shrink `Graph.n` and `PartialGraphState.base[]`
+- Goal: test whether shrinking the remaining graph-side scalar fields to byte-sized storage gives a further locality win after Experiment 97.
+- Implementation:
+  - changed `Graph.n` from `int` to `uint8_t`
+  - changed `PartialGraphState.base[]` from `int[MAX_COLS]` to `uint8_t[MAX_COLS]`
+  - left all graph algorithms and solver logic unchanged
+- Exactness checks:
+  - `7x2 --task-end 50` shard output matched exactly against `/tmp/partition_poly_7_pre98`
+- Baseline `7x4` command:
+  - `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre98 7 4 --prefix-depth 2 --task-end 16 --profile`
+- Baseline `7x4` result:
+  - `Worker Complete in 0.73s`
+  - `canon_state_prepare_push: 0.513s`
+- Experiment `7x4` result:
+  - `env OMP_NUM_THREADS=1 ./partition_poly_7 7 4 --prefix-depth 2 --task-end 16 --profile`
+  - `Worker Complete in 0.71s`
+  - `canon_state_prepare_push: 0.505s`
+- Baseline `7x5` command:
+  - `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre98 7 5 --prefix-depth 2 --task-end 4 --profile`
+- Baseline `7x5` result:
+  - `Worker Complete in 14.85s`
+  - `canon_state_prepare_push: 11.065s`
+  - `solve_graph_poly: 1.652s`
+- Experiment `7x5` result:
+  - `env OMP_NUM_THREADS=1 ./partition_poly_7 7 5 --prefix-depth 2 --task-end 4 --profile`
+  - `Worker Complete in 15.47s`
+  - `canon_state_prepare_push: 11.690s`
+  - `solve_graph_poly: 1.650s`
+- Interpretation:
+  - the lighter fields do not help in practice
+  - the tiny `7x4` improvement is noise-level, and the heavier `7x5` sample regresses clearly
+  - this suggests the extra integer promotions and narrower-field handling cost more than the reduced struct size saves
+- Outcome: rejected and reverted.
+
+### Experiment 99: Set nauty `tc_level = 0`
+- Goal: test the cheap target-cell choice setting in nauty without changing any other canonicalisation options.
+- Implementation:
+  - kept the current `densenauty()` path unchanged apart from `options.tc_level = 0`
+- Exactness checks:
+  - `7x2 --task-end 50` shard output matched exactly against `/tmp/partition_poly_7_pre99`
+- Baseline `7x4` command:
+  - `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre99 7 4 --prefix-depth 2 --task-end 16 --profile`
+- Baseline `7x4` result:
+  - `Worker Complete in 0.71s`
+  - `get_canonical_graph/densenauty: 0.002s`
+- Experiment `7x4` result:
+  - `env OMP_NUM_THREADS=1 ./partition_poly_7 7 4 --prefix-depth 2 --task-end 16 --profile`
+  - `Worker Complete in 0.71s`
+  - `get_canonical_graph/densenauty: 0.002s`
+- Baseline `7x5` command:
+  - `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre99 7 5 --prefix-depth 2 --task-end 4 --profile`
+- Baseline `7x5` result:
+  - `Worker Complete in 14.81s`
+  - `Canonicalisation calls: 98166`
+  - `Canonical cache hits: 71012`
+  - `Raw cache hits: 233452`
+  - `get_canonical_graph/densenauty: 0.189s`
+- Experiment `7x5` result:
+  - `env OMP_NUM_THREADS=1 ./partition_poly_7 7 5 --prefix-depth 2 --task-end 4 --profile`
+  - `Worker Complete in 14.76s`
+  - `Canonicalisation calls: 98200`
+  - `Canonical cache hits: 71054`
+  - `Raw cache hits: 233400`
+  - `get_canonical_graph/densenauty: 0.185s`
+- Interpretation:
+  - this is essentially flat
+  - the end-to-end movement is tiny and comes with small shifts in the recursion/caching counts, so it is not a clean enough win to justify keeping
+- Outcome: rejected and reverted.
+
+### Experiment 100: Use nauty `twopaths` invariant at level 1
+- Goal: try one remaining dense nauty invariant that had not yet been benchmarked here, in isolation from other nauty option changes.
+- Implementation:
+  - included `nautinv.h`
+  - set:
+    - `options.invarproc = twopaths`
+    - `options.mininvarlevel = 1`
+    - `options.maxinvarlevel = 1`
+    - `options.invararg = 0`
+  - left all other nauty options at their current defaults
+- Exactness checks:
+  - `7x2 --task-end 50` shard output matched exactly against `/tmp/partition_poly_7_pre99`
+- Baseline `7x4` command:
+  - `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre99 7 4 --prefix-depth 2 --task-end 16 --profile`
+- Baseline `7x4` result:
+  - `Worker Complete in 0.70s`
+  - `Canonicalisation calls: 683`
+  - `solve_graph_poly: 0.030s`
+  - `get_canonical_graph/densenauty: 0.002s`
+- Experiment `7x4` result:
+  - `env OMP_NUM_THREADS=1 ./partition_poly_7 7 4 --prefix-depth 2 --task-end 16 --profile`
+  - `Worker Complete in 0.71s`
+  - `Canonicalisation calls: 682`
+  - `solve_graph_poly: 0.032s`
+  - `get_canonical_graph/densenauty: 0.002s`
+- Baseline `7x5` command:
+  - `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre99 7 5 --prefix-depth 2 --task-end 4 --profile`
+- Baseline `7x5` result:
+  - `Worker Complete in 14.74s`
+  - `Canonicalisation calls: 98166`
+  - `Canonical cache hits: 71012`
+  - `Raw cache hits: 233452`
+  - `solve_graph_poly: 1.629s`
+  - `get_canonical_graph/densenauty: 0.189s`
+- Experiment `7x5` result:
+  - `env OMP_NUM_THREADS=1 ./partition_poly_7 7 5 --prefix-depth 2 --task-end 4 --profile`
+  - `Worker Complete in 14.79s`
+  - `Canonicalisation calls: 98144`
+  - `Canonical cache hits: 70984`
+  - `Raw cache hits: 233482`
+  - `solve_graph_poly: 1.756s`
+  - `get_canonical_graph/densenauty: 0.233s`
+- Interpretation:
+  - this is also effectively flat-to-worse
+  - the invariant changes the search/caching counts slightly, but does not improve end-to-end runtime and makes the direct nauty time worse on the heavier sample
+- Outcome: rejected and reverted.
