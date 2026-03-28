@@ -1740,3 +1740,547 @@
   - the previous fixed depth-2 numbering was dominated by dead prefixes and gave very misleading task counts
   - the live list is a much better basis for timing exports, shard sizing, and total-work estimates
 - Outcome: accepted.
+
+### Experiment 71: Carry only exact stabiliser permutations in `CanonState`
+- Goal: test the strongest possible version of the “stop scanning all `5040` permutations” idea:
+  - after an accepted `prepare_push()`, carry forward only the permutations whose transformed row exactly matches the new prefix
+  - then make child `prepare_push()` scan only that exact stabiliser list instead of the full permutation range
+- Baseline command:
+  - `env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 4 --prefix-depth 2 --task-end 16 --profile`
+- Baseline result:
+  - `Worker Complete in 1.57 seconds`
+  - `Total elapsed including prefix generation: 1.60 seconds`
+  - `canon_state_prepare_push: 331045 calls, 1.018s`
+  - depth profile:
+    - depth `0`: avg active `5040.0/5040`
+    - depth `1`: avg active `4770.0/5040`
+    - depth `2`: avg active `64.7/209`
+    - depth `3`: avg active `128.9/681`
+- Implementation attempt:
+  - added per-depth permutation-id scan lists to `CanonState`
+  - changed `prepare_push()` to iterate only the current depth's scan list
+  - changed `commit_push()` to carry forward only permutations with `first_greater == new_depth`, i.e. the exact stabiliser of the accepted child prefix
+- Quick correctness check:
+  - attempted binary:
+    - `./partition_poly_7 7 2 --prefix-depth 2 --task-end 50`
+    - reported `Prefix depth: 2 (742 tasks)`
+    - `P(4) = 1706388`
+    - `P(5) = 15471560`
+  - accepted baseline binary:
+    - `/tmp/partition_poly_7_pre71 7 2 --prefix-depth 2 --task-end 50`
+    - reported `Prefix depth: 2 (491 tasks)`
+    - `P(4) = 1754772`
+    - `P(5) = 15743720`
+- Interpretation:
+  - this optimisation is not correctness-safe
+  - a permutation that is not in the exact stabiliser at one depth can still become relevant again after a later sorted insertion changes the multiset ordering
+  - that means the child scan set cannot be reduced to only exact stabiliser permutations
+  - I stopped after the first correctness failure rather than benchmark a broken solver
+- Outcome: rejected and reverted.
+
+### Experiment 72: Packed 10-bit transformed-row keys in `CanonState`
+- Goal: keep the current `5040`-permutation scan, but reduce the per-permutation cost inside `canon_state_prepare_push()`:
+  - for the `MAX_COLS=7` build, each partition id fits in `10` bits
+  - a sorted transformed row of length at most `7` therefore fits in a single `__uint128_t`
+  - the idea was to replace row materialisation, copying, and lexicographic comparison on `uint16_t[7]` with packed-key insertion and comparison
+- Baseline command:
+  - `/usr/bin/time -f 'REAL %e' env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre71 7 4 --prefix-depth 2 --task-end 16 --profile`
+- Baseline result:
+  - `Worker Complete in 1.55 seconds`
+  - `Total elapsed including prefix generation: 1.58 seconds`
+  - `canon_state_prepare_push: 331045 calls, 1.008s`
+  - `canon_state_commit_push: 43601 calls, 0.308s`
+  - `solve_graph_poly: 44197 calls, 0.046s`
+  - `Canonicalisation calls: 1503`
+  - `Canonical cache hits: 936 (62.3%)`
+  - `Raw cache hits: 17117`
+  - depth profile:
+    - depth `0`: avg active `5040.0/5040`
+    - depth `1`: avg active `4770.0/5040`
+    - depth `2`: avg active `64.7/209`
+    - depth `3`: avg active `128.9/681`
+  - `REAL 1.69`
+- Implementation attempt:
+  - replaced the transformed-row scratch/state arrays with packed `__uint128_t` keys
+  - added helpers to:
+    - pack and unpack `10`-bit row entries
+    - insert one value into a sorted packed key
+    - compare two packed keys and recover `first_greater` from the highest differing bit
+  - kept the surrounding canonicalisation logic unchanged
+- Exactness check:
+  - current build:
+    - `env OMP_NUM_THREADS=1 ./partition_poly_7 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/current_7x2.poly`
+  - accepted baseline binary:
+    - `/tmp/partition_poly_7_pre71 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/baseline_7x2.poly`
+  - result:
+    - both runs reported `491` live depth-2 tasks
+    - both produced `P(4) = 1754772`, `P(5) = 15743720`
+    - shard files matched exactly
+- Packed-key result:
+  - `/usr/bin/time -f 'REAL %e' env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 4 --prefix-depth 2 --task-end 16 --profile`
+  - `Worker Complete in 2.45 seconds`
+  - `Total elapsed including prefix generation: 2.49 seconds`
+  - `canon_state_prepare_push: 331045 calls, 2.097s`
+  - `canon_state_commit_push: 43601 calls, 0.169s`
+  - `solve_graph_poly: 44197 calls, 0.047s`
+  - `Canonicalisation calls: 1503`
+  - `Canonical cache hits: 936 (62.3%)`
+  - `Raw cache hits: 17117`
+  - `REAL 2.59`
+- Interpretation:
+  - the packed representation was correctness-safe, but this first scalar implementation was substantially slower overall
+  - `commit_push()` became cheaper, but `prepare_push()` more than doubled
+  - the likely cause is that the generic pack/unpack and packed insertion path introduced more work than it removed, so the reduced row copying did not pay for itself
+  - a packed-key approach may still have potential if reworked around highly specialised insertion and comparison paths, but this version is not competitive
+- Outcome: rejected and reverted.
+
+### Experiment 73: Skip canonicalisation below a graph-size threshold
+- Goal: test whether nauty and canonical-cache probing are wasted on very small connected residual graphs, by skipping canonicalisation below a configurable size threshold and branching directly on the labelled graph after the raw-cache miss.
+- Implementation attempt:
+  - added an opt-in `--canon-min-n N` flag
+  - when a connected raw-cache miss reaches `solve_graph_poly()`, canonicalisation runs only if `n >= N`
+  - below that threshold, the solver skips nauty and canonical-cache/shared-cache probes and goes straight to deletion-contraction on the original graph
+- Exactness check:
+  - baseline:
+    - `env OMP_NUM_THREADS=1 ./partition_poly_7 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/canon_baseline_7x2.poly`
+  - threshold:
+    - `env OMP_NUM_THREADS=1 ./partition_poly_7 7 2 --prefix-depth 2 --task-end 50 --canon-min-n 8 --poly-out /tmp/canon_min8_7x2.poly`
+  - result:
+    - both produced `P(4) = 1754772`, `P(5) = 15743720`
+    - shard files matched exactly
+- Baseline command:
+  - `/usr/bin/time -f 'REAL %e' env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 4 --prefix-depth 2 --task-end 16 --profile`
+- Baseline result:
+  - `Worker Complete in 1.59 seconds`
+  - `Total elapsed including prefix generation: 1.61 seconds`
+  - `Canonicalisation calls: 1503`
+  - `Raw cache hits: 17117`
+  - `solve_graph_poly: 44197 calls, 0.047s`
+  - `get_canonical_graph/densenauty: 1503 calls, 0.004s`
+  - `hard graph nodes: 567, max n 10, max degree 9`
+  - `REAL 1.72`
+- Threshold `n >= 8` result:
+  - command:
+    - `/usr/bin/time -f 'REAL %e' env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 4 --prefix-depth 2 --task-end 16 --canon-min-n 8 --profile`
+  - result:
+    - `Worker Complete in 1.59 seconds`
+    - `Total elapsed including prefix generation: 1.62 seconds`
+    - `Canonicalisation calls: 693`
+    - `Raw cache hits: 19731`
+    - `solve_graph_poly: 49481 calls, 0.049s`
+    - `hard graph nodes: 3209`
+    - `REAL 1.73`
+- Threshold `n >= 10` result:
+  - command:
+    - `/usr/bin/time -f 'REAL %e' env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 4 --prefix-depth 2 --task-end 16 --canon-min-n 10 --profile`
+  - result:
+    - `Worker Complete in 1.56 seconds`
+    - `Total elapsed including prefix generation: 1.59 seconds`
+    - `Canonicalisation calls: 15`
+    - `Raw cache hits: 24283`
+    - `solve_graph_poly: 59001 calls, 0.064s`
+    - `hard graph nodes: 7969`
+    - `REAL 1.70`
+- Secondary check on a heavier fixed `7x5` task:
+  - baseline:
+    - `/usr/bin/time -f 'REAL %e' env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 5 --prefix-depth 2 --task-end 1 --profile`
+    - `Worker Complete in 1.68 seconds`
+    - `Canonicalisation calls: 4503`
+    - `Raw cache hits: 17155`
+    - `solve_graph_poly: 45887 calls, 0.243s`
+    - `hard graph nodes: 2327, max n 11, max degree 10`
+    - `REAL 1.81`
+  - threshold `n >= 10`:
+    - `/usr/bin/time -f 'REAL %e' env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 5 --prefix-depth 2 --task-end 1 --canon-min-n 10 --profile`
+    - `Worker Complete in 1.76 seconds`
+    - `Canonicalisation calls: 310`
+    - `Raw cache hits: 44441`
+    - `solve_graph_poly: 105639 calls, 0.342s`
+    - `hard graph nodes: 32203, max n 11, max degree 10`
+    - `REAL 1.90`
+- Interpretation:
+  - skipping nauty below a size threshold does reduce canonicalisation calls dramatically
+  - but on these samples that mostly turns canonical cache hits into extra deletion-contraction work
+  - the light `7x4` slice was at best flat and within noise
+  - on the heavier `7x5` sample, the threshold clearly made the recursion tree worse and increased graph-solver time substantially
+- Outcome: rejected and reverted.
+
+### Experiment 74: `m == 1` nauty row-translation fast path
+- Goal: reduce `get_canonical_graph()` overhead for the `7x7`-style regime where residual graphs have `n <= 21`, so `SETWORDSNEEDED(n) == 1` and the dense nauty graph fits in one setword per row.
+- Implementation attempt:
+  - kept the existing `densenauty()` path
+  - for `m == 1`, replaced the nested `ADDONEEDGE()` build with a one-row-at-a-time translation from our `uint64_t` adjacency into nauty's one-word dense row format
+  - for `m == 1`, replaced the nested `ISELEMENT()` unpack with a one-word translation back from nauty rows into our adjacency format
+  - kept the old nested loops for `m > 1`
+- Important note:
+  - a naive direct word copy is not correct here because nauty's dense set representation uses `BITT[pos]`, not our plain `1ULL << pos` numbering
+  - the first direct-copy attempt crashed on `7x4`; the benchmarked version below is the corrected one-word translation using `BITT[]` / `FIRSTBITNZ()`
+- Exactness check:
+  - baseline:
+    - `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre74 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/pre74_7x2.poly`
+  - experiment:
+    - `env OMP_NUM_THREADS=1 ./partition_poly_7 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/m1fix_7x2.poly`
+  - result:
+    - both produced `P(4) = 1754772`, `P(5) = 15743720`
+    - shard files matched exactly
+- Baseline `7x4` command:
+  - `/usr/bin/time -f 'REAL %e' env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre74 7 4 --prefix-depth 2 --task-end 16 --profile`
+- Baseline `7x4` result:
+  - `Worker Complete in 1.57 seconds`
+  - `Total elapsed including prefix generation: 1.60 seconds`
+  - `solve_graph_poly: 44197 calls, 0.047s`
+  - `get_canonical_graph/densenauty: 1503 calls, 0.004s`
+  - `REAL 1.71`
+- Experiment `7x4` result:
+  - `/usr/bin/time -f 'REAL %e' env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 4 --prefix-depth 2 --task-end 16 --profile`
+  - `Worker Complete in 1.55 seconds`
+  - `Total elapsed including prefix generation: 1.58 seconds`
+  - `solve_graph_poly: 44197 calls, 0.045s`
+  - `get_canonical_graph/densenauty: 1503 calls, 0.004s`
+  - `REAL 1.69`
+- Baseline `7x5` command:
+  - `/usr/bin/time -f 'REAL %e' env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre74 7 5 --prefix-depth 2 --task-end 4 --profile`
+- Baseline `7x5` result:
+  - `Worker Complete in 35.22 seconds`
+  - `Total elapsed including prefix generation: 35.25 seconds`
+  - `solve_graph_poly: 1485096 calls, 2.733s`
+  - `get_canonical_graph/densenauty: 158292 calls, 0.314s`
+  - `REAL 35.36`
+- Experiment `7x5` result:
+  - `/usr/bin/time -f 'REAL %e' env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 5 --prefix-depth 2 --task-end 4 --profile`
+  - `Worker Complete in 34.98 seconds`
+  - `Total elapsed including prefix generation: 35.01 seconds`
+  - `solve_graph_poly: 1485096 calls, 2.679s`
+  - `get_canonical_graph/densenauty: 158292 calls, 0.313s`
+  - `REAL 35.12`
+- Interpretation:
+  - the corrected one-word translation path is correctness-safe
+  - but on the measured workloads it does not produce a material standalone win
+  - the heavier sample is the more reliable signal here, and on that run the actual measured `get_canonical_graph/densenauty` time was essentially unchanged (`0.314s` vs `0.313s`)
+  - the small wall-clock improvement is therefore more likely normal noise in the surrounding solver than a real canonicalisation gain
+- Outcome: rejected and reverted.
+
+### Experiment 75: Degree-class initial partition for nauty
+- Goal: give `densenauty()` a better initial colouring without changing the graph solver, by partitioning vertices into degree classes instead of starting from one undifferentiated cell.
+- Implementation attempt:
+  - kept the existing dense graph conversion and `densenauty()` call
+  - built `lab` / `ptn` from degree classes in ascending degree order
+  - set `options.defaultptn = FALSE`
+  - left vertices with equal degree in the same initial cell
+- Exactness check:
+  - baseline:
+    - `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre75 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/pre75_7x2.poly`
+  - experiment:
+    - `env OMP_NUM_THREADS=1 ./partition_poly_7 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/degpart_7x2.poly`
+  - result:
+    - both produced `P(4) = 1754772`, `P(5) = 15743720`
+    - shard files matched exactly
+- Baseline `7x4` command:
+  - `/usr/bin/time -f 'REAL %e' env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre75 7 4 --prefix-depth 2 --task-end 16 --profile`
+- Baseline `7x4` result:
+  - `Worker Complete in 1.56 seconds`
+  - `Total elapsed including prefix generation: 1.59 seconds`
+  - `solve_graph_poly: 44197 calls, 0.046s`
+  - `get_canonical_graph/densenauty: 1503 calls, 0.004s`
+  - `REAL 1.69`
+- Experiment `7x4` result:
+  - `/usr/bin/time -f 'REAL %e' env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 4 --prefix-depth 2 --task-end 16 --profile`
+  - `Worker Complete in 1.58 seconds`
+  - `Total elapsed including prefix generation: 1.60 seconds`
+  - `solve_graph_poly: 44197 calls, 0.047s`
+  - `get_canonical_graph/densenauty: 1503 calls, 0.004s`
+  - `REAL 1.71`
+- Baseline `7x5` command:
+  - `/usr/bin/time -f 'REAL %e' env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre75 7 5 --prefix-depth 2 --task-end 4 --profile`
+- Baseline `7x5` result:
+  - `Worker Complete in 34.91 seconds`
+  - `Total elapsed including prefix generation: 34.94 seconds`
+  - `solve_graph_poly: 1485096 calls, 2.721s`
+  - `get_canonical_graph/densenauty: 158292 calls, 0.314s`
+  - `REAL 35.04`
+- Experiment `7x5` result:
+  - `/usr/bin/time -f 'REAL %e' env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 5 --prefix-depth 2 --task-end 4 --profile`
+  - `Worker Complete in 34.87 seconds`
+  - `Total elapsed including prefix generation: 34.90 seconds`
+  - `solve_graph_poly: 1485096 calls, 2.818s`
+  - `get_canonical_graph/densenauty: 158292 calls, 0.305s`
+  - `REAL 35.01`
+- Interpretation:
+  - degree-class initial partitioning is correctness-safe and does slightly reduce measured nauty time on the heavier sample
+  - but the gain is tiny in absolute terms, and it did not produce a convincing end-to-end improvement across the samples
+  - the light `7x4` slice was slightly worse, while the heavier `7x5` slice was only marginally faster overall and simultaneously slightly slower in `solve_graph_poly`
+  - that is not strong enough evidence to keep the extra canonicalisation complexity
+- Outcome: rejected and reverted.
+
+### Experiment 76: `adjtriang` invariant at level 1
+- Goal: test whether one dense nauty invariant application can prune canonicalisation enough to matter on the hard residual graphs, without changing the solver or other nauty options.
+- Implementation attempt:
+  - included `nautinv.h`
+  - left the current `densenauty()` setup unchanged apart from:
+    - `options.invarproc = adjtriang`
+    - `options.mininvarlevel = 1`
+    - `options.maxinvarlevel = 1`
+    - `options.invararg = 0`
+- Exactness check:
+  - baseline:
+    - `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre76 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/pre75_7x2.poly`
+  - experiment:
+    - `env OMP_NUM_THREADS=1 ./partition_poly_7 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/adjtriang_7x2.poly`
+  - result:
+    - both produced `P(4) = 1754772`, `P(5) = 15743720`
+    - shard files matched exactly
+- Baseline `7x4` command:
+  - `/usr/bin/time -f 'REAL %e' env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre76 7 4 --prefix-depth 2 --task-end 16 --profile`
+- Baseline `7x4` result:
+  - `Worker Complete in 1.59 seconds`
+  - `Total elapsed including prefix generation: 1.62 seconds`
+  - `solve_graph_poly: 44197 calls, 0.049s`
+  - `get_canonical_graph/densenauty: 1503 calls, 0.004s`
+  - `REAL 1.72`
+- Experiment `7x4` result:
+  - `/usr/bin/time -f 'REAL %e' env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 4 --prefix-depth 2 --task-end 16 --profile`
+  - `Worker Complete in 1.57 seconds`
+  - `Total elapsed including prefix generation: 1.59 seconds`
+  - `solve_graph_poly: 44197 calls, 0.049s`
+  - `get_canonical_graph/densenauty: 1503 calls, 0.005s`
+  - `REAL 1.70`
+- Baseline `7x5` command:
+  - `/usr/bin/time -f 'REAL %e' env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre76 7 5 --prefix-depth 2 --task-end 4 --profile`
+- Baseline `7x5` result:
+  - `Worker Complete in 34.84 seconds`
+  - `Total elapsed including prefix generation: 34.86 seconds`
+  - `solve_graph_poly: 1485096 calls, 2.703s`
+  - `get_canonical_graph/densenauty: 158292 calls, 0.313s`
+  - `REAL 34.97`
+- Experiment `7x5` result:
+  - `/usr/bin/time -f 'REAL %e' env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 5 --prefix-depth 2 --task-end 4 --profile`
+  - `Worker Complete in 35.29 seconds`
+  - `Total elapsed including prefix generation: 35.32 seconds`
+  - `solve_graph_poly: 1485096 calls, 2.979s`
+  - `get_canonical_graph/densenauty: 158292 calls, 0.389s`
+  - `REAL 35.43`
+- Interpretation:
+  - this invariant setting is correctness-safe
+  - but on the heavier sample it makes nauty materially slower instead of faster
+  - the light `7x4` slice was close to flat, but the `7x5` slice is decisive enough to reject this configuration
+- Outcome: rejected and reverted.
+
+### Experiment 77: Size-2 clique-separator factorisation
+- Goal: add one more exact graph-solver reduction beyond connected components, by splitting connected graphs across an adjacent separator pair `{u,v}` when removing that edge pair disconnects the remainder.
+- Implementation attempt:
+  - added a masked connected-component helper for traversing `G - {u,v}` without materialising a temporary graph
+  - added exact polynomial division by `(x-c)` for the small separator-gluing denominator
+  - in `solve_graph_poly()`, after simplification and connected-component splitting but before canonicalisation:
+    - scan adjacent pairs `{u,v}`
+    - remove `{u,v}` logically and collect components of the remainder
+    - if there is more than one component, solve each induced subgraph on `component ∪ {u,v}`
+    - multiply the results and divide by `(x(x-1))^(k-1)` where `k` is the number of components
+- Exactness check:
+  - baseline:
+    - `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre76 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/pre76_7x2.poly`
+  - experiment:
+    - `env OMP_NUM_THREADS=1 ./partition_poly_7 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/k2sep_7x2.poly`
+  - result:
+    - both produced `P(4) = 1754772`, `P(5) = 15743720`
+    - shard files matched exactly
+- Baseline `7x4` command:
+  - `/usr/bin/time -f 'REAL %e' env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre76 7 4 --prefix-depth 2 --task-end 16 --profile`
+- Baseline `7x4` result:
+  - `Worker Complete in 1.59 seconds`
+  - `Total elapsed including prefix generation: 1.62 seconds`
+  - `Canonicalisation calls: 1503`
+  - `solve_graph_poly: 44197 calls, 0.049s`
+  - `get_canonical_graph/densenauty: 1503 calls, 0.004s`
+  - `hard graph nodes: 567`
+  - `REAL 1.72`
+- Experiment `7x4` result:
+  - `/usr/bin/time -f 'REAL %e' env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 4 --prefix-depth 2 --task-end 16 --profile`
+  - `Worker Complete in 1.54 seconds`
+  - `Total elapsed including prefix generation: 1.57 seconds`
+  - `Canonicalisation calls: 1485`
+  - `solve_graph_poly: 44199 calls, 0.048s`
+  - `get_canonical_graph/densenauty: 1485 calls, 0.004s`
+  - `hard graph nodes: 554`
+  - `REAL 1.68`
+- Baseline `7x5` command:
+  - `/usr/bin/time -f 'REAL %e' env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre76 7 5 --prefix-depth 2 --task-end 4 --profile`
+- Baseline `7x5` result:
+  - `Worker Complete in 34.84 seconds`
+  - `Total elapsed including prefix generation: 34.86 seconds`
+  - `Canonicalisation calls: 158292`
+  - `solve_graph_poly: 1485096 calls, 2.703s`
+  - `get_canonical_graph/densenauty: 158292 calls, 0.313s`
+  - `hard graph nodes: 48204`
+  - `REAL 34.97`
+- Experiment `7x5` result:
+  - `/usr/bin/time -f 'REAL %e' env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 5 --prefix-depth 2 --task-end 4 --profile`
+  - `Worker Complete in 34.90 seconds`
+  - `Total elapsed including prefix generation: 34.93 seconds`
+  - `Canonicalisation calls: 154371`
+  - `solve_graph_poly: 1485318 calls, 3.118s`
+  - `get_canonical_graph/densenauty: 154371 calls, 0.306s`
+  - `hard graph nodes: 46304`
+  - `REAL 35.04`
+- Interpretation:
+  - the reduction is correctness-safe and it does fire often enough to cut canonical calls and hard-node counts slightly
+  - but on the heavier sample that saving is offset by extra graph-solver work and subproblem overhead
+  - the light `7x4` slice looked mildly positive, but the heavier `7x5` slice is effectively flat to slightly worse overall
+  - that is not strong enough evidence to keep the added complexity
+- Outcome: rejected and reverted.
+
+### Experiment 78: Branch on the canonical graph after a canonical miss
+- Goal: improve cache reuse and search consistency after canonicalisation by doing deletion-contraction on the canonical graph itself, instead of canonicalising only for cache lookup and then branching on the original labelled graph.
+- Implementation:
+  - left the existing branch heuristic unchanged:
+    - `u =` max-degree vertex
+    - `v =` first neighbour of `u`
+  - after a canonical miss in `solve_graph_poly()`, switched deletion and contraction to operate on `canon` rather than on the original connected graph `g`
+  - kept the cache writes unchanged:
+    - canonical result stored under the canonical key
+    - raw result still stored under the original labelled graph key
+- Exactness checks:
+  - shard smoke test:
+    - baseline:
+      - `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre78 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/pre78_7x2.poly`
+    - experiment:
+      - `env OMP_NUM_THREADS=1 ./partition_poly_7 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/canonbranch_7x2.poly`
+    - result:
+      - both produced `P(4) = 1754772`, `P(5) = 15743720`
+      - shard files matched exactly
+  - full `6x3` check:
+    - baseline:
+      - `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre78 6 3 --prefix-depth 2 --poly-out /tmp/pre78_6x3.poly`
+    - experiment:
+      - `env OMP_NUM_THREADS=1 ./partition_poly_7 6 3 --prefix-depth 2 --poly-out /tmp/canonbranch_6x3.poly`
+    - result:
+      - both produced `P(4) = 36376835616`, `P(5) = 2734002504000`
+      - output files matched exactly
+- Baseline `7x4` command:
+  - `/usr/bin/time -f 'REAL %e' env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre78 7 4 --prefix-depth 2 --task-end 16 --profile`
+- Baseline `7x4` result:
+  - `Worker Complete in 1.57 seconds`
+  - `Total elapsed including prefix generation: 1.60 seconds`
+  - `Canonicalisation calls: 1503`
+  - `Canonical cache hits: 936 (62.3%)`
+  - `Raw cache hits: 17117`
+  - `solve_graph_poly: 44197 calls, 0.046s`
+  - `get_canonical_graph/densenauty: 1503 calls, 0.004s`
+  - `hard graph nodes: 567`
+  - `REAL 1.70`
+- Experiment `7x4` result:
+  - `/usr/bin/time -f 'REAL %e' env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 4 --prefix-depth 2 --task-end 16 --profile`
+  - `Worker Complete in 1.57 seconds`
+  - `Total elapsed including prefix generation: 1.59 seconds`
+  - `Canonicalisation calls: 1495`
+  - `Canonical cache hits: 969 (64.8%)`
+  - `Raw cache hits: 17049`
+  - `solve_graph_poly: 44115 calls, 0.048s`
+  - `get_canonical_graph/densenauty: 1495 calls, 0.004s`
+  - `hard graph nodes: 526`
+  - `REAL 1.70`
+- Baseline `7x5` command:
+  - `/usr/bin/time -f 'REAL %e' env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre78 7 5 --prefix-depth 2 --task-end 4 --profile`
+- Baseline `7x5` result:
+  - `Worker Complete in 34.94 seconds`
+  - `Total elapsed including prefix generation: 34.96 seconds`
+  - `Canonicalisation calls: 158292`
+  - `Canonical cache hits: 110088 (69.5%)`
+  - `Raw cache hits: 823543`
+  - `solve_graph_poly: 1485096 calls, 2.754s`
+  - `get_canonical_graph/densenauty: 158292 calls, 0.316s`
+  - `hard graph nodes: 48204`
+  - `REAL 35.07`
+- Experiment `7x5` result:
+  - `/usr/bin/time -f 'REAL %e' env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 5 --prefix-depth 2 --task-end 4 --profile`
+  - `Worker Complete in 34.86 seconds`
+  - `Total elapsed including prefix generation: 34.89 seconds`
+  - `Canonicalisation calls: 124255`
+  - `Canonical cache hits: 96894 (78.0%)`
+  - `Raw cache hits: 816549`
+  - `solve_graph_poly: 1443402 calls, 1.658s`
+  - `get_canonical_graph/densenauty: 124255 calls, 0.266s`
+  - `hard graph nodes: 27361`
+  - `REAL 35.00`
+- Interpretation:
+  - this change is correctness-safe on the tested cases
+  - on the heavier `7x5` sample it substantially improves the graph solver itself:
+    - canonical calls down by about `21.5%`
+    - canonical-hit rate up from `69.5%` to `78.0%`
+    - hard graph nodes down by about `43%`
+    - `solve_graph_poly` time down from `2.754s` to `1.658s`
+  - the end-to-end wall-clock gain on current `7x5` samples is still modest because `canon_state_prepare_push()` remains the dominant cost
+  - unlike the previous nauty micro-tuning experiments, this is a real solver-side improvement and should matter more on workloads where the remaining cost is deeper in the graph recursion
+- Outcome: accepted.
+
+### Experiment 79: Age-aware graph-cache replacement, with and without delayed shared-cache flush
+- Goal: rework the cache behaviour itself rather than only tuning cache sizes:
+  - avoid the current “first empty else overwrite home slot” policy in `store_graph_cache_entry()`
+  - test whether task-by-task shared-cache export flushing is accidentally defeating the exporter buffer
+- Implementation:
+  - added a per-slot stamp array to each graph cache
+  - on local raw/canonical cache hits, touch the slot stamp
+  - on cache store:
+    - first scan the full probe window for an exact existing match and overwrite it in place
+    - otherwise prefer the first empty slot
+    - otherwise evict the oldest slot in the probe window, preferring an older slot with a different `key_n`
+  - also tested a variant that removed the `shared_graph_cache_flush_exports()` call from `complete_task_and_report()`, leaving flushes only on exporter-full and thread teardown
+- Exactness check:
+  - baseline:
+    - `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre79 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/cache_pre79.poly`
+  - experiment:
+    - `env OMP_NUM_THREADS=1 ./partition_poly_7 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/cache_post79.poly`
+  - result:
+    - both produced `P(4) = 1754772`, `P(5) = 15743720`
+    - shard files matched exactly
+- Baseline serial `7x3` command:
+  - `env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre79 7 3 --prefix-depth 2 --profile`
+- Baseline serial `7x3` result:
+  - `Worker Complete in 1.41 seconds`
+  - `Total elapsed including prefix generation: 1.43 seconds`
+  - `Canonicalisation calls: 725`
+  - `Canonical cache hits: 619 (85.4%)`
+  - `Raw cache hits: 16618`
+  - `canon_state_prepare_push: 0.917s`
+  - `solve_graph_poly: 41445 calls, 0.013s`
+- Replacement-only `7x3` result:
+  - `env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 3 --prefix-depth 2 --profile`
+  - `Worker Complete in 1.39 seconds`
+  - `Total elapsed including prefix generation: 1.42 seconds`
+  - `Canonicalisation calls: 725`
+  - `Canonical cache hits: 619 (85.4%)`
+  - `Raw cache hits: 16618`
+  - `canon_state_prepare_push: 0.903s`
+  - `solve_graph_poly: 41445 calls, 0.014s`
+- Same-session shared-merge baseline command:
+  - `env RECT_SHARED_CACHE_MERGE=1 RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 /tmp/partition_poly_7_pre79 7 4 --prefix-depth 2`
+- Same-session shared-merge baseline result:
+  - `Worker Complete in 17.33 seconds`
+  - `Total elapsed including prefix generation: 17.36 seconds`
+  - `Canonicalisation calls: 268897`
+  - `Canonical cache hits: 250769 (93.3%)`
+  - `Raw cache hits: 3754021`
+- Combined replacement + delayed-flush `7x4` result:
+  - `env RECT_SHARED_CACHE_MERGE=1 RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly_7 7 4 --prefix-depth 2`
+  - `Worker Complete in 17.67 seconds`
+  - `Total elapsed including prefix generation: 17.70 seconds`
+  - `Canonicalisation calls: 261293`
+  - `Canonical cache hits: 242314 (92.7%)`
+  - `Raw cache hits: 3763293`
+- Final replacement-only `7x4` result:
+  - `env RECT_SHARED_CACHE_MERGE=1 RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly_7 7 4 --prefix-depth 2`
+  - `Worker Complete in 16.51 seconds`
+  - `Total elapsed including prefix generation: 16.54 seconds`
+  - `Canonicalisation calls: 260034`
+  - `Canonical cache hits: 241737 (93.0%)`
+  - `Raw cache hits: 3763199`
+- Interpretation:
+  - the age-aware replacement policy is a real improvement on these samples
+  - exact-match overwrite avoids duplicate entries for the same graph inside a probe window
+  - “evict the oldest in the window, preferring the wrong `key_n`” beats the previous deterministic home-slot overwrite on this host:
+    - serial `7x3` improved slightly from `1.41s` to `1.39s`
+    - shared-merge `7x4` improved more clearly from `17.33s` to `16.51s`
+  - delaying shared-cache export flushes to only exporter-full or thread exit was a mistake here:
+    - it reduced write-lock frequency
+    - but it delayed cross-thread canonical reuse enough to regress from `17.33s` to `17.67s`
+  - so the exporter buffer is still useful, but task-boundary flush remains the better policy for this workload
+- Outcome: accepted, but only for the replacement-policy rework; keep task-boundary shared-cache flushing.

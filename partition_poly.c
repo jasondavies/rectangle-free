@@ -129,12 +129,14 @@ typedef struct {
 
 typedef struct {
     CacheKey* keys;
+    uint32_t* stamps;
     AdjWord* adj;
     uint8_t* degs;
     PolyCoeff* coeffs;
     int mask;
     int probe;
     int poly_len;
+    uint32_t next_stamp;
 } GraphCache;
 
 typedef struct {
@@ -322,6 +324,10 @@ static void* checked_calloc(size_t count, size_t size, const char* label);
 static void* checked_aligned_alloc(size_t alignment, size_t size, const char* label);
 static void shared_graph_cache_flush_exports(void);
 static inline void graph_cache_load_poly(const GraphCache* cache, int slot, Poly* value);
+static inline uint32_t graph_cache_next_stamp(GraphCache* cache);
+static inline void graph_cache_touch_slot(GraphCache* cache, int slot);
+static inline int graph_cache_slot_matches(const GraphCache* cache, int slot, uint64_t key_hash,
+                                           uint32_t key_n, const Graph* g, uint64_t row_mask);
 void store_graph_cache_entry(GraphCache* cache, uint64_t key_hash, uint32_t key_n, const Graph* g,
                              uint64_t row_mask, const Poly* value);
 
@@ -2234,22 +2240,38 @@ static inline PolyCoeff* graph_cache_coeff_slot(const GraphCache* cache, int slo
     return cache->coeffs + (size_t)slot * (size_t)cache->poly_len;
 }
 
-static int graph_cache_lookup_poly(const GraphCache* cache, uint64_t key_hash, uint32_t key_n,
-                                   const Graph* g, uint64_t row_mask, Poly* value) {
+static inline uint32_t graph_cache_next_stamp(GraphCache* cache) {
+    cache->next_stamp++;
+    if (cache->next_stamp == 0) cache->next_stamp = 1;
+    return cache->next_stamp;
+}
+
+static inline void graph_cache_touch_slot(GraphCache* cache, int slot) {
+    cache->stamps[slot] = graph_cache_next_stamp(cache);
+}
+
+static inline int graph_cache_slot_matches(const GraphCache* cache, int slot, uint64_t key_hash,
+                                           uint32_t key_n, const Graph* g, uint64_t row_mask) {
+    if (!cache->keys[slot].used || cache->keys[slot].key_hash != key_hash ||
+        cache->keys[slot].key_n != key_n) {
+        return 0;
+    }
+    for (int i = 0; i < (int)key_n; i++) {
+        uint64_t row = g->adj[i] & row_mask;
+        if (cache->adj[(size_t)slot * MAXN_NAUTY + i] != (AdjWord)row) return 0;
+    }
+    return 1;
+}
+
+static int graph_cache_lookup_poly(GraphCache* cache, uint64_t key_hash, uint32_t key_n,
+                                   const Graph* g, uint64_t row_mask, Poly* value, int touch) {
     int cache_idx = (int)(key_hash & (uint64_t)cache->mask);
     for (int k = 0; k < cache->probe; k++) {
         int p = (cache_idx + k) & cache->mask;
-        if (cache->keys[p].used && cache->keys[p].key_hash == key_hash &&
-            cache->keys[p].key_n == key_n) {
-            int match = 1;
-            for (int i = 0; i < (int)key_n && match; i++) {
-                uint64_t row = g->adj[i] & row_mask;
-                if (cache->adj[(size_t)p * MAXN_NAUTY + i] != (AdjWord)row) match = 0;
-            }
-            if (match) {
-                graph_cache_load_poly(cache, p, value);
-                return 1;
-            }
+        if (graph_cache_slot_matches(cache, p, key_hash, key_n, g, row_mask)) {
+            graph_cache_load_poly(cache, p, value);
+            if (touch) graph_cache_touch_slot(cache, p);
+            return 1;
         }
     }
     return 0;
@@ -2270,17 +2292,21 @@ static void shared_graph_cache_init(SharedGraphCache* shared, int bits, int poly
     shared->cache.probe = CACHE_PROBE;
     shared->cache.poly_len = poly_len;
     shared->cache.keys = checked_aligned_alloc(64, sizeof(CacheKey) * size, "shared_cache_keys");
+    shared->cache.stamps = checked_aligned_alloc(64, sizeof(uint32_t) * size, "shared_cache_stamps");
     shared->cache.adj = checked_aligned_alloc(64, sizeof(AdjWord) * size * MAXN_NAUTY, "shared_cache_adj");
     shared->cache.degs = checked_aligned_alloc(64, sizeof(uint8_t) * size, "shared_cache_degs");
     shared->cache.coeffs =
         checked_aligned_alloc(64, sizeof(PolyCoeff) * size * (size_t)poly_len, "shared_cache_coeffs");
     memset(shared->cache.keys, 0, sizeof(CacheKey) * size);
+    memset(shared->cache.stamps, 0, sizeof(uint32_t) * size);
+    shared->cache.next_stamp = 0;
     shared->enabled = 1;
 }
 
 static void shared_graph_cache_free(SharedGraphCache* shared) {
     if (!shared) return;
     free(shared->cache.keys);
+    free(shared->cache.stamps);
     free(shared->cache.adj);
     free(shared->cache.degs);
     free(shared->cache.coeffs);
@@ -2293,7 +2319,7 @@ static int shared_graph_cache_lookup_poly(SharedGraphCache* shared, uint64_t key
     if (!shared || !shared->enabled) return 0;
     int found = 0;
     pthread_rwlock_rdlock(&shared->lock);
-    found = graph_cache_lookup_poly(&shared->cache, key_hash, key_n, g, row_mask, value);
+    found = graph_cache_lookup_poly(&shared->cache, key_hash, key_n, g, row_mask, value, 0);
     pthread_rwlock_unlock(&shared->lock);
     return found;
 }
@@ -2330,14 +2356,38 @@ static void shared_graph_cache_export(uint64_t key_hash, uint32_t key_n, const G
 void store_graph_cache_entry(GraphCache* cache, uint64_t key_hash, uint32_t key_n, const Graph* g,
                              uint64_t row_mask, const Poly* value) {
     int cache_idx = (int)(key_hash & (uint64_t)cache->mask);
-    int best_slot = cache_idx;
+    int empty_slot = -1;
+    int oldest_same_n_slot = -1;
+    int oldest_other_n_slot = -1;
+    uint32_t oldest_same_n_stamp = UINT32_MAX;
+    uint32_t oldest_other_n_stamp = UINT32_MAX;
     for (int k = 0; k < cache->probe; k++) {
         int p = (cache_idx + k) & cache->mask;
-        if (!cache->keys[p].used) {
-            best_slot = p;
+        if (graph_cache_slot_matches(cache, p, key_hash, key_n, g, row_mask)) {
+            empty_slot = p;
             break;
         }
+        if (!cache->keys[p].used) {
+            if (empty_slot < 0) empty_slot = p;
+            continue;
+        }
+
+        uint32_t stamp = cache->stamps[p];
+        if (cache->keys[p].key_n != key_n) {
+            if (stamp < oldest_other_n_stamp) {
+                oldest_other_n_stamp = stamp;
+                oldest_other_n_slot = p;
+            }
+        } else if (stamp < oldest_same_n_stamp) {
+            oldest_same_n_stamp = stamp;
+            oldest_same_n_slot = p;
+        }
     }
+    int best_slot = empty_slot;
+    if (best_slot < 0) {
+        best_slot = (oldest_other_n_slot >= 0) ? oldest_other_n_slot : oldest_same_n_slot;
+    }
+    if (best_slot < 0) best_slot = cache_idx;
     cache->keys[best_slot].key_hash = key_hash;
     cache->keys[best_slot].key_n = key_n;
     for (int i = 0; i < (int)key_n; i++) {
@@ -2347,6 +2397,7 @@ void store_graph_cache_entry(GraphCache* cache, uint64_t key_hash, uint32_t key_
     memcpy(graph_cache_coeff_slot(cache, best_slot), value->coeffs,
            (size_t)(value->deg + 1) * sizeof(value->coeffs[0]));
     cache->keys[best_slot].used = 1;
+    graph_cache_touch_slot(cache, best_slot);
 }
 
 void remove_vertex(Graph* g, int i) {
@@ -2445,21 +2496,14 @@ static void solve_graph_poly(const Graph* input_g, GraphCache* cache, GraphCache
     // Fast exact lookup on labelled graph before canonicalisation.
     for (int k = 0; k < raw_cache->probe; k++) {
         int p = (raw_cache_idx + k) & raw_cache->mask;
-        if (raw_cache->keys[p].used && raw_cache->keys[p].key_hash == raw_hash &&
-            raw_cache->keys[p].key_n == (uint32_t)g.n) {
-            int match = 1;
-            for (int i = 0; i < g.n && match; i++) {
-                uint64_t row = g.adj[i] & row_mask;
-                if (raw_cache->adj[(size_t)p * MAXN_NAUTY + i] != (AdjWord)row) match = 0;
-            }
-            if (match) {
-                Poly cached;
-                (*local_raw_cache_hits)++;
-                graph_cache_load_poly(raw_cache, p, &cached);
-                poly_mul_ref(&multiplier, &cached, out_result);
-                if (g_profile && profile) profile->solve_graph_time += omp_get_wtime() - solve_t0;
-                return;
-            }
+        if (graph_cache_slot_matches(raw_cache, p, raw_hash, (uint32_t)g.n, &g, row_mask)) {
+            Poly cached;
+            (*local_raw_cache_hits)++;
+            graph_cache_load_poly(raw_cache, p, &cached);
+            graph_cache_touch_slot(raw_cache, p);
+            poly_mul_ref(&multiplier, &cached, out_result);
+            if (g_profile && profile) profile->solve_graph_time += omp_get_wtime() - solve_t0;
+            return;
         }
     }
 
@@ -2489,22 +2533,15 @@ static void solve_graph_poly(const Graph* input_g, GraphCache* cache, GraphCache
         // Cache lookup using canonical form
         for (int k = 0; k < cache->probe; k++) {
             int p = (cache_idx + k) & cache->mask;
-            if (cache->keys[p].used && cache->keys[p].key_hash == hash &&
-                cache->keys[p].key_n == (uint32_t)canon.n) {
-                int match = 1;
-                for (int i = 0; i < canon.n && match; i++) {
-                    uint64_t row = canon.adj[i] & ADJWORD_MASK;
-                    if (cache->adj[(size_t)p * MAXN_NAUTY + i] != (AdjWord)row) match = 0;
-                }
-                if (match) {
-                    Poly cached;
-                    (*local_cache_hits)++;
-                    graph_cache_load_poly(cache, p, &cached);
-                    store_graph_cache_entry(raw_cache, raw_hash, (uint32_t)g.n, &g, row_mask, &cached);
-                    poly_mul_ref(&multiplier, &cached, out_result);
-                    if (g_profile && profile) profile->solve_graph_time += omp_get_wtime() - solve_t0;
-                    return;
-                }
+            if (graph_cache_slot_matches(cache, p, hash, (uint32_t)canon.n, &canon, ADJWORD_MASK)) {
+                Poly cached;
+                (*local_cache_hits)++;
+                graph_cache_load_poly(cache, p, &cached);
+                graph_cache_touch_slot(cache, p);
+                store_graph_cache_entry(raw_cache, raw_hash, (uint32_t)g.n, &g, row_mask, &cached);
+                poly_mul_ref(&multiplier, &cached, out_result);
+                if (g_profile && profile) profile->solve_graph_time += omp_get_wtime() - solve_t0;
+                return;
             }
         }
 
@@ -2518,24 +2555,25 @@ static void solve_graph_poly(const Graph* input_g, GraphCache* cache, GraphCache
             return;
         }
 
-        // Deletion-contraction on original (non-canonical) graph
+        // Deletion-contraction on canonical graph
+        const Graph* branch_g = &canon;
         int max_deg = -1, u = -1;
-        for (int i = 0; i < g.n; i++) {
-            int d = __builtin_popcountll(g.adj[i]);
+        for (int i = 0; i < branch_g->n; i++) {
+            int d = __builtin_popcountll(branch_g->adj[i]);
             if (d > max_deg) { max_deg = d; u = i; }
         }
-        if (u != -1 && max_deg > 0) record_hard_graph_node(profile, g.n, max_deg);
+        if (u != -1 && max_deg > 0) record_hard_graph_node(profile, branch_g->n, max_deg);
 
         int v = -1;
         if (u != -1) {
-            for (int k = 0; k < g.n; k++) {
-                if ((g.adj[u] >> k) & 1ULL) { v = k; break; }
+            for (int k = 0; k < branch_g->n; k++) {
+                if ((branch_g->adj[u] >> k) & 1ULL) { v = k; break; }
             }
         }
 
         if (u != -1 && v != -1) {
-        // Deletion: remove edge (u,v)
-            Graph g_del = g;
+            // Deletion: remove edge (u,v)
+            Graph g_del = *branch_g;
             g_del.adj[u] &= ~(1ULL << v);
             g_del.adj[v] &= ~(1ULL << u);
             Poly p_del;
@@ -2544,7 +2582,7 @@ static void solve_graph_poly(const Graph* input_g, GraphCache* cache, GraphCache
                              profile, &p_del);
 
             // Contraction: merge v into u
-            Graph g_cont = g;
+            Graph g_cont = *branch_g;
             g_cont.adj[u] |= g_cont.adj[v];
             g_cont.adj[u] &= ~(1ULL << u);
             g_cont.adj[u] &= ~(1ULL << v);
@@ -2565,7 +2603,7 @@ static void solve_graph_poly(const Graph* input_g, GraphCache* cache, GraphCache
             poly_sub_ref(&p_del, &p_cont, &res);
         } else {
             poly_one_ref(&res);
-            for (int k = 0; k < g.n; k++) poly_mul_linear_ref(&res, 0, &res);
+            for (int k = 0; k < branch_g->n; k++) poly_mul_linear_ref(&res, 0, &res);
         }
 
         store_graph_cache_entry(cache, hash, (uint32_t)canon.n, &canon, ADJWORD_MASK, &res);
@@ -3482,22 +3520,28 @@ int main(int argc, char** argv) {
         cache.probe = CACHE_PROBE;
         cache.poly_len = graph_poly_len;
         cache.keys = checked_aligned_alloc(64, sizeof(CacheKey) * CACHE_SIZE, "cache_keys");
+        cache.stamps = checked_aligned_alloc(64, sizeof(uint32_t) * CACHE_SIZE, "cache_stamps");
         cache.adj = checked_aligned_alloc(64, sizeof(AdjWord) * CACHE_SIZE * MAXN_NAUTY, "cache_adj");
         cache.degs = checked_aligned_alloc(64, sizeof(uint8_t) * CACHE_SIZE, "cache_degs");
         cache.coeffs =
             checked_aligned_alloc(64, sizeof(PolyCoeff) * CACHE_SIZE * (size_t)graph_poly_len, "cache_coeffs");
+        cache.next_stamp = 0;
 
         raw_cache.mask = RAW_CACHE_MASK;
         raw_cache.probe = RAW_CACHE_PROBE;
         raw_cache.poly_len = graph_poly_len;
         raw_cache.keys = checked_aligned_alloc(64, sizeof(CacheKey) * RAW_CACHE_SIZE, "raw_cache_keys");
+        raw_cache.stamps = checked_aligned_alloc(64, sizeof(uint32_t) * RAW_CACHE_SIZE, "raw_cache_stamps");
         raw_cache.adj = checked_aligned_alloc(64, sizeof(AdjWord) * RAW_CACHE_SIZE * MAXN_NAUTY, "raw_cache_adj");
         raw_cache.degs = checked_aligned_alloc(64, sizeof(uint8_t) * RAW_CACHE_SIZE, "raw_cache_degs");
         raw_cache.coeffs = checked_aligned_alloc(64, sizeof(PolyCoeff) * RAW_CACHE_SIZE * (size_t)graph_poly_len,
                                                  "raw_cache_coeffs");
+        raw_cache.next_stamp = 0;
 
         memset(cache.keys, 0, sizeof(CacheKey) * CACHE_SIZE);
+        memset(cache.stamps, 0, sizeof(uint32_t) * CACHE_SIZE);
         memset(raw_cache.keys, 0, sizeof(CacheKey) * RAW_CACHE_SIZE);
+        memset(raw_cache.stamps, 0, sizeof(uint32_t) * RAW_CACHE_SIZE);
 
         int stack[MAX_COLS];
         CanonState canon_state;
@@ -3910,10 +3954,12 @@ int main(int argc, char** argv) {
         canon_scratch_free(&canon_scratch);
         nauty_workspace_free(&ws);
         free(cache.keys);
+        free(cache.stamps);
         free(cache.adj);
         free(cache.degs);
         free(cache.coeffs);
         free(raw_cache.keys);
+        free(raw_cache.stamps);
         free(raw_cache.adj);
         free(raw_cache.degs);
         free(raw_cache.coeffs);
