@@ -3755,3 +3755,46 @@
   - the bounded `7x6` tail already has excellent occupancy, so donating one graph branch mainly adds queueing and synchronisation overhead
   - the expensive `n=10..12` band becomes much slower despite slightly fewer nodes, so this narrow graph-donation design is not a viable default
 - Outcome: rejected and reverted.
+
+### Experiment 110: Hard-miss-only cut-vertex decomposition in the `10 <= n <= 12` band
+- Goal: revisit articulation decomposition in the strongest plausible placement suggested by the profiling:
+  - only after raw-cache miss
+  - only after canonicalisation and canonical-cache miss
+  - only on connected hard misses
+  - only for `10 <= n <= 12`
+- Change:
+  - added an exact cut-vertex decomposition on the canonical hard-miss path
+  - built each component piece as an induced subgraph containing the cut vertex
+  - combined piece polynomials incrementally in `GraphPoly` with `(A * B) / x` via a shifted convolution, to avoid oversized intermediate products
+  - added temporary profiling for cut-vertex tests, hits, and time
+- Baseline binary:
+  - `/tmp/partition_poly_7_pre109`
+- Exactness checks:
+  - `7x2 --task-end 50` shard output matched exactly
+- `7x6 --adaptive-subdivide --task-end 1 --adaptive-work-budget 10 --adaptive-max-depth 5 --profile`:
+  - baseline:
+    - `Worker Complete in 3.48s`
+    - `solve_graph_poly: 8416683 calls, 219.520s`
+    - `get_canonical_graph/densenauty: 2545651 calls, 9.390s`
+    - `hard graph nodes: 1264083`
+  - experiment:
+    - `Worker Complete in 3.49s`
+    - `solve_graph_poly: 8406713 calls, 219.845s`
+    - `get_canonical_graph/densenauty: 2539530 calls, 9.328s`
+    - `try_cut_vertex_decompose: 1010004 tests, 2468 hits, 0.549s`
+    - `hard graph nodes: 1256912`
+- Hard-band details:
+  - baseline:
+    - `n=10`: `31.246s`
+    - `n=11`: `64.489s`
+    - `n=12`: `65.782s`
+  - experiment:
+    - `n=10`: `31.401s`
+    - `n=11`: `66.052s`
+    - `n=12`: `66.428s`
+- Interpretation:
+  - the implementation is exact and correctly avoids degree blow-up in `GraphPoly`
+  - but the true hit rate is very low: about `2468 / 1010004`, or roughly `0.24%`
+  - that is much lower than the earlier coarse articulation detector suggested, and it is not enough to pay for the added test
+  - the bounded adaptive `7x6` run is effectively flat to slightly worse overall, with the expensive `n=10..12` band moving the wrong way
+- Outcome: rejected and reverted.
