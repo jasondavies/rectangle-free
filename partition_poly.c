@@ -105,6 +105,9 @@ typedef struct {
     uint64_t adj[MAXN_NAUTY]; 
 } Graph;
 
+#define GRAPH_SIG_BITS ((MAXN_NAUTY * (MAXN_NAUTY - 1)) / 2)
+#define GRAPH_SIG_WORDS ((GRAPH_SIG_BITS + 63) / 64)
+
 typedef struct {
     Graph g;
     int base[MAX_COLS];
@@ -130,7 +133,7 @@ typedef struct {
 typedef struct {
     CacheKey* keys;
     uint32_t* stamps;
-    AdjWord* adj;
+    uint64_t* sigs;
     uint8_t* degs;
     PolyCoeff* coeffs;
     int mask;
@@ -319,6 +322,15 @@ static double g_queue_profile_report_step = 0.0;
 static int g_shared_cache_merge = 0;
 static int g_shared_cache_bits = 16;
 static SharedGraphCache* g_shared_graph_cache = NULL;
+#define SMALL_GRAPH_LOOKUP_MAX_N 7
+static int g_small_graph_lookup_ready = 0;
+static double g_small_graph_lookup_init_time = 0.0;
+static int g_small_graph_lookup_loaded_from_file = 0;
+static int32_t* g_small_graph_lookup_coeffs[SMALL_GRAPH_LOOKUP_MAX_N + 1] = {0};
+static uint8_t g_small_graph_edge_u[SMALL_GRAPH_LOOKUP_MAX_N + 1][21];
+static uint8_t g_small_graph_edge_v[SMALL_GRAPH_LOOKUP_MAX_N + 1][21];
+static uint32_t g_small_graph_graph_count[SMALL_GRAPH_LOOKUP_MAX_N + 1] = {0};
+static uint8_t g_small_graph_edge_count[SMALL_GRAPH_LOOKUP_MAX_N + 1] = {0};
 
 static void* checked_calloc(size_t count, size_t size, const char* label);
 static void* checked_aligned_alloc(size_t alignment, size_t size, const char* label);
@@ -326,10 +338,12 @@ static void shared_graph_cache_flush_exports(void);
 static inline void graph_cache_load_poly(const GraphCache* cache, int slot, Poly* value);
 static inline uint32_t graph_cache_next_stamp(GraphCache* cache);
 static inline void graph_cache_touch_slot(GraphCache* cache, int slot);
-static inline int graph_cache_slot_matches(const GraphCache* cache, int slot, uint64_t key_hash,
-                                           uint32_t key_n, const Graph* g, uint64_t row_mask);
+static inline int graph_cache_slot_matches_sig(const GraphCache* cache, int slot, uint64_t key_hash,
+                                               uint32_t key_n, const uint64_t* sig);
 void store_graph_cache_entry(GraphCache* cache, uint64_t key_hash, uint32_t key_n, const Graph* g,
                              uint64_t row_mask, const Poly* value);
+static void small_graph_lookup_init(void);
+static void small_graph_lookup_free(void);
 
 static inline uint32_t* intra_mask_row(int partition_id) {
     return intra_mask + (size_t)partition_id * (size_t)max_complex_per_partition;
@@ -2173,6 +2187,214 @@ void get_canonical_graph(Graph* g, Graph* canon, NautyWorkspace* ws, ProfileStat
 
 // --- GRAPH SOLVER ---
 
+static inline uint32_t small_graph_stride(int n) {
+    return (uint32_t)(n + 1);
+}
+
+static inline uint32_t small_graph_edge_total(int n) {
+    return (uint32_t)(n * (n - 1) / 2);
+}
+
+static inline int32_t* small_graph_poly_slot(int n, uint32_t mask) {
+    return g_small_graph_lookup_coeffs[n] + (size_t)mask * (size_t)small_graph_stride(n);
+}
+
+static void small_graph_lookup_init_layout(void) {
+    g_small_graph_graph_count[0] = 1;
+    g_small_graph_edge_count[0] = 0;
+    for (int n = 1; n <= SMALL_GRAPH_LOOKUP_MAX_N; n++) {
+        uint32_t edge_total = small_graph_edge_total(n);
+        g_small_graph_graph_count[n] = 1U << edge_total;
+        g_small_graph_edge_count[n] = (uint8_t)edge_total;
+
+        int bit = 0;
+        for (int j = 1; j < n; j++) {
+            for (int i = 0; i < j; i++, bit++) {
+                g_small_graph_edge_u[n][bit] = (uint8_t)i;
+                g_small_graph_edge_v[n][bit] = (uint8_t)j;
+            }
+        }
+    }
+}
+
+static int small_graph_lookup_allocate_storage(void) {
+    if (g_small_graph_lookup_coeffs[0]) return 1;
+    for (int n = 0; n <= SMALL_GRAPH_LOOKUP_MAX_N; n++) {
+        uint32_t stride = small_graph_stride(n);
+        uint32_t graph_count = g_small_graph_graph_count[n];
+        g_small_graph_lookup_coeffs[n] =
+            checked_calloc((size_t)graph_count * (size_t)stride, sizeof(int32_t), "small_graph_lookup");
+    }
+    return 1;
+}
+
+static uint32_t small_graph_pack_mask_from_rows(const uint8_t* rows, int n) {
+    uint32_t mask = 0;
+    int bit = 0;
+    for (int j = 1; j < n; j++) {
+        for (int i = 0; i < j; i++, bit++) {
+            if ((rows[i] >> j) & 1U) mask |= 1U << bit;
+        }
+    }
+    return mask;
+}
+
+static uint32_t small_graph_pack_mask(const Graph* g) {
+    uint32_t mask = 0;
+    int bit = 0;
+    for (int j = 1; j < g->n; j++) {
+        for (int i = 0; i < j; i++, bit++) {
+            if ((g->adj[i] >> j) & 1ULL) mask |= 1U << bit;
+        }
+    }
+    return mask;
+}
+
+static uint32_t small_graph_contract_mask(uint32_t mask, int n, int u, int v) {
+    uint8_t rows[SMALL_GRAPH_LOOKUP_MAX_N] = {0};
+    int bit = 0;
+    for (int j = 1; j < n; j++) {
+        for (int i = 0; i < j; i++, bit++) {
+            if ((mask >> bit) & 1U) {
+                rows[i] |= (uint8_t)(1U << j);
+                rows[j] |= (uint8_t)(1U << i);
+            }
+        }
+    }
+
+    rows[u] |= rows[v];
+    rows[u] &= (uint8_t)~((1U << u) | (1U << v));
+    for (int k = 0; k < n; k++) {
+        if (k == u || k == v) continue;
+        if ((rows[k] >> v) & 1U) {
+            rows[k] &= (uint8_t)~(1U << v);
+            rows[k] |= (uint8_t)(1U << u);
+            rows[u] |= (uint8_t)(1U << k);
+        }
+    }
+
+    uint8_t compact[SMALL_GRAPH_LOOKUP_MAX_N] = {0};
+    int remap[SMALL_GRAPH_LOOKUP_MAX_N];
+    int next = 0;
+    for (int i = 0; i < n; i++) remap[i] = -1;
+    for (int i = 0; i < n; i++) {
+        if (i == v) continue;
+        remap[i] = next++;
+    }
+    for (int i = 0; i < n; i++) {
+        if (i == v) continue;
+        uint8_t new_row = 0;
+        for (int j = 0; j < n; j++) {
+            if (j == v || !((rows[i] >> j) & 1U)) continue;
+            new_row |= (uint8_t)(1U << remap[j]);
+        }
+        compact[remap[i]] = new_row;
+    }
+    return small_graph_pack_mask_from_rows(compact, n - 1);
+}
+
+static void small_graph_lookup_generate_tables(void) {
+    int32_t* empty0 = small_graph_poly_slot(0, 0);
+    empty0[0] = 1;
+
+    for (int n = 1; n <= SMALL_GRAPH_LOOKUP_MAX_N; n++) {
+        uint32_t graph_count = g_small_graph_graph_count[n];
+        int32_t* empty_poly = small_graph_poly_slot(n, 0);
+        empty_poly[n] = 1;
+
+        for (uint32_t mask = 1; mask < graph_count; mask++) {
+            uint32_t del_mask = mask & (mask - 1U);
+            int edge_bit = __builtin_ctz(mask);
+            int u = g_small_graph_edge_u[n][edge_bit];
+            int v = g_small_graph_edge_v[n][edge_bit];
+            uint32_t cont_mask = small_graph_contract_mask(mask, n, u, v);
+            int32_t* out = small_graph_poly_slot(n, mask);
+            const int32_t* del_poly = small_graph_poly_slot(n, del_mask);
+            const int32_t* cont_poly = small_graph_poly_slot(n - 1, cont_mask);
+            for (int k = 0; k <= n; k++) {
+                int32_t cont_coeff = (k < n) ? cont_poly[k] : 0;
+                out[k] = del_poly[k] - cont_coeff;
+            }
+        }
+    }
+}
+
+static const char* small_graph_lookup_default_path(void) {
+    const char* env_path = getenv("RECT_SMALL_GRAPH_TABLE");
+    if (env_path && *env_path) return env_path;
+    return "small_graph_lookup_n7.bin";
+}
+
+typedef struct {
+    uint64_t magic;
+    uint32_t version;
+    uint32_t max_n;
+} SmallGraphTableHeader;
+
+#define SMALL_GRAPH_TABLE_MAGIC UINT64_C(0x534750375441424c)
+#define SMALL_GRAPH_TABLE_VERSION 1U
+
+static int small_graph_lookup_try_load_file(const char* path) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return 0;
+
+    SmallGraphTableHeader header;
+    int ok = fread(&header, sizeof(header), 1, f) == 1 &&
+             header.magic == SMALL_GRAPH_TABLE_MAGIC &&
+             header.version == SMALL_GRAPH_TABLE_VERSION &&
+             header.max_n == SMALL_GRAPH_LOOKUP_MAX_N;
+    if (!ok) {
+        fclose(f);
+        return 0;
+    }
+
+    small_graph_lookup_init_layout();
+    small_graph_lookup_allocate_storage();
+    for (int n = 0; n <= SMALL_GRAPH_LOOKUP_MAX_N; n++) {
+        uint32_t count = g_small_graph_graph_count[n] * small_graph_stride(n);
+        if (fread(g_small_graph_lookup_coeffs[n], sizeof(int32_t), count, f) != count) {
+            fclose(f);
+            small_graph_lookup_free();
+            return 0;
+        }
+    }
+    fclose(f);
+    g_small_graph_lookup_loaded_from_file = 1;
+    g_small_graph_lookup_ready = 1;
+    return 1;
+}
+
+static void small_graph_lookup_init(void) {
+    if (g_small_graph_lookup_ready) return;
+
+    double t0 = omp_get_wtime();
+    g_small_graph_lookup_loaded_from_file = 0;
+    if (!small_graph_lookup_try_load_file(small_graph_lookup_default_path())) {
+        small_graph_lookup_init_layout();
+        small_graph_lookup_allocate_storage();
+        small_graph_lookup_generate_tables();
+        g_small_graph_lookup_loaded_from_file = 0;
+        g_small_graph_lookup_ready = 1;
+    }
+    g_small_graph_lookup_init_time = omp_get_wtime() - t0;
+}
+
+static void small_graph_lookup_free(void) {
+    for (int n = 0; n <= SMALL_GRAPH_LOOKUP_MAX_N; n++) {
+        free(g_small_graph_lookup_coeffs[n]);
+        g_small_graph_lookup_coeffs[n] = NULL;
+    }
+    g_small_graph_lookup_ready = 0;
+    g_small_graph_lookup_init_time = 0.0;
+    g_small_graph_lookup_loaded_from_file = 0;
+}
+
+static void small_graph_lookup_load_poly(int n, uint32_t mask, Poly* out) {
+    const int32_t* coeffs = small_graph_poly_slot(n, mask);
+    out->deg = n;
+    for (int i = 0; i <= n; i++) out->coeffs[i] = coeffs[i];
+}
+
 static inline uint64_t graph_row_mask(int n) {
     if (n >= 64) return ~0ULL;
     if (n <= 0) return 0ULL;
@@ -2236,6 +2458,22 @@ uint64_t hash_graph(const Graph* g) {
     return h;
 }
 
+static inline uint64_t* graph_cache_sig_slot(const GraphCache* cache, int slot) {
+    return cache->sigs + (size_t)slot * GRAPH_SIG_WORDS;
+}
+
+static inline void graph_pack_signature(const Graph* g, uint32_t key_n, uint64_t* out) {
+    memset(out, 0, (size_t)GRAPH_SIG_WORDS * sizeof(*out));
+    int bit = 0;
+    for (uint32_t j = 1; j < key_n; j++) {
+        for (uint32_t i = 0; i < j; i++, bit++) {
+            if ((g->adj[i] >> j) & 1ULL) {
+                out[(unsigned)bit >> 6] |= 1ULL << (bit & 63);
+            }
+        }
+    }
+}
+
 static inline PolyCoeff* graph_cache_coeff_slot(const GraphCache* cache, int slot) {
     return cache->coeffs + (size_t)slot * (size_t)cache->poly_len;
 }
@@ -2250,25 +2488,28 @@ static inline void graph_cache_touch_slot(GraphCache* cache, int slot) {
     cache->stamps[slot] = graph_cache_next_stamp(cache);
 }
 
-static inline int graph_cache_slot_matches(const GraphCache* cache, int slot, uint64_t key_hash,
-                                           uint32_t key_n, const Graph* g, uint64_t row_mask) {
+static inline int graph_cache_slot_matches_sig(const GraphCache* cache, int slot, uint64_t key_hash,
+                                               uint32_t key_n, const uint64_t* sig) {
     if (!cache->keys[slot].used || cache->keys[slot].key_hash != key_hash ||
         cache->keys[slot].key_n != key_n) {
         return 0;
     }
-    for (int i = 0; i < (int)key_n; i++) {
-        uint64_t row = g->adj[i] & row_mask;
-        if (cache->adj[(size_t)slot * MAXN_NAUTY + i] != (AdjWord)row) return 0;
+    const uint64_t* slot_sig = graph_cache_sig_slot(cache, slot);
+    for (int i = 0; i < GRAPH_SIG_WORDS; i++) {
+        if (slot_sig[i] != sig[i]) return 0;
     }
     return 1;
 }
 
 static int graph_cache_lookup_poly(GraphCache* cache, uint64_t key_hash, uint32_t key_n,
                                    const Graph* g, uint64_t row_mask, Poly* value, int touch) {
+    (void)row_mask;
+    uint64_t sig[GRAPH_SIG_WORDS];
+    graph_pack_signature(g, key_n, sig);
     int cache_idx = (int)(key_hash & (uint64_t)cache->mask);
     for (int k = 0; k < cache->probe; k++) {
         int p = (cache_idx + k) & cache->mask;
-        if (graph_cache_slot_matches(cache, p, key_hash, key_n, g, row_mask)) {
+        if (graph_cache_slot_matches_sig(cache, p, key_hash, key_n, sig)) {
             graph_cache_load_poly(cache, p, value);
             if (touch) graph_cache_touch_slot(cache, p);
             return 1;
@@ -2293,7 +2534,7 @@ static void shared_graph_cache_init(SharedGraphCache* shared, int bits, int poly
     shared->cache.poly_len = poly_len;
     shared->cache.keys = checked_aligned_alloc(64, sizeof(CacheKey) * size, "shared_cache_keys");
     shared->cache.stamps = checked_aligned_alloc(64, sizeof(uint32_t) * size, "shared_cache_stamps");
-    shared->cache.adj = checked_aligned_alloc(64, sizeof(AdjWord) * size * MAXN_NAUTY, "shared_cache_adj");
+    shared->cache.sigs = checked_aligned_alloc(64, sizeof(uint64_t) * size * GRAPH_SIG_WORDS, "shared_cache_sigs");
     shared->cache.degs = checked_aligned_alloc(64, sizeof(uint8_t) * size, "shared_cache_degs");
     shared->cache.coeffs =
         checked_aligned_alloc(64, sizeof(PolyCoeff) * size * (size_t)poly_len, "shared_cache_coeffs");
@@ -2307,7 +2548,7 @@ static void shared_graph_cache_free(SharedGraphCache* shared) {
     if (!shared) return;
     free(shared->cache.keys);
     free(shared->cache.stamps);
-    free(shared->cache.adj);
+    free(shared->cache.sigs);
     free(shared->cache.degs);
     free(shared->cache.coeffs);
     pthread_rwlock_destroy(&shared->lock);
@@ -2355,6 +2596,9 @@ static void shared_graph_cache_export(uint64_t key_hash, uint32_t key_n, const G
 
 void store_graph_cache_entry(GraphCache* cache, uint64_t key_hash, uint32_t key_n, const Graph* g,
                              uint64_t row_mask, const Poly* value) {
+    (void)row_mask;
+    uint64_t sig[GRAPH_SIG_WORDS];
+    graph_pack_signature(g, key_n, sig);
     int cache_idx = (int)(key_hash & (uint64_t)cache->mask);
     int empty_slot = -1;
     int oldest_same_n_slot = -1;
@@ -2363,7 +2607,7 @@ void store_graph_cache_entry(GraphCache* cache, uint64_t key_hash, uint32_t key_
     uint32_t oldest_other_n_stamp = UINT32_MAX;
     for (int k = 0; k < cache->probe; k++) {
         int p = (cache_idx + k) & cache->mask;
-        if (graph_cache_slot_matches(cache, p, key_hash, key_n, g, row_mask)) {
+        if (graph_cache_slot_matches_sig(cache, p, key_hash, key_n, sig)) {
             empty_slot = p;
             break;
         }
@@ -2390,9 +2634,7 @@ void store_graph_cache_entry(GraphCache* cache, uint64_t key_hash, uint32_t key_
     if (best_slot < 0) best_slot = cache_idx;
     cache->keys[best_slot].key_hash = key_hash;
     cache->keys[best_slot].key_n = key_n;
-    for (int i = 0; i < (int)key_n; i++) {
-        cache->adj[(size_t)best_slot * MAXN_NAUTY + i] = (AdjWord)(g->adj[i] & row_mask);
-    }
+    memcpy(graph_cache_sig_slot(cache, best_slot), sig, sizeof(sig));
     cache->degs[best_slot] = (uint8_t)value->deg;
     memcpy(graph_cache_coeff_slot(cache, best_slot), value->coeffs,
            (size_t)(value->deg + 1) * sizeof(value->coeffs[0]));
@@ -2489,14 +2731,24 @@ static void solve_graph_poly(const Graph* input_g, GraphCache* cache, GraphCache
         return;
     }
 
+    if (g.n <= SMALL_GRAPH_LOOKUP_MAX_N) {
+        Poly small_poly;
+        small_graph_lookup_load_poly(g.n, small_graph_pack_mask(&g), &small_poly);
+        poly_mul_ref(&multiplier, &small_poly, out_result);
+        if (g_profile && profile) profile->solve_graph_time += omp_get_wtime() - solve_t0;
+        return;
+    }
+
     uint64_t row_mask = graph_row_mask(g.n);
     uint64_t raw_hash = hash_graph(&g);
+    uint64_t raw_sig[GRAPH_SIG_WORDS];
+    graph_pack_signature(&g, (uint32_t)g.n, raw_sig);
     int raw_cache_idx = (int)(raw_hash & (uint64_t)raw_cache->mask);
 
     // Fast exact lookup on labelled graph before canonicalisation.
     for (int k = 0; k < raw_cache->probe; k++) {
         int p = (raw_cache_idx + k) & raw_cache->mask;
-        if (graph_cache_slot_matches(raw_cache, p, raw_hash, (uint32_t)g.n, &g, row_mask)) {
+        if (graph_cache_slot_matches_sig(raw_cache, p, raw_hash, (uint32_t)g.n, raw_sig)) {
             Poly cached;
             (*local_raw_cache_hits)++;
             graph_cache_load_poly(raw_cache, p, &cached);
@@ -2528,12 +2780,14 @@ static void solve_graph_poly(const Graph* input_g, GraphCache* cache, GraphCache
         (*local_canon_calls)++;
         
         uint64_t hash = hash_graph(&canon);
+        uint64_t canon_sig[GRAPH_SIG_WORDS];
+        graph_pack_signature(&canon, (uint32_t)canon.n, canon_sig);
         int cache_idx = (int)(hash & (uint64_t)cache->mask);
         
         // Cache lookup using canonical form
         for (int k = 0; k < cache->probe; k++) {
             int p = (cache_idx + k) & cache->mask;
-            if (graph_cache_slot_matches(cache, p, hash, (uint32_t)canon.n, &canon, ADJWORD_MASK)) {
+            if (graph_cache_slot_matches_sig(cache, p, hash, (uint32_t)canon.n, canon_sig)) {
                 Poly cached;
                 (*local_cache_hits)++;
                 graph_cache_load_poly(cache, p, &cached);
@@ -3448,6 +3702,14 @@ int main(int argc, char** argv) {
     progress_reporter_print_initial(&progress_reporter, total_tasks);
 
     double start_time = omp_get_wtime();
+    if (total_tasks > 0) {
+        small_graph_lookup_init();
+        if (g_profile) {
+            printf("Small-graph lookup %s: %.2f seconds\n",
+                   g_small_graph_lookup_loaded_from_file ? "load" : "initialisation",
+                   g_small_graph_lookup_init_time);
+        }
+    }
     
     int num_threads = omp_get_max_threads();
     LocalTaskQueue local_queue;
@@ -3521,7 +3783,7 @@ int main(int argc, char** argv) {
         cache.poly_len = graph_poly_len;
         cache.keys = checked_aligned_alloc(64, sizeof(CacheKey) * CACHE_SIZE, "cache_keys");
         cache.stamps = checked_aligned_alloc(64, sizeof(uint32_t) * CACHE_SIZE, "cache_stamps");
-        cache.adj = checked_aligned_alloc(64, sizeof(AdjWord) * CACHE_SIZE * MAXN_NAUTY, "cache_adj");
+        cache.sigs = checked_aligned_alloc(64, sizeof(uint64_t) * CACHE_SIZE * GRAPH_SIG_WORDS, "cache_sigs");
         cache.degs = checked_aligned_alloc(64, sizeof(uint8_t) * CACHE_SIZE, "cache_degs");
         cache.coeffs =
             checked_aligned_alloc(64, sizeof(PolyCoeff) * CACHE_SIZE * (size_t)graph_poly_len, "cache_coeffs");
@@ -3532,7 +3794,8 @@ int main(int argc, char** argv) {
         raw_cache.poly_len = graph_poly_len;
         raw_cache.keys = checked_aligned_alloc(64, sizeof(CacheKey) * RAW_CACHE_SIZE, "raw_cache_keys");
         raw_cache.stamps = checked_aligned_alloc(64, sizeof(uint32_t) * RAW_CACHE_SIZE, "raw_cache_stamps");
-        raw_cache.adj = checked_aligned_alloc(64, sizeof(AdjWord) * RAW_CACHE_SIZE * MAXN_NAUTY, "raw_cache_adj");
+        raw_cache.sigs =
+            checked_aligned_alloc(64, sizeof(uint64_t) * RAW_CACHE_SIZE * GRAPH_SIG_WORDS, "raw_cache_sigs");
         raw_cache.degs = checked_aligned_alloc(64, sizeof(uint8_t) * RAW_CACHE_SIZE, "raw_cache_degs");
         raw_cache.coeffs = checked_aligned_alloc(64, sizeof(PolyCoeff) * RAW_CACHE_SIZE * (size_t)graph_poly_len,
                                                  "raw_cache_coeffs");
@@ -3955,12 +4218,12 @@ int main(int argc, char** argv) {
         nauty_workspace_free(&ws);
         free(cache.keys);
         free(cache.stamps);
-        free(cache.adj);
+        free(cache.sigs);
         free(cache.degs);
         free(cache.coeffs);
         free(raw_cache.keys);
         free(raw_cache.stamps);
-        free(raw_cache.adj);
+        free(raw_cache.sigs);
         free(raw_cache.degs);
         free(raw_cache.coeffs);
     }
@@ -4193,6 +4456,7 @@ int main(int argc, char** argv) {
         shared_graph_cache_free(&shared_graph_cache);
         g_shared_graph_cache = NULL;
     }
+    small_graph_lookup_free();
     free_row_dependent_tables();
 
     return 0;

@@ -23,7 +23,7 @@ NVCCFLAGS ?= -O3 -arch=sm_89 -std=c++17 -I./inspiration/cpads/include
 
 CFLAGS_5XN ?= -O3 -march=native -std=c11
 
-all: 5xn_count4 partition_count4 partition_poly partition_poly_7
+all: 5xn_count4 partition_count4 partition_poly partition_poly_7 small_graph_lookup_gen
 
 $(NAUTY_BUILD_DIR)/.prepared:
 	rm -rf $(NAUTY_BUILD_DIR)
@@ -49,10 +49,13 @@ partition_poly: partition_poly.c $(NAUTY_BUILD_DIR)/nautyT.a
 partition_poly_7: partition_poly.c $(NAUTY_BUILD_DIR)/nautyT.a
 	$(CC) $(PARTITION_CFLAGS) -DMAX_COLS=7 -DDEFAULT_ROWS=7 -DDEFAULT_COLS=7 -DCACHE_BITS=17 -o $@ $< $(LDFLAGS)
 
+small_graph_lookup_gen: small_graph_lookup_gen.c
+	$(CC) $(CFLAGS_5XN) -o $@ $<
+
 clean:
-	rm -f 5xn_count4 partition_count4 partition_poly partition_poly_7
+	rm -f 5xn_count4 partition_count4 partition_poly partition_poly_7 small_graph_lookup_gen
 
 clean-nauty:
 	rm -rf $(NAUTY_BUILD_DIR)
 
-.PHONY: all clean clean-nauty 5xn_count4 partition_count4 partition_poly partition_poly_7
+.PHONY: all clean clean-nauty 5xn_count4 partition_count4 partition_poly partition_poly_7 small_graph_lookup_gen
