@@ -3032,3 +3032,53 @@
   - that matches the hypothesis from the bucket counts: the dominant remaining work is metadata traffic on the `x>=r` / `c<x<r` paths, not the rare `x==c` rebuild
   - the run-to-run noise is nontrivial on this machine, but both sampled serial workloads move in the right direction
 - Outcome: accepted.
+
+### Experiment 93: Bias `canon_state_prepare_push()` hard towards the fast skip path
+- Goal: reduce instruction count in the overwhelmingly dominant `g < depth && x >= r` case by making `canon_state_prepare_push()` branch-light in that path and keeping its hot metadata in local pointers/counters.
+- Motivation:
+  - the bucket counts from the follow-up instrumentation showed:
+    - `g < depth && x >= r`: `7,511,446,112`
+    - `g < depth && c < x < r`: `807,985,208`
+    - `g < depth && x == c`: `1,032,657`
+  - so the remaining hotspot after Experiment 92 was not the rare equality rebuild, but the billions of iterations that only need to load packed state, compare `x` against `r`, and skip
+- Implementation:
+  - kept the Experiment 92 algorithm exactly the same
+  - rewrote `canon_state_prepare_push()` to:
+    - cache `state`, `stack_vals`, `next_state`, `active_idx`, and `changed_first_greater_idx` in local pointers
+    - use local `active_count` / `changed_first_greater_count`
+    - treat `g != depth` as the likely branch
+    - treat `x >= r` as the likely outcome inside that branch
+    - treat `x > c` as the likely survivor case once `x < r`
+  - also unpacked `g` and `r` directly from the packed state word in the hot loop instead of going through helper calls
+- Exactness checks:
+  - `7x2 --task-end 50` shard output matched exactly against `/tmp/partition_poly_7_pre93`
+  - full `7x3` output matched exactly against `/tmp/partition_poly_7_pre93`
+- Baseline `7x4` command:
+  - `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre93 7 4 --prefix-depth 2 --task-end 16 --profile`
+- Baseline `7x4` result:
+  - `Worker Complete in 1.33 seconds`
+  - `canon_state_prepare_push: 0.977s`
+  - `canon_state_commit_push: 0.117s`
+- Experiment `7x4` result:
+  - `env OMP_NUM_THREADS=1 ./partition_poly_7 7 4 --prefix-depth 2 --task-end 16 --profile`
+  - `Worker Complete in 1.30 seconds`
+  - `canon_state_prepare_push: 0.942s`
+  - `canon_state_commit_push: 0.117s`
+- Baseline `7x5` command:
+  - `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre93 7 5 --prefix-depth 2 --task-end 4 --profile`
+- Baseline `7x5` result:
+  - `Worker Complete in 33.99 seconds`
+  - `canon_state_prepare_push: 25.567s`
+  - `canon_state_commit_push: 2.444s`
+  - `solve_graph_poly: 3.652s`
+- Experiment `7x5` result:
+  - `env OMP_NUM_THREADS=1 ./partition_poly_7 7 5 --prefix-depth 2 --task-end 4 --profile`
+  - `Worker Complete in 29.90 seconds`
+  - `canon_state_prepare_push: 22.365s`
+  - `canon_state_commit_push: 2.277s`
+  - `solve_graph_poly: 3.215s`
+- Interpretation:
+  - this is a larger-than-expected win for a control-flow/locality rewrite
+  - the direction matches the bucket data: making the fast skip path cheaper matters more than touching the rare equality fallback
+  - most of the gain shows up directly in `canon_state_prepare_push()`, which is the intended target
+- Outcome: accepted.

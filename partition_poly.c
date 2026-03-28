@@ -1791,17 +1791,42 @@ int canon_state_prepare_push(const CanonState* st, int partition_id, CanonScratc
     uint16_t pid = (uint16_t)partition_id;
     const uint16_t* partition_perm_row =
         perm_table + (size_t)partition_id * (size_t)perm_count;
+    const uint32_t* state = st->state;
+    const uint16_t* stack_vals = st->stack_vals;
+    uint32_t* next_state = scratch->next_state;
+    uint16_t* active_idx = scratch->active_idx;
+    uint16_t* changed_first_greater_idx = scratch->changed_first_greater_idx;
+    uint16_t active_count = 0;
+    uint16_t changed_first_greater_count = 0;
     scratch->active_count = 0;
     scratch->changed_first_greater_count = 0;
 
     for (int p = 0; p < st->limit; p++) {
-        uint32_t old_state = st->state[p];
+        uint32_t old_state = state[p];
         uint16_t x = partition_perm_row[p];
-        int g = (int)canon_state_unpack_first_greater(old_state);
+        uint8_t g = (uint8_t)(old_state & 0xffU);
         uint8_t next_fg;
         uint16_t next_fg_val;
 
-        if (g == depth) {
+        if (__builtin_expect(g != (uint8_t)depth, 1)) {
+            uint16_t r = (uint16_t)(old_state >> 8);
+            if (__builtin_expect(x >= r, 1)) continue;
+
+            uint16_t c = stack_vals[g];
+            if (__builtin_expect(x > c, 1)) {
+                next_fg = g;
+                next_fg_val = x;
+            } else if (x < c) {
+                return 0;
+            } else {
+                if (!canon_rebuild_equal_case(st, p, g, pid, &next_fg, &next_fg_val)) {
+                    return 0;
+                }
+                if (next_fg == new_depth) {
+                    stabilizer++;
+                }
+            }
+        } else {
             if (x < pid) return 0;
             if (x == pid) {
                 next_fg = (uint8_t)new_depth;
@@ -1811,37 +1836,22 @@ int canon_state_prepare_push(const CanonState* st, int partition_id, CanonScratc
                 next_fg = (uint8_t)depth;
                 next_fg_val = x;
             }
-        } else {
-            uint16_t r = canon_state_unpack_first_greater_val(old_state);
-            if (x >= r) continue;
-
-            uint16_t c = st->stack_vals[g];
-            if (x < c) return 0;
-            if (x > c) {
-                next_fg = (uint8_t)g;
-                next_fg_val = x;
-            } else {
-                if (!canon_rebuild_equal_case(st, p, g, pid, &next_fg, &next_fg_val)) {
-                    return 0;
-                }
-                if (next_fg == new_depth) {
-                    stabilizer++;
-                }
-            }
         }
 
         uint16_t new_fg_val = (next_fg < new_depth) ? next_fg_val : 0;
         uint32_t new_state = canon_state_pack(next_fg, new_fg_val);
-        scratch->next_state[p] = new_state;
-        scratch->active_idx[scratch->active_count++] = (uint16_t)p;
+        next_state[p] = new_state;
+        active_idx[active_count++] = (uint16_t)p;
         if (old_state != new_state) {
-            scratch->changed_first_greater_idx[scratch->changed_first_greater_count++] = (uint16_t)p;
+            changed_first_greater_idx[changed_first_greater_count++] = (uint16_t)p;
         }
 
     }
+    scratch->active_count = active_count;
+    scratch->changed_first_greater_count = changed_first_greater_count;
     if (g_profile && tls_profile) {
         tls_profile->canon_prepare_scanned_by_depth[depth] += st->limit;
-        tls_profile->canon_prepare_active_by_depth[depth] += scratch->active_count;
+        tls_profile->canon_prepare_active_by_depth[depth] += active_count;
     }
     *next_stabilizer = stabilizer;
     return 1;
