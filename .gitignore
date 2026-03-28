@@ -8,10 +8,13 @@ partition_poly_7
 *.o
 __pycache__/
 *.pyc
-ad-hoc/
 coordinator/
 gcloud/
+aws/
 patch
+gmon.out
+small_graph_lookup_gen
+small_graph_lookup_n7.bin
 
 third_party/nauty/.configured-tls
 third_party/nauty/nautyT.a
