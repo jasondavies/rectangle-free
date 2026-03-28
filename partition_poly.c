@@ -1862,9 +1862,6 @@ static int canon_state_prepare_terminal(const CanonState* st, int partition_id,
         uint8_t g = (uint8_t)(old_state & 0xffU);
 
         if (__builtin_expect(g != (uint8_t)depth, 1)) {
-            uint16_t r = (uint16_t)(old_state >> 8);
-            if (__builtin_expect(x >= r, 1)) continue;
-
             uint16_t c = stack_vals[g];
             if (__builtin_expect(x > c, 1)) {
                 continue;

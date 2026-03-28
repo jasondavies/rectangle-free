@@ -3457,3 +3457,58 @@
   - Experiment 15 measured the same family of idea on the older generic `partition_poly` path, before the later accepted `partition_poly_7` canon-state and terminal-depth wins
   - on the current code, those later front-end improvements reduced the cost of maintaining the stabiliser metadata enough that the sibling filter now pays for itself
 - Outcome: accepted.
+
+### Experiment 103: Remove the dead `r` check from `canon_state_prepare_terminal()`
+- Goal: simplify the terminal-only canon path after Experiment 101 by using the stronger invariant available at the final depth: when `g < depth`, only the relation between `x` and `c = stack_vals[g]` matters, so loading `r` and testing `x >= r` should be unnecessary work.
+- Change:
+  - in `canon_state_prepare_terminal()`, removed:
+    - `uint16_t r = (uint16_t)(old_state >> 8);`
+    - `if (x >= r) continue;`
+  - kept the remaining terminal logic:
+    - `x > c` continues
+    - `x < c` rejects
+    - `x == c` falls back to `canon_rebuild_equal_case(...)`
+- Baseline binary:
+  - `/tmp/partition_poly_7_pre103`, copied from the accepted `HEAD` before the code change
+- Exactness checks:
+  - baseline command: `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre103 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/pre103.poly`
+  - experiment command: `env OMP_NUM_THREADS=1 ./partition_poly_7 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/exp103.poly`
+  - `cmp -s /tmp/pre103.poly /tmp/exp103.poly` succeeded
+- `7x4 --task-end 16 --profile`:
+  - baseline:
+    - `Worker Complete in 0.41s`
+    - `canon_state_prepare_push: 79611 calls, 0.301s`
+    - `canon_state_commit_push: 538 calls, 0.001s`
+    - `solve_graph_poly: 43817 calls, 0.030s`
+  - experiment:
+    - `Worker Complete in 0.35s`
+    - `canon_state_prepare_push: 79611 calls, 0.238s`
+    - `canon_state_commit_push: 538 calls, 0.001s`
+    - `solve_graph_poly: 43817 calls, 0.030s`
+- `7x5 --task-end 4 --profile`:
+  - baseline:
+    - `Worker Complete in 10.26s`
+    - `canon_state_prepare_push: 2188134 calls, 8.239s`
+    - `canon_state_commit_push: 9795 calls, 0.012s`
+    - `solve_graph_poly: 1442988 calls, 1.623s`
+  - experiment:
+    - `Worker Complete in 9.04s`
+    - `canon_state_prepare_push: 2188134 calls, 7.054s`
+    - `canon_state_commit_push: 9795 calls, 0.012s`
+    - `solve_graph_poly: 1442988 calls, 1.613s`
+- `7x6 --task-end 1 --profile`:
+  - baseline:
+    - `Worker Complete in 47.60s`
+    - `canon_state_prepare_push: 9458098 calls, 37.547s`
+    - `canon_state_commit_push: 41741 calls, 0.064s`
+    - `solve_graph_poly: 6229781 calls, 18.476s`
+  - experiment:
+    - `Worker Complete in 41.23s`
+    - `canon_state_prepare_push: 9458098 calls, 30.797s`
+    - `canon_state_commit_push: 41741 calls, 0.064s`
+    - `solve_graph_poly: 6229781 calls, 18.522s`
+- Interpretation:
+  - this is a strong win
+  - the change leaves all graph-side counts unchanged and cuts only the terminal-depth symmetry work, exactly as intended
+  - the effect gets larger as the terminal level dominates more of the run; the bounded `7x6` sample benefits much more than `7x5`
+- Outcome: accepted.
