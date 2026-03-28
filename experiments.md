@@ -3082,3 +3082,175 @@
   - the direction matches the bucket data: making the fast skip path cheaper matters more than touching the rare equality fallback
   - most of the gain shows up directly in `canon_state_prepare_push()`, which is the intended target
 - Outcome: accepted.
+
+### Experiment 94: Two-pass block filtering for the `x >= r` skip path
+- Goal: cut branch cost further by scanning `canon_state_prepare_push()` in small blocks, filtering out the common `g < depth && x >= r` skips in a first pass, and only running the fuller logic on the survivors in a second pass.
+- Implementation:
+  - replaced the single-pass loop with a `16`-entry block loop
+  - first pass per block:
+    - load `state[p]`, `x`, and `g`
+    - immediately discard the common `g != depth && x >= r` case
+    - buffer surviving `(p, old_state, x)` triples in small stack arrays
+  - second pass per block:
+    - run the existing `x > c` / `x < c` / `x == c` logic for buffered survivors
+    - write `next_state`, `active_idx`, and `changed_first_greater_idx`
+- Exactness checks:
+  - `7x2 --task-end 50` shard output matched exactly against `/tmp/partition_poly_7_pre94`
+- Baseline `7x4` command:
+  - `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre94 7 4 --prefix-depth 2 --task-end 16 --profile`
+- Baseline `7x4` result:
+  - `Worker Complete in 1.31 seconds`
+  - `canon_state_prepare_push: 0.947s`
+- Experiment `7x4` result:
+  - `env OMP_NUM_THREADS=1 ./partition_poly_7 7 4 --prefix-depth 2 --task-end 16 --profile`
+  - `Worker Complete in 1.46 seconds`
+  - `canon_state_prepare_push: 1.101s`
+- Baseline `7x5` command:
+  - `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre94 7 5 --prefix-depth 2 --task-end 4 --profile`
+- Baseline `7x5` result:
+  - `Worker Complete in 29.90 seconds`
+  - `canon_state_prepare_push: 22.365s`
+  - `canon_state_commit_push: 2.277s`
+- Experiment `7x5` result:
+  - `env OMP_NUM_THREADS=1 ./partition_poly_7 7 5 --prefix-depth 2 --task-end 4 --profile`
+  - `Worker Complete in 32.94 seconds`
+  - `canon_state_prepare_push: 25.232s`
+  - `canon_state_commit_push: 2.287s`
+- Interpretation:
+  - the extra survivor buffering and second pass cost more than they save
+  - the current single-pass fast-skip loop is already efficient enough that this block-filter structure just adds overhead
+  - if SIMD is worth revisiting here, it likely needs real vector compares rather than a scalar two-pass emulation
+- Outcome: rejected and reverted.
+
+### Experiment 95: Re-test cache sizes after the prefix-side speedups
+- Goal: check whether the accepted `CACHE_BITS=17`, `RAW_CACHE_BITS=13` choice from the earlier 7-row-specific cache experiments is still optimal after Experiments 90-93 reduced the prefix-side cost substantially.
+- Method:
+  - kept the current accepted solver unchanged
+  - compiled temporary `partition_poly_7` variants with:
+    - `CACHE_BITS=16`, `RAW_CACHE_BITS=13`
+    - `CACHE_BITS=17`, `RAW_CACHE_BITS=14`
+    - `CACHE_BITS=16`, `RAW_CACHE_BITS=14`
+    - `CACHE_BITS=18`, `RAW_CACHE_BITS=13`
+  - screened them on serial `7x4 --task-end 16`, then took the plausible alternatives `16/13` and `18/13` to serial `7x5 --task-end 4`
+- `7x4` serial screen:
+  - baseline `17/13`: `Worker Complete in 1.29s`, `canon_state_prepare_push: 0.937s`
+  - `16/13`: `1.29s`, `0.936s`
+  - `17/14`: `1.29s`, `0.935s`
+  - `16/14`: `1.30s`, `0.941s`
+  - `18/13`: `1.29s`, `0.937s`
+- `7x5` serial comparison on a quiet machine:
+  - baseline `17/13`:
+    - `Worker Complete in 15.56s`
+    - `canon_state_prepare_push: 11.698s`
+    - `canon_state_commit_push: 1.274s`
+    - `solve_graph_poly: 1.672s`
+  - `16/13`:
+    - `Worker Complete in 15.52s`
+    - `canon_state_prepare_push: 11.659s`
+    - `canon_state_commit_push: 1.264s`
+    - `solve_graph_poly: 1.619s`
+  - `18/13`:
+    - `Worker Complete in 15.55s`
+    - `canon_state_prepare_push: 11.698s`
+    - `canon_state_commit_push: 1.269s`
+    - `solve_graph_poly: 1.776s`
+  - all three runs had identical:
+    - `Canonicalisation calls: 98166`
+    - `Canonical cache hits: 71012`
+    - `Raw cache hits: 233452`
+- Interpretation:
+  - after controlling for background CPU load, the apparent cache-size win disappears
+  - on these sampled serial workloads, `16/13`, `17/13`, and `18/13` are effectively tied
+  - there is no strong evidence that the old cache-size choice has gone stale in a meaningful way
+- Outcome: no change; keep the current `partition_poly_7` defaults.
+
+### Experiment 96: Specialise `canon_state_prepare_push()` for depth 4
+- Goal: reduce depth-dependent branching in the hottest remaining `CanonState` level by adding a dedicated depth-4 path and a matching depth-4 equality-rebuild helper.
+- Implementation:
+  - added a `canon_state_prepare_push_depth4()` helper with fixed `depth = 4`, `new_depth = 5`
+  - added a `canon_rebuild_equal_case_depth4()` helper that rebuilt and compared the four-row case directly
+  - dispatched from `canon_state_prepare_push()` to the specialised helper when `st->depth == 4`
+  - left the generic path unchanged for all other depths
+- Exactness checks:
+  - `7x2 --task-end 50` shard output matched exactly against `/tmp/partition_poly_7_pre96`
+- Baseline `7x4` command:
+  - `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre96 7 4 --prefix-depth 2 --task-end 16 --profile`
+- Baseline `7x4` result:
+  - `Worker Complete in 0.72s`
+  - `canon_state_prepare_push: 0.514s`
+  - `canon_state_commit_push: 0.070s`
+- Experiment `7x4` result:
+  - `env OMP_NUM_THREADS=1 ./partition_poly_7 7 4 --prefix-depth 2 --task-end 16 --profile`
+  - `Worker Complete in 0.73s`
+  - `canon_state_prepare_push: 0.514s`
+  - `canon_state_commit_push: 0.072s`
+- Baseline `7x5` command:
+  - `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre96 7 5 --prefix-depth 2 --task-end 4 --profile`
+- Baseline `7x5` result:
+  - `Worker Complete in 15.56s`
+  - `canon_state_prepare_push: 11.682s`
+  - `canon_state_commit_push: 1.281s`
+  - `solve_graph_poly: 1.686s`
+- Experiment `7x5` result:
+  - `env OMP_NUM_THREADS=1 ./partition_poly_7 7 5 --prefix-depth 2 --task-end 4 --profile`
+  - `Worker Complete in 16.06s`
+  - `canon_state_prepare_push: 12.213s`
+  - `canon_state_commit_push: 1.261s`
+  - `solve_graph_poly: 1.664s`
+- Interpretation:
+  - the depth-4 specialisation does not help in practice
+  - the generic branch-light loop is already good enough that duplicating the depth-4 logic mostly adds code size without reducing the real hot cost
+  - the regression shows up directly in `canon_state_prepare_push()`, which is the intended target
+- Outcome: rejected and reverted.
+
+### Experiment 97: Split a compact `GraphPoly` from full `Poly`
+- Goal: stop carrying full `Poly` objects through the graph solver and graph caches when `solve_graph_poly()` only ever needs degree `<= n <= MAXN_NAUTY`.
+- Implementation:
+  - introduced a compact `GraphPoly` type with coefficients sized to `MAXN_NAUTY + 1`
+  - added graph-only polynomial helpers for:
+    - zero / one
+    - multiply
+    - subtraction
+    - multiply by a linear factor
+    - conversion to and from full `Poly`
+  - changed the graph-solver path to use `GraphPoly` throughout:
+    - `solve_graph_poly()`
+    - raw cache load/store
+    - canonical cache load/store
+    - shared cache export/import
+    - small-graph lookup load
+  - converted back to full `Poly` only in `solve_structure()` before multiplying by the outer weight polynomial
+- Exactness checks:
+  - `7x2 --task-end 50` shard output matched exactly against `/tmp/partition_poly_7_pre96`
+  - full `7x3` output matched exactly against `/tmp/partition_poly_7_pre96`
+- Baseline `7x4` command:
+  - `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre96 7 4 --prefix-depth 2 --task-end 16 --profile`
+- Baseline `7x4` result:
+  - `Worker Complete in 0.78s`
+  - `canon_state_prepare_push: 0.562s`
+  - `canon_state_commit_push: 0.076s`
+  - `solve_graph_poly: 0.033s`
+- Experiment `7x4` result:
+  - `env OMP_NUM_THREADS=1 ./partition_poly_7 7 4 --prefix-depth 2 --task-end 16 --profile`
+  - `Worker Complete in 0.68s`
+  - `canon_state_prepare_push: 0.480s`
+  - `canon_state_commit_push: 0.069s`
+  - `solve_graph_poly: 0.028s`
+- Baseline `7x5` command:
+  - `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre96 7 5 --prefix-depth 2 --task-end 4 --profile`
+- Baseline `7x5` result:
+  - `Worker Complete in 15.52s`
+  - `canon_state_prepare_push: 11.691s`
+  - `canon_state_commit_push: 1.266s`
+  - `solve_graph_poly: 1.662s`
+- Experiment `7x5` result:
+  - `env OMP_NUM_THREADS=1 ./partition_poly_7 7 5 --prefix-depth 2 --task-end 4 --profile`
+  - `Worker Complete in 14.94s`
+  - `canon_state_prepare_push: 11.056s`
+  - `canon_state_commit_push: 1.271s`
+  - `solve_graph_poly: 1.851s`
+- Interpretation:
+  - this is a real end-to-end win on both sampled serial workloads
+  - the direct graph-solver time is mixed, but the smaller graph-side objects reduce enough overall traffic that total runtime still drops clearly
+  - the main visible improvement is in the hot prefix-side path, which suggests the smaller graph/cached polynomial objects are helping overall locality rather than just the recursive graph solver
+- Outcome: accepted.

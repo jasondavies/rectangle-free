@@ -91,6 +91,11 @@ typedef struct {
 } Poly;
 
 typedef struct {
+    uint8_t deg;
+    PolyCoeff coeffs[MAXN_NAUTY + 1];
+} GraphPoly;
+
+typedef struct {
     uint8_t mapping[MAX_ROWS];
     int num_blocks;
     uint32_t block_masks[MAX_ROWS]; 
@@ -213,7 +218,7 @@ typedef struct {
     uint32_t key_n;
     Graph g;
     uint64_t row_mask;
-    Poly value;
+    GraphPoly value;
 } SharedGraphCacheExportEntry;
 
 typedef struct {
@@ -335,13 +340,13 @@ static uint8_t g_small_graph_edge_count[SMALL_GRAPH_LOOKUP_MAX_N + 1] = {0};
 static void* checked_calloc(size_t count, size_t size, const char* label);
 static void* checked_aligned_alloc(size_t alignment, size_t size, const char* label);
 static void shared_graph_cache_flush_exports(void);
-static inline void graph_cache_load_poly(const GraphCache* cache, int slot, Poly* value);
+static inline void graph_cache_load_poly(const GraphCache* cache, int slot, GraphPoly* value);
 static inline uint32_t graph_cache_next_stamp(GraphCache* cache);
 static inline void graph_cache_touch_slot(GraphCache* cache, int slot);
 static inline int graph_cache_slot_matches_sig(const GraphCache* cache, int slot, uint64_t key_hash,
                                                uint32_t key_n, const uint64_t* sig);
 void store_graph_cache_entry(GraphCache* cache, uint64_t key_hash, uint32_t key_n, const Graph* g,
-                             uint64_t row_mask, const Poly* value);
+                             uint64_t row_mask, const GraphPoly* value);
 static void small_graph_lookup_init(void);
 static void small_graph_lookup_free(void);
 
@@ -1283,6 +1288,89 @@ Poly poly_mul_falling(Poly p, int start, int count) {
     return r;
 }
 
+static inline void graph_poly_degree_overflow(int deg) {
+    fprintf(stderr, "Graph polynomial degree %d exceeds MAXN_NAUTY=%d\n", deg, MAXN_NAUTY);
+    exit(1);
+}
+
+static inline void graph_poly_zero(GraphPoly* p) {
+    p->deg = 0;
+    memset(p->coeffs, 0, sizeof(p->coeffs));
+}
+
+static inline void graph_poly_one_ref(GraphPoly* p) {
+    graph_poly_zero(p);
+    p->coeffs[0] = 1;
+}
+
+static inline void graph_poly_from_poly(const Poly* src, GraphPoly* dst) {
+    if (src->deg > MAXN_NAUTY) graph_poly_degree_overflow(src->deg);
+    dst->deg = (uint8_t)src->deg;
+    memcpy(dst->coeffs, src->coeffs, (size_t)(src->deg + 1) * sizeof(src->coeffs[0]));
+}
+
+static inline void graph_poly_to_poly(const GraphPoly* src, Poly* dst) {
+    dst->deg = src->deg;
+    memcpy(dst->coeffs, src->coeffs, (size_t)(src->deg + 1) * sizeof(src->coeffs[0]));
+}
+
+static inline void graph_poly_mul_ref(const GraphPoly* a, const GraphPoly* b, GraphPoly* out) {
+    if ((a->deg == 0 && a->coeffs[0] == 0) || (b->deg == 0 && b->coeffs[0] == 0)) {
+        graph_poly_zero(out);
+        return;
+    }
+
+    GraphPoly tmp;
+    GraphPoly* r = out;
+    if (out == a || out == b) r = &tmp;
+    r->deg = (uint8_t)(a->deg + b->deg);
+    if (r->deg > MAXN_NAUTY) graph_poly_degree_overflow(r->deg);
+    memset(r->coeffs, 0, (size_t)(r->deg + 1) * sizeof(r->coeffs[0]));
+    for (int i = 0; i <= a->deg; i++) {
+        if (a->coeffs[i] == 0) continue;
+        for (int j = 0; j <= b->deg; j++) {
+            r->coeffs[i + j] += a->coeffs[i] * b->coeffs[j];
+        }
+    }
+    while (r->deg > 0 && r->coeffs[r->deg] == 0) r->deg--;
+    if (r != out) *out = *r;
+}
+
+static inline void graph_poly_sub_ref(const GraphPoly* a, const GraphPoly* b, GraphPoly* out) {
+    GraphPoly tmp;
+    GraphPoly* r = out;
+    if (out == a || out == b) r = &tmp;
+    r->deg = (a->deg > b->deg) ? a->deg : b->deg;
+    for (int i = 0; i <= r->deg; i++) {
+        PolyCoeff av = (i <= a->deg) ? a->coeffs[i] : 0;
+        PolyCoeff bv = (i <= b->deg) ? b->coeffs[i] : 0;
+        r->coeffs[i] = av - bv;
+    }
+    while (r->deg > 0 && r->coeffs[r->deg] == 0) r->deg--;
+    if (r != out) *out = *r;
+}
+
+static inline void graph_poly_mul_linear_ref(const GraphPoly* a, int c, GraphPoly* out) {
+    if (a->deg == 0 && a->coeffs[0] == 0) {
+        graph_poly_zero(out);
+        return;
+    }
+
+    GraphPoly tmp;
+    GraphPoly* r = out;
+    if (out == a) r = &tmp;
+    r->deg = (uint8_t)(a->deg + 1);
+    if (r->deg > MAXN_NAUTY) graph_poly_degree_overflow(r->deg);
+    memset(r->coeffs, 0, (size_t)(r->deg + 1) * sizeof(r->coeffs[0]));
+
+    for (int i = 0; i <= a->deg; i++) r->coeffs[i + 1] += a->coeffs[i];
+    if (c != 0) {
+        for (int i = 0; i <= a->deg; i++) r->coeffs[i] -= a->coeffs[i] * (PolyCoeff)c;
+    }
+    while (r->deg > 0 && r->coeffs[r->deg] == 0) r->deg--;
+    if (r != out) *out = *r;
+}
+
 void print_u128(PolyCoeff n) {
     if (n == 0) { printf("0"); return; }
     if (n < 0) { printf("-"); n = -n; }
@@ -2206,6 +2294,12 @@ static void small_graph_lookup_load_poly(int n, uint32_t mask, Poly* out) {
     for (int i = 0; i <= n; i++) out->coeffs[i] = coeffs[i];
 }
 
+static void small_graph_lookup_load_graph_poly(int n, uint32_t mask, GraphPoly* out) {
+    const int32_t* coeffs = small_graph_poly_slot(n, mask);
+    out->deg = (uint8_t)n;
+    for (int i = 0; i <= n; i++) out->coeffs[i] = coeffs[i];
+}
+
 static inline uint64_t graph_row_mask(int n) {
     if (n >= 64) return ~0ULL;
     if (n <= 0) return 0ULL;
@@ -2313,7 +2407,7 @@ static inline int graph_cache_slot_matches_sig(const GraphCache* cache, int slot
 }
 
 static int graph_cache_lookup_poly(GraphCache* cache, uint64_t key_hash, uint32_t key_n,
-                                   const Graph* g, uint64_t row_mask, Poly* value, int touch) {
+                                   const Graph* g, uint64_t row_mask, GraphPoly* value, int touch) {
     (void)row_mask;
     uint64_t sig[GRAPH_SIG_WORDS];
     graph_pack_signature(g, key_n, sig);
@@ -2329,9 +2423,9 @@ static int graph_cache_lookup_poly(GraphCache* cache, uint64_t key_hash, uint32_
     return 0;
 }
 
-static inline void graph_cache_load_poly(const GraphCache* cache, int slot, Poly* value) {
+static inline void graph_cache_load_poly(const GraphCache* cache, int slot, GraphPoly* value) {
     int deg = cache->degs[slot];
-    value->deg = deg;
+    value->deg = (uint8_t)deg;
     memcpy(value->coeffs, graph_cache_coeff_slot(cache, slot),
            (size_t)(deg + 1) * sizeof(value->coeffs[0]));
 }
@@ -2367,7 +2461,7 @@ static void shared_graph_cache_free(SharedGraphCache* shared) {
 }
 
 static int shared_graph_cache_lookup_poly(SharedGraphCache* shared, uint64_t key_hash, uint32_t key_n,
-                                          const Graph* g, uint64_t row_mask, Poly* value) {
+                                          const Graph* g, uint64_t row_mask, GraphPoly* value) {
     if (!shared || !shared->enabled) return 0;
     int found = 0;
     pthread_rwlock_rdlock(&shared->lock);
@@ -2390,7 +2484,7 @@ static void shared_graph_cache_flush_exports(void) {
 }
 
 static void shared_graph_cache_export(uint64_t key_hash, uint32_t key_n, const Graph* g,
-                                      uint64_t row_mask, const Poly* value) {
+                                      uint64_t row_mask, const GraphPoly* value) {
     SharedGraphCacheExporter* exporter = tls_shared_cache_exporter;
     SharedGraphCache* shared = g_shared_graph_cache;
     if (!shared || !shared->enabled || !exporter) return;
@@ -2406,7 +2500,7 @@ static void shared_graph_cache_export(uint64_t key_hash, uint32_t key_n, const G
 }
 
 void store_graph_cache_entry(GraphCache* cache, uint64_t key_hash, uint32_t key_n, const Graph* g,
-                             uint64_t row_mask, const Poly* value) {
+                             uint64_t row_mask, const GraphPoly* value) {
     (void)row_mask;
     uint64_t sig[GRAPH_SIG_WORDS];
     graph_pack_signature(g, key_n, sig);
@@ -2494,15 +2588,15 @@ static inline void record_hard_graph_node(ProfileStats* profile, int n, int max_
 static void solve_graph_poly(const Graph* input_g, GraphCache* cache, GraphCache* raw_cache,
                              NautyWorkspace* ws, long long* local_canon_calls,
                              long long* local_cache_hits, long long* local_raw_cache_hits,
-                             ProfileStats* profile, Poly* out_result) {
+                             ProfileStats* profile, GraphPoly* out_result) {
     Graph g = *input_g;
     double solve_t0 = 0.0;
     if (g_profile && profile) {
         profile->solve_graph_calls++;
         solve_t0 = omp_get_wtime();
     }
-    Poly multiplier;
-    poly_one_ref(&multiplier);
+    GraphPoly multiplier;
+    graph_poly_one_ref(&multiplier);
     
     // Simplification loop - same as before
     int changed = 1;
@@ -2513,7 +2607,7 @@ static void solve_graph_poly(const Graph* input_g, GraphCache* cache, GraphCache
             int degree = __builtin_popcountll(neighbors);
             
             if (degree == 0) {
-                poly_mul_linear_ref(&multiplier, 0, &multiplier);
+                graph_poly_mul_linear_ref(&multiplier, 0, &multiplier);
                 remove_vertex(&g, i);
                 changed = 1; i--; continue;
             }
@@ -2530,7 +2624,7 @@ static void solve_graph_poly(const Graph* input_g, GraphCache* cache, GraphCache
             }
             
             if (is_clique) {
-                poly_mul_linear_ref(&multiplier, degree, &multiplier);
+                graph_poly_mul_linear_ref(&multiplier, degree, &multiplier);
                 remove_vertex(&g, i);
                 changed = 1; i--;
             }
@@ -2543,9 +2637,9 @@ static void solve_graph_poly(const Graph* input_g, GraphCache* cache, GraphCache
     }
 
     if (g.n <= SMALL_GRAPH_LOOKUP_MAX_N) {
-        Poly small_poly;
-        small_graph_lookup_load_poly(g.n, small_graph_pack_mask(&g), &small_poly);
-        poly_mul_ref(&multiplier, &small_poly, out_result);
+        GraphPoly small_poly;
+        small_graph_lookup_load_graph_poly(g.n, small_graph_pack_mask(&g), &small_poly);
+        graph_poly_mul_ref(&multiplier, &small_poly, out_result);
         if (g_profile && profile) profile->solve_graph_time += omp_get_wtime() - solve_t0;
         return;
     }
@@ -2560,29 +2654,29 @@ static void solve_graph_poly(const Graph* input_g, GraphCache* cache, GraphCache
     for (int k = 0; k < raw_cache->probe; k++) {
         int p = (raw_cache_idx + k) & raw_cache->mask;
         if (graph_cache_slot_matches_sig(raw_cache, p, raw_hash, (uint32_t)g.n, raw_sig)) {
-            Poly cached;
+            GraphPoly cached;
             (*local_raw_cache_hits)++;
             graph_cache_load_poly(raw_cache, p, &cached);
             graph_cache_touch_slot(raw_cache, p);
-            poly_mul_ref(&multiplier, &cached, out_result);
+            graph_poly_mul_ref(&multiplier, &cached, out_result);
             if (g_profile && profile) profile->solve_graph_time += omp_get_wtime() - solve_t0;
             return;
         }
     }
 
-    Poly res;
+    GraphPoly res;
     uint64_t component_masks[MAXN_NAUTY];
     int component_count = graph_collect_components(&g, component_masks);
     if (component_count > 1) {
-        poly_one_ref(&res);
+        graph_poly_one_ref(&res);
         for (int i = 0; i < component_count; i++) {
             Graph subgraph;
             induced_subgraph_from_mask(&g, component_masks[i], &subgraph);
-            Poly part;
+            GraphPoly part;
             solve_graph_poly(&subgraph, cache, raw_cache, ws,
                              local_canon_calls, local_cache_hits, local_raw_cache_hits,
                              profile, &part);
-            poly_mul_ref(&res, &part, &res);
+            graph_poly_mul_ref(&res, &part, &res);
         }
     } else {
         // Canonicalise only if exact lookup missed and the graph is still connected.
@@ -2599,12 +2693,12 @@ static void solve_graph_poly(const Graph* input_g, GraphCache* cache, GraphCache
         for (int k = 0; k < cache->probe; k++) {
             int p = (cache_idx + k) & cache->mask;
             if (graph_cache_slot_matches_sig(cache, p, hash, (uint32_t)canon.n, canon_sig)) {
-                Poly cached;
+                GraphPoly cached;
                 (*local_cache_hits)++;
                 graph_cache_load_poly(cache, p, &cached);
                 graph_cache_touch_slot(cache, p);
                 store_graph_cache_entry(raw_cache, raw_hash, (uint32_t)g.n, &g, row_mask, &cached);
-                poly_mul_ref(&multiplier, &cached, out_result);
+                graph_poly_mul_ref(&multiplier, &cached, out_result);
                 if (g_profile && profile) profile->solve_graph_time += omp_get_wtime() - solve_t0;
                 return;
             }
@@ -2615,7 +2709,7 @@ static void solve_graph_poly(const Graph* input_g, GraphCache* cache, GraphCache
             store_graph_cache_entry(cache, hash, (uint32_t)canon.n, &canon, ADJWORD_MASK, &res);
             (*local_cache_hits)++;
             store_graph_cache_entry(raw_cache, raw_hash, (uint32_t)g.n, &g, row_mask, &res);
-            poly_mul_ref(&multiplier, &res, out_result);
+            graph_poly_mul_ref(&multiplier, &res, out_result);
             if (g_profile && profile) profile->solve_graph_time += omp_get_wtime() - solve_t0;
             return;
         }
@@ -2641,7 +2735,7 @@ static void solve_graph_poly(const Graph* input_g, GraphCache* cache, GraphCache
             Graph g_del = *branch_g;
             g_del.adj[u] &= ~(1ULL << v);
             g_del.adj[v] &= ~(1ULL << u);
-            Poly p_del;
+            GraphPoly p_del;
             solve_graph_poly(&g_del, cache, raw_cache, ws,
                              local_canon_calls, local_cache_hits, local_raw_cache_hits,
                              profile, &p_del);
@@ -2660,15 +2754,15 @@ static void solve_graph_poly(const Graph* input_g, GraphCache* cache, GraphCache
                 }
             }
             remove_vertex(&g_cont, v);
-            Poly p_cont;
+            GraphPoly p_cont;
             solve_graph_poly(&g_cont, cache, raw_cache, ws,
                              local_canon_calls, local_cache_hits, local_raw_cache_hits,
                              profile, &p_cont);
 
-            poly_sub_ref(&p_del, &p_cont, &res);
+            graph_poly_sub_ref(&p_del, &p_cont, &res);
         } else {
-            poly_one_ref(&res);
-            for (int k = 0; k < branch_g->n; k++) poly_mul_linear_ref(&res, 0, &res);
+            graph_poly_one_ref(&res);
+            for (int k = 0; k < branch_g->n; k++) graph_poly_mul_linear_ref(&res, 0, &res);
         }
 
         store_graph_cache_entry(cache, hash, (uint32_t)canon.n, &canon, ADJWORD_MASK, &res);
@@ -2676,7 +2770,7 @@ static void solve_graph_poly(const Graph* input_g, GraphCache* cache, GraphCache
     }
 
     store_graph_cache_entry(raw_cache, raw_hash, (uint32_t)g.n, &g, row_mask, &res);
-    poly_mul_ref(&multiplier, &res, out_result);
+    graph_poly_mul_ref(&multiplier, &res, out_result);
     if (g_profile && profile) profile->solve_graph_time += omp_get_wtime() - solve_t0;
 }
 
@@ -2781,10 +2875,12 @@ static void solve_structure(const Graph* partial_graph, CanonState* canon_state,
     Poly weight;
     poly_scale_ref(weight_prod, mult_coeff * row_orbit, &weight);
     if (g_profile && profile) profile->build_weight_time += omp_get_wtime() - t0;
+    GraphPoly graph_poly_small;
     Poly graph_poly;
     solve_graph_poly(partial_graph, cache, raw_cache, ws,
                      local_canon_calls, local_cache_hits, local_raw_cache_hits,
-                     profile, &graph_poly);
+                     profile, &graph_poly_small);
+    graph_poly_to_poly(&graph_poly_small, &graph_poly);
     poly_mul_ref(&weight, &graph_poly, out_result);
 }
 
