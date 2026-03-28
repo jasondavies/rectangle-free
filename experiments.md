@@ -3708,3 +3708,50 @@
   - even with top-3 prefiltering and one-ply simplification summaries, the selector chooses dramatically worse branch edges for this graph family
   - the hard band explodes instead of shrinking, so this branch-selection direction should be considered exhausted
 - Outcome: rejected and reverted.
+
+### Experiment 109: Prototype coarse graph-task donation on hard misses with `n >= 10`
+- Goal: test whether graph-level parallelism can reduce wall time on the adaptive `7x6` tail once graph solving dominates cumulative thread time. The narrow prototype was:
+  - only on canonical hard misses
+  - only when the simplified connected graph had `n >= 10`
+  - only at graph-task depth `0`
+  - only when the local runtime queue reported at least one idle thread
+  - donate the contraction branch as a runtime queue task, solve the deletion branch locally, then join the two `GraphPoly` results
+- Change:
+  - extended the runtime queue task payload to support a graph-solve task carrying a `Graph`
+  - added a small `GraphTaskResult` join object for the donated branch result
+  - threaded queue/root context through `execute_local_runtime_task()`
+  - on the hard-miss deletion-contraction path, tried to enqueue the contraction branch into the local runtime queue under the conditions above
+- Baseline binary:
+  - `/tmp/partition_poly_7_pre109`, compiled from committed `fd7341e`
+- Exactness checks:
+  - `7x2 --task-end 50` shard output matched exactly
+- `7x6 --adaptive-subdivide --task-end 1 --adaptive-work-budget 10 --adaptive-max-depth 5 --profile`:
+  - baseline:
+    - `Runtime queue occupancy: avg active 31.18/32 (97.4%)`
+    - `Runtime queue work-budget continuations: 1103`
+    - `Worker Complete in 5.97s`
+    - `solve_graph_poly: 8455213 calls, 427.136s`
+    - `get_canonical_graph/densenauty: 2579809 calls, 17.421s`
+    - `hard graph nodes: 1283331`
+  - experiment:
+    - `Runtime queue occupancy: avg active 31.74/32 (99.2%)`
+    - `Runtime queue work-budget continuations: 1065`
+    - `Worker Complete in 6.78s`
+    - `solve_graph_poly: 8378119 calls, 667.617s`
+    - `get_canonical_graph/densenauty: 2495863 calls, 17.290s`
+    - `hard graph nodes: 1244790`
+- Expensive-band breakdown:
+  - baseline:
+    - `n=10`: `1187496` calls, `60.545s`
+    - `n=11`: `667696` calls, `126.164s`
+    - `n=12`: `193676` calls, `125.693s`
+  - experiment:
+    - `n=10`: `1162702` calls, `125.225s`
+    - `n=11`: `649352` calls, `215.980s`
+    - `n=12`: `189033` calls, `190.528s`
+- Interpretation:
+  - the prototype is functionally sound and slightly reduces graph-call counts and hard graph nodes
+  - but it is still clearly worse overall
+  - the bounded `7x6` tail already has excellent occupancy, so donating one graph branch mainly adds queueing and synchronisation overhead
+  - the expensive `n=10..12` band becomes much slower despite slightly fewer nodes, so this narrow graph-donation design is not a viable default
+- Outcome: rejected and reverted.
