@@ -1545,19 +1545,12 @@ static void build_partition_weight_table(void) {
 
 typedef struct {
     int limit;
-    int cols;
     int depth;
-    uint16_t* transformed;
-    uint8_t* materialized_len;
     uint16_t* first_greater_val;
-    uint16_t* updated_idx;
-    uint8_t* prev_materialized_len;
-    uint16_t* prev_rows;
     uint8_t* first_greater;
     uint16_t* changed_first_greater_idx;
     uint8_t* changed_first_greater_old;
     uint16_t* changed_first_greater_val_old;
-    uint16_t updated_count[MAX_COLS];
     uint16_t changed_first_greater_count[MAX_COLS];
     uint16_t stack_vals[MAX_COLS];
     int stabilizer[MAX_COLS + 1];
@@ -1565,14 +1558,12 @@ typedef struct {
 
 typedef struct {
     int limit;
-    int cols;
     uint8_t* next_first_greater;
     uint16_t* next_first_greater_val;
     uint16_t* active_idx;
     uint16_t* changed_first_greater_idx;
     uint16_t active_count;
     uint16_t changed_first_greater_count;
-    uint16_t* prepared_rows;
 } CanonScratch;
 
 typedef struct {
@@ -1588,27 +1579,6 @@ typedef struct {
     long long local_raw_cache_hits;
 } WorkerCtx;
 
-static inline uint16_t* canon_state_row(CanonState* st, int perm_id) {
-    return st->transformed + (size_t)perm_id * (size_t)st->cols;
-}
-
-static inline const uint16_t* canon_state_row_const(const CanonState* st, int perm_id) {
-    return st->transformed + (size_t)perm_id * (size_t)st->cols;
-}
-
-static inline uint16_t* canon_state_updated_idx_row(CanonState* st, int depth) {
-    return st->updated_idx + (size_t)depth * (size_t)st->limit;
-}
-
-static inline uint8_t* canon_state_prev_materialized_len_row(CanonState* st, int depth) {
-    return st->prev_materialized_len + (size_t)depth * (size_t)st->limit;
-}
-
-static inline uint16_t* canon_state_prev_row(CanonState* st, int depth, int idx) {
-    return st->prev_rows +
-           (((size_t)depth * (size_t)st->limit + (size_t)idx) * (size_t)st->cols);
-}
-
 static inline uint16_t* canon_state_changed_first_greater_idx_row(CanonState* st, int depth) {
     return st->changed_first_greater_idx + (size_t)depth * (size_t)st->limit;
 }
@@ -1619,14 +1589,6 @@ static inline uint8_t* canon_state_changed_first_greater_old_row(CanonState* st,
 
 static inline uint16_t* canon_state_changed_first_greater_val_old_row(CanonState* st, int depth) {
     return st->changed_first_greater_val_old + (size_t)depth * (size_t)st->limit;
-}
-
-static inline uint16_t* canon_scratch_prepared_row(CanonScratch* scratch, int perm_id) {
-    return scratch->prepared_rows + (size_t)perm_id * (size_t)scratch->cols;
-}
-
-static inline const uint16_t* canon_scratch_prepared_row_const(const CanonScratch* scratch, int perm_id) {
-    return scratch->prepared_rows + (size_t)perm_id * (size_t)scratch->cols;
 }
 
 static inline int row_insert_sorted(uint16_t* row, int len, uint16_t val) {
@@ -1734,72 +1696,6 @@ static inline int row_insert_sorted(uint16_t* row, int len, uint16_t val) {
     }
 }
 
-static inline int canon_row_compare(const CanonState* st, const uint16_t* row, int depth, uint16_t pid) {
-    switch (depth + 1) {
-        case 1:
-            if (row[0] < pid) return -1;
-            if (row[0] > pid) return 0;
-            return 1;
-        case 2:
-            if (row[0] < st->stack_vals[0]) return -1;
-            if (row[0] > st->stack_vals[0]) return 0;
-            if (row[1] < pid) return -1;
-            if (row[1] > pid) return 1;
-            return 2;
-        case 3:
-            if (row[0] < st->stack_vals[0]) return -1;
-            if (row[0] > st->stack_vals[0]) return 0;
-            if (row[1] < st->stack_vals[1]) return -1;
-            if (row[1] > st->stack_vals[1]) return 1;
-            if (row[2] < pid) return -1;
-            if (row[2] > pid) return 2;
-            return 3;
-        case 4:
-            if (row[0] < st->stack_vals[0]) return -1;
-            if (row[0] > st->stack_vals[0]) return 0;
-            if (row[1] < st->stack_vals[1]) return -1;
-            if (row[1] > st->stack_vals[1]) return 1;
-            if (row[2] < st->stack_vals[2]) return -1;
-            if (row[2] > st->stack_vals[2]) return 2;
-            if (row[3] < pid) return -1;
-            if (row[3] > pid) return 3;
-            return 4;
-        case 5:
-            if (row[0] < st->stack_vals[0]) return -1;
-            if (row[0] > st->stack_vals[0]) return 0;
-            if (row[1] < st->stack_vals[1]) return -1;
-            if (row[1] > st->stack_vals[1]) return 1;
-            if (row[2] < st->stack_vals[2]) return -1;
-            if (row[2] > st->stack_vals[2]) return 2;
-            if (row[3] < st->stack_vals[3]) return -1;
-            if (row[3] > st->stack_vals[3]) return 3;
-            if (row[4] < pid) return -1;
-            if (row[4] > pid) return 4;
-            return 5;
-        case 6:
-            if (row[0] < st->stack_vals[0]) return -1;
-            if (row[0] > st->stack_vals[0]) return 0;
-            if (row[1] < st->stack_vals[1]) return -1;
-            if (row[1] > st->stack_vals[1]) return 1;
-            if (row[2] < st->stack_vals[2]) return -1;
-            if (row[2] > st->stack_vals[2]) return 2;
-            if (row[3] < st->stack_vals[3]) return -1;
-            if (row[3] > st->stack_vals[3]) return 3;
-            if (row[4] < st->stack_vals[4]) return -1;
-            if (row[4] > st->stack_vals[4]) return 4;
-            if (row[5] < pid) return -1;
-            if (row[5] > pid) return 5;
-            return 6;
-        default:
-            for (int k = 0; k <= depth; k++) {
-                uint16_t sv = (k < depth) ? st->stack_vals[k] : pid;
-                if (row[k] < sv) return -1;
-                if (row[k] > sv) return k;
-            }
-            return depth + 1;
-    }
-}
-
 static inline int canon_rebuild_equal_case(const CanonState* st, int p, int g, uint16_t pid,
                                            uint8_t* next_first_greater, uint16_t* next_first_greater_val) {
     int depth = st->depth;
@@ -1836,153 +1732,26 @@ static inline int canon_rebuild_equal_case(const CanonState* st, int p, int g, u
     return 1;
 }
 
-static inline void canon_copy_row_prefix(uint16_t* dst, const uint16_t* src, int len) {
-    switch (len) {
-        case 5:
-            dst[4] = src[4];
-            /* fall through */
-        case 4:
-            dst[3] = src[3];
-            /* fall through */
-        case 3:
-            dst[2] = src[2];
-            /* fall through */
-        case 2:
-            dst[1] = src[1];
-            /* fall through */
-        case 1:
-            dst[0] = src[0];
-            /* fall through */
-        case 0:
-            break;
-        default:
-            memcpy(dst, src, (size_t)len * sizeof(*dst));
-            break;
-    }
-}
-
-static inline void canon_materialize_row(const CanonState* st, CanonScratch* scratch, int p, int depth, int len,
-                                         const uint16_t* const* stack_perm_rows) {
-    uint16_t* row = canon_scratch_prepared_row(scratch, p);
-    const uint16_t* transformed_row = canon_state_row_const(st, p);
-    canon_copy_row_prefix(row, transformed_row, len);
-    switch (depth) {
-        case 5:
-            switch (len) {
-                case 0:
-                    row_insert_sorted(row, 0, stack_perm_rows[0][p]);
-                    /* fall through */
-                case 1:
-                    row_insert_sorted(row, 1, stack_perm_rows[1][p]);
-                    /* fall through */
-                case 2:
-                    row_insert_sorted(row, 2, stack_perm_rows[2][p]);
-                    /* fall through */
-                case 3:
-                    row_insert_sorted(row, 3, stack_perm_rows[3][p]);
-                    /* fall through */
-                case 4:
-                    row_insert_sorted(row, 4, stack_perm_rows[4][p]);
-                    /* fall through */
-                default:
-                    break;
-            }
-            break;
-        case 4:
-            switch (len) {
-                case 0:
-                    row_insert_sorted(row, 0, stack_perm_rows[0][p]);
-                    /* fall through */
-                case 1:
-                    row_insert_sorted(row, 1, stack_perm_rows[1][p]);
-                    /* fall through */
-                case 2:
-                    row_insert_sorted(row, 2, stack_perm_rows[2][p]);
-                    /* fall through */
-                case 3:
-                    row_insert_sorted(row, 3, stack_perm_rows[3][p]);
-                    /* fall through */
-                default:
-                    break;
-            }
-            break;
-        case 3:
-            switch (len) {
-                case 0:
-                    row_insert_sorted(row, 0, stack_perm_rows[0][p]);
-                    /* fall through */
-                case 1:
-                    row_insert_sorted(row, 1, stack_perm_rows[1][p]);
-                    /* fall through */
-                case 2:
-                    row_insert_sorted(row, 2, stack_perm_rows[2][p]);
-                    /* fall through */
-                default:
-                    break;
-            }
-            break;
-        case 2:
-            switch (len) {
-                case 0:
-                    row_insert_sorted(row, 0, stack_perm_rows[0][p]);
-                    /* fall through */
-                case 1:
-                    row_insert_sorted(row, 1, stack_perm_rows[1][p]);
-                    /* fall through */
-                default:
-                    break;
-            }
-            break;
-        case 1:
-            if (len == 0) {
-                row_insert_sorted(row, 0, stack_perm_rows[0][p]);
-            }
-            break;
-        default:
-            for (int t = len; t < depth; t++) {
-                row_insert_sorted(row, t, stack_perm_rows[t][p]);
-            }
-            break;
-    }
-}
-
 static void canon_state_init(CanonState* st, int limit) {
     memset(st, 0, sizeof(*st));
     st->limit = limit;
-    st->cols = g_cols;
-    st->transformed =
-        checked_calloc((size_t)limit * (size_t)st->cols, sizeof(*st->transformed), "canon_state_transformed");
-    st->materialized_len =
-        checked_calloc((size_t)limit, sizeof(*st->materialized_len), "canon_state_materialized_len");
     st->first_greater_val =
         checked_calloc((size_t)limit, sizeof(*st->first_greater_val), "canon_state_first_greater_val");
-    st->updated_idx =
-        checked_calloc((size_t)st->cols * (size_t)limit, sizeof(*st->updated_idx), "canon_state_updated_idx");
-    st->prev_materialized_len = checked_calloc((size_t)st->cols * (size_t)limit,
-                                               sizeof(*st->prev_materialized_len),
-                                               "canon_state_prev_materialized_len");
-    st->prev_rows = checked_calloc((size_t)st->cols * (size_t)limit * (size_t)st->cols,
-                                   sizeof(*st->prev_rows), "canon_state_prev_rows");
     st->first_greater =
         checked_calloc((size_t)limit, sizeof(*st->first_greater), "canon_state_first_greater");
     st->changed_first_greater_idx =
-        checked_calloc((size_t)st->cols * (size_t)limit, sizeof(*st->changed_first_greater_idx),
+        checked_calloc((size_t)g_cols * (size_t)limit, sizeof(*st->changed_first_greater_idx),
                        "canon_state_changed_first_greater_idx");
     st->changed_first_greater_old =
-        checked_calloc((size_t)st->cols * (size_t)limit, sizeof(*st->changed_first_greater_old),
+        checked_calloc((size_t)g_cols * (size_t)limit, sizeof(*st->changed_first_greater_old),
                        "canon_state_changed_first_greater_old");
     st->changed_first_greater_val_old =
-        checked_calloc((size_t)st->cols * (size_t)limit, sizeof(*st->changed_first_greater_val_old),
+        checked_calloc((size_t)g_cols * (size_t)limit, sizeof(*st->changed_first_greater_val_old),
                        "canon_state_changed_first_greater_val_old");
 }
 
 static void canon_state_free(CanonState* st) {
-    free(st->transformed);
-    free(st->materialized_len);
     free(st->first_greater_val);
-    free(st->updated_idx);
-    free(st->prev_materialized_len);
-    free(st->prev_rows);
     free(st->first_greater);
     free(st->changed_first_greater_idx);
     free(st->changed_first_greater_old);
@@ -1993,7 +1762,6 @@ static void canon_state_free(CanonState* st) {
 static void canon_scratch_init(CanonScratch* scratch, int limit) {
     memset(scratch, 0, sizeof(*scratch));
     scratch->limit = limit;
-    scratch->cols = g_cols;
     scratch->next_first_greater =
         checked_calloc((size_t)limit, sizeof(*scratch->next_first_greater), "canon_scratch_next_first_greater");
     scratch->next_first_greater_val =
@@ -2003,8 +1771,6 @@ static void canon_scratch_init(CanonScratch* scratch, int limit) {
     scratch->changed_first_greater_idx = checked_calloc((size_t)limit,
                                                         sizeof(*scratch->changed_first_greater_idx),
                                                         "canon_scratch_changed_first_greater_idx");
-    scratch->prepared_rows = checked_calloc((size_t)limit * (size_t)scratch->cols,
-                                            sizeof(*scratch->prepared_rows), "canon_scratch_prepared_rows");
 }
 
 static void canon_scratch_free(CanonScratch* scratch) {
@@ -2012,16 +1778,13 @@ static void canon_scratch_free(CanonScratch* scratch) {
     free(scratch->next_first_greater_val);
     free(scratch->active_idx);
     free(scratch->changed_first_greater_idx);
-    free(scratch->prepared_rows);
     memset(scratch, 0, sizeof(*scratch));
 }
 
 void canon_state_reset(CanonState* st, int limit) {
     st->limit = limit;
-    st->cols = g_cols;
     st->depth = 0;
     st->stabilizer[0] = limit;
-    memset(st->materialized_len, 0, (size_t)limit * sizeof(*st->materialized_len));
     memset(st->first_greater, 0, (size_t)limit * sizeof(*st->first_greater));
     memset(st->first_greater_val, 0, (size_t)limit * sizeof(*st->first_greater_val));
 }
@@ -2112,7 +1875,6 @@ void canon_state_commit_push(CanonState* st, int partition_id, const CanonScratc
     }
 
     st->changed_first_greater_count[depth] = changed_fg_count;
-    st->updated_count[depth] = 0;
     st->stabilizer[new_depth] = next_stabilizer;
     st->depth = new_depth;
 }

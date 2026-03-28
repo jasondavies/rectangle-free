@@ -2928,3 +2928,59 @@
     - graph-solver and cache hit rates stay effectively unchanged
   - this strongly supports the underlying diagnosis: the missed win was not row packing, it was avoiding full row maintenance in cases where `first_greater` plus one threshold value already decides the result
 - Outcome: accepted.
+
+### Experiment 91: Remove dead row-state storage after Experiment 90
+- Goal: strip the legacy row-materialisation machinery that became dead after Experiment 90, so `CanonState` and `CanonScratch` only keep the metadata that the new algorithm actually uses.
+- Implementation:
+  - removed unused `CanonState` fields:
+    - `transformed`
+    - `materialized_len`
+    - `updated_idx`
+    - `prev_materialized_len`
+    - `prev_rows`
+    - `updated_count`
+  - removed unused `CanonScratch` field:
+    - `prepared_rows`
+  - deleted the dead helper/accessor code that only served the old row path:
+    - `canon_state_row*`
+    - `canon_state_updated_idx_row`
+    - `canon_state_prev_*`
+    - `canon_scratch_prepared_row*`
+    - `canon_row_compare`
+    - `canon_copy_row_prefix`
+    - `canon_materialize_row`
+  - kept the Experiment 90 metadata algorithm unchanged
+- Exactness checks:
+  - full `7x3` output matched exactly against the committed Experiment 90 baseline binary
+  - the resulting polynomial text and shard file both matched
+- Baseline build for direct comparison:
+  - compiled `/tmp/partition_poly_7_cleanup_base` from committed `HEAD` at `ed781ca`
+- Baseline `7x4` command:
+  - `env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 /tmp/partition_poly_7_cleanup_base 7 4 --prefix-depth 2 --task-end 16 --profile`
+- Baseline `7x4` result:
+  - `Worker Complete in 0.89 seconds`
+  - `canon_state_prepare_push: 0.561s`
+  - `canon_state_commit_push: 0.131s`
+- Cleanup `7x4` result:
+  - `env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 4 --prefix-depth 2 --task-end 16 --profile`
+  - `Worker Complete in 0.88 seconds`
+  - `canon_state_prepare_push: 0.565s`
+  - `canon_state_commit_push: 0.134s`
+- Baseline `7x5` command:
+  - `env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 /tmp/partition_poly_7_cleanup_base 7 5 --prefix-depth 2 --task-end 4 --profile`
+- Baseline `7x5` result:
+  - `Worker Complete in 18.06 seconds`
+  - `canon_state_prepare_push: 12.491s`
+  - `canon_state_commit_push: 2.255s`
+  - `solve_graph_poly: 1.689s`
+- Cleanup `7x5` result:
+  - `env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 5 --prefix-depth 2 --task-end 4 --profile`
+  - `Worker Complete in 18.06 seconds`
+  - `canon_state_prepare_push: 12.584s`
+  - `canon_state_commit_push: 2.256s`
+  - `solve_graph_poly: 1.690s`
+- Interpretation:
+  - this cleanup is correctness-safe and removes a substantial amount of dead symmetry-state code and allocation
+  - relative to the accepted Experiment 90 implementation, performance is essentially flat
+  - so the value here is mainly simpler state and smaller memory footprint, not extra speed
+- Outcome: accepted as cleanup.
