@@ -3414,3 +3414,46 @@
   - the leaf level dominates accepted work on the heavier sample, so removing canon commit/pop bookkeeping there cuts a large amount of front-end overhead without changing the graph-solver search
   - the near-elimination of `canon_state_commit_push()` on the heavier sample confirms that most of its remaining cost was leaf-only bookkeeping
 - Outcome: accepted.
+
+### Experiment 102: Re-try stabiliser-orbit representative filtering on the current `partition_poly_7` solver
+- Goal: revisit the old representative-filter idea on the much faster modern canon path, to see whether the previous rejection was specific to the older generic solver rather than the underlying idea.
+- Change:
+  - extended `CanonState` to store the exact stabiliser permutation list at each depth (`equal_perm`, `equal_count`)
+  - extended `CanonScratch` to collect the next depth's exact-equality permutations during `canon_state_prepare_push()`
+  - copied that list into `CanonState` in `canon_state_commit_push()`
+  - added `canon_state_partition_is_rep(...)`, which rejects a candidate `pid` if some current stabiliser permutation maps it to a smaller admissible image in `[min_idx, pid)`
+  - applied that representative filter in:
+    - `dfs()`
+    - `dfs_runtime_split_local()`
+  - in the runtime split queue, used the parent prefix value as the admissible lower bound rather than the donated subrange start, so split workers still agree on the same global orbit representative
+- Baseline binary:
+  - `/tmp/partition_poly_7_head` compiled from committed `HEAD` (`ab4f891`)
+- Exactness checks:
+  - `7x2 --task-end 50` shard output matched exactly
+  - full `7x3` output matched exactly
+- `7x4 --task-end 16 --profile`:
+  - baseline:
+    - `Worker Complete in 0.75s`
+    - `canon_state_prepare_push: 331045 calls, 0.530s`
+    - `canon_state_commit_push: 43601 calls, 0.076s`
+  - experiment:
+    - `Worker Complete in 0.41s`
+    - `canon_state_prepare_push: 79611 calls, 0.303s`
+    - `canon_state_commit_push: 538 calls, 0.001s`
+- `7x5 --task-end 4 --profile`:
+  - baseline:
+    - `Worker Complete in 11.42s`
+    - `canon_state_prepare_push: 4959144 calls, 9.379s`
+    - `canon_state_commit_push: 9795 calls, 0.013s`
+  - experiment:
+    - `Worker Complete in 10.24s`
+    - `canon_state_prepare_push: 2188134 calls, 8.233s`
+    - `canon_state_commit_push: 9795 calls, 0.012s`
+- Interpretation:
+  - this is a real win on the current accepted solver
+  - unlike the old generic-path experiment, the modern `partition_poly_7` front-end is cheap enough that the representative test overhead no longer dominates
+  - the effect shows up exactly where expected: far fewer `canon_state_prepare_push()` calls at the deeper levels, with no change to graph-solver or cache counts
+- Why this differs from the earlier rejection:
+  - Experiment 15 measured the same family of idea on the older generic `partition_poly` path, before the later accepted `partition_poly_7` canon-state and terminal-depth wins
+  - on the current code, those later front-end improvements reduced the cost of maintaining the stabiliser metadata enough that the sibling filter now pays for itself
+- Outcome: accepted.

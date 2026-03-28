@@ -1635,8 +1635,10 @@ typedef struct {
     int limit;
     int depth;
     uint32_t* state;
+    uint16_t* equal_perm;
     uint16_t* changed_first_greater_idx;
     uint32_t* changed_first_greater_old_state;
+    uint16_t equal_count[MAX_COLS + 1];
     uint16_t changed_first_greater_count[MAX_COLS];
     uint16_t stack_vals[MAX_COLS];
     int stabilizer[MAX_COLS + 1];
@@ -1646,8 +1648,10 @@ typedef struct {
     int limit;
     uint32_t* next_state;
     uint16_t* active_idx;
+    uint16_t* next_equal_perm;
     uint16_t* changed_first_greater_idx;
     uint16_t active_count;
+    uint16_t next_equal_count;
     uint16_t changed_first_greater_count;
 } CanonScratch;
 
@@ -1670,6 +1674,14 @@ static inline uint16_t* canon_state_changed_first_greater_idx_row(CanonState* st
 
 static inline uint32_t* canon_state_changed_first_greater_old_state_row(CanonState* st, int depth) {
     return st->changed_first_greater_old_state + (size_t)depth * (size_t)st->limit;
+}
+
+static inline uint16_t* canon_state_equal_perm_row(CanonState* st, int depth) {
+    return st->equal_perm + (size_t)depth * (size_t)st->limit;
+}
+
+static inline const uint16_t* canon_state_equal_perm_row_const(const CanonState* st, int depth) {
+    return st->equal_perm + (size_t)depth * (size_t)st->limit;
 }
 
 static inline uint32_t canon_state_pack(uint8_t first_greater, uint16_t first_greater_val) {
@@ -1880,11 +1892,33 @@ static int canon_state_prepare_terminal(const CanonState* st, int partition_id,
     return 1;
 }
 
+static inline int canon_state_partition_is_rep(const CanonState* st, int min_idx,
+                                               int partition_id) {
+    uint16_t pid = (uint16_t)partition_id;
+    uint16_t min_pid = (uint16_t)min_idx;
+    uint16_t eq_count = st->equal_count[st->depth];
+    if (eq_count <= 1) return 1;
+
+    const uint16_t* eq = canon_state_equal_perm_row_const(st, st->depth);
+    const uint16_t* partition_perm_row =
+        perm_table + (size_t)partition_id * (size_t)perm_count;
+    for (uint16_t i = 0; i < eq_count; i++) {
+        uint16_t image = partition_perm_row[eq[i]];
+        if (image >= min_pid && image < pid) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static void canon_state_init(CanonState* st, int limit) {
     memset(st, 0, sizeof(*st));
     st->limit = limit;
     st->state =
         checked_calloc((size_t)limit, sizeof(*st->state), "canon_state_state");
+    st->equal_perm =
+        checked_calloc((size_t)(g_cols + 1) * (size_t)limit, sizeof(*st->equal_perm),
+                       "canon_state_equal_perm");
     st->changed_first_greater_idx =
         checked_calloc((size_t)g_cols * (size_t)limit, sizeof(*st->changed_first_greater_idx),
                        "canon_state_changed_first_greater_idx");
@@ -1895,6 +1929,7 @@ static void canon_state_init(CanonState* st, int limit) {
 
 static void canon_state_free(CanonState* st) {
     free(st->state);
+    free(st->equal_perm);
     free(st->changed_first_greater_idx);
     free(st->changed_first_greater_old_state);
     memset(st, 0, sizeof(*st));
@@ -1907,6 +1942,9 @@ static void canon_scratch_init(CanonScratch* scratch, int limit) {
         checked_calloc((size_t)limit, sizeof(*scratch->next_state), "canon_scratch_next_state");
     scratch->active_idx =
         checked_calloc((size_t)limit, sizeof(*scratch->active_idx), "canon_scratch_active_idx");
+    scratch->next_equal_perm =
+        checked_calloc((size_t)limit, sizeof(*scratch->next_equal_perm),
+                       "canon_scratch_next_equal_perm");
     scratch->changed_first_greater_idx = checked_calloc((size_t)limit,
                                                         sizeof(*scratch->changed_first_greater_idx),
                                                         "canon_scratch_changed_first_greater_idx");
@@ -1915,6 +1953,7 @@ static void canon_scratch_init(CanonScratch* scratch, int limit) {
 static void canon_scratch_free(CanonScratch* scratch) {
     free(scratch->next_state);
     free(scratch->active_idx);
+    free(scratch->next_equal_perm);
     free(scratch->changed_first_greater_idx);
     memset(scratch, 0, sizeof(*scratch));
 }
@@ -1923,6 +1962,11 @@ void canon_state_reset(CanonState* st, int limit) {
     st->limit = limit;
     st->depth = 0;
     st->stabilizer[0] = limit;
+    st->equal_count[0] = (uint16_t)limit;
+    uint16_t* equal_perm0 = canon_state_equal_perm_row(st, 0);
+    for (int p = 0; p < limit; p++) {
+        equal_perm0[p] = (uint16_t)p;
+    }
     memset(st->state, 0, (size_t)limit * sizeof(*st->state));
 }
 
@@ -1938,10 +1982,13 @@ int canon_state_prepare_push(const CanonState* st, int partition_id, CanonScratc
     const uint16_t* stack_vals = st->stack_vals;
     uint32_t* next_state = scratch->next_state;
     uint16_t* active_idx = scratch->active_idx;
+    uint16_t* next_equal_perm = scratch->next_equal_perm;
     uint16_t* changed_first_greater_idx = scratch->changed_first_greater_idx;
     uint16_t active_count = 0;
+    uint16_t next_equal_count = 0;
     uint16_t changed_first_greater_count = 0;
     scratch->active_count = 0;
+    scratch->next_equal_count = 0;
     scratch->changed_first_greater_count = 0;
 
     for (int p = 0; p < st->limit; p++) {
@@ -1985,12 +2032,16 @@ int canon_state_prepare_push(const CanonState* st, int partition_id, CanonScratc
         uint32_t new_state = canon_state_pack(next_fg, new_fg_val);
         next_state[p] = new_state;
         active_idx[active_count++] = (uint16_t)p;
+        if (next_fg == new_depth) {
+            next_equal_perm[next_equal_count++] = (uint16_t)p;
+        }
         if (old_state != new_state) {
             changed_first_greater_idx[changed_first_greater_count++] = (uint16_t)p;
         }
 
     }
     scratch->active_count = active_count;
+    scratch->next_equal_count = next_equal_count;
     scratch->changed_first_greater_count = changed_first_greater_count;
     if (g_profile && tls_profile) {
         tls_profile->canon_prepare_scanned_by_depth[depth] += st->limit;
@@ -2004,11 +2055,15 @@ void canon_state_commit_push(CanonState* st, int partition_id, const CanonScratc
                              int next_stabilizer) {
     int depth = st->depth;
     int new_depth = depth + 1;
+    uint16_t* equal_perm = canon_state_equal_perm_row(st, new_depth);
     uint16_t* changed_first_greater_idx = canon_state_changed_first_greater_idx_row(st, depth);
     uint32_t* changed_first_greater_old_state = canon_state_changed_first_greater_old_state_row(st, depth);
     uint16_t changed_fg_count = scratch->changed_first_greater_count;
     st->stack_vals[depth] = (uint16_t)partition_id;
 
+    for (uint16_t i = 0; i < scratch->next_equal_count; i++) {
+        equal_perm[i] = scratch->next_equal_perm[i];
+    }
     for (uint16_t i = 0; i < changed_fg_count; i++) {
         uint16_t p = scratch->changed_first_greater_idx[i];
         changed_first_greater_idx[i] = p;
@@ -2016,6 +2071,7 @@ void canon_state_commit_push(CanonState* st, int partition_id, const CanonScratc
         st->state[p] = scratch->next_state[p];
     }
 
+    st->equal_count[new_depth] = scratch->next_equal_count;
     st->changed_first_greater_count[depth] = changed_fg_count;
     st->stabilizer[new_depth] = next_stabilizer;
     st->depth = new_depth;
@@ -2969,6 +3025,9 @@ void dfs(int depth, int min_idx, int* stack, CanonState* canon_state, const Part
     for (int i = min_idx; i < num_partitions; i++) {
         double t0 = 0.0;
         int is_terminal = (depth + 1 == g_cols);
+        if (!canon_state_partition_is_rep(canon_state, min_idx, i)) {
+            continue;
+        }
         if (g_profile && profile) {
             profile->canon_prepare_calls++;
             profile->canon_prepare_calls_by_depth[depth]++;
@@ -3226,6 +3285,7 @@ static void dfs_runtime_split_local(int depth, int start_pid, int end_pid, long 
 
     int next_stabilizer = 0;
     int local_end = end_pid;
+    int rep_min_idx = (depth > 0) ? ctx->stack[depth - 1] : 0;
     for (int pid = start_pid; pid < local_end; pid++) {
         if (g_adaptive_work_budget > 0 &&
             tls_adaptive_work_counter &&
@@ -3259,6 +3319,9 @@ static void dfs_runtime_split_local(int depth, int start_pid, int end_pid, long 
 
         double t0 = 0.0;
         int is_terminal = (depth + 1 == g_cols);
+        if (!canon_state_partition_is_rep(&ctx->canon_state, rep_min_idx, pid)) {
+            continue;
+        }
         ctx->stack[depth] = pid;
         if (g_profile) {
             tls_profile->canon_prepare_calls++;
