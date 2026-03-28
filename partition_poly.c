@@ -1314,6 +1314,28 @@ static inline void graph_poly_to_poly(const GraphPoly* src, Poly* dst) {
     memcpy(dst->coeffs, src->coeffs, (size_t)(src->deg + 1) * sizeof(src->coeffs[0]));
 }
 
+static inline void poly_mul_graph_ref(const Poly* a, const GraphPoly* b, Poly* out) {
+    if ((a->deg == 0 && a->coeffs[0] == 0) || (b->deg == 0 && b->coeffs[0] == 0)) {
+        poly_zero(out);
+        return;
+    }
+
+    Poly tmp;
+    Poly* r = out;
+    if (out == a) r = &tmp;
+    r->deg = a->deg + b->deg;
+    if (r->deg >= MAX_DEGREE) degree_overflow(r->deg);
+    memset(r->coeffs, 0, (size_t)(r->deg + 1) * sizeof(r->coeffs[0]));
+    for (int i = 0; i <= a->deg; i++) {
+        if (a->coeffs[i] == 0) continue;
+        for (int j = 0; j <= b->deg; j++) {
+            r->coeffs[i + j] += a->coeffs[i] * b->coeffs[j];
+        }
+    }
+    while (r->deg > 0 && r->coeffs[r->deg] == 0) r->deg--;
+    if (r != out) *out = *r;
+}
+
 static inline void graph_poly_mul_ref(const GraphPoly* a, const GraphPoly* b, GraphPoly* out) {
     if ((a->deg == 0 && a->coeffs[0] == 0) || (b->deg == 0 && b->coeffs[0] == 0)) {
         graph_poly_zero(out);
@@ -2985,12 +3007,10 @@ static void solve_structure_with_row_orbit(const Graph* partial_graph, long long
     poly_scale_ref(weight_prod, mult_coeff * row_orbit, &weight);
     if (g_profile && profile) profile->build_weight_time += omp_get_wtime() - t0;
     GraphPoly graph_poly_small;
-    Poly graph_poly;
     solve_graph_poly(partial_graph, cache, raw_cache, ws,
                      local_canon_calls, local_cache_hits, local_raw_cache_hits,
                      profile, &graph_poly_small);
-    graph_poly_to_poly(&graph_poly_small, &graph_poly);
-    poly_mul_ref(&weight, &graph_poly, out_result);
+    poly_mul_graph_ref(&weight, &graph_poly_small, out_result);
 }
 
 static void solve_structure(const Graph* partial_graph, CanonState* canon_state,

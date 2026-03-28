@@ -3512,3 +3512,86 @@
   - the change leaves all graph-side counts unchanged and cuts only the terminal-depth symmetry work, exactly as intended
   - the effect gets larger as the terminal level dominates more of the run; the bounded `7x6` sample benefits much more than `7x5`
 - Outcome: accepted.
+
+### Experiment 104: Direct `Poly x GraphPoly` multiply in the leaf path
+- Goal: remove the remaining `GraphPoly -> Poly` conversion in `solve_structure_with_row_orbit()` by multiplying the full `weight` polynomial directly by the small graph polynomial returned from `solve_graph_poly()`.
+- Change:
+  - added `poly_mul_graph_ref(const Poly*, const GraphPoly*, Poly*)`
+  - changed `solve_structure_with_row_orbit()` to:
+    - keep `weight` as a full `Poly`
+    - call `solve_graph_poly()` into `GraphPoly graph_poly_small`
+    - multiply with `poly_mul_graph_ref(...)`
+  - removed the temporary `graph_poly_to_poly(...)` conversion at that leaf call site
+- Baseline binary:
+  - `/tmp/partition_poly_7_pre104`, copied from accepted `HEAD`
+- Exactness checks:
+  - `7x2 --task-end 50` shard output matched exactly
+- `7x4 --task-end 16 --profile`:
+  - baseline:
+    - `Worker Complete in 0.38s`
+    - `canon_state_prepare_push: 79611 calls, 0.272s`
+    - `solve_graph_poly: 43817 calls, 0.031s`
+  - experiment:
+    - `Worker Complete in 0.39s`
+    - `canon_state_prepare_push: 79611 calls, 0.281s`
+    - `solve_graph_poly: 43817 calls, 0.033s`
+- `7x5 --task-end 4 --profile`:
+  - baseline:
+    - `Worker Complete in 9.38s`
+    - `canon_state_prepare_push: 2188134 calls, 7.268s`
+    - `solve_graph_poly: 1442988 calls, 1.704s`
+  - experiment:
+    - `Worker Complete in 9.10s`
+    - `canon_state_prepare_push: 2188134 calls, 7.104s`
+    - `solve_graph_poly: 1442988 calls, 1.638s`
+  - repeat:
+    - baseline `9.06s`
+    - experiment `9.01s`
+- `7x6 --task-end 1 --profile`:
+  - baseline:
+    - `Worker Complete in 41.17s`
+    - `canon_state_prepare_push: 9458098 calls, 31.043s`
+    - `solve_graph_poly: 6229781 calls, 18.684s`
+  - experiment:
+    - `Worker Complete in 40.74s`
+    - `canon_state_prepare_push: 9458098 calls, 30.805s`
+    - `solve_graph_poly: 6229781 calls, 18.467s`
+- Interpretation:
+  - the effect is small and noisy, but consistently non-negative on the heavier `7x5` and `7x6` samples
+  - the `7x4` sample moves slightly the wrong way, but this is a tiny, exact, low-risk cleanup on a hot leaf path
+  - after review, the implementation was restored and kept despite the weak benchmark signal
+- Outcome: accepted and kept as a small leaf-path cleanup.
+
+### Experiment 105: Specialise the terminal canon prepare path for `depth == 5`
+- Goal: follow up Experiment 103 by specialising the hot terminal-depth path on bounded `7x6`, hoisting `stack_vals[0..4]` into locals and replacing `c = stack_vals[g]` with a small inline selection.
+- Change:
+  - added `canon_state_prepare_terminal_depth5(...)`
+  - dispatched to it from `canon_state_prepare_terminal()` when `st->depth == 5`
+  - kept the generic terminal helper unchanged for all other depths
+- Baseline binary:
+  - `/tmp/partition_poly_7_pre105`, copied from accepted `HEAD`
+- Exactness checks:
+  - `7x2 --task-end 50` shard output matched exactly
+- `7x5 --task-end 4 --profile`:
+  - baseline:
+    - `Worker Complete in 9.26s`
+    - `canon_state_prepare_push: 2188134 calls, 7.197s`
+    - `solve_graph_poly: 1442988 calls, 1.686s`
+  - experiment:
+    - `Worker Complete in 9.05s`
+    - `canon_state_prepare_push: 2188134 calls, 7.052s`
+    - `solve_graph_poly: 1442988 calls, 1.626s`
+- `7x6 --task-end 1 --profile`:
+  - baseline:
+    - `Worker Complete in 40.84s`
+    - `canon_state_prepare_push: 9458098 calls, 30.914s`
+    - `solve_graph_poly: 6229781 calls, 18.681s`
+  - experiment:
+    - `Worker Complete in 65.22s`
+    - `canon_state_prepare_push: 9458098 calls, 55.193s`
+    - `solve_graph_poly: 6229781 calls, 18.485s`
+- Interpretation:
+  - this is not a viable follow-up to Experiment 103
+  - although the bounded `7x5` sample is slightly positive, the bounded `7x6` sample regresses catastrophically in the hot terminal-depth regime the specialisation was meant to help
+  - the extra specialised control flow appears to be much worse for the compiler/runtime than the generic terminal helper
+- Outcome: rejected.
