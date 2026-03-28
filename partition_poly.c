@@ -1684,6 +1684,14 @@ static inline uint16_t canon_state_unpack_first_greater_val(uint32_t state) {
     return (uint16_t)(state >> 8);
 }
 
+static void solve_structure_with_row_orbit(const Graph* partial_graph, long long row_orbit,
+                                           GraphCache* cache, GraphCache* raw_cache,
+                                           NautyWorkspace* ws, long long* local_canon_calls,
+                                           long long* local_cache_hits,
+                                           long long* local_raw_cache_hits,
+                                           const Poly* weight_prod, long long mult_coeff,
+                                           ProfileStats* profile, Poly* out_result);
+
 static inline int row_insert_sorted(uint16_t* row, int len, uint16_t val) {
     switch (len) {
         case 0:
@@ -1822,6 +1830,53 @@ static inline int canon_rebuild_equal_case(const CanonState* st, int p, int g, u
         *next_first_greater = (uint8_t)new_depth;
         *next_first_greater_val = 0;
     }
+    return 1;
+}
+
+static int canon_state_prepare_terminal(const CanonState* st, int partition_id,
+                                        int* next_stabilizer) {
+    int depth = st->depth;
+    int new_depth = depth + 1;
+    int stabilizer = 0;
+    uint16_t pid = (uint16_t)partition_id;
+    const uint16_t* partition_perm_row =
+        perm_table + (size_t)partition_id * (size_t)perm_count;
+    const uint32_t* state = st->state;
+    const uint16_t* stack_vals = st->stack_vals;
+
+    for (int p = 0; p < st->limit; p++) {
+        uint32_t old_state = state[p];
+        uint16_t x = partition_perm_row[p];
+        uint8_t g = (uint8_t)(old_state & 0xffU);
+
+        if (__builtin_expect(g != (uint8_t)depth, 1)) {
+            uint16_t r = (uint16_t)(old_state >> 8);
+            if (__builtin_expect(x >= r, 1)) continue;
+
+            uint16_t c = stack_vals[g];
+            if (__builtin_expect(x > c, 1)) {
+                continue;
+            } else if (x < c) {
+                return 0;
+            } else {
+                uint8_t next_fg;
+                uint16_t next_fg_val;
+                if (!canon_rebuild_equal_case(st, p, g, pid, &next_fg, &next_fg_val)) {
+                    return 0;
+                }
+                if (next_fg == new_depth) {
+                    stabilizer++;
+                }
+            }
+        } else {
+            if (x < pid) return 0;
+            if (x == pid) {
+                stabilizer++;
+            }
+        }
+    }
+
+    *next_stabilizer = stabilizer;
     return 1;
 }
 
@@ -2861,17 +2916,18 @@ static void build_live_prefix2_tasks(PrefixId** live_i_out, PrefixId** live_j_ou
     *live_count_out = live.count;
 }
 
-static void solve_structure(const Graph* partial_graph, CanonState* canon_state,
-                            GraphCache* cache, GraphCache* raw_cache, NautyWorkspace* ws,
-                            long long* local_canon_calls, long long* local_cache_hits,
-                            long long* local_raw_cache_hits, const Poly* weight_prod,
-                            long long mult_coeff, ProfileStats* profile, Poly* out_result) {
+static void solve_structure_with_row_orbit(const Graph* partial_graph, long long row_orbit,
+                                           GraphCache* cache, GraphCache* raw_cache,
+                                           NautyWorkspace* ws, long long* local_canon_calls,
+                                           long long* local_cache_hits,
+                                           long long* local_raw_cache_hits,
+                                           const Poly* weight_prod, long long mult_coeff,
+                                           ProfileStats* profile, Poly* out_result) {
     double t0 = 0.0;
     if (g_profile && profile) {
         profile->solve_structure_calls++;
         t0 = omp_get_wtime();
     }
-    long long row_orbit = get_orbit_multiplier_state(canon_state);
     Poly weight;
     poly_scale_ref(weight_prod, mult_coeff * row_orbit, &weight);
     if (g_profile && profile) profile->build_weight_time += omp_get_wtime() - t0;
@@ -2882,6 +2938,17 @@ static void solve_structure(const Graph* partial_graph, CanonState* canon_state,
                      profile, &graph_poly_small);
     graph_poly_to_poly(&graph_poly_small, &graph_poly);
     poly_mul_ref(&weight, &graph_poly, out_result);
+}
+
+static void solve_structure(const Graph* partial_graph, CanonState* canon_state,
+                            GraphCache* cache, GraphCache* raw_cache, NautyWorkspace* ws,
+                            long long* local_canon_calls, long long* local_cache_hits,
+                            long long* local_raw_cache_hits, const Poly* weight_prod,
+                            long long mult_coeff, ProfileStats* profile, Poly* out_result) {
+    long long row_orbit = get_orbit_multiplier_state(canon_state);
+    solve_structure_with_row_orbit(partial_graph, row_orbit, cache, raw_cache, ws,
+                                   local_canon_calls, local_cache_hits, local_raw_cache_hits,
+                                   weight_prod, mult_coeff, profile, out_result);
 }
 
 void dfs(int depth, int min_idx, int* stack, CanonState* canon_state, const PartialGraphState* partial_graph,
@@ -2901,12 +2968,16 @@ void dfs(int depth, int min_idx, int* stack, CanonState* canon_state, const Part
     int next_stabilizer = 0;
     for (int i = min_idx; i < num_partitions; i++) {
         double t0 = 0.0;
+        int is_terminal = (depth + 1 == g_cols);
         if (g_profile && profile) {
             profile->canon_prepare_calls++;
             profile->canon_prepare_calls_by_depth[depth]++;
             t0 = omp_get_wtime();
         }
-        if (!canon_state_prepare_push(canon_state, i, canon_scratch, &next_stabilizer)) {
+        int ok_prepare = is_terminal
+            ? canon_state_prepare_terminal(canon_state, i, &next_stabilizer)
+            : canon_state_prepare_push(canon_state, i, canon_scratch, &next_stabilizer);
+        if (!ok_prepare) {
             if (g_profile && profile) profile->canon_prepare_time += omp_get_wtime() - t0;
             continue;
         }
@@ -2915,8 +2986,10 @@ void dfs(int depth, int min_idx, int* stack, CanonState* canon_state, const Part
             profile->canon_prepare_accepts++;
             profile->canon_prepare_accepts_by_depth[depth]++;
             profile->stabilizer_sum_by_depth[depth] += next_stabilizer;
-            profile->canon_commit_calls++;
-            t0 = omp_get_wtime();
+            if (!is_terminal) {
+                profile->canon_commit_calls++;
+                t0 = omp_get_wtime();
+            }
         }
         stack[depth] = i;
         Poly next_weight_prod;
@@ -2927,9 +3000,11 @@ void dfs(int depth, int min_idx, int* stack, CanonState* canon_state, const Part
             next_run_len = run_len + 1;
             next_mult_coeff /= next_run_len;
         }
-        canon_state_commit_push(canon_state, i, canon_scratch, next_stabilizer);
-        if (g_profile && profile) profile->canon_commit_time += omp_get_wtime() - t0;
         PartialGraphState next_graph = *partial_graph;
+        if (!is_terminal) {
+            canon_state_commit_push(canon_state, i, canon_scratch, next_stabilizer);
+            if (g_profile && profile) profile->canon_commit_time += omp_get_wtime() - t0;
+        }
         if (g_profile && profile) {
             profile->partial_append_calls++;
             t0 = omp_get_wtime();
@@ -2937,11 +3012,23 @@ void dfs(int depth, int min_idx, int* stack, CanonState* canon_state, const Part
         int ok = partial_graph_append(&next_graph, depth, i, stack);
         if (g_profile && profile) profile->partial_append_time += omp_get_wtime() - t0;
         if (ok) {
-            dfs(depth + 1, i, stack, canon_state, &next_graph, cache, raw_cache, ws, local_total,
-                local_canon_calls, local_cache_hits, local_raw_cache_hits, &next_weight_prod,
-                next_mult_coeff, next_run_len, profile, canon_scratch);
+            if (is_terminal) {
+                long long row_orbit = factorial[g_rows] / next_stabilizer;
+                Poly res;
+                solve_structure_with_row_orbit(&next_graph.g, row_orbit, cache, raw_cache, ws,
+                                               local_canon_calls, local_cache_hits,
+                                               local_raw_cache_hits, &next_weight_prod,
+                                               next_mult_coeff, profile, &res);
+                poly_add_ref_checked(local_total, &res, local_total);
+            } else {
+                dfs(depth + 1, i, stack, canon_state, &next_graph, cache, raw_cache, ws, local_total,
+                    local_canon_calls, local_cache_hits, local_raw_cache_hits, &next_weight_prod,
+                    next_mult_coeff, next_run_len, profile, canon_scratch);
+            }
         }
-        canon_state_pop(canon_state);
+        if (!is_terminal) {
+            canon_state_pop(canon_state);
+        }
     }
 }
 
@@ -3171,13 +3258,17 @@ static void dfs_runtime_split_local(int depth, int start_pid, int end_pid, long 
         }
 
         double t0 = 0.0;
+        int is_terminal = (depth + 1 == g_cols);
         ctx->stack[depth] = pid;
         if (g_profile) {
             tls_profile->canon_prepare_calls++;
             tls_profile->canon_prepare_calls_by_depth[depth]++;
             t0 = omp_get_wtime();
         }
-        if (!canon_state_prepare_push(&ctx->canon_state, pid, &ctx->canon_scratch, &next_stabilizer)) {
+        int ok_prepare = is_terminal
+            ? canon_state_prepare_terminal(&ctx->canon_state, pid, &next_stabilizer)
+            : canon_state_prepare_push(&ctx->canon_state, pid, &ctx->canon_scratch, &next_stabilizer);
+        if (!ok_prepare) {
             if (g_profile) tls_profile->canon_prepare_time += omp_get_wtime() - t0;
             continue;
         }
@@ -3186,13 +3277,17 @@ static void dfs_runtime_split_local(int depth, int start_pid, int end_pid, long 
             tls_profile->canon_prepare_accepts++;
             tls_profile->canon_prepare_accepts_by_depth[depth]++;
             tls_profile->stabilizer_sum_by_depth[depth] += next_stabilizer;
-            tls_profile->canon_commit_calls++;
-            t0 = omp_get_wtime();
+            if (!is_terminal) {
+                tls_profile->canon_commit_calls++;
+                t0 = omp_get_wtime();
+            }
         }
 
-        canon_state_commit_push(&ctx->canon_state, pid, &ctx->canon_scratch, next_stabilizer);
-        if (g_profile) tls_profile->canon_commit_time += omp_get_wtime() - t0;
         PartialGraphState saved_graph = ctx->partial_graph;
+        if (!is_terminal) {
+            canon_state_commit_push(&ctx->canon_state, pid, &ctx->canon_scratch, next_stabilizer);
+            if (g_profile) tls_profile->canon_commit_time += omp_get_wtime() - t0;
+        }
 
         if (g_profile) {
             tls_profile->partial_append_calls++;
@@ -3209,15 +3304,28 @@ static void dfs_runtime_split_local(int depth, int start_pid, int end_pid, long 
                 next_mult_coeff /= next_run_len;
             }
 
-            dfs_runtime_split_local(depth + 1, pid, num_partitions, root_id, ctx, local_total,
-                                    &next_weight_prod, next_mult_coeff, next_run_len,
-                                    profile, queue);
+            if (is_terminal) {
+                long long row_orbit = factorial[g_rows] / next_stabilizer;
+                Poly res;
+                solve_structure_with_row_orbit(&ctx->partial_graph.g, row_orbit, &ctx->cache,
+                                               &ctx->raw_cache, &ctx->ws,
+                                               &ctx->local_canon_calls, &ctx->local_cache_hits,
+                                               &ctx->local_raw_cache_hits, &next_weight_prod,
+                                               next_mult_coeff, profile, &res);
+                poly_add_ref_checked(local_total, &res, local_total);
+            } else {
+                dfs_runtime_split_local(depth + 1, pid, num_partitions, root_id, ctx, local_total,
+                                        &next_weight_prod, next_mult_coeff, next_run_len,
+                                        profile, queue);
+            }
         } else if (g_profile) {
             tls_profile->partial_append_time += omp_get_wtime() - t0;
         }
 
         ctx->partial_graph = saved_graph;
-        canon_state_pop(&ctx->canon_state);
+        if (!is_terminal) {
+            canon_state_pop(&ctx->canon_state);
+        }
     }
 }
 

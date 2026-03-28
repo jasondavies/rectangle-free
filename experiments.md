@@ -3370,3 +3370,47 @@
   - this is also effectively flat-to-worse
   - the invariant changes the search/caching counts slightly, but does not improve end-to-end runtime and makes the direct nauty time worse on the heavier sample
 - Outcome: rejected and reverted.
+
+### Experiment 101: Terminal-depth canon fast path without commit/pop
+- Goal: avoid paying canon scratch-state writes, `canon_state_commit_push()`, and `canon_state_pop()` for the final accepted column, where there is no further recursion.
+- Implementation:
+  - added `canon_state_prepare_terminal()` to run the same metadata-first acceptance logic as `canon_state_prepare_push()` but return only accept/reject plus `next_stabilizer`
+  - added `solve_structure_with_row_orbit(...)` so leaf calls can pass `factorial[g_rows] / next_stabilizer` directly without mutating `CanonState`
+  - changed both `dfs()` and `dfs_runtime_split_local()` so when `depth + 1 == g_cols` they:
+    - call the terminal prepare helper
+    - append the final column into a copied `PartialGraphState`
+    - solve the leaf immediately
+    - skip `canon_state_commit_push()` and `canon_state_pop()`
+- Baseline binary:
+  - `/tmp/partition_poly_7_head` compiled from committed `HEAD`
+- Exactness checks:
+  - baseline command: `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_head 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/terminal_head_7x2.poly`
+  - experiment command: `env OMP_NUM_THREADS=1 ./partition_poly_7 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/terminal_exp_7x2.poly`
+  - `cmp -s /tmp/terminal_head_7x2.poly /tmp/terminal_exp_7x2.poly` succeeded
+- `7x4 --task-end 16 --profile`:
+  - baseline:
+    - `Worker Complete in 0.68s`
+    - `canon_state_prepare_push: 331045 calls, 0.480s`
+    - `canon_state_commit_push: 43601 calls, 0.069s`
+    - `solve_graph_poly: 43817 calls, 0.029s`
+  - experiment:
+    - `Worker Complete in 0.53s`
+    - `canon_state_prepare_push: 331045 calls, 0.421s`
+    - `canon_state_commit_push: 538 calls, 0.002s`
+    - `solve_graph_poly: 43817 calls, 0.032s`
+- `7x5 --task-end 4 --profile`:
+  - baseline:
+    - `Worker Complete in 14.90s`
+    - `canon_state_prepare_push: 4959144 calls, 11.140s`
+    - `canon_state_commit_push: 1398473 calls, 1.269s`
+    - `solve_graph_poly: 1442988 calls, 1.661s`
+  - experiment:
+    - `Worker Complete in 11.62s`
+    - `canon_state_prepare_push: 4959144 calls, 9.486s`
+    - `canon_state_commit_push: 9795 calls, 0.013s`
+    - `solve_graph_poly: 1442988 calls, 1.684s`
+- Interpretation:
+  - this is a strong win
+  - the leaf level dominates accepted work on the heavier sample, so removing canon commit/pop bookkeeping there cuts a large amount of front-end overhead without changing the graph-solver search
+  - the near-elimination of `canon_state_commit_push()` on the heavier sample confirms that most of its remaining cost was leaf-only bookkeeping
+- Outcome: accepted.
