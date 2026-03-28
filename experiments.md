@@ -2783,3 +2783,148 @@
   - the improvement is small, but it comes with a substantial reduction in cache-entry graph storage
   - interestingly, `solve_graph_poly()` itself is a little slower in this sample, so the net gain is coming from the surrounding cache/prefix path rather than from the graph solver proper
 - Outcome: accepted.
+
+### Experiment 89: Re-try articulation-point factorisation on the current accepted solver
+- Goal: revisit the old cut-vertex split after the later accepted solver/cache changes, by inserting articulation-point factorisation immediately after simplification and connected-component splitting, before nauty and deletion-contraction.
+- Implementation attempt:
+  - added brute-force articulation detection on the connected residual graph
+  - if removing a vertex `v` split the graph into `k > 1` components:
+    - solved each induced subgraph on `component_i ∪ {v}`
+    - multiplied those `k` chromatic polynomials
+    - divided the product by `x^(k-1)`
+  - kept the current small-graph lookup, raw cache, canonical cache, and canonical-graph branching unchanged otherwise
+- Exactness check:
+  - baseline:
+    - `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre89 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/base89_7x2.poly`
+  - experiment:
+    - `env OMP_NUM_THREADS=1 ./partition_poly_7 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/exp89_7x2.poly`
+  - result:
+    - both produced `P(4) = 1754772`, `P(5) = 15743720`
+    - shard files matched exactly
+- Baseline `7x4` command:
+  - `env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre89 7 4 --prefix-depth 2 --task-end 16 --profile`
+- Baseline `7x4` result:
+  - `Worker Complete in 1.55 seconds`
+  - `Total elapsed including prefix generation: 1.58 seconds`
+  - `Canonicalisation calls: 683`
+  - `Canonical cache hits: 306 (44.8%)`
+  - `Raw cache hits: 1006`
+  - `solve_graph_poly: 43817 calls, 0.030s`
+  - `canon_state_prepare_push: 0.983s`
+- Experiment `7x4` result:
+  - `env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 4 --prefix-depth 2 --task-end 16 --profile`
+  - `Worker Complete in 1.62 seconds`
+  - `Total elapsed including prefix generation: 1.65 seconds`
+  - `Canonicalisation calls: 683`
+  - `Canonical cache hits: 306 (44.8%)`
+  - `Raw cache hits: 1006`
+  - `solve_graph_poly: 43817 calls, 0.032s`
+  - `canon_state_prepare_push: 1.023s`
+- Baseline `7x5` command:
+  - `env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre89 7 5 --prefix-depth 2 --task-end 4 --profile`
+- Baseline `7x5` result:
+  - `Worker Complete in 34.94 seconds`
+  - `Total elapsed including prefix generation: 34.96 seconds`
+  - `Canonicalisation calls: 98166`
+  - `Canonical cache hits: 71012 (72.3%)`
+  - `Raw cache hits: 233452`
+  - `solve_graph_poly: 1442988 calls, 1.724s`
+  - `get_canonical_graph/densenauty: 98166 calls, 0.200s`
+- Experiment `7x5` result:
+  - `env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 5 --prefix-depth 2 --task-end 4 --profile`
+  - `Worker Complete in 35.09 seconds`
+  - `Total elapsed including prefix generation: 35.12 seconds`
+  - `Canonicalisation calls: 98028`
+  - `Canonical cache hits: 70972 (72.4%)`
+  - `Raw cache hits: 233460`
+  - `solve_graph_poly: 1442884 calls, 1.836s`
+  - `get_canonical_graph/densenauty: 98028 calls, 0.208s`
+- Interpretation:
+  - this re-try is correctness-safe, but it still does not help on the current accepted solver
+  - the articulation split slightly reduces canonical calls on the heavier sample, but not enough to offset its own overhead
+  - end-to-end it regresses both the light `7x4` and heavier `7x5` samples
+  - so the old conclusion still holds after the later solver/cache wins: cut-vertex splitting is not a worthwhile addition here
+- Outcome: rejected and reverted.
+
+### Experiment 90: Metadata-first `canon_state_prepare_push()` using `first_greater_val`
+- Goal: exploit the existing `first_greater` invariant directly, so the common path in `canon_state_prepare_push()` does not rebuild and compare sorted rows when the answer is already determined by:
+  - the canonical value at the first difference `c = stack_vals[g]`
+  - the current differing row value `r = first_greater_val[p]`
+  - the new permuted partition value `x`
+- Implementation:
+  - added `first_greater_val[p]` to `CanonState`, valid whenever `first_greater[p] < depth`
+  - added undo support for both:
+    - `first_greater[p]`
+    - `first_greater_val[p]`
+  - rewrote `canon_state_prepare_push()` as a metadata-first case split:
+    - if `g == depth`:
+      - `x < pid` -> reject immediately
+      - `x == pid` -> new equality, `first_greater = depth + 1`
+      - `x > pid` -> new first difference at `depth`, `first_greater_val = x`
+    - if `g < depth`:
+      - `x >= r` -> skip immediately, no state change
+      - `x < c` -> reject immediately
+      - `c < x < r` -> first difference stays at `g`, but `first_greater_val` becomes `x`
+      - only `x == c` falls back to a slow helper
+  - replaced the old row-cached slow path with a rebuild-from-stack helper for the `x == c` case only
+  - simplified `canon_state_commit_push()` / `canon_state_pop()` to update and restore just the metadata pair `(first_greater, first_greater_val)` rather than copying per-permutation prepared rows on every accepted push
+  - left the old row arrays allocated for now, but they are no longer used by the hot path
+- Exactness checks:
+  - `7x2 --task-end 50` shard output matched exactly against `/tmp/partition_poly_7_pre89`
+  - full `7x3` shard output matched exactly against `/tmp/partition_poly_7_pre89`
+- Baseline `7x3` command:
+  - `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre89 7 3 --prefix-depth 2 --poly-out /tmp/base90_7x3.poly`
+- Baseline `7x3` result:
+  - `Worker Complete in 1.47 seconds`
+  - `Canonicalisation calls: 79`
+  - `Canonical cache hits: 54 (68.4%)`
+  - `Raw cache hits: 137`
+- Experiment `7x3` result:
+  - `env OMP_NUM_THREADS=1 ./partition_poly_7 7 3 --prefix-depth 2 --poly-out /tmp/exp90_7x3.poly`
+  - `Worker Complete in 0.84 seconds`
+  - `Canonicalisation calls: 79`
+  - `Canonical cache hits: 54 (68.4%)`
+  - `Raw cache hits: 137`
+- Baseline `7x4` command:
+  - `env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre89 7 4 --prefix-depth 2 --task-end 16 --profile`
+- Baseline `7x4` result:
+  - `Worker Complete in 1.60 seconds`
+  - `canon_state_prepare_push: 1.015s`
+  - `canon_state_commit_push: 0.308s`
+  - `solve_graph_poly: 0.031s`
+- Experiment `7x4` result:
+  - `env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 4 --prefix-depth 2 --task-end 16 --profile`
+  - `Worker Complete in 0.90 seconds`
+  - `canon_state_prepare_push: 0.577s`
+  - `canon_state_commit_push: 0.134s`
+  - `solve_graph_poly: 0.031s`
+- Baseline `7x5` command:
+  - `env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre89 7 5 --prefix-depth 2 --task-end 4 --profile`
+- Baseline `7x5` result:
+  - `Worker Complete in 34.86 seconds`
+  - `Total elapsed including prefix generation: 34.88 seconds`
+  - `Canonicalisation calls: 98166`
+  - `Canonical cache hits: 71012 (72.3%)`
+  - `Raw cache hits: 233452`
+  - `canon_state_prepare_push: 23.491s`
+  - `canon_state_commit_push: 6.091s`
+  - `solve_graph_poly: 1.767s`
+- Experiment `7x5` result:
+  - `env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 5 --prefix-depth 2 --task-end 4 --profile`
+  - `Worker Complete in 18.61 seconds`
+  - `Total elapsed including prefix generation: 18.63 seconds`
+  - `Canonicalisation calls: 98166`
+  - `Canonical cache hits: 71012 (72.3%)`
+  - `Raw cache hits: 233452`
+  - `canon_state_prepare_push: 12.519s`
+  - `canon_state_commit_push: 2.416s`
+  - `solve_graph_poly: 1.696s`
+- Interpretation:
+  - this is a major exact win in the real hotspot
+  - the common path no longer pays for row materialisation, insertion, and lexicographic comparison when the existing first-difference metadata already determines the outcome
+  - the effect is visible exactly where expected:
+    - `prepare_push` is nearly halved on the heavier sample
+    - `commit_push` also drops sharply because the row-copy path is gone
+    - graph-solver and cache hit rates stay effectively unchanged
+  - this strongly supports the underlying diagnosis: the missed win was not row packing, it was avoiding full row maintenance in cases where `first_greater` plus one threshold value already decides the result
+- Outcome: accepted.
