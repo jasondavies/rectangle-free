@@ -1546,11 +1546,9 @@ static void build_partition_weight_table(void) {
 typedef struct {
     int limit;
     int depth;
-    uint16_t* first_greater_val;
-    uint8_t* first_greater;
+    uint32_t* state;
     uint16_t* changed_first_greater_idx;
-    uint8_t* changed_first_greater_old;
-    uint16_t* changed_first_greater_val_old;
+    uint32_t* changed_first_greater_old_state;
     uint16_t changed_first_greater_count[MAX_COLS];
     uint16_t stack_vals[MAX_COLS];
     int stabilizer[MAX_COLS + 1];
@@ -1558,8 +1556,7 @@ typedef struct {
 
 typedef struct {
     int limit;
-    uint8_t* next_first_greater;
-    uint16_t* next_first_greater_val;
+    uint32_t* next_state;
     uint16_t* active_idx;
     uint16_t* changed_first_greater_idx;
     uint16_t active_count;
@@ -1583,12 +1580,20 @@ static inline uint16_t* canon_state_changed_first_greater_idx_row(CanonState* st
     return st->changed_first_greater_idx + (size_t)depth * (size_t)st->limit;
 }
 
-static inline uint8_t* canon_state_changed_first_greater_old_row(CanonState* st, int depth) {
-    return st->changed_first_greater_old + (size_t)depth * (size_t)st->limit;
+static inline uint32_t* canon_state_changed_first_greater_old_state_row(CanonState* st, int depth) {
+    return st->changed_first_greater_old_state + (size_t)depth * (size_t)st->limit;
 }
 
-static inline uint16_t* canon_state_changed_first_greater_val_old_row(CanonState* st, int depth) {
-    return st->changed_first_greater_val_old + (size_t)depth * (size_t)st->limit;
+static inline uint32_t canon_state_pack(uint8_t first_greater, uint16_t first_greater_val) {
+    return (uint32_t)first_greater | ((uint32_t)first_greater_val << 8);
+}
+
+static inline uint8_t canon_state_unpack_first_greater(uint32_t state) {
+    return (uint8_t)(state & 0xffU);
+}
+
+static inline uint16_t canon_state_unpack_first_greater_val(uint32_t state) {
+    return (uint16_t)(state >> 8);
 }
 
 static inline int row_insert_sorted(uint16_t* row, int len, uint16_t val) {
@@ -1735,37 +1740,28 @@ static inline int canon_rebuild_equal_case(const CanonState* st, int p, int g, u
 static void canon_state_init(CanonState* st, int limit) {
     memset(st, 0, sizeof(*st));
     st->limit = limit;
-    st->first_greater_val =
-        checked_calloc((size_t)limit, sizeof(*st->first_greater_val), "canon_state_first_greater_val");
-    st->first_greater =
-        checked_calloc((size_t)limit, sizeof(*st->first_greater), "canon_state_first_greater");
+    st->state =
+        checked_calloc((size_t)limit, sizeof(*st->state), "canon_state_state");
     st->changed_first_greater_idx =
         checked_calloc((size_t)g_cols * (size_t)limit, sizeof(*st->changed_first_greater_idx),
                        "canon_state_changed_first_greater_idx");
-    st->changed_first_greater_old =
-        checked_calloc((size_t)g_cols * (size_t)limit, sizeof(*st->changed_first_greater_old),
-                       "canon_state_changed_first_greater_old");
-    st->changed_first_greater_val_old =
-        checked_calloc((size_t)g_cols * (size_t)limit, sizeof(*st->changed_first_greater_val_old),
-                       "canon_state_changed_first_greater_val_old");
+    st->changed_first_greater_old_state =
+        checked_calloc((size_t)g_cols * (size_t)limit, sizeof(*st->changed_first_greater_old_state),
+                       "canon_state_changed_first_greater_old_state");
 }
 
 static void canon_state_free(CanonState* st) {
-    free(st->first_greater_val);
-    free(st->first_greater);
+    free(st->state);
     free(st->changed_first_greater_idx);
-    free(st->changed_first_greater_old);
-    free(st->changed_first_greater_val_old);
+    free(st->changed_first_greater_old_state);
     memset(st, 0, sizeof(*st));
 }
 
 static void canon_scratch_init(CanonScratch* scratch, int limit) {
     memset(scratch, 0, sizeof(*scratch));
     scratch->limit = limit;
-    scratch->next_first_greater =
-        checked_calloc((size_t)limit, sizeof(*scratch->next_first_greater), "canon_scratch_next_first_greater");
-    scratch->next_first_greater_val =
-        checked_calloc((size_t)limit, sizeof(*scratch->next_first_greater_val), "canon_scratch_next_first_greater_val");
+    scratch->next_state =
+        checked_calloc((size_t)limit, sizeof(*scratch->next_state), "canon_scratch_next_state");
     scratch->active_idx =
         checked_calloc((size_t)limit, sizeof(*scratch->active_idx), "canon_scratch_active_idx");
     scratch->changed_first_greater_idx = checked_calloc((size_t)limit,
@@ -1774,8 +1770,7 @@ static void canon_scratch_init(CanonScratch* scratch, int limit) {
 }
 
 static void canon_scratch_free(CanonScratch* scratch) {
-    free(scratch->next_first_greater);
-    free(scratch->next_first_greater_val);
+    free(scratch->next_state);
     free(scratch->active_idx);
     free(scratch->changed_first_greater_idx);
     memset(scratch, 0, sizeof(*scratch));
@@ -1785,8 +1780,7 @@ void canon_state_reset(CanonState* st, int limit) {
     st->limit = limit;
     st->depth = 0;
     st->stabilizer[0] = limit;
-    memset(st->first_greater, 0, (size_t)limit * sizeof(*st->first_greater));
-    memset(st->first_greater_val, 0, (size_t)limit * sizeof(*st->first_greater_val));
+    memset(st->state, 0, (size_t)limit * sizeof(*st->state));
 }
 
 int canon_state_prepare_push(const CanonState* st, int partition_id, CanonScratch* scratch,
@@ -1801,8 +1795,9 @@ int canon_state_prepare_push(const CanonState* st, int partition_id, CanonScratc
     scratch->changed_first_greater_count = 0;
 
     for (int p = 0; p < st->limit; p++) {
+        uint32_t old_state = st->state[p];
         uint16_t x = partition_perm_row[p];
-        int g = st->first_greater[p];
+        int g = (int)canon_state_unpack_first_greater(old_state);
         uint8_t next_fg;
         uint16_t next_fg_val;
 
@@ -1817,10 +1812,8 @@ int canon_state_prepare_push(const CanonState* st, int partition_id, CanonScratc
                 next_fg_val = x;
             }
         } else {
-            uint16_t r = st->first_greater_val[p];
-            if (x >= r) {
-                continue;
-            }
+            uint16_t r = canon_state_unpack_first_greater_val(old_state);
+            if (x >= r) continue;
 
             uint16_t c = st->stack_vals[g];
             if (x < c) return 0;
@@ -1837,12 +1830,11 @@ int canon_state_prepare_push(const CanonState* st, int partition_id, CanonScratc
             }
         }
 
-        uint16_t old_fg_val = (g < depth) ? st->first_greater_val[p] : 0;
         uint16_t new_fg_val = (next_fg < new_depth) ? next_fg_val : 0;
-        scratch->next_first_greater[p] = next_fg;
-        scratch->next_first_greater_val[p] = new_fg_val;
+        uint32_t new_state = canon_state_pack(next_fg, new_fg_val);
+        scratch->next_state[p] = new_state;
         scratch->active_idx[scratch->active_count++] = (uint16_t)p;
-        if (st->first_greater[p] != next_fg || old_fg_val != new_fg_val) {
+        if (old_state != new_state) {
             scratch->changed_first_greater_idx[scratch->changed_first_greater_count++] = (uint16_t)p;
         }
 
@@ -1860,18 +1852,15 @@ void canon_state_commit_push(CanonState* st, int partition_id, const CanonScratc
     int depth = st->depth;
     int new_depth = depth + 1;
     uint16_t* changed_first_greater_idx = canon_state_changed_first_greater_idx_row(st, depth);
-    uint8_t* changed_first_greater_old = canon_state_changed_first_greater_old_row(st, depth);
-    uint16_t* changed_first_greater_val_old = canon_state_changed_first_greater_val_old_row(st, depth);
+    uint32_t* changed_first_greater_old_state = canon_state_changed_first_greater_old_state_row(st, depth);
     uint16_t changed_fg_count = scratch->changed_first_greater_count;
     st->stack_vals[depth] = (uint16_t)partition_id;
 
     for (uint16_t i = 0; i < changed_fg_count; i++) {
         uint16_t p = scratch->changed_first_greater_idx[i];
         changed_first_greater_idx[i] = p;
-        changed_first_greater_old[i] = st->first_greater[p];
-        changed_first_greater_val_old[i] = st->first_greater_val[p];
-        st->first_greater[p] = scratch->next_first_greater[p];
-        st->first_greater_val[p] = scratch->next_first_greater_val[p];
+        changed_first_greater_old_state[i] = st->state[p];
+        st->state[p] = scratch->next_state[p];
     }
 
     st->changed_first_greater_count[depth] = changed_fg_count;
@@ -1882,12 +1871,10 @@ void canon_state_commit_push(CanonState* st, int partition_id, const CanonScratc
 void canon_state_pop(CanonState* st) {
     int depth = st->depth - 1;
     uint16_t* changed_first_greater_idx = canon_state_changed_first_greater_idx_row(st, depth);
-    uint8_t* changed_first_greater_old = canon_state_changed_first_greater_old_row(st, depth);
-    uint16_t* changed_first_greater_val_old = canon_state_changed_first_greater_val_old_row(st, depth);
+    uint32_t* changed_first_greater_old_state = canon_state_changed_first_greater_old_state_row(st, depth);
     for (uint16_t i = 0; i < st->changed_first_greater_count[depth]; i++) {
         uint16_t p = changed_first_greater_idx[i];
-        st->first_greater[p] = changed_first_greater_old[i];
-        st->first_greater_val[p] = changed_first_greater_val_old[i];
+        st->state[p] = changed_first_greater_old_state[i];
     }
     st->depth = depth;
 }

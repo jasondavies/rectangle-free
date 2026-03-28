@@ -2984,3 +2984,51 @@
   - relative to the accepted Experiment 90 implementation, performance is essentially flat
   - so the value here is mainly simpler state and smaller memory footprint, not extra speed
 - Outcome: accepted as cleanup.
+
+### Experiment 92: Pack `(first_greater, first_greater_val)` into one state word
+- Goal: reduce metadata traffic in the now-dominant fast path by replacing the separate `first_greater[]` and `first_greater_val[]` arrays with one packed per-permutation state word, and likewise pack the undo/next-state paths.
+- Implementation:
+  - replaced the split metadata arrays with:
+    - `CanonState.state[p]`
+    - `CanonScratch.next_state[p]`
+    - packed undo state in `changed_first_greater_old_state`
+  - encoded each per-permutation state as:
+    - low `8` bits: `first_greater`
+    - upper bits: `first_greater_val`
+  - rewrote `canon_state_prepare_push()`, `canon_state_commit_push()`, and `canon_state_pop()` to read and write that packed state directly
+  - left the actual Experiment 90 case split unchanged
+- Exactness checks:
+  - `7x2 --task-end 50` shard output matched exactly against `/tmp/partition_poly_7_pre92`
+  - full `7x3` output matched exactly against `/tmp/partition_poly_7_pre92`
+- Baseline `7x4` command:
+  - `env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre92 7 4 --prefix-depth 2 --task-end 16 --profile`
+- Baseline `7x4` result:
+  - `Worker Complete in 1.70 seconds`
+  - `canon_state_prepare_push: 1.152s`
+  - `canon_state_commit_push: 0.230s`
+  - `solve_graph_poly: 0.057s`
+- Experiment `7x4` result:
+  - `env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 4 --prefix-depth 2 --task-end 16 --profile`
+  - `Worker Complete in 1.34 seconds`
+  - `canon_state_prepare_push: 0.981s`
+  - `canon_state_commit_push: 0.116s`
+  - `solve_graph_poly: 0.056s`
+- Baseline `7x5` command:
+  - `env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre92 7 5 --prefix-depth 2 --task-end 4 --profile`
+- Baseline `7x5` result:
+  - `Worker Complete in 48.44 seconds`
+  - `canon_state_prepare_push: 33.795s`
+  - `canon_state_commit_push: 5.596s`
+  - `solve_graph_poly: 5.011s`
+- Experiment `7x5` result:
+  - `env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 5 --prefix-depth 2 --task-end 4 --profile`
+  - `Worker Complete in 42.97 seconds`
+  - `canon_state_prepare_push: 32.555s`
+  - `canon_state_commit_push: 3.130s`
+  - `solve_graph_poly: 4.443s`
+- Interpretation:
+  - this is a correctness-safe improvement on top of Experiment 90
+  - the main gain is not a dramatic drop in `prepare_push`, but a clear reduction in metadata-update overhead, especially in `commit_push`
+  - that matches the hypothesis from the bucket counts: the dominant remaining work is metadata traffic on the `x>=r` / `c<x<r` paths, not the rare `x==c` rebuild
+  - the run-to-run noise is nontrivial on this machine, but both sampled serial workloads move in the right direction
+- Outcome: accepted.
