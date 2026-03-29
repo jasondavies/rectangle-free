@@ -4934,3 +4934,66 @@
   - on `7x5`, the larger cache changes nothing about hit counts and only adds overhead
   - the current `CACHE_BITS=17` setting therefore remains the best tradeoff among the tested nearby points
 - Outcome: rejected; keep `CACHE_BITS=17`.
+
+### Experiment 133: Dedicated raw cache keyed by masked adjacency rows
+- Goal: revisit the raw-cache path with a genuinely different implementation: avoid `graph_pack_signature()` entirely on raw hits by storing and matching the labelled graph directly as masked adjacency rows.
+- Change:
+  - added a dedicated `RawGraphCache` type with its own row storage
+  - raw-cache lookups now compare `n` plus masked `adj[0..n)` rows directly instead of packed graph signatures
+  - kept the same probe count, replacement policy, polynomial payload, and hash function as the old raw cache
+  - left the canonical cache and shared canonical cache paths unchanged
+- Baseline binary:
+  - `/tmp/partition_poly_7_pre133`, compiled from committed `HEAD` at `3a241a9` before this change
+- Exactness checks:
+  - baseline command: `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre133 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/pre133_7x2.poly`
+  - experiment command: `env OMP_NUM_THREADS=1 ./partition_poly_7 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/post133_7x2.poly`
+  - `cmp -s /tmp/pre133_7x2.poly /tmp/post133_7x2.poly` succeeded
+- `7x5 --task-end 4 --profile`:
+  - baseline:
+    - `Worker Complete in 9.04s`
+    - `Canonicalisation calls: 89357`
+    - `Canonical cache hits: 62203 (69.6%)`
+    - `Raw cache hits: 242261`
+    - `solve_graph_poly: 1442988 calls, 1.767s`
+    - `get_canonical_graph/densenauty: 89357 calls, 0.155s`
+  - experiment:
+    - `Worker Complete in 9.00s`
+    - `Canonicalisation calls: 89357`
+    - `Canonical cache hits: 62203 (69.6%)`
+    - `Raw cache hits: 242261`
+    - `solve_graph_poly: 1442988 calls, 1.647s`
+    - `get_canonical_graph/densenauty: 89357 calls, 0.155s`
+- `7x6 --task-end 1 --profile`:
+  - baseline:
+    - `Worker Complete in 40.67s`
+    - `Canonicalisation calls: 497075`
+    - `Canonical cache hits: 326174 (65.6%)`
+    - `Raw cache hits: 1908378`
+    - `solve_graph_poly: 6229795 calls, 18.182s`
+    - `get_canonical_graph/densenauty: 497075 calls, 1.116s`
+  - experiment:
+    - `Worker Complete in 40.29s`
+    - `Canonicalisation calls: 497075`
+    - `Canonical cache hits: 326174 (65.6%)`
+    - `Raw cache hits: 1908378`
+    - `solve_graph_poly: 6229795 calls, 16.520s`
+    - `get_canonical_graph/densenauty: 497075 calls, 1.093s`
+- `7x6 --task-end 1` re-run without `--profile`:
+  - baseline:
+    - `Worker Complete in 39.14s`
+    - `Canonicalisation calls: 497075`
+    - `Canonical cache hits: 326174 (65.6%)`
+    - `Raw cache hits: 1908378`
+  - experiment:
+    - `Worker Complete in 38.68s`
+    - `Canonicalisation calls: 497075`
+    - `Canonical cache hits: 326174 (65.6%)`
+    - `Raw cache hits: 1908378`
+- Verification:
+  - `make partition_poly_7` succeeded
+  - `make partition_poly` succeeded
+- Interpretation:
+  - the cache counters staying identical confirms that the dedicated raw cache is behaviour-preserving
+  - the win comes from removing signature packing and signature-array traffic from the extremely hot raw-cache path
+  - this is materially different from the earlier rejected signature-helper refactors: the canonical/shared cache machinery stays unchanged, and only the raw cache switches to a row-keyed representation
+- Outcome: accepted.
