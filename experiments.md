@@ -4750,3 +4750,120 @@
   - the win comes entirely from removing expensive diagnostic-only separator work from the default profiled hard-miss path
   - keeping the separator report behind an explicit env flag gives cleaner microbenchmarks without losing the diagnostics when we actually want them
 - Outcome: accepted.
+
+### Experiment 130: Increase `partition_poly_7` raw-cache probe depth from 12 to 16
+- Goal: revisit the raw-cache tuning that gave us Experiment 126, this time by keeping `RAW_CACHE_BITS=15` fixed and checking whether a deeper probe window improves hit rate enough to beat the current `RAW_CACHE_PROBE=12` setting.
+- Change:
+  - temporary no-source build sweep only:
+    - baseline `partition_poly_7`: `RAW_CACHE_BITS=15`, `RAW_CACHE_PROBE=12`
+    - experiment variant: `RAW_CACHE_BITS=15`, `RAW_CACHE_PROBE=16`
+- Baseline binary:
+  - `/tmp/partition_poly_7_probe12`, copied from committed `HEAD` at `450ca8f`
+- Exactness checks:
+  - baseline command: `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_probe12 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/probe12_7x2.poly`
+  - experiment command: `env OMP_NUM_THREADS=1 ./partition_poly_7 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/probe16_7x2.poly`
+  - `cmp -s /tmp/probe12_7x2.poly /tmp/probe16_7x2.poly` succeeded
+- `7x5 --task-end 4 --profile`:
+  - baseline `15/12`:
+    - `Worker Complete in 9.04s`
+    - `Canonicalisation calls: 89357`
+    - `Canonical cache hits: 62203 (69.6%)`
+    - `Raw cache hits: 242261`
+    - `solve_graph_poly: 1442988 calls, 1.765s`
+    - `get_canonical_graph/densenauty: 89357 calls, 0.156s`
+  - experiment `15/16`:
+    - `Worker Complete in 9.06s`
+    - `Canonicalisation calls: 89275`
+    - `Canonical cache hits: 62121 (69.6%)`
+    - `Raw cache hits: 242343`
+    - `solve_graph_poly: 1442988 calls, 1.784s`
+    - `get_canonical_graph/densenauty: 89275 calls, 0.154s`
+- `7x6 --task-end 1 --profile`:
+  - baseline `15/12`:
+    - `Worker Complete in 40.62s`
+    - `Canonicalisation calls: 497075`
+    - `Canonical cache hits: 326174 (65.6%)`
+    - `Raw cache hits: 1908378`
+    - `solve_graph_poly: 6229795 calls, 18.182s`
+    - `get_canonical_graph/densenauty: 497075 calls, 1.104s`
+  - experiment `15/16`:
+    - `Worker Complete in 40.68s`
+    - `Canonicalisation calls: 496938`
+    - `Canonical cache hits: 326037 (65.6%)`
+    - `Raw cache hits: 1908515`
+    - `solve_graph_poly: 6229795 calls, 18.360s`
+    - `get_canonical_graph/densenauty: 496938 calls, 1.109s`
+- Verification:
+  - rebuilt `partition_poly_7` back to the default `RAW_CACHE_PROBE=12` setting after the sweep
+- Interpretation:
+  - a deeper raw-cache probe does exactly what the tuning knob suggests: it buys a few extra raw hits and slightly fewer canonicalisations
+  - however, the lookup overhead is larger than the saved canonical work on both heavy shards
+  - the current `RAW_CACHE_PROBE=12` remains the better tradeoff for `partition_poly_7`
+- Outcome: rejected; keep `RAW_CACHE_PROBE=12`.
+
+### Experiment 131: Raw-cache size sweep around the current `15/12` setting
+- Goal: check whether the accepted `RAW_CACHE_BITS=15`, `RAW_CACHE_PROBE=12` tuning is actually a local optimum, or whether a smaller table or a larger table with a shallower probe window performs better.
+- Change:
+  - temporary no-source build sweep only:
+    - baseline: `RAW_CACHE_BITS=15`, `RAW_CACHE_PROBE=12`
+    - variant A: `RAW_CACHE_BITS=14`, `RAW_CACHE_PROBE=12`
+    - variant B: `RAW_CACHE_BITS=16`, `RAW_CACHE_PROBE=8`
+- Baseline binary:
+  - `/tmp/partition_poly_7_15_12`, copied from committed `HEAD` at `450ca8f`
+- Exactness checks:
+  - baseline command: `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_15_12 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/cache_15_12_7x2.poly`
+  - variant A command: `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_14_12 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/cache_14_12_7x2.poly`
+  - variant B command: `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_16_8 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/cache_16_8_7x2.poly`
+  - `cmp -s /tmp/cache_15_12_7x2.poly /tmp/cache_14_12_7x2.poly` succeeded
+  - `cmp -s /tmp/cache_15_12_7x2.poly /tmp/cache_16_8_7x2.poly` succeeded
+- `7x5 --task-end 4 --profile`:
+  - baseline `15/12`:
+    - `Worker Complete in 9.04s`
+    - `Canonicalisation calls: 89357`
+    - `Canonical cache hits: 62203 (69.6%)`
+    - `Raw cache hits: 242261`
+    - `solve_graph_poly: 1442988 calls, 1.762s`
+    - `get_canonical_graph/densenauty: 89357 calls, 0.155s`
+  - variant A `14/12`:
+    - `Worker Complete in 9.03s`
+    - `Canonicalisation calls: 92768`
+    - `Canonical cache hits: 65614 (70.7%)`
+    - `Raw cache hits: 238850`
+    - `solve_graph_poly: 1442988 calls, 1.748s`
+    - `get_canonical_graph/densenauty: 92768 calls, 0.161s`
+  - variant B `16/8`:
+    - `Worker Complete in 9.47s`
+    - `Canonicalisation calls: 86438`
+    - `Canonical cache hits: 59284 (68.6%)`
+    - `Raw cache hits: 245180`
+    - `solve_graph_poly: 1442988 calls, 2.169s`
+    - `get_canonical_graph/densenauty: 86438 calls, 0.150s`
+- `7x6 --task-end 1 --profile`:
+  - baseline `15/12`:
+    - `Worker Complete in 40.64s`
+    - `Canonicalisation calls: 497075`
+    - `Canonical cache hits: 326174 (65.6%)`
+    - `Raw cache hits: 1908378`
+    - `solve_graph_poly: 6229795 calls, 18.172s`
+    - `get_canonical_graph/densenauty: 497075 calls, 1.104s`
+  - variant A `14/12`:
+    - `Worker Complete in 41.11s`
+    - `Canonicalisation calls: 517377`
+    - `Canonical cache hits: 346480 (67.0%)`
+    - `Raw cache hits: 1888068`
+    - `solve_graph_poly: 6229787 calls, 18.046s`
+    - `get_canonical_graph/densenauty: 517377 calls, 1.152s`
+  - variant B `16/8`:
+    - `Worker Complete in 40.62s`
+    - `Canonicalisation calls: 474812`
+    - `Canonical cache hits: 303910 (64.0%)`
+    - `Raw cache hits: 1930643`
+    - `solve_graph_poly: 6229797 calls, 18.130s`
+    - `get_canonical_graph/densenauty: 474812 calls, 1.045s`
+- Verification:
+  - kept the checked-in `partition_poly_7` build on `RAW_CACHE_BITS=15`, `RAW_CACHE_PROBE=12`
+- Interpretation:
+  - `14/12` is plainly worse on the decisive `7x6` shard, confirming that shrinking the raw cache loses too many cheap hits
+  - `16/8` shifts work in the expected direction, with more raw hits and fewer canonicalisations, but it regresses `7x5` badly and is only essentially flat on `7x6`
+  - that makes the current `15/12` setting still the best overall tradeoff among the tested nearby points
+- Outcome: rejected; keep `RAW_CACHE_BITS=15`, `RAW_CACHE_PROBE=12`.
