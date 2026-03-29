@@ -2058,6 +2058,51 @@ void normalize_partition(uint8_t* p) {
     }
 }
 
+#if RECT_SPECIAL_K4
+static int partition_pair_shadow_size(const Partition* part) {
+    int pairs = 0;
+    for (int ci = 0; ci < part->num_complex; ci++) {
+        int block = part->complex_blocks[ci];
+        int sz = __builtin_popcount(part->block_masks[block]);
+        pairs += (sz * (sz - 1)) / 2;
+    }
+    return pairs;
+}
+
+static int partition_largest_complex_block(const Partition* part) {
+    int best = 0;
+    for (int ci = 0; ci < part->num_complex; ci++) {
+        int block = part->complex_blocks[ci];
+        int sz = __builtin_popcount(part->block_masks[block]);
+        if (sz > best) best = sz;
+    }
+    return best;
+}
+
+static int compare_partition_hardness(const void* lhs, const void* rhs) {
+    const Partition* a = (const Partition*)lhs;
+    const Partition* b = (const Partition*)rhs;
+
+    if (a->num_complex != b->num_complex) return b->num_complex - a->num_complex;
+
+    int ap = partition_pair_shadow_size(a);
+    int bp = partition_pair_shadow_size(b);
+    if (ap != bp) return bp - ap;
+
+    int al = partition_largest_complex_block(a);
+    int bl = partition_largest_complex_block(b);
+    if (al != bl) return bl - al;
+
+    if (a->num_blocks != b->num_blocks) return b->num_blocks - a->num_blocks;
+
+    return memcmp(a->mapping, b->mapping, (size_t)g_rows);
+}
+
+static void reorder_partitions_by_hardness(void) {
+    qsort(partitions, (size_t)num_partitions, sizeof(partitions[0]), compare_partition_hardness);
+}
+#endif
+
 void generate_partitions_recursive(int idx, uint8_t* current, int max_val) {
     if (idx == g_rows) {
         Partition part;
@@ -4810,6 +4855,9 @@ int main(int argc, char** argv) {
     generate_permutations();
     uint8_t buffer[MAX_ROWS] = {0};
     generate_partitions_recursive(0, buffer, -1);
+#if RECT_SPECIAL_K4
+    reorder_partitions_by_hardness();
+#endif
 #if RECT_SPECIAL_K4_FEASIBILITY
     init_pair_index();
 #endif
