@@ -4696,3 +4696,57 @@
   - however, the total `solve_graph_poly()` time rises and both profiled and non-profiled `7x6` runs are slower overall
   - that means the extra articulation detection and subgraph construction cost outweighs the saved nauty work in the current implementation
 - Outcome: rejected and reverted.
+
+### Experiment 129: Gate hard-miss separator diagnostics behind `RECT_PROFILE_SEPARATORS`
+- Goal: make normal `--profile` runs cheaper and cleaner by removing expensive diagnostic-only separator checks from the default hard-miss path, while keeping them available on demand.
+- Change:
+  - added a global `g_profile_separators` flag, enabled only when `RECT_PROFILE_SEPARATORS` is set to a non-zero value
+  - gated the hard-miss `graph_has_articulation_point()` and `graph_has_k2_separator()` calls behind that flag
+  - changed the profile footer to print either the old separator table when enabled or a one-line disabled message by default
+- Baseline binary:
+  - `/tmp/partition_poly_7_pre129`, compiled from committed `HEAD` at `0e472e7` before this change
+- Exactness checks:
+  - baseline command: `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre129 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/pre129_7x2.poly`
+  - experiment command: `env OMP_NUM_THREADS=1 ./partition_poly_7 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/post129_7x2.poly`
+  - `cmp -s /tmp/pre129_7x2.poly /tmp/post129_7x2.poly` succeeded
+- Separator-report verification:
+  - `env RECT_PROFILE_SEPARATORS=1 OMP_NUM_THREADS=1 ./partition_poly_7 7 4 --prefix-depth 2 --task-end 1 --profile`
+  - the old `Hard-miss separator detection by simplified n:` section reappeared, confirming the diagnostics are still available when explicitly requested
+- `7x5 --task-end 4 --profile`:
+  - baseline:
+    - `Worker Complete in 9.04s`
+    - `Canonicalisation calls: 89357`
+    - `Canonical cache hits: 62203 (69.6%)`
+    - `Raw cache hits: 242261`
+    - `solve_graph_poly: 1442988 calls, 1.839s`
+    - `get_canonical_graph/densenauty: 89357 calls, 0.156s`
+  - experiment:
+    - `Worker Complete in 8.99s`
+    - `Canonicalisation calls: 89357`
+    - `Canonical cache hits: 62203 (69.6%)`
+    - `Raw cache hits: 242261`
+    - `solve_graph_poly: 1442988 calls, 1.740s`
+    - `get_canonical_graph/densenauty: 89357 calls, 0.154s`
+- `7x6 --task-end 1 --profile`:
+  - baseline:
+    - `Worker Complete in 42.59s`
+    - `Canonicalisation calls: 497075`
+    - `Canonical cache hits: 326174 (65.6%)`
+    - `Raw cache hits: 1908378`
+    - `solve_graph_poly: 6229795 calls, 22.017s`
+    - `get_canonical_graph/densenauty: 497075 calls, 1.132s`
+  - experiment:
+    - `Worker Complete in 40.63s`
+    - `Canonicalisation calls: 497075`
+    - `Canonical cache hits: 326174 (65.6%)`
+    - `Raw cache hits: 1908378`
+    - `solve_graph_poly: 6229795 calls, 18.206s`
+    - `get_canonical_graph/densenauty: 497075 calls, 1.103s`
+- Verification:
+  - `make partition_poly_7` succeeded
+  - `make partition_poly` succeeded
+- Interpretation:
+  - all canonicalisation and cache counters stayed identical, so solver behaviour is unchanged
+  - the win comes entirely from removing expensive diagnostic-only separator work from the default profiled hard-miss path
+  - keeping the separator report behind an explicit env flag gives cleaner microbenchmarks without losing the diagnostics when we actually want them
+- Outcome: accepted.

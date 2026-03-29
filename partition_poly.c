@@ -352,6 +352,7 @@ static int g_effective_prefix_depth = 0;
 static double g_queue_profile_report_step = 0.0;
 static int g_shared_cache_merge = 0;
 static int g_shared_cache_bits = 16;
+static int g_profile_separators = 0;
 static SharedGraphCache* g_shared_graph_cache = NULL;
 #define SMALL_GRAPH_LOOKUP_MAX_N 7
 static int g_small_graph_lookup_ready = 0;
@@ -2981,7 +2982,8 @@ static void solve_graph_poly(const Graph* input_g, GraphCache* cache, GraphCache
         }
         if (u != -1 && max_deg > 0) record_hard_graph_node(profile, branch_g->n, max_deg);
         outcome = SG_OUTCOME_HARD_MISS;
-        if (g_profile && profile && branch_g->n >= 10 && branch_g->n <= MAXN_NAUTY) {
+        if (g_profile && g_profile_separators && profile &&
+            branch_g->n >= 10 && branch_g->n <= MAXN_NAUTY) {
             if (graph_has_articulation_point(branch_g)) {
                 profile->hard_graph_articulation_by_n[branch_g->n]++;
             }
@@ -3804,6 +3806,11 @@ int main(int argc, char** argv) {
                 fprintf(stderr, "RECT_SHARED_CACHE_BITS must be between 10 and 24\n");
                 return 1;
             }
+        }
+        const char* profile_separators_env = getenv("RECT_PROFILE_SEPARATORS");
+        if (profile_separators_env && *profile_separators_env &&
+            strcmp(profile_separators_env, "0") != 0) {
+            g_profile_separators = 1;
         }
     }
     if (task_start < 0) {
@@ -4643,14 +4650,19 @@ int main(int argc, char** argv) {
                    component_calls, total_profile.solve_graph_component_time_by_n[n],
                    hard_misses, total_profile.solve_graph_hard_miss_time_by_n[n]);
         }
-        printf("  Hard-miss separator detection by simplified n:\n");
-        for (int n = 0; n <= MAXN_NAUTY; n++) {
-            long long hard_misses = total_profile.solve_graph_hard_misses_by_n[n];
-            long long articulation = total_profile.hard_graph_articulation_by_n[n];
-            long long k2 = total_profile.hard_graph_k2_separator_by_n[n];
-            if (hard_misses == 0 && articulation == 0 && k2 == 0) continue;
-            printf("    n=%d: hard-miss %lld, articulation %lld, k2-separator %lld\n",
-                   n, hard_misses, articulation, k2);
+        if (g_profile_separators) {
+            printf("  Hard-miss separator detection by simplified n:\n");
+            for (int n = 0; n <= MAXN_NAUTY; n++) {
+                long long hard_misses = total_profile.solve_graph_hard_misses_by_n[n];
+                long long articulation = total_profile.hard_graph_articulation_by_n[n];
+                long long k2 = total_profile.hard_graph_k2_separator_by_n[n];
+                if (hard_misses == 0 && articulation == 0 && k2 == 0) continue;
+                printf("    n=%d: hard-miss %lld, articulation %lld, k2-separator %lld\n",
+                       n, hard_misses, articulation, k2);
+            }
+        } else {
+            printf("  Hard-miss separator detection: disabled"
+                   " (set RECT_PROFILE_SEPARATORS=1 to enable)\n");
         }
         printf("  Hard graph nodes by simplified n and max degree:\n");
         for (int n = 10; n <= MAXN_NAUTY; n++) {
