@@ -106,8 +106,8 @@ typedef struct {
 } Partition;
 
 typedef struct {
-    int n;
-    uint64_t adj[MAXN_NAUTY]; 
+    uint8_t n;
+    AdjWord adj[MAXN_NAUTY];
 } Graph;
 
 #define GRAPH_SIG_BITS ((MAXN_NAUTY * (MAXN_NAUTY - 1)) / 2)
@@ -2216,7 +2216,7 @@ void get_canonical_graph(Graph* g, Graph* canon, NautyWorkspace* ws, ProfileStat
     }
     
     // Convert canonical graph back to our format
-    canon->n = n;
+    canon->n = (uint8_t)n;
     memset(canon->adj, 0, (size_t)n * sizeof(canon->adj[0]));
     
     for (int i = 0; i < n; i++) {
@@ -2461,7 +2461,7 @@ static void induced_subgraph_from_mask(const Graph* src, uint64_t mask, Graph* d
         rem &= rem - 1;
     }
 
-    dst->n = n;
+    dst->n = (uint8_t)n;
     memset(dst->adj, 0, sizeof(dst->adj));
     for (int i = 0; i < n; i++) {
         for (int j = i + 1; j < n; j++) {
@@ -3051,7 +3051,7 @@ static int partial_graph_append(PartialGraphState* st, int depth, int pid, const
     int base_new = st->g.n;
     int num_complex = partitions[pid].num_complex;
     st->base[depth] = base_new;
-    st->g.n += num_complex;
+    st->g.n = (uint8_t)(st->g.n + num_complex);
     for (int i = 0; i < num_complex; i++) st->g.adj[base_new + i] = 0;
 
     for (int i1 = 0; i1 < num_complex; i1++) {

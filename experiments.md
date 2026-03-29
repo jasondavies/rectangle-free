@@ -3798,3 +3798,83 @@
   - that is much lower than the earlier coarse articulation detector suggested, and it is not enough to pay for the added test
   - the bounded adaptive `7x6` run is effectively flat to slightly worse overall, with the expensive `n=10..12` band moving the wrong way
 - Outcome: rejected and reverted.
+
+### Experiment 111: Revisit graph-state shrinking by narrowing `Graph.adj[]` to `AdjWord`
+- Goal: revisit the rejected Experiment 98 graph-state shrink, but make the adjacency rows narrow as well for the `7x7` regime where `MAXN_NAUTY = 21` and `AdjWord = uint32_t`.
+- Implementation:
+  - changed `Graph.n` from `int` to `uint8_t`
+  - changed `Graph.adj[]` from `uint64_t[MAXN_NAUTY]` to `AdjWord[MAXN_NAUTY]`
+  - left the graph algorithms unchanged; they still manipulate bits with `uint64_t` masks and store back into the narrower row type
+  - kept this change in `partition_poly.c` only; `partition_count4.c` was left alone for now
+- Structural impact:
+  - for the `7x7` build, `Graph` drops from `176` bytes to `88` bytes
+  - for the `7x7` build, `PartialGraphState` drops from `208` bytes to `116` bytes
+  - this is materially larger than Experiment 98, which only shrank scalar metadata and did not reduce adjacency-row width
+- Verification:
+  - `make partition_poly`
+  - `make partition_poly_7`
+  - both builds compiled cleanly after the type change
+- Benchmark note:
+  - local benchmarking on the `7x7` path showed this change as a win
+  - the exact benchmark command and timings were not captured in this log entry
+- Interpretation:
+  - unlike Experiment 98, this change removes roughly half of the row-storage bandwidth from every `Graph` copy, which also pulls down the size of `PartialGraphState`
+  - that is consistent with a real win in the `7x7` solver, where graph and partial-graph snapshots are copied frequently
+  - the likely lesson is that narrowing scalar metadata alone is too small to matter, but narrowing the hot adjacency payload is large enough to pay back the added integer promotions
+- Outcome: accepted.
+
+### Experiment 112: Narrow `overlap_mask`/`intra_mask` and packed canon state for `7x7`
+- Goal: continue the Experiment 111 locality pass by shrinking two other hot `7x7` data paths:
+  - the overlap/intra tables read on every `partial_graph_append()`
+  - the packed canon-state arrays streamed by `canon_state_prepare_push()` and push/pop
+- Change:
+  - changed `overlap_mask[]` and `intra_mask[]` from `uint32_t` to a narrow `ComplexMaskWord`
+  - for the current `MAX_ROWS = 7` build, that made the overlap/intra storage `uint8_t`
+  - changed `CanonState.state`, `CanonScratch.next_state`, and `changed_first_greater_old_state` from `uint32_t` to a narrow `CanonStateWord`
+  - for the current `MAX_ROWS = 7`, `MAX_COLS <= 31` build, that made the packed canon state `uint16_t`
+  - repacked the canon state with a 5-bit depth field and added guards so wider future builds would fail loudly
+- Baseline binary:
+  - `/tmp/partition_poly_7_pre112`, compiled from committed `HEAD` at `0ae8dc4` before this change
+- Exactness checks:
+  - baseline command: `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre112 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/pre112_7x2.poly`
+  - experiment command: `env OMP_NUM_THREADS=1 ./partition_poly_7 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/post112_7x2.poly`
+  - `cmp -s /tmp/pre112_7x2.poly /tmp/post112_7x2.poly` succeeded
+- `7x4 --task-end 16 --profile`:
+  - baseline:
+    - `Worker Complete in 0.39s`
+    - `canon_state_prepare_push: 79611 calls, 0.274s`
+    - `partial_graph_append: 43601 calls, 0.006s`
+    - `solve_graph_poly: 43817 calls, 0.044s`
+  - experiment:
+    - `Worker Complete in 0.39s`
+    - `canon_state_prepare_push: 79611 calls, 0.271s`
+    - `partial_graph_append: 43601 calls, 0.005s`
+    - `solve_graph_poly: 43817 calls, 0.043s`
+- `7x5 --task-end 4 --profile`:
+  - baseline:
+    - `Worker Complete in 9.05s`
+    - `canon_state_prepare_push: 2188134 calls, 7.036s`
+    - `partial_graph_append: 1398473 calls, 0.167s`
+    - `solve_graph_poly: 1442988 calls, 1.934s`
+  - experiment:
+    - `Worker Complete in 9.15s`
+    - `canon_state_prepare_push: 2188134 calls, 7.128s`
+    - `partial_graph_append: 1398473 calls, 0.149s`
+    - `solve_graph_poly: 1442988 calls, 1.949s`
+- `7x6 --task-end 1 --profile`:
+  - baseline:
+    - `Worker Complete in 41.05s`
+    - `canon_state_prepare_push: 9458098 calls, 30.845s`
+    - `partial_graph_append: 5929660 calls, 0.728s`
+    - `solve_graph_poly: 6229781 calls, 21.757s`
+  - experiment:
+    - `Worker Complete in 41.37s`
+    - `canon_state_prepare_push: 9458098 calls, 31.139s`
+    - `partial_graph_append: 5929660 calls, 0.664s`
+    - `solve_graph_poly: 6229781 calls, 21.692s`
+- Interpretation:
+  - the narrower tables do help `partial_graph_append()`, but that gain is too small to matter overall
+  - the packed canon-state shrink consistently makes `canon_state_prepare_push()` slower on the heavier samples
+  - since the solver is dominated by `canon_state_prepare_push()`, the net effect is a small but repeatable end-to-end regression on both `7x5` and `7x6`
+  - this looks like the same lesson as Experiment 98: shrinking the hot representation is not automatically a win if the narrower packing makes the front-end harder for the compiler to optimise
+- Outcome: rejected and reverted.
