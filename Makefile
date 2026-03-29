@@ -17,6 +17,8 @@ endif
 
 PARTITION_CFLAGS ?= -O3 -march=native $(OPENMP_CFLAGS) -DUSE_TLS -I$(NAUTY_BUILD_DIR) -I$(NAUTY_DIR)
 LDFLAGS ?= $(NAUTY_BUILD_DIR)/nautyT.a -lm $(OPENMP_LDFLAGS)
+PARTITION_POLY_7_NAUTY_CFLAGS ?= -DWORDSIZE=64 -DMAXN=WORDSIZE
+PARTITION_POLY_7_LDFLAGS ?= $(NAUTY_BUILD_DIR)/nautyTL1.a -lm $(OPENMP_LDFLAGS)
 
 NVCC ?= nvcc
 NVCCFLAGS ?= -O3 -arch=sm_89 -std=c++17 -I./inspiration/cpads/include
@@ -37,6 +39,9 @@ $(NAUTY_BUILD_DIR)/.configured-tls: $(NAUTY_BUILD_DIR)/.prepared
 $(NAUTY_BUILD_DIR)/nautyT.a: $(NAUTY_BUILD_DIR)/.configured-tls
 	$(MAKE) -C $(NAUTY_BUILD_DIR) nautyT.a
 
+$(NAUTY_BUILD_DIR)/nautyTL1.a: $(NAUTY_BUILD_DIR)/.configured-tls
+	$(MAKE) -C $(NAUTY_BUILD_DIR) nautyTL1.a
+
 5xn_count4: 5xn_count4.c
 	$(CC) $(CFLAGS_5XN) -o $@ $<
 
@@ -46,8 +51,8 @@ partition_count4: partition_count4.c $(NAUTY_BUILD_DIR)/nautyT.a
 partition_poly: partition_poly.c $(NAUTY_BUILD_DIR)/nautyT.a
 	$(CC) $(PARTITION_CFLAGS) -o $@ $< $(LDFLAGS)
 
-partition_poly_7: partition_poly.c $(NAUTY_BUILD_DIR)/nautyT.a
-	$(CC) $(PARTITION_CFLAGS) -DMAX_COLS=7 -DDEFAULT_ROWS=7 -DDEFAULT_COLS=7 -DCACHE_BITS=17 -o $@ $< $(LDFLAGS)
+partition_poly_7: partition_poly.c $(NAUTY_BUILD_DIR)/nautyTL1.a
+	$(CC) $(PARTITION_CFLAGS) $(PARTITION_POLY_7_NAUTY_CFLAGS) -DMAX_COLS=7 -DDEFAULT_ROWS=7 -DDEFAULT_COLS=7 -DCACHE_BITS=17 -o $@ $< $(PARTITION_POLY_7_LDFLAGS)
 
 small_graph_lookup_gen: small_graph_lookup_gen.c
 	$(CC) $(CFLAGS_5XN) -o $@ $<

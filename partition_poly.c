@@ -28,6 +28,11 @@
 // Define MAXN before including nauty
 #define MAX_COMPLEX_PER_COL (MAX_ROWS / 2)
 #define MAXN_NAUTY (MAX_COLS * (MAX_COMPLEX_PER_COL > 0 ? MAX_COMPLEX_PER_COL : 1))
+
+#if MAXN_NAUTY > 64
+#error "This 7x7-specialised build expects MAXN_NAUTY <= 64"
+#endif
+
 #include "nauty.h"
 
 #if MAXN_NAUTY <= 16
@@ -2130,6 +2135,25 @@ long long get_orbit_multiplier_state(const CanonState* st) {
 
 // --- NAUTY CANONICALISATION ---
 
+static inline setword pack_row_to_nauty1(uint64_t row_bits, int n) {
+    if (n < 64) row_bits &= (1ULL << n) - 1ULL;
+    setword row = 0;
+    while (row_bits) {
+        int j = __builtin_ctzll(row_bits);
+        row |= bit[j];
+        row_bits &= row_bits - 1;
+    }
+    return row;
+}
+
+static inline uint64_t unpack_row_from_nauty1(setword row, int n) {
+    uint64_t out = 0;
+    for (int j = 0; j < n; j++) {
+        if (row & bit[j]) out |= 1ULL << j;
+    }
+    return out;
+}
+
 // Convert our graph to nauty format and compute canonical form
 void nauty_workspace_init(NautyWorkspace* ws, int n) {
     int m = SETWORDSNEEDED(n);
@@ -2182,23 +2206,20 @@ void get_canonical_graph(Graph* g, Graph* canon, NautyWorkspace* ws, ProfileStat
     int* ptn = ws->ptn;
     int* orbits = ws->orbits;
     
-    EMPTYGRAPH(ng, m, n);
-
-    // Convert our adjacency representation to nauty format
-    for (int i = 0; i < n; i++) {
-        for (int j = i + 1; j < n; j++) {
-            if ((g->adj[i] >> j) & 1ULL) {
-                ADDONEEDGE(ng, i, j, m);
+    if (m == 1) {
+        for (int i = 0; i < n; i++) {
+            GRAPHROW(ng, i, 1)[0] = pack_row_to_nauty1((uint64_t)g->adj[i], n);
+        }
+    } else {
+        EMPTYGRAPH(ng, m, n);
+        for (int i = 0; i < n; i++) {
+            for (int j = i + 1; j < n; j++) {
+                if ((g->adj[i] >> j) & 1ULL) {
+                    ADDONEEDGE(ng, i, j, m);
+                }
             }
         }
     }
-    
-    // Initialise labelling
-    for (int i = 0; i < n; i++) {
-        lab[i] = i;
-        ptn[i] = 1;
-    }
-    ptn[n-1] = 0;
     
     // Set up options for canonical labelling
     DEFAULTOPTIONS_GRAPH(options);
@@ -2218,13 +2239,19 @@ void get_canonical_graph(Graph* g, Graph* canon, NautyWorkspace* ws, ProfileStat
     // Convert canonical graph back to our format
     canon->n = (uint8_t)n;
     memset(canon->adj, 0, (size_t)n * sizeof(canon->adj[0]));
-    
-    for (int i = 0; i < n; i++) {
-        set *row = GRAPHROW(cg, i, m);
-        for (int j = i + 1; j < n; j++) {
-            if (ISELEMENT(row, j)) {
-                canon->adj[i] |= (1ULL << j);
-                canon->adj[j] |= (1ULL << i);
+
+    if (m == 1) {
+        for (int i = 0; i < n; i++) {
+            canon->adj[i] = (AdjWord)unpack_row_from_nauty1(GRAPHROW(cg, i, 1)[0], n);
+        }
+    } else {
+        for (int i = 0; i < n; i++) {
+            set *row = GRAPHROW(cg, i, m);
+            for (int j = i + 1; j < n; j++) {
+                if (ISELEMENT(row, j)) {
+                    canon->adj[i] |= (1ULL << j);
+                    canon->adj[j] |= (1ULL << i);
+                }
             }
         }
     }

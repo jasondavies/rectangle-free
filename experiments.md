@@ -3929,3 +3929,186 @@
   - the profile does not show a material improvement in the measured append cost, and end-to-end time is flat on `7x4` and slightly worse on the heavier `7x5` and `7x6` samples
   - that is not enough to justify keeping a larger mutable-state rewrite in a correctness-sensitive hot path
 - Outcome: rejected and reverted.
+
+### Experiment 114: Remove the dead `lab`/`ptn` initialisation in `get_canonical_graph()`
+- Goal: test the small nauty call-site cleanup suggested by the docs: when `options.defaultptn = TRUE`, nauty ignores the caller-provided initial `lab` and `ptn` arrays and initialises them itself.
+- Change:
+  - removed the `for (i = 0; i < n; i++) { lab[i] = i; ptn[i] = 1; } ptn[n-1] = 0;` loop before `densenauty()`
+  - left the nauty library, graph conversion, and everything else unchanged
+- Baseline binary:
+  - `/tmp/partition_poly_7_pre114`, compiled from committed `HEAD` at `00dc214` before this change
+- Exactness checks:
+  - baseline command: `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre114 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/pre114_7x2.poly`
+  - experiment command: `env OMP_NUM_THREADS=1 ./partition_poly_7 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/post114_7x2.poly`
+  - `cmp -s /tmp/pre114_7x2.poly /tmp/post114_7x2.poly` succeeded
+- `7x4 --task-end 16 --profile`:
+  - baseline:
+    - `Worker Complete in 0.38s`
+  - experiment:
+    - `Worker Complete in 0.37s`
+- `7x5 --task-end 4 --profile`:
+  - baseline:
+    - `Worker Complete in 9.04s`
+  - experiment:
+    - `Worker Complete in 9.06s`
+- `7x6 --task-end 1 --profile`:
+  - baseline:
+    - `Worker Complete in 41.13s`
+  - experiment:
+    - `Worker Complete in 41.07s`
+- Interpretation:
+  - this cleanup is semantically valid, but the end-to-end effect is extremely small and not directionally stable across the benchmark set
+  - it is best treated as noise-level for the current solver rather than a meaningful optimisation
+- Outcome: rejected and reverted.
+
+### Experiment 115: Specialise `partition_poly_7` to nauty's one-word 64-bit build
+- Goal: test the more aggressive `7x7`-specific nauty path:
+  - compile `partition_poly_7` with `WORDSIZE=64` and `MAXN=WORDSIZE`
+  - link it against the TLS one-word library `nautyTL1.a`
+  - remove the dead `lab`/`ptn` initialisation
+  - convert to and from nauty's one-word dense rows directly with a bit-reversal row copy instead of `ADDONEEDGE()` and `ISELEMENT()`
+- Change:
+  - switched only the dedicated `partition_poly_7` build to `nautyTL1.a` with `-DWORDSIZE=64 -DMAXN=WORDSIZE`
+  - added a one-word fast path in `get_canonical_graph()` for row conversion in both directions
+  - kept the generic `partition_poly` build unchanged
+- Baseline binary:
+  - `/tmp/partition_poly_7_pre114`, compiled from committed `HEAD` at `00dc214` before this change
+- Exactness checks:
+  - baseline command: `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre114 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/pre115_7x2.poly`
+  - experiment command: `env OMP_NUM_THREADS=1 ./partition_poly_7 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/post115_7x2.poly`
+  - `cmp -s /tmp/pre115_7x2.poly /tmp/post115_7x2.poly` succeeded
+- `7x4 --task-end 16 --profile`:
+  - baseline:
+    - `Worker Complete in 0.38s`
+  - experiment:
+    - `Worker Complete in 0.38s`
+- `7x5 --task-end 4 --profile`:
+  - baseline:
+    - `Worker Complete in 9.06s`
+    - `get_canonical_graph/densenauty: 98166 calls, 0.190s`
+  - experiment:
+    - `Worker Complete in 9.05s`
+    - `get_canonical_graph/densenauty: 98166 calls, 0.173s`
+- `7x6 --task-end 1 --profile`:
+  - baseline:
+    - `Worker Complete in 40.94s`
+    - `get_canonical_graph/densenauty: 543290 calls, 1.377s`
+  - experiment:
+    - `Worker Complete in 42.53s`
+    - `get_canonical_graph/densenauty: 543290 calls, 1.250s`
+- `7x6 --task-end 1` re-run without `--profile` to check the noisy heavy case:
+  - baseline:
+    - `Worker Complete in 39.15s`
+  - experiment:
+    - `Worker Complete in 39.24s`
+- Interpretation:
+  - the nauty work itself really does get faster in this configuration, especially on the heavier `7x6` sample
+  - however, that speedup is not turning into a reliable end-to-end win for the full solver
+  - `7x4` is flat, `7x5` is only trivially better, and the decisive `7x6` case is at best flat and slightly worse on the cleaner non-profile re-run
+  - that is not enough to justify carrying a dedicated nauty-library split and extra conversion code in the build
+- Outcome: rejected and reverted.
+
+### Experiment 116: Re-try the dead `lab`/`ptn` initialisation removal
+- Goal: repeat the tiny nauty call-site cleanup from Experiment 114 against a clean `00dc214` baseline to see whether the earlier mixed result was just run noise.
+- Change:
+  - removed the `lab`/`ptn` initialisation loop before `densenauty()`
+  - left the nauty library and graph conversion unchanged
+- Baseline binary:
+  - `/tmp/partition_poly_7_pre116`, compiled from committed `HEAD` at `00dc214`
+- Exactness checks:
+  - baseline command: `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre116 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/pre116_7x2.poly`
+  - experiment command: `env OMP_NUM_THREADS=1 ./partition_poly_7 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/post116_7x2.poly`
+  - `cmp -s /tmp/pre116_7x2.poly /tmp/post116_7x2.poly` succeeded
+- `7x4 --task-end 16 --profile`:
+  - baseline:
+    - `Worker Complete in 0.37s`
+  - experiment:
+    - `Worker Complete in 0.40s`
+- `7x5 --task-end 4 --profile`:
+  - baseline:
+    - `Worker Complete in 9.18s`
+  - experiment:
+    - `Worker Complete in 9.02s`
+- `7x6 --task-end 1 --profile`:
+  - baseline:
+    - `Worker Complete in 41.00s`
+  - experiment:
+    - `Worker Complete in 41.03s`
+- Interpretation:
+  - the result is still mixed after a re-test
+  - `7x5` improves, but `7x4` gets worse and `7x6` is effectively flat to slightly worse
+  - this is still too small and too unstable to justify as a standalone optimisation
+- Outcome: rejected and reverted.
+
+### Experiment 117: Re-try the one-word nauty build using `bit[]` row packing
+- Goal: re-test the dedicated `7x7` nauty specialisation, but this time follow nauty's one-word dense-graph representation more literally:
+  - compile `partition_poly_7` with `-DWORDSIZE=64 -DMAXN=WORDSIZE`
+  - link it against `nautyTL1.a`
+  - use nauty's `bit[]` masks to pack and unpack one-word dense rows directly
+  - fold in the dead `lab`/`ptn` initialisation removal
+- Change:
+  - switched only the `partition_poly_7` target to `nautyTL1.a` with `-DWORDSIZE=64 -DMAXN=WORDSIZE`
+  - added `pack_row_to_nauty1()` and `unpack_row_from_nauty1()` using nauty's `bit[]`
+  - used the direct row path when `m == 1`, and kept the old edge-by-edge conversion as the fallback
+- Baseline binary:
+  - `/tmp/partition_poly_7_pre116`, compiled from committed `HEAD` at `00dc214`
+- Exactness checks:
+  - baseline command: `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre116 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/pre117_7x2.poly`
+  - experiment command: `env OMP_NUM_THREADS=1 ./partition_poly_7 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/post117_7x2.poly`
+  - `cmp -s /tmp/pre117_7x2.poly /tmp/post117_7x2.poly` succeeded
+- `7x4 --task-end 16 --profile`:
+  - baseline:
+    - `Worker Complete in 0.37s`
+  - experiment:
+    - `Worker Complete in 0.37s`
+- `7x5 --task-end 4 --profile`:
+  - baseline:
+    - `Worker Complete in 9.11s`
+    - `get_canonical_graph/densenauty: 98166 calls, 0.189s`
+  - experiment:
+    - `Worker Complete in 9.03s`
+    - `get_canonical_graph/densenauty: 98166 calls, 0.174s`
+- `7x6 --task-end 1 --profile`:
+  - baseline:
+    - `Worker Complete in 40.96s`
+    - `get_canonical_graph/densenauty: 543290 calls, 1.370s`
+  - experiment:
+    - `Worker Complete in 40.72s`
+    - `get_canonical_graph/densenauty: 543290 calls, 1.257s`
+- Interpretation:
+  - unlike the earlier Experiment 115 attempt, this version gives a clean nauty speedup and that does translate into an end-to-end win on the heavier samples
+  - `7x4` is flat, `7x5` improves by about `0.08s`, and `7x6` improves by about `0.24s`
+  - the packed-row path based on nauty's own `bit[]` masks appears to avoid the earlier representation mismatch and finally makes the one-word library worthwhile for the dedicated `7x7` binary
+- Outcome: accepted.
+
+### Experiment 118: Re-try reversible `PartialGraphState` append/restore on top of Experiment 117
+- Goal: test the append/restore `PartialGraphState` rewrite again, but now on top of the accepted one-word nauty build from Experiment 117.
+- Change:
+  - added checkpoint/restore helpers for `PartialGraphState`
+  - changed the main DFS, runtime-split DFS, fixed depth-2 batch path, and the shallow fixed prefix handlers to mutate one `PartialGraphState` in place and restore it instead of copying
+- Baseline binary:
+  - `/tmp/partition_poly_7_pre118`, compiled from the accepted Experiment 117 tree before applying this rewrite
+- Exactness checks:
+  - baseline command: `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre118 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/pre118_7x2.poly`
+  - experiment command: `env OMP_NUM_THREADS=1 ./partition_poly_7 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/post118_7x2.poly`
+  - `cmp -s /tmp/pre118_7x2.poly /tmp/post118_7x2.poly` succeeded
+- `7x4 --task-end 16 --profile`:
+  - baseline:
+    - `Worker Complete in 0.41s`
+  - experiment:
+    - `Worker Complete in 0.35s`
+- `7x5 --task-end 4 --profile`:
+  - baseline:
+    - `Worker Complete in 9.42s`
+  - experiment:
+    - `Worker Complete in 9.05s`
+- `7x6 --task-end 1 --profile`:
+  - baseline:
+    - `Worker Complete in 40.65s`
+  - experiment:
+    - `Worker Complete in 41.00s`
+- Interpretation:
+  - the small and medium samples were faster on this run, but the decisive heavy `7x6` case regressed
+  - that is not a stable enough result to keep a larger mutable-state rewrite in a correctness-sensitive DFS hot path
+  - the safer conclusion is that Experiment 117 is the real gain, while the append/restore rewrite remains too noisy and too risky for the observed payoff
+- Outcome: rejected and reverted.
