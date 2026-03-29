@@ -77,6 +77,10 @@ typedef uint64_t AdjWord;
 #define FIXED_PREFIX2_BATCH_SIZE 16
 #endif
 
+#ifndef RECT_SPECIAL_K4
+#define RECT_SPECIAL_K4 0
+#endif
+
 // --- DATA TYPES ---
 
 typedef __int128_t PolyCoeff;
@@ -355,6 +359,7 @@ typedef uint32_t ComplexMask;
 static ComplexMask* overlap_mask = NULL;
 static ComplexMask* intra_mask = NULL;
 static Poly* partition_weight_poly = NULL;
+static uint8_t* partition_weight4 = NULL;
 static PrefixId* g_live_prefix2_i = NULL;
 static PrefixId* g_live_prefix2_j = NULL;
 static long long g_live_prefix2_count = 0;
@@ -425,6 +430,12 @@ static void small_graph_lookup_init(void);
 static void small_graph_lookup_free(void);
 static void connected_canon_lookup_n9_init(void);
 static void connected_canon_lookup_n9_free(void);
+static inline int32_t* small_graph_poly_slot(int n, uint32_t mask);
+static uint32_t small_graph_pack_mask(const Graph* g);
+static uint64_t graph_pack_upper_mask64(const Graph* g);
+static int connected_canon_lookup_n9_entry_cmp(const void* lhs, const void* rhs);
+static inline uint64_t graph_row_mask(int n);
+
 static inline ComplexMask* intra_mask_row(int partition_id) {
     return intra_mask + (size_t)partition_id * (size_t)max_complex_per_partition;
 }
@@ -447,6 +458,12 @@ static void unrank_prefix2(long long rank, int* i, int* j);
 static void unrank_prefix3(long long rank, int* i, int* j, int* k);
 static void unrank_prefix4(long long rank, int* i, int* j, int* k, int* l);
 static inline long long repeated_combo_count(int values, int slots);
+
+#if RECT_SPECIAL_K4
+typedef unsigned __int128 WeightAccum;
+#else
+typedef Poly WeightAccum;
+#endif
 
 static void task_timing_insert_topk(TaskTimingStats* stats, long long task_index, double elapsed) {
     for (int i = 0; i < TASK_PROFILE_TOPK; i++) {
@@ -1159,6 +1176,7 @@ static void init_partition_lookup_tables(void) {
                                 sizeof(*intra_mask), "intra_mask");
     partition_weight_poly =
         checked_calloc(partition_count, sizeof(*partition_weight_poly), "partition_weight_poly");
+    partition_weight4 = checked_calloc(partition_count, sizeof(*partition_weight4), "partition_weight4");
 }
 
 static void free_row_dependent_tables(void) {
@@ -1169,6 +1187,7 @@ static void free_row_dependent_tables(void) {
     free(overlap_mask);
     free(intra_mask);
     free(partition_weight_poly);
+    free(partition_weight4);
 
     partitions = NULL;
     perms = NULL;
@@ -1178,6 +1197,7 @@ static void free_row_dependent_tables(void) {
     overlap_mask = NULL;
     intra_mask = NULL;
     partition_weight_poly = NULL;
+    partition_weight4 = NULL;
     num_partitions = 0;
     perm_count = 0;
     max_partition_capacity = 0;
@@ -1468,6 +1488,132 @@ static inline void graph_poly_mul_linear_ref(const GraphPoly* a, int c, GraphPol
     if (r != out) *out = *r;
 }
 
+#if RECT_SPECIAL_K4
+static inline void graph_poly_set_count4(uint64_t count, GraphPoly* out) {
+    out->deg = 0;
+    out->coeffs[0] = (PolyCoeff)count;
+}
+
+static inline uint64_t graph_poly_get_count4(const GraphPoly* p) {
+    return (uint64_t)p->coeffs[0];
+}
+
+static inline void poly_set_count4(unsigned __int128 count, Poly* out) {
+    poly_zero(out);
+    out->coeffs[0] = (PolyCoeff)count;
+}
+
+static uint64_t eval_int32_poly_at_4(const int32_t* coeffs, int deg) {
+    __int128 acc = 0;
+    for (int i = deg; i >= 0; i--) acc = (acc * 4) + coeffs[i];
+    if (acc < 0 || acc > UINT64_MAX) {
+        fprintf(stderr, "4-colouring count out of uint64 range\n");
+        exit(1);
+    }
+    return (uint64_t)acc;
+}
+
+static uint64_t small_graph_lookup_load_count4(int n, uint32_t mask) {
+    return eval_int32_poly_at_4(small_graph_poly_slot(n, mask), n);
+}
+
+static uint64_t connected_canon_lookup_n9_load_count4(const Graph* g) {
+    if (!g_connected_canon_lookup_n9_ready || g->n != CONNECTED_CANON_LOOKUP_N) return UINT64_MAX;
+
+    uint64_t mask = graph_pack_upper_mask64(g);
+    ConnectedCanonLookupEntryN9 key = {.mask = mask};
+    ConnectedCanonLookupEntryN9* entry = bsearch(&key, g_connected_canon_lookup_n9,
+                                                 g_connected_canon_lookup_n9_count,
+                                                 sizeof(*g_connected_canon_lookup_n9),
+                                                 connected_canon_lookup_n9_entry_cmp);
+    if (!entry) return UINT64_MAX;
+    return eval_int32_poly_at_4(entry->coeffs, CONNECTED_CANON_LOOKUP_N);
+}
+
+static const uint64_t g_fall4[5] = {1, 4, 12, 24, 24};
+
+static uint64_t count_graph_4_rec(const Graph* g, AdjWord uncoloured,
+                                  uint8_t forbid[MAXN_NAUTY], int used) {
+    if (!uncoloured) return g_fall4[used];
+
+    int best = -1;
+    int best_sat = -1;
+    int best_deg = -1;
+    AdjWord rem = uncoloured;
+    while (rem) {
+        int v = __builtin_ctzll((uint64_t)rem);
+        rem &= rem - 1;
+        int sat = __builtin_popcount((unsigned)forbid[v]);
+        int deg = __builtin_popcountll((uint64_t)(g->adj[v] & uncoloured));
+        if (sat > best_sat || (sat == best_sat && deg > best_deg)) {
+            best = v;
+            best_sat = sat;
+            best_deg = deg;
+        }
+    }
+
+    AdjWord rest = uncoloured & ~((AdjWord)1 << best);
+    AdjWord neigh = g->adj[best] & rest;
+    uint8_t fb = forbid[best];
+    uint64_t total = 0;
+
+    for (int c = 0; c < used; c++) {
+        uint8_t bit = (uint8_t)(1u << c);
+        if (fb & bit) continue;
+
+        int changed[MAXN_NAUTY];
+        int changed_count = 0;
+        AdjWord nbrs = neigh;
+        while (nbrs) {
+            int u = __builtin_ctzll((uint64_t)nbrs);
+            nbrs &= nbrs - 1;
+            if (!(forbid[u] & bit)) {
+                forbid[u] |= bit;
+                changed[changed_count++] = u;
+            }
+        }
+
+        total += count_graph_4_rec(g, rest, forbid, used);
+
+        while (changed_count) {
+            int u = changed[--changed_count];
+            forbid[u] &= (uint8_t)~bit;
+        }
+    }
+
+    if (used < 4) {
+        uint8_t bit = (uint8_t)(1u << used);
+        if (!(fb & bit)) {
+            int changed[MAXN_NAUTY];
+            int changed_count = 0;
+            AdjWord nbrs = neigh;
+            while (nbrs) {
+                int u = __builtin_ctzll((uint64_t)nbrs);
+                nbrs &= nbrs - 1;
+                if (!(forbid[u] & bit)) {
+                    forbid[u] |= bit;
+                    changed[changed_count++] = u;
+                }
+            }
+
+            total += count_graph_4_rec(g, rest, forbid, used + 1);
+
+            while (changed_count) {
+                int u = changed[--changed_count];
+                forbid[u] &= (uint8_t)~bit;
+            }
+        }
+    }
+
+    return total;
+}
+
+static uint64_t count_graph_4_dsat(const Graph* g) {
+    uint8_t forbid[MAXN_NAUTY] = {0};
+    return count_graph_4_rec(g, (AdjWord)graph_row_mask(g->n), forbid, 0);
+}
+#endif
+
 void print_u128(PolyCoeff n) {
     if (n == 0) { printf("0"); return; }
     if (n < 0) { printf("-"); n = -n; }
@@ -1608,6 +1754,9 @@ void generate_partitions_recursive(int idx, uint8_t* current, int max_val) {
         memset(&part, 0, sizeof(part));
         memcpy(part.mapping, current, g_rows);
         part.num_blocks = max_val + 1;
+#if RECT_SPECIAL_K4
+        if (part.num_blocks > 4) return;
+#endif
         
         int counts[MAX_ROWS];
         for(int k=0; k<g_rows; k++) counts[k]=0;
@@ -1636,7 +1785,11 @@ void generate_partitions_recursive(int idx, uint8_t* current, int max_val) {
         current[idx] = i;
         generate_partitions_recursive(idx + 1, current, max_val);
     }
-    if (max_val < g_rows - 1) {
+    if (max_val < g_rows - 1
+#if RECT_SPECIAL_K4
+        && max_val + 2 <= 4
+#endif
+    ) {
         current[idx] = max_val + 1;
         generate_partitions_recursive(idx + 1, current, max_val + 1);
     }
@@ -1726,6 +1879,56 @@ static void build_partition_weight_table(void) {
     }
 }
 
+static inline uint8_t falling4_weight(int c, int s) {
+    if (c + s > 4) return 0;
+    uint8_t w = 1;
+    for (int i = 0; i < s; i++) w = (uint8_t)(w * (uint8_t)(4 - c - i));
+    return w;
+}
+
+static void build_partition_weight4_table(void) {
+    for (int pid = 0; pid < num_partitions; pid++) {
+        partition_weight4[pid] =
+            falling4_weight(partitions[pid].num_complex, partitions[pid].num_singletons);
+    }
+}
+
+#if RECT_SPECIAL_K4
+static inline void weight_accum_one(WeightAccum* out) {
+    *out = 1;
+}
+
+static inline void weight_accum_from_partition(int pid, WeightAccum* out) {
+    *out = (WeightAccum)partition_weight4[pid];
+}
+
+static inline void weight_accum_mul_partition(const WeightAccum* src, int pid, WeightAccum* out) {
+    *out = (*src) * (WeightAccum)partition_weight4[pid];
+}
+
+static inline void weight_accum_scale_to_poly(const WeightAccum* weight_prod, long long mult_coeff,
+                                              long long row_orbit, uint64_t graph_count4, Poly* out) {
+    WeightAccum total = *weight_prod;
+    total *= (WeightAccum)mult_coeff;
+    total *= (WeightAccum)row_orbit;
+    total *= (WeightAccum)graph_count4;
+    poly_zero(out);
+    out->coeffs[0] = (PolyCoeff)total;
+}
+#else
+static inline void weight_accum_one(WeightAccum* out) {
+    poly_one_ref(out);
+}
+
+static inline void weight_accum_from_partition(int pid, WeightAccum* out) {
+    *out = partition_weight_poly[pid];
+}
+
+static inline void weight_accum_mul_partition(const WeightAccum* src, int pid, WeightAccum* out) {
+    poly_mul_ref(src, &partition_weight_poly[pid], out);
+}
+#endif
+
 // --- SYMMETRY LOGIC ---
 
 typedef uint16_t CanonPackedState;
@@ -1801,7 +2004,7 @@ static void solve_structure_with_row_orbit(const Graph* partial_graph, long long
                                            NautyWorkspace* ws, long long* local_canon_calls,
                                            long long* local_cache_hits,
                                            long long* local_raw_cache_hits,
-                                           const Poly* weight_prod, long long mult_coeff,
+                                           const WeightAccum* weight_prod, long long mult_coeff,
                                            ProfileStats* profile, Poly* out_result);
 
 static inline int row_insert_sorted(uint16_t* row, int len, uint16_t val) {
@@ -3068,6 +3271,209 @@ static void solve_graph_poly(const Graph* input_g, RowGraphCache* cache, RowGrap
                              NautyWorkspace* ws, long long* local_canon_calls,
                              long long* local_cache_hits, long long* local_raw_cache_hits,
                              ProfileStats* profile, GraphPoly* out_result) {
+#if RECT_SPECIAL_K4
+    Graph g = *input_g;
+    double solve_t0 = 0.0;
+    int profile_n = 0;
+    enum {
+        SG_OUTCOME_NONE = 0,
+        SG_OUTCOME_LOOKUP,
+        SG_OUTCOME_CONNECTED_LOOKUP,
+        SG_OUTCOME_RAW_HIT,
+        SG_OUTCOME_CANON_HIT,
+        SG_OUTCOME_COMPONENTS,
+        SG_OUTCOME_HARD_MISS,
+    } outcome = SG_OUTCOME_NONE;
+    if (g_profile && profile) {
+        profile->solve_graph_calls++;
+        solve_t0 = omp_get_wtime();
+    }
+
+    uint64_t multiplier = 1;
+
+    int changed = 1;
+    while (changed && g.n > 0) {
+        changed = 0;
+        for (int i = 0; i < g.n; i++) {
+            uint64_t neighbors = g.adj[i];
+            int degree = __builtin_popcountll(neighbors);
+
+            if (degree == 0) {
+                multiplier *= 4;
+                remove_vertex(&g, i);
+                changed = 1;
+                i--;
+                continue;
+            }
+
+            int is_clique = 1;
+            uint64_t rem = neighbors;
+            while (rem) {
+                int u = __builtin_ctzll(rem);
+                if ((neighbors & ~g.adj[u]) != (1ULL << u)) {
+                    is_clique = 0;
+                    break;
+                }
+                rem &= rem - 1;
+            }
+
+            if (is_clique) {
+                if (degree >= 4) {
+                    graph_poly_set_count4(0, out_result);
+                    outcome = SG_OUTCOME_HARD_MISS;
+                    goto done;
+                }
+                multiplier *= (uint64_t)(4 - degree);
+                remove_vertex(&g, i);
+                changed = 1;
+                i--;
+            }
+        }
+    }
+
+    profile_n = g.n;
+    if (g_profile && profile && profile_n >= 0 && profile_n <= MAXN_NAUTY) {
+        profile->solve_graph_calls_by_n[profile_n]++;
+    }
+
+    if (g.n == 0) {
+        graph_poly_set_count4(multiplier, out_result);
+        goto done;
+    }
+
+    if (g.n <= SMALL_GRAPH_LOOKUP_MAX_N) {
+        uint64_t count4 = small_graph_lookup_load_count4(g.n, small_graph_pack_mask(&g));
+        graph_poly_set_count4(multiplier * count4, out_result);
+        outcome = SG_OUTCOME_LOOKUP;
+        goto done;
+    }
+
+    AdjWord row_mask = (AdjWord)graph_row_mask(g.n);
+    uint64_t raw_hash = hash_graph(&g);
+    GraphPoly raw_cached;
+    if (row_graph_cache_lookup_poly(raw_cache, raw_hash, (uint32_t)g.n, &g, row_mask,
+                                    &raw_cached, 1)) {
+        (*local_raw_cache_hits)++;
+        if (g_profile && profile && g.n <= MAXN_NAUTY) {
+            profile->solve_graph_raw_hits_by_n[g.n]++;
+        }
+        graph_poly_set_count4(multiplier * graph_poly_get_count4(&raw_cached), out_result);
+        outcome = SG_OUTCOME_RAW_HIT;
+        goto done;
+    }
+
+    GraphPoly res;
+    uint64_t component_masks[MAXN_NAUTY];
+    int component_count = graph_collect_components(&g, component_masks);
+    if (component_count > 1) {
+        uint64_t total = 1;
+        outcome = SG_OUTCOME_COMPONENTS;
+        for (int i = 0; i < component_count; i++) {
+            Graph subgraph;
+            induced_subgraph_from_mask(&g, component_masks[i], &subgraph);
+            GraphPoly part;
+            solve_graph_poly(&subgraph, cache, raw_cache, ws,
+                             local_canon_calls, local_cache_hits, local_raw_cache_hits,
+                             profile, &part);
+            total *= graph_poly_get_count4(&part);
+        }
+        graph_poly_set_count4(total, &res);
+    } else {
+        Graph canon;
+        get_canonical_graph(&g, &canon, ws, profile);
+        (*local_canon_calls)++;
+        uint64_t hash = hash_graph(&canon);
+
+        if (row_graph_cache_lookup_poly(cache, hash, (uint32_t)canon.n, &canon,
+                                        (AdjWord)ADJWORD_MASK, &res, 1)) {
+            (*local_cache_hits)++;
+            store_row_graph_cache_entry(raw_cache, raw_hash, (uint32_t)g.n, &g, row_mask, &res);
+            if (g_profile && profile && canon.n <= MAXN_NAUTY) {
+                profile->solve_graph_canon_hits_by_n[canon.n]++;
+            }
+            graph_poly_set_count4(multiplier * graph_poly_get_count4(&res), out_result);
+            outcome = SG_OUTCOME_CANON_HIT;
+            goto done;
+        }
+
+        if (shared_graph_cache_lookup_poly(g_shared_graph_cache, hash, (uint32_t)canon.n,
+                                           &canon, ADJWORD_MASK, &res)) {
+            store_row_graph_cache_entry(cache, hash, (uint32_t)canon.n, &canon,
+                                        (AdjWord)ADJWORD_MASK, &res);
+            (*local_cache_hits)++;
+            if (g_profile && profile && canon.n <= MAXN_NAUTY) {
+                profile->solve_graph_canon_hits_by_n[canon.n]++;
+            }
+            store_row_graph_cache_entry(raw_cache, raw_hash, (uint32_t)g.n, &g, row_mask, &res);
+            graph_poly_set_count4(multiplier * graph_poly_get_count4(&res), out_result);
+            outcome = SG_OUTCOME_CANON_HIT;
+            goto done;
+        }
+
+        uint64_t connected_lookup = connected_canon_lookup_n9_load_count4(&canon);
+        if (connected_lookup != UINT64_MAX) {
+            graph_poly_set_count4(connected_lookup, &res);
+            store_row_graph_cache_entry(cache, hash, (uint32_t)canon.n, &canon,
+                                        (AdjWord)ADJWORD_MASK, &res);
+            store_row_graph_cache_entry(raw_cache, raw_hash, (uint32_t)g.n, &g, row_mask, &res);
+            graph_poly_set_count4(multiplier * connected_lookup, out_result);
+            outcome = SG_OUTCOME_CONNECTED_LOOKUP;
+            goto done;
+        }
+
+        const Graph* branch_g = &canon;
+        int max_deg = -1;
+        for (int i = 0; i < branch_g->n; i++) {
+            int d = __builtin_popcountll(branch_g->adj[i]);
+            if (d > max_deg) max_deg = d;
+        }
+        if (max_deg > 0) record_hard_graph_node(profile, branch_g->n, max_deg);
+        outcome = SG_OUTCOME_HARD_MISS;
+        uint64_t count4 = count_graph_4_dsat(branch_g);
+        graph_poly_set_count4(count4, &res);
+        store_row_graph_cache_entry(cache, hash, (uint32_t)canon.n, &canon,
+                                    (AdjWord)ADJWORD_MASK, &res);
+        shared_graph_cache_export(hash, (uint32_t)canon.n, &canon, ADJWORD_MASK, &res);
+    }
+
+    store_row_graph_cache_entry(raw_cache, raw_hash, (uint32_t)g.n, &g, row_mask, &res);
+    graph_poly_set_count4(multiplier * graph_poly_get_count4(&res), out_result);
+done:
+    if (g_profile && profile) {
+        double dt = omp_get_wtime() - solve_t0;
+        profile->solve_graph_time += dt;
+        if (profile_n >= 0 && profile_n <= MAXN_NAUTY) {
+            profile->solve_graph_time_by_n[profile_n] += dt;
+            switch (outcome) {
+                case SG_OUTCOME_LOOKUP:
+                    profile->solve_graph_lookup_calls_by_n[profile_n]++;
+                    profile->solve_graph_lookup_time_by_n[profile_n] += dt;
+                    break;
+                case SG_OUTCOME_CONNECTED_LOOKUP:
+                    profile->solve_graph_connected_lookup_calls_by_n[profile_n]++;
+                    profile->solve_graph_connected_lookup_time_by_n[profile_n] += dt;
+                    break;
+                case SG_OUTCOME_RAW_HIT:
+                    profile->solve_graph_raw_hit_time_by_n[profile_n] += dt;
+                    break;
+                case SG_OUTCOME_CANON_HIT:
+                    profile->solve_graph_canon_hit_time_by_n[profile_n] += dt;
+                    break;
+                case SG_OUTCOME_COMPONENTS:
+                    profile->solve_graph_component_calls_by_n[profile_n]++;
+                    profile->solve_graph_component_time_by_n[profile_n] += dt;
+                    break;
+                case SG_OUTCOME_HARD_MISS:
+                    profile->solve_graph_hard_misses_by_n[profile_n]++;
+                    profile->solve_graph_hard_miss_time_by_n[profile_n] += dt;
+                    break;
+                default:
+                    break;
+            }
+        }
+    }
+    return;
+#else
     Graph g = *input_g;
     double solve_t0 = 0.0;
     int profile_n = 0;
@@ -3315,6 +3721,7 @@ done:
             }
         }
     }
+#endif
 }
 
 static void partial_graph_reset(PartialGraphState* st) {
@@ -3409,27 +3816,42 @@ static void solve_structure_with_row_orbit(const Graph* partial_graph, long long
                                            NautyWorkspace* ws, long long* local_canon_calls,
                                            long long* local_cache_hits,
                                            long long* local_raw_cache_hits,
-                                           const Poly* weight_prod, long long mult_coeff,
+                                           const WeightAccum* weight_prod, long long mult_coeff,
                                            ProfileStats* profile, Poly* out_result) {
     double t0 = 0.0;
     if (g_profile && profile) {
         profile->solve_structure_calls++;
         t0 = omp_get_wtime();
     }
+#if RECT_SPECIAL_K4
+    unsigned __int128 structure_weight =
+        (*weight_prod) * (WeightAccum)mult_coeff * (WeightAccum)row_orbit;
+    if (g_profile && profile) profile->build_weight_time += omp_get_wtime() - t0;
+    if (structure_weight == 0) {
+        poly_zero(out_result);
+        return;
+    }
+#else
     Poly weight;
     poly_scale_ref(weight_prod, mult_coeff * row_orbit, &weight);
     if (g_profile && profile) profile->build_weight_time += omp_get_wtime() - t0;
+#endif
     GraphPoly graph_poly_small;
     solve_graph_poly(partial_graph, cache, raw_cache, ws,
                      local_canon_calls, local_cache_hits, local_raw_cache_hits,
                      profile, &graph_poly_small);
+#if RECT_SPECIAL_K4
+    weight_accum_scale_to_poly(weight_prod, mult_coeff, row_orbit,
+                               graph_poly_get_count4(&graph_poly_small), out_result);
+#else
     poly_mul_graph_ref(&weight, &graph_poly_small, out_result);
+#endif
 }
 
 static void solve_structure(const Graph* partial_graph, CanonState* canon_state,
                             RowGraphCache* cache, RowGraphCache* raw_cache, NautyWorkspace* ws,
                             long long* local_canon_calls, long long* local_cache_hits,
-                            long long* local_raw_cache_hits, const Poly* weight_prod,
+                            long long* local_raw_cache_hits, const WeightAccum* weight_prod,
                             long long mult_coeff, ProfileStats* profile, Poly* out_result) {
     long long row_orbit = get_orbit_multiplier_state(canon_state);
     solve_structure_with_row_orbit(partial_graph, row_orbit, cache, raw_cache, ws,
@@ -3440,7 +3862,7 @@ static void solve_structure(const Graph* partial_graph, CanonState* canon_state,
 void dfs(int depth, int min_idx, int* stack, CanonState* canon_state, const PartialGraphState* partial_graph,
          RowGraphCache* cache, RowGraphCache* raw_cache, NautyWorkspace* ws, Poly* local_total,
          long long* local_canon_calls, long long* local_cache_hits,
-         long long* local_raw_cache_hits, const Poly* weight_prod, long long mult_coeff,
+         long long* local_raw_cache_hits, const WeightAccum* weight_prod, long long mult_coeff,
          int run_len, ProfileStats* profile, CanonScratch* canon_scratch) {
     if (depth == g_cols) {
         Poly res;
@@ -3481,8 +3903,8 @@ void dfs(int depth, int min_idx, int* stack, CanonState* canon_state, const Part
             }
         }
         stack[depth] = i;
-        Poly next_weight_prod;
-        poly_mul_ref(weight_prod, &partition_weight_poly[i], &next_weight_prod);
+        WeightAccum next_weight_prod;
+        weight_accum_mul_partition(weight_prod, i, &next_weight_prod);
         long long next_mult_coeff = mult_coeff * (depth + 1);
         int next_run_len = 1;
         if (depth > 0 && i == stack[depth - 1]) {
@@ -3614,8 +4036,9 @@ static void execute_prefix2_fixed_batch(PrefixId i, const PrefixId* js, const lo
         int ok = partial_graph_append(&prefix_graph, 1, (int)j, stack);
         if (g_profile) profile->partial_append_time += omp_get_wtime() - t0;
         if (ok) {
-            Poly prefix_weight;
-            poly_mul_ref(&partition_weight_poly[i], &partition_weight_poly[j], &prefix_weight);
+            WeightAccum prefix_weight;
+            weight_accum_from_partition((int)i, &prefix_weight);
+            weight_accum_mul_partition(&prefix_weight, (int)j, &prefix_weight);
             long long prefix_mult = (i == j) ? 1 : 2;
             int prefix_run = (i == j) ? 2 : 1;
             dfs(2, (int)j, stack, canon_state, &prefix_graph, cache, raw_cache, ws, &task_total,
@@ -3632,14 +4055,14 @@ static void execute_prefix2_fixed_batch(PrefixId i, const PrefixId* js, const lo
 }
 
 static int replay_local_task_prefix(const LocalTask* task, WorkerCtx* ctx,
-                                    Poly* weight_prod, long long* mult_coeff,
+                                    WeightAccum* weight_prod, long long* mult_coeff,
                                     int* run_len, int* min_idx) {
     int next_stabilizer = 0;
     int prev_pid = -1;
 
     canon_state_reset(&ctx->canon_state, perm_count);
     partial_graph_reset(&ctx->partial_graph);
-    poly_one_ref(weight_prod);
+    weight_accum_one(weight_prod);
     *mult_coeff = 1;
     *run_len = 0;
     *min_idx = 0;
@@ -3682,7 +4105,7 @@ static int replay_local_task_prefix(const LocalTask* task, WorkerCtx* ctx,
         }
         if (g_profile) tls_profile->partial_append_time += omp_get_wtime() - t0;
 
-        poly_mul_ref(weight_prod, &partition_weight_poly[pid], weight_prod);
+        weight_accum_mul_partition(weight_prod, pid, weight_prod);
 
         long long next_mult = (*mult_coeff) * (depth + 1);
         int next_run = 1;
@@ -3700,7 +4123,7 @@ static int replay_local_task_prefix(const LocalTask* task, WorkerCtx* ctx,
 }
 
 static void dfs_runtime_split_local(int depth, int start_pid, int end_pid, long long root_id, WorkerCtx* ctx,
-                                    Poly* local_total, const Poly* weight_prod,
+                                    Poly* local_total, const WeightAccum* weight_prod,
                                     long long mult_coeff, int run_len, ProfileStats* profile,
                                     LocalTaskQueue* queue) {
     if (depth == g_cols) {
@@ -3788,8 +4211,8 @@ static void dfs_runtime_split_local(int depth, int start_pid, int end_pid, long 
         }
         if (partial_graph_append(&ctx->partial_graph, depth, pid, ctx->stack)) {
             if (g_profile) tls_profile->partial_append_time += omp_get_wtime() - t0;
-            Poly next_weight_prod;
-            poly_mul_ref(weight_prod, &partition_weight_poly[pid], &next_weight_prod);
+            WeightAccum next_weight_prod;
+            weight_accum_mul_partition(weight_prod, pid, &next_weight_prod);
             long long next_mult_coeff = mult_coeff * (depth + 1);
             int next_run_len = 1;
             if (depth > 0 && pid == ctx->stack[depth - 1]) {
@@ -3828,7 +4251,7 @@ static void execute_local_runtime_task(const LocalTask* task, WorkerCtx* ctx, Po
                                        double start_time, long long* pending_completed,
                                        TaskTimingStats* task_timing,
                                        QueueSubtaskTimingStats* queue_subtask_stats) {
-    Poly weight_prod;
+    WeightAccum weight_prod;
     long long mult_coeff = 1;
     int run_len = 0;
     int min_idx = 0;
@@ -3980,11 +4403,20 @@ int main(int argc, char** argv) {
     build_partition_id_lookup();
     build_perm_table();
     build_overlap_table();
+#if RECT_SPECIAL_K4
+    build_partition_weight4_table();
+#else
     build_partition_weight_table();
+#endif
     
     printf("Grid: %dx%d\n", g_rows, g_cols);
     printf("Partitions: %d\n", num_partitions);
     printf("Threads: %d\n", omp_get_max_threads());
+#if RECT_SPECIAL_K4
+    printf("Mode: fixed 4-colour count\n");
+#else
+    printf("Mode: chromatic polynomial\n");
+#endif
     printf("Using nauty for canonical graph caching\n");
 
     // Build prefix list for work distribution.
@@ -4068,7 +4500,7 @@ int main(int argc, char** argv) {
     }
     g_effective_prefix_depth = prefix_depth;
 
-    int graph_poly_len = g_cols * (g_rows / 2) + 1;
+    int graph_poly_len = RECT_SPECIAL_K4 ? 1 : (g_cols * (g_rows / 2) + 1);
     SharedGraphCache shared_graph_cache;
     int shared_graph_cache_active = 0;
     if (g_shared_cache_merge) {
@@ -4386,9 +4818,11 @@ int main(int argc, char** argv) {
                 int ok = partial_graph_append(&partial_graph, 0, (int)i, stack);
                 if (g_profile) profile->partial_append_time += omp_get_wtime() - t0;
                 if (ok) {
+                    WeightAccum initial_weight;
+                    weight_accum_from_partition((int)i, &initial_weight);
                     dfs(1, (int)i, stack, &canon_state, &partial_graph, &cache, &raw_cache, &ws,
                         &thread_polys[tid], &local_canon_calls, &local_cache_hits, &local_raw_cache_hits,
-                        &partition_weight_poly[i], 1, 1, profile, &canon_scratch);
+                        &initial_weight, 1, 1, profile, &canon_scratch);
                 }
                 complete_task_report_and_time(total_tasks, progress_report_step, start_time,
                                               &pending_completed, task_timing, i, task_t0);
@@ -4515,9 +4949,9 @@ int main(int argc, char** argv) {
                     ok = partial_graph_append(&prefix_graph, 1, j, stack);
                     if (g_profile) profile->partial_append_time += omp_get_wtime() - t0;
                     if (ok) {
-                        Poly prefix_weight;
-                        poly_mul_ref(&partition_weight_poly[i], &partition_weight_poly[j],
-                                     &prefix_weight);
+                        WeightAccum prefix_weight;
+                        weight_accum_from_partition(i, &prefix_weight);
+                        weight_accum_mul_partition(&prefix_weight, j, &prefix_weight);
                         long long prefix_mult = (i == j) ? 1 : 2;
                         int prefix_run = (i == j) ? 2 : 1;
                         dfs(2, j, stack, &canon_state, &prefix_graph, &cache, &raw_cache, &ws,
@@ -4589,9 +5023,10 @@ int main(int argc, char** argv) {
                 PartialGraphState prefix_graph2 = prefix_graph;
                 int ok = partial_graph_append(&prefix_graph2, 2, k, stack);
                 if (ok) {
-                    Poly prefix_weight;
-                    poly_mul_ref(&partition_weight_poly[i], &partition_weight_poly[j], &prefix_weight);
-                    poly_mul_ref(&prefix_weight, &partition_weight_poly[k], &prefix_weight);
+                    WeightAccum prefix_weight;
+                    weight_accum_from_partition(i, &prefix_weight);
+                    weight_accum_mul_partition(&prefix_weight, j, &prefix_weight);
+                    weight_accum_mul_partition(&prefix_weight, k, &prefix_weight);
                     long long prefix_mult = (i == j) ? 1 : 2;
                     int prefix_run = (i == j) ? 2 : 1;
                     if (k == j) {
@@ -4691,10 +5126,11 @@ int main(int argc, char** argv) {
                 PartialGraphState prefix_graph3 = prefix_graph2;
                 int ok = partial_graph_append(&prefix_graph3, 3, l, stack);
                 if (ok) {
-                    Poly prefix_weight;
-                    poly_mul_ref(&partition_weight_poly[i], &partition_weight_poly[j], &prefix_weight);
-                    poly_mul_ref(&prefix_weight, &partition_weight_poly[k], &prefix_weight);
-                    poly_mul_ref(&prefix_weight, &partition_weight_poly[l], &prefix_weight);
+                    WeightAccum prefix_weight;
+                    weight_accum_from_partition(i, &prefix_weight);
+                    weight_accum_mul_partition(&prefix_weight, j, &prefix_weight);
+                    weight_accum_mul_partition(&prefix_weight, k, &prefix_weight);
+                    weight_accum_mul_partition(&prefix_weight, l, &prefix_weight);
                     long long prefix_mult = (i == j) ? 1 : 2;
                     int prefix_run = (i == j) ? 2 : 1;
                     if (k == j) {
@@ -5022,6 +5458,11 @@ int main(int argc, char** argv) {
         printf("Task timing CSV: %s\n", g_task_times_out_path);
     }
     
+#if RECT_SPECIAL_K4
+    printf("\nRectangle-free 4-colourings:\n");
+    print_u128(global_poly.coeffs[0]);
+    printf("\n");
+#else
     printf("\nChromatic Polynomial P(x):\n");
     print_poly(global_poly);
 
@@ -5035,6 +5476,7 @@ int main(int argc, char** argv) {
     printf("P(%lld) = ", k_test);
     print_u128(poly_eval(global_poly, k_test));
     printf("\n");
+#endif
 
     if (poly_out_path) {
         PolyFileMeta meta = {
@@ -5045,7 +5487,11 @@ int main(int argc, char** argv) {
             .full_tasks = full_tasks,
         };
         write_poly_file(poly_out_path, &global_poly, &meta);
+#if RECT_SPECIAL_K4
+        printf("\nWrote fixed-4 shard to %s\n", poly_out_path);
+#else
         printf("\nWrote polynomial shard to %s\n", poly_out_path);
+#endif
     }
 
     free(g_live_prefix2_i);
