@@ -4620,3 +4620,79 @@
   - `canon_state_prepare_push()` gets a little cheaper on all three samples, which is exactly what we would expect from removing a dead per-active-permutation store
   - the end-to-end gain is modest but consistent, including on the decisive `7x6` shard with and without profiling
 - Outcome: accepted.
+
+### Experiment 128: Articulation split before nauty on connected graphs
+- Goal: try a larger structural optimisation than the recent micro cleanups by decomposing connected graphs with an articulation vertex before canonicalisation:
+  - if removing `v` yields components `C1..Ck`, compute `P(G)` as the product of `P(G[Ci ∪ {v}])` divided by `x^(k-1)`
+  - apply this after connected-components decomposition but before nauty on still-connected graphs
+- Change:
+  - added a temporary helper to find one articulation vertex and the components of `G - v`
+  - added a temporary `graph_poly_div_x_pow_ref()` helper to divide the multiplied sub-polynomials by `x^(k-1)`
+  - inserted the articulation split in `solve_graph_poly()` before the nauty path
+- Baseline binary:
+  - `/tmp/partition_poly_7_pre128`, compiled from committed `HEAD` at `97c8a81` before this change
+- Exactness checks:
+  - baseline command: `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre128 7 4 --prefix-depth 2 --task-end 16 --poly-out /tmp/pre128_7x4.poly`
+  - experiment command: `env OMP_NUM_THREADS=1 ./partition_poly_7 7 4 --prefix-depth 2 --task-end 16 --poly-out /tmp/post128_7x4.poly`
+  - `cmp -s /tmp/pre128_7x4.poly /tmp/post128_7x4.poly` succeeded
+- `7x4 --task-end 16 --profile`:
+  - baseline:
+    - `Worker Complete in 0.39s`
+    - `Canonicalisation calls: 683`
+    - `Canonical cache hits: 306 (44.8%)`
+    - `Raw cache hits: 1006`
+    - `solve_graph_poly: 43817 calls, 0.048s`
+    - `get_canonical_graph/densenauty: 683 calls, 0.002s`
+  - experiment:
+    - `Worker Complete in 0.33s`
+    - `Canonicalisation calls: 683`
+    - `Canonical cache hits: 306 (44.8%)`
+    - `Raw cache hits: 1006`
+    - `solve_graph_poly: 43817 calls, 0.041s`
+    - `get_canonical_graph/densenauty: 683 calls, 0.001s`
+- `7x5 --task-end 4 --profile`:
+  - baseline:
+    - `Worker Complete in 9.04s`
+    - `Canonicalisation calls: 89357`
+    - `Canonical cache hits: 62203 (69.6%)`
+    - `Raw cache hits: 242261`
+    - `solve_graph_poly: 1442988 calls, 1.833s`
+    - `get_canonical_graph/densenauty: 89357 calls, 0.156s`
+  - experiment:
+    - `Worker Complete in 9.05s`
+    - `Canonicalisation calls: 89219`
+    - `Canonical cache hits: 62163 (69.7%)`
+    - `Raw cache hits: 242273`
+    - `solve_graph_poly: 1442876 calls, 1.897s`
+    - `get_canonical_graph/densenauty: 89219 calls, 0.157s`
+- `7x6 --task-end 1 --profile`:
+  - baseline:
+    - `Worker Complete in 40.79s`
+    - `Canonicalisation calls: 497075`
+    - `Canonical cache hits: 326174 (65.6%)`
+    - `Raw cache hits: 1908378`
+    - `solve_graph_poly: 6229795 calls, 20.043s`
+    - `get_canonical_graph/densenauty: 497075 calls, 1.130s`
+  - experiment:
+    - `Worker Complete in 40.92s`
+    - `Canonicalisation calls: 495133`
+    - `Canonical cache hits: 325359 (65.7%)`
+    - `Raw cache hits: 1908395`
+    - `solve_graph_poly: 6228261 calls, 20.986s`
+    - `get_canonical_graph/densenauty: 495133 calls, 1.125s`
+- `7x6 --task-end 1` re-run without `--profile`:
+  - baseline:
+    - `Worker Complete in 38.91s`
+    - `Canonicalisation calls: 497075`
+    - `Canonical cache hits: 326174 (65.6%)`
+    - `Raw cache hits: 1908378`
+  - experiment:
+    - `Worker Complete in 39.06s`
+    - `Canonicalisation calls: 495133`
+    - `Canonical cache hits: 325359 (65.7%)`
+    - `Raw cache hits: 1908395`
+- Interpretation:
+  - the decomposition does fire a little, since canonicalisation calls fall slightly on the heavier shards
+  - however, the total `solve_graph_poly()` time rises and both profiled and non-profiled `7x6` runs are slower overall
+  - that means the extra articulation detection and subgraph construction cost outweighs the saved nauty work in the current implementation
+- Outcome: rejected and reverted.
