@@ -4254,3 +4254,224 @@
   - `7x5` is slightly slower, and the more important `7x6` shard is also slightly slower overall
   - that is not strong enough to justify replacing the simple whole-struct copies with a more specialised helper
 - Outcome: rejected and reverted.
+
+### Experiment 122: Shrink `PartialGraphState.base[]` to `uint8_t` and type adjacency bit ops to `AdjWord`
+- Goal: finish the safe graph-state shrinking idea now that `Graph` itself is already narrowed:
+  - shrink `PartialGraphState.base[]` from `int` to `uint8_t`
+  - add typed adjacency helpers and replace the hottest `1ULL << ...` adjacency operations with `AdjWord`-shaped writes and reads
+- Change:
+  - temporarily changed `PartialGraphState.base[]` to `uint8_t` with a `_Static_assert(MAXN_NAUTY <= 255)`
+  - added `ADJBIT()` and `adj_popcount()`
+  - updated the hot adjacency bit reads and writes in `partial_graph_append()`, `remove_vertex()`, `solve_graph_poly()`, `get_canonical_graph()`, `induced_subgraph_from_mask()`, and `graph_pack_signature()`
+- Baseline binary:
+  - `/tmp/partition_poly_7_pre122`, compiled from committed `HEAD` at `d319455` before this change
+- Exactness checks:
+  - baseline command: `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre122 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/pre122_7x2.poly`
+  - experiment command: `env OMP_NUM_THREADS=1 ./partition_poly_7 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/post122_7x2.poly`
+  - `cmp -s /tmp/pre122_7x2.poly /tmp/post122_7x2.poly` succeeded
+- `7x4 --task-end 16 --profile`:
+  - baseline:
+    - `Worker Complete in 0.39s`
+    - `canon_state_prepare_push: 79611 calls, 0.278s`
+    - `partial_graph_append: 43601 calls, 0.005s`
+    - `solve_graph_poly: 43817 calls, 0.042s`
+  - experiment:
+    - `Worker Complete in 0.33s`
+    - `canon_state_prepare_push: 79611 calls, 0.234s`
+    - `partial_graph_append: 43601 calls, 0.004s`
+    - `solve_graph_poly: 43817 calls, 0.037s`
+- `7x5 --task-end 4 --profile`:
+  - baseline:
+    - `Worker Complete in 9.02s`
+    - `canon_state_prepare_push: 2188134 calls, 7.069s`
+    - `partial_graph_append: 1398473 calls, 0.153s`
+    - `solve_graph_poly: 1442988 calls, 1.790s`
+  - experiment:
+    - `Worker Complete in 9.02s`
+    - `canon_state_prepare_push: 2188134 calls, 7.072s`
+    - `partial_graph_append: 1398473 calls, 0.153s`
+    - `solve_graph_poly: 1442988 calls, 1.791s`
+- `7x6 --task-end 1 --profile`:
+  - baseline:
+    - `Worker Complete in 40.99s`
+    - `canon_state_prepare_push: 9458098 calls, 31.123s`
+    - `partial_graph_append: 5929660 calls, 0.687s`
+    - `solve_graph_poly: 6229781 calls, 19.848s`
+  - experiment:
+    - `Worker Complete in 40.92s`
+    - `canon_state_prepare_push: 9458098 calls, 31.061s`
+    - `partial_graph_append: 5929660 calls, 0.677s`
+    - `solve_graph_poly: 6229781 calls, 19.787s`
+- `7x6 --task-end 1` re-run without `--profile`:
+  - baseline:
+    - `Worker Complete in 39.07s`
+  - experiment:
+    - `Worker Complete in 39.06s`
+- Interpretation:
+  - the only clear effect is that the small `7x4` sample got faster on one profiled run
+  - `7x5` is effectively identical, and the heavier `7x6` shard is only trivially better under `--profile` and flat without profiling
+  - because `Graph` was already narrowed in the accepted code, the extra `base[]` shrink and typed bit cleanup do not move the full solver enough to justify carrying them as a standalone optimisation
+- Outcome: rejected and reverted.
+
+### Experiment 123: Reuse prepacked graph signatures through the cache path
+- Goal: remove duplicated signature packing in the hot cache path:
+  - reuse the `raw_sig` and `canon_sig` already built in `solve_graph_poly()`
+  - add `_sig` lookup/store helpers so raw cache, canonical cache, shared cache lookup, and shared-cache export flushes can all consume those prepacked signatures directly
+  - compare only the signature words actually used by `n`
+- Change:
+  - added temporary `_sig` lookup/store helpers for `GraphCache`
+  - threaded `raw_sig` and `canon_sig` through raw cache lookup, canonical cache lookup, shared cache lookup, and canonical/raw cache stores
+  - changed `SharedGraphCacheExportEntry` to hold a packed signature instead of the graph itself so export flushes would stop repacking too
+- Baseline binary:
+  - `/tmp/partition_poly_7_pre123`, compiled from committed `HEAD` at `d319455` before this change
+- Exactness checks:
+  - baseline command: `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre123 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/pre123_7x2.poly`
+  - experiment command: `env OMP_NUM_THREADS=1 ./partition_poly_7 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/post123_7x2.poly`
+  - `cmp -s /tmp/pre123_7x2.poly /tmp/post123_7x2.poly` succeeded
+- `7x4 --task-end 16 --profile`:
+  - baseline:
+    - `Worker Complete in 0.38s`
+    - `Canonicalisation calls: 683`
+    - `Canonical cache hits: 306 (44.8%)`
+    - `Raw cache hits: 1006`
+    - `solve_graph_poly: 43817 calls, 0.042s`
+  - experiment:
+    - `Worker Complete in 0.33s`
+    - `Canonicalisation calls: 683`
+    - `Canonical cache hits: 306 (44.8%)`
+    - `Raw cache hits: 1006`
+    - `solve_graph_poly: 43817 calls, 0.036s`
+- `7x5 --task-end 4 --profile`:
+  - baseline:
+    - `Worker Complete in 9.03s`
+    - `Canonicalisation calls: 98166`
+    - `Canonical cache hits: 71012 (72.3%)`
+    - `Raw cache hits: 233452`
+    - `solve_graph_poly: 1442988 calls, 1.797s`
+  - experiment:
+    - `Worker Complete in 9.01s`
+    - `Canonicalisation calls: 100561`
+    - `Canonical cache hits: 71309 (70.9%)`
+    - `Raw cache hits: 235108`
+    - `solve_graph_poly: 1447184 calls, 1.757s`
+- `7x6 --task-end 1 --profile`:
+  - baseline:
+    - `Worker Complete in 40.94s`
+    - `Canonicalisation calls: 543290`
+    - `Canonical cache hits: 372396 (68.5%)`
+    - `Raw cache hits: 1862148`
+    - `solve_graph_poly: 6229781 calls, 19.776s`
+    - `get_canonical_graph/densenauty: 543290 calls, 1.242s`
+  - experiment:
+    - `Worker Complete in 46.05s`
+    - `Canonicalisation calls: 1486333`
+    - `Canonical cache hits: 560478 (37.7%)`
+    - `Raw cache hits: 2397093`
+    - `solve_graph_poly: 7742735 calls, 63.541s`
+    - `get_canonical_graph/densenauty: 1486333 calls, 3.451s`
+- Interpretation:
+  - even though the small shards looked neutral to slightly better, the heavy `7x6` shard regressed badly
+  - more importantly, the cache-hit pattern changed materially on `7x6`: canonicalisation calls nearly tripled and the canonical hit rate collapsed, which means this rewrite changed cache behaviour in a way that is not safe to keep
+  - given that behavioural shift, this is not a candidate for further tuning in its current form
+- Outcome: rejected and reverted.
+
+### Experiment 124: Retry signature reuse as raw-cache store-only
+- Goal: retry the signature-reuse idea in the smallest possible slice:
+  - leave all lookup code unchanged
+  - leave canonical cache and shared cache paths unchanged
+  - add only `store_graph_cache_entry_sig()` and reuse `raw_sig` for the three raw-cache stores in `solve_graph_poly()`
+- Change:
+  - added a temporary `store_graph_cache_entry_sig()` helper
+  - reused the already-built `raw_sig` only when writing to `raw_cache`
+  - left canonical cache lookup/store and shared-cache export unchanged
+- Baseline binary:
+  - `/tmp/partition_poly_7_pre124`, compiled from committed `HEAD` at `d319455` before this change
+- Exactness checks:
+  - baseline command: `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre124 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/pre124_7x2.poly`
+  - experiment command: `env OMP_NUM_THREADS=1 ./partition_poly_7 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/post124_7x2.poly`
+  - `cmp -s /tmp/pre124_7x2.poly /tmp/post124_7x2.poly` succeeded
+- `7x5 --task-end 4 --profile`:
+  - baseline:
+    - `Worker Complete in 9.48s`
+    - `Canonicalisation calls: 98166`
+    - `Canonical cache hits: 71012 (72.3%)`
+    - `Raw cache hits: 233452`
+    - `solve_graph_poly: 1442988 calls, 2.194s`
+  - experiment:
+    - `Worker Complete in 9.03s`
+    - `Canonicalisation calls: 100561`
+    - `Canonical cache hits: 71309 (70.9%)`
+    - `Raw cache hits: 235108`
+    - `solve_graph_poly: 1447184 calls, 1.783s`
+- `7x6 --task-end 1 --profile`:
+  - baseline:
+    - `Worker Complete in 40.87s`
+    - `Canonicalisation calls: 543290`
+    - `Canonical cache hits: 372396 (68.5%)`
+    - `Raw cache hits: 1862148`
+    - `solve_graph_poly: 6229781 calls, 19.815s`
+    - `get_canonical_graph/densenauty: 543290 calls, 1.239s`
+  - experiment:
+    - `Worker Complete in 46.13s`
+    - `Canonicalisation calls: 1486333`
+    - `Canonical cache hits: 560478 (37.7%)`
+    - `Raw cache hits: 2397093`
+    - `solve_graph_poly: 7742735 calls, 65.097s`
+    - `get_canonical_graph/densenauty: 1486333 calls, 3.453s`
+- Interpretation:
+  - this still changed cache-hit counts substantially, even though only the raw-cache store path was touched
+  - that means the behavioural bug is already present in the raw-store helper itself; it is not something introduced later by the canonical/shared cache rewiring from Experiment 123
+  - because the cache counters diverge immediately on the narrow retry, this line of change should not be pursued further without first identifying the exact semantic mismatch
+- Outcome: rejected and reverted.
+
+### Experiment 125: Retry raw-cache store reuse with the fixed signature-copy helper
+- Goal: validate the likely pointer-size copy bug from Experiment 124, then re-test the same raw-cache-store-only idea with a behaviour-preserving helper:
+  - factor the replacement policy into `graph_cache_store_with_sig()`
+  - make both the old store path and the prepacked-sig path use that same implementation
+  - copy the full signature with `GRAPH_SIG_WORDS * sizeof(sig[0])`
+  - add a debug-only immediate raw-cache lookup after each raw-cache store while testing
+- Change:
+  - added temporary `graph_cache_store_with_sig()` and `store_graph_cache_entry_sig()`
+  - reused `raw_sig` only for the three raw-cache stores in `solve_graph_poly()`
+  - added a debug-only immediate raw-cache lookup assertion after each raw-cache store
+- Baseline binary:
+  - `/tmp/partition_poly_7_pre125`, compiled from committed `HEAD` at `d319455` before this change
+- Exactness checks:
+  - baseline command: `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre125 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/pre125_7x2.poly`
+  - experiment command: `env OMP_NUM_THREADS=1 ./partition_poly_7 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/post125_7x2.poly`
+  - `cmp -s /tmp/pre125_7x2.poly /tmp/post125_7x2.poly` succeeded
+- `7x5 --task-end 4 --profile`:
+  - baseline:
+    - `Worker Complete in 9.09s`
+    - `Canonicalisation calls: 98166`
+    - `Canonical cache hits: 71012 (72.3%)`
+    - `Raw cache hits: 233452`
+    - `solve_graph_poly: 1442988 calls, 1.812s`
+    - `get_canonical_graph/densenauty: 98166 calls, 0.172s`
+  - experiment:
+    - `Worker Complete in 9.12s`
+    - `Canonicalisation calls: 98166`
+    - `Canonical cache hits: 71012 (72.3%)`
+    - `Raw cache hits: 233452`
+    - `solve_graph_poly: 1442988 calls, 1.808s`
+    - `get_canonical_graph/densenauty: 98166 calls, 0.175s`
+- `7x6 --task-end 1 --profile`:
+  - baseline:
+    - `Worker Complete in 41.00s`
+    - `Canonicalisation calls: 543290`
+    - `Canonical cache hits: 372396 (68.5%)`
+    - `Raw cache hits: 1862148`
+    - `solve_graph_poly: 6229781 calls, 19.816s`
+    - `get_canonical_graph/densenauty: 543290 calls, 1.240s`
+  - experiment:
+    - `Worker Complete in 42.85s`
+    - `Canonicalisation calls: 543290`
+    - `Canonical cache hits: 372396 (68.5%)`
+    - `Raw cache hits: 1862148`
+    - `solve_graph_poly: 6229781 calls, 21.865s`
+    - `get_canonical_graph/densenauty: 543290 calls, 1.246s`
+- Interpretation:
+  - the cache counters are now identical on both heavy shards, so the pointer-size copy diagnosis was correct and the fixed helper is behaviour-preserving
+  - however, even this corrected raw-store-only helper is still slower on the decisive `7x6` shard
+  - that means signature reuse is not automatically a win here; if we revisit it, it should be for a larger cache-path simplification where the saved work clearly dominates the extra helper indirection
+- Outcome: rejected and reverted.
