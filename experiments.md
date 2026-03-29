@@ -4202,3 +4202,55 @@
   - `1`, `2`, and `100` are all flat to slightly worse than the pre-change baseline
   - once the accepted one-word nauty specialisation is already in place, this knob does not look like a useful runtime lever for the current `7x7` build
 - Outcome: rejected and reverted.
+
+### Experiment 121: Copy only the live `PartialGraphState` prefix instead of the whole struct
+- Goal: revisit the graph-copy bandwidth idea without the rejected mutable restore rewrite from Experiment 118:
+  - keep child graph state immutable
+  - replace whole-struct `PartialGraphState` copies with a helper that clones only `g.adj[0..g.n)` and `base[0..depth)`
+- Change:
+  - added a temporary `partial_graph_clone_live()` helper
+  - used it in the main DFS, fixed depth-2 batching, runtime split DFS, live depth-2 prefix generation, and the shallow prefix builders in `main()`
+- Baseline binary:
+  - `/tmp/partition_poly_7_pre121`, compiled from committed `HEAD` at `302790a` before this change
+- Exactness checks:
+  - baseline command: `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre121 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/pre121_7x2.poly`
+  - experiment command: `env OMP_NUM_THREADS=1 ./partition_poly_7 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/post121_7x2.poly`
+  - `cmp -s /tmp/pre121_7x2.poly /tmp/post121_7x2.poly` succeeded
+- `7x4 --task-end 16 --profile`:
+  - baseline:
+    - `Worker Complete in 0.39s`
+    - `canon_state_prepare_push: 79611 calls, 0.277s`
+    - `partial_graph_append: 43601 calls, 0.005s`
+    - `solve_graph_poly: 43817 calls, 0.041s`
+  - experiment:
+    - `Worker Complete in 0.33s`
+    - `canon_state_prepare_push: 79611 calls, 0.234s`
+    - `partial_graph_append: 43601 calls, 0.004s`
+    - `solve_graph_poly: 43817 calls, 0.037s`
+- `7x5 --task-end 4 --profile`:
+  - baseline:
+    - `Worker Complete in 9.05s`
+    - `canon_state_prepare_push: 2188134 calls, 7.077s`
+    - `partial_graph_append: 1398473 calls, 0.150s`
+    - `solve_graph_poly: 1442988 calls, 1.797s`
+  - experiment:
+    - `Worker Complete in 9.11s`
+    - `canon_state_prepare_push: 2188134 calls, 7.110s`
+    - `partial_graph_append: 1398473 calls, 0.151s`
+    - `solve_graph_poly: 1442988 calls, 1.837s`
+- `7x6 --task-end 1 --profile`:
+  - baseline:
+    - `Worker Complete in 40.89s`
+    - `canon_state_prepare_push: 9458098 calls, 31.085s`
+    - `partial_graph_append: 5929660 calls, 0.667s`
+    - `solve_graph_poly: 6229781 calls, 19.700s`
+  - experiment:
+    - `Worker Complete in 40.99s`
+    - `canon_state_prepare_push: 9458098 calls, 31.041s`
+    - `partial_graph_append: 5929660 calls, 0.673s`
+    - `solve_graph_poly: 6229781 calls, 19.988s`
+- Interpretation:
+  - the small `7x4` sample improved sharply on this run, but both heavier samples regressed
+  - `7x5` is slightly slower, and the more important `7x6` shard is also slightly slower overall
+  - that is not strong enough to justify replacing the simple whole-struct copies with a more specialised helper
+- Outcome: rejected and reverted.
