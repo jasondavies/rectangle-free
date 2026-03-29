@@ -5059,3 +5059,61 @@
   - the win comes from removing canonical-signature packing and signature-array traffic from the post-nauty local cache path
   - keeping the shared canonical cache unchanged makes this a narrow extension of Experiment 133 rather than another risky shared-cache refactor
 - Outcome: accepted.
+
+### Experiment 135: Dedicated shared canonical cache keyed by adjacency rows
+- Goal: extend the successful row-keyed cache format to the shared canonical cache/export path, not just the local raw and local canonical caches.
+- Change:
+  - temporarily switched `SharedGraphCache` from packed-signature slots to row-keyed adjacency slots
+  - changed shared canonical lookup under the rwlock to compare `adj[0..n)` rows directly
+  - changed exporter flush to write row-keyed shared entries instead of repacking canonical signatures
+- Baseline binary:
+  - `/tmp/partition_poly_7_pre135`, compiled from committed `HEAD` at `c2950c3` before this change
+- Exactness checks:
+  - baseline command: `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre135 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/pre135_7x2.poly`
+  - experiment command: `env OMP_NUM_THREADS=1 ./partition_poly_7 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/post135_7x2.poly`
+  - `cmp -s /tmp/pre135_7x2.poly /tmp/post135_7x2.poly` succeeded
+- `7x6 --task-end 1` re-run without `--profile`:
+  - baseline:
+    - `Worker Complete in 38.53s`
+    - `Canonicalisation calls: 497075`
+    - `Canonical cache hits: 326174 (65.6%)`
+    - `Raw cache hits: 1908378`
+  - experiment:
+    - `Worker Complete in 38.60s`
+    - `Canonicalisation calls: 497075`
+    - `Canonical cache hits: 326174 (65.6%)`
+    - `Raw cache hits: 1908378`
+- `OMP_NUM_THREADS=4`, `7x5 --task-end 4 --profile`:
+  - baseline:
+    - `Worker Complete in 9.40s`
+    - `Canonicalisation calls: 89357`
+    - `Canonical cache hits: 62203 (69.6%)`
+    - `Raw cache hits: 242261`
+    - `solve_graph_poly: 1442988 calls, 1.818s`
+  - experiment:
+    - `Worker Complete in 9.38s`
+    - `Canonicalisation calls: 89357`
+    - `Canonical cache hits: 62203 (69.6%)`
+    - `Raw cache hits: 242261`
+    - `solve_graph_poly: 1442988 calls, 1.838s`
+- `OMP_NUM_THREADS=8`, `7x5 --task-end 8 --profile`:
+  - baseline:
+    - `Worker Complete in 33.10s`
+    - `Canonicalisation calls: 313637`
+    - `Canonical cache hits: 226052 (72.1%)`
+    - `Raw cache hits: 1050963`
+    - `solve_graph_poly: 4996724 calls, 6.061s`
+  - experiment:
+    - `Worker Complete in 33.27s`
+    - `Canonicalisation calls: 313637`
+    - `Canonical cache hits: 226052 (72.1%)`
+    - `Raw cache hits: 1050963`
+    - `solve_graph_poly: 4996724 calls, 6.138s`
+- Verification:
+  - `make partition_poly_7` succeeded after reverting the patch
+  - `make partition_poly` succeeded after reverting the patch
+- Interpretation:
+  - counters staying identical confirms the shared row-keyed cache rewrite was behaviour-preserving
+  - unlike Experiments 133 and 134, replacing shared signature slots with shared row slots did not pay for the extra footprint and lock-protected table traffic
+  - the slightly worse serial, `4`-thread, and `8`-thread timings are enough to reject it without pursuing a larger multi-threaded run
+- Outcome: rejected and reverted.
