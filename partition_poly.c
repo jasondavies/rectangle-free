@@ -77,8 +77,14 @@ typedef uint64_t AdjWord;
 #define FIXED_PREFIX2_BATCH_SIZE 16
 #endif
 
+#define MAX_ROW_PAIRS ((MAX_ROWS * (MAX_ROWS - 1)) / 2)
+
 #ifndef RECT_SPECIAL_K4
 #define RECT_SPECIAL_K4 0
+#endif
+
+#ifndef RECT_SPECIAL_K4_FEASIBILITY
+#define RECT_SPECIAL_K4_FEASIBILITY 0
 #endif
 
 // --- DATA TYPES ---
@@ -125,6 +131,13 @@ typedef struct {
 typedef struct {
     Graph g;
     int base[MAX_COLS];
+#if RECT_SPECIAL_K4_FEASIBILITY
+    uint8_t pair_count[MAX_ROW_PAIRS];
+    uint8_t remaining_capacity;
+    uint32_t full_pair_mask;
+    uint8_t last_base;
+    uint8_t last_num_new;
+#endif
 } PartialGraphState;
 
 typedef struct {
@@ -360,6 +373,14 @@ static ComplexMask* overlap_mask = NULL;
 static ComplexMask* intra_mask = NULL;
 static Poly* partition_weight_poly = NULL;
 static uint8_t* partition_weight4 = NULL;
+#if RECT_SPECIAL_K4_FEASIBILITY
+static uint32_t* pair_shadow_mask = NULL;
+static uint8_t* pair_shadow_pairs = NULL;
+static uint8_t* suffix_min_pairs = NULL;
+static int pair_index[MAX_ROWS][MAX_ROWS];
+static int num_row_pairs = 0;
+static int min_partition_pairs = 0;
+#endif
 static PrefixId* g_live_prefix2_i = NULL;
 static PrefixId* g_live_prefix2_j = NULL;
 static long long g_live_prefix2_count = 0;
@@ -1177,6 +1198,11 @@ static void init_partition_lookup_tables(void) {
     partition_weight_poly =
         checked_calloc(partition_count, sizeof(*partition_weight_poly), "partition_weight_poly");
     partition_weight4 = checked_calloc(partition_count, sizeof(*partition_weight4), "partition_weight4");
+#if RECT_SPECIAL_K4_FEASIBILITY
+    pair_shadow_mask = checked_calloc(partition_count, sizeof(*pair_shadow_mask), "pair_shadow_mask");
+    pair_shadow_pairs = checked_calloc(partition_count, sizeof(*pair_shadow_pairs), "pair_shadow_pairs");
+    suffix_min_pairs = checked_calloc(partition_count, sizeof(*suffix_min_pairs), "suffix_min_pairs");
+#endif
 }
 
 static void free_row_dependent_tables(void) {
@@ -1188,6 +1214,11 @@ static void free_row_dependent_tables(void) {
     free(intra_mask);
     free(partition_weight_poly);
     free(partition_weight4);
+#if RECT_SPECIAL_K4_FEASIBILITY
+    free(pair_shadow_mask);
+    free(pair_shadow_pairs);
+    free(suffix_min_pairs);
+#endif
 
     partitions = NULL;
     perms = NULL;
@@ -1198,6 +1229,13 @@ static void free_row_dependent_tables(void) {
     intra_mask = NULL;
     partition_weight_poly = NULL;
     partition_weight4 = NULL;
+#if RECT_SPECIAL_K4_FEASIBILITY
+    pair_shadow_mask = NULL;
+    pair_shadow_pairs = NULL;
+    suffix_min_pairs = NULL;
+    num_row_pairs = 0;
+    min_partition_pairs = 0;
+#endif
     num_partitions = 0;
     perm_count = 0;
     max_partition_capacity = 0;
@@ -1612,6 +1650,278 @@ static uint64_t count_graph_4_dsat(const Graph* g) {
     uint8_t forbid[MAXN_NAUTY] = {0};
     return count_graph_4_rec(g, (AdjWord)graph_row_mask(g->n), forbid, 0);
 }
+
+#if RECT_SPECIAL_K4_FEASIBILITY
+static int contains_edge_mask(const Graph* g, uint64_t mask) {
+    while (mask) {
+        int a = __builtin_ctzll(mask);
+        uint64_t na = (uint64_t)g->adj[a] & mask & ~((UINT64_C(1) << (a + 1)) - 1U);
+        if (na) return 1;
+        mask &= mask - 1;
+    }
+    return 0;
+}
+
+static int contains_triangle_mask(const Graph* g, uint64_t mask) {
+    while (mask) {
+        int a = __builtin_ctzll(mask);
+        uint64_t na = (uint64_t)g->adj[a] & mask & ~((UINT64_C(1) << (a + 1)) - 1U);
+        while (na) {
+            int b = __builtin_ctzll(na);
+            if ((na & (uint64_t)g->adj[b]) & ~((UINT64_C(1) << (b + 1)) - 1U)) return 1;
+            na &= na - 1;
+        }
+        mask &= mask - 1;
+    }
+    return 0;
+}
+
+static int contains_k4_mask(const Graph* g, uint64_t mask) {
+    while (mask) {
+        int a = __builtin_ctzll(mask);
+        uint64_t na = (uint64_t)g->adj[a] & mask & ~((UINT64_C(1) << (a + 1)) - 1U);
+        while (na) {
+            int b = __builtin_ctzll(na);
+            uint64_t nb = (na & (uint64_t)g->adj[b]) & ~((UINT64_C(1) << (b + 1)) - 1U);
+            while (nb) {
+                int c = __builtin_ctzll(nb);
+                if ((nb & (uint64_t)g->adj[c]) & ~((UINT64_C(1) << (c + 1)) - 1U)) return 1;
+                nb &= nb - 1;
+            }
+            na &= na - 1;
+        }
+        mask &= mask - 1;
+    }
+    return 0;
+}
+
+static int partial_graph_new_has_k5(const PartialGraphState* st) {
+    if (st->g.n < 5 || st->last_num_new == 0) return 0;
+
+    uint64_t old_mask = st->last_base > 0 ? ((UINT64_C(1) << st->last_base) - 1U) : 0;
+    int base_new = st->last_base;
+    int num_new = st->last_num_new;
+
+    for (int i = 0; i < num_new; i++) {
+        int u = base_new + i;
+        if (contains_k4_mask(&st->g, (uint64_t)st->g.adj[u] & old_mask)) return 1;
+    }
+
+    for (int i = 0; i < num_new; i++) {
+        int u = base_new + i;
+        for (int j = i + 1; j < num_new; j++) {
+            int v = base_new + j;
+            if (contains_triangle_mask(&st->g,
+                                       ((uint64_t)st->g.adj[u] & (uint64_t)st->g.adj[v] & old_mask))) {
+                return 1;
+            }
+        }
+    }
+
+    if (num_new >= 3) {
+        uint64_t common = old_mask;
+        for (int i = 0; i < 3; i++) common &= (uint64_t)st->g.adj[base_new + i];
+        if (contains_edge_mask(&st->g, common)) return 1;
+    }
+
+    return 0;
+}
+
+static int choose_dsat_vertex_colourable(const Graph* g, const int8_t* colour,
+                                         const uint8_t* saturation) {
+    int best = -1;
+    int best_sat = -1;
+    int best_deg = -1;
+    for (int v = 0; v < g->n; v++) {
+        if (colour[v] >= 0) continue;
+        int sat = __builtin_popcount((unsigned)saturation[v]);
+        int deg = __builtin_popcountll((uint64_t)g->adj[v]);
+        if (sat > best_sat || (sat == best_sat && deg > best_deg)) {
+            best = v;
+            best_sat = sat;
+            best_deg = deg;
+        }
+    }
+    return best;
+}
+
+static int dsatur_is_4_colourable(const Graph* g, int coloured, const int8_t* colour,
+                                  const uint8_t* saturation, int8_t* solution) {
+    if (coloured == g->n) {
+        if (solution) memcpy(solution, colour, (size_t)g->n * sizeof(solution[0]));
+        return 1;
+    }
+
+    int v = choose_dsat_vertex_colourable(g, colour, saturation);
+    if (v < 0) {
+        if (solution) memcpy(solution, colour, (size_t)g->n * sizeof(solution[0]));
+        return 1;
+    }
+
+    uint8_t available = (uint8_t)(0x0fU & (uint8_t)~saturation[v]);
+    while (available) {
+        unsigned bit_u = (unsigned)available & (unsigned)(-(int)available);
+        uint8_t bit = (uint8_t)bit_u;
+        int c = __builtin_ctz((unsigned)bit);
+        available &= (uint8_t)(available - 1);
+
+        int8_t next_colour[MAXN_NAUTY];
+        uint8_t next_saturation[MAXN_NAUTY];
+        memcpy(next_colour, colour, sizeof(next_colour));
+        memcpy(next_saturation, saturation, sizeof(next_saturation));
+        next_colour[v] = (int8_t)c;
+
+        uint64_t neighbours = (uint64_t)g->adj[v];
+        int stuck = 0;
+        while (neighbours) {
+            int u = __builtin_ctzll(neighbours);
+            if (next_colour[u] < 0) {
+                next_saturation[u] |= bit;
+                if (next_saturation[u] == 0x0fU) stuck = 1;
+            }
+            neighbours &= neighbours - 1;
+        }
+
+        if (!stuck && dsatur_is_4_colourable(g, coloured + 1, next_colour, next_saturation,
+                                             solution)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int induced_subgraph_with_vertices(const Graph* src, uint64_t mask, Graph* dst, int* verts) {
+    int n = 0;
+    uint64_t rem = mask;
+    while (rem) {
+        verts[n++] = __builtin_ctzll(rem);
+        rem &= rem - 1;
+    }
+
+    dst->n = (uint8_t)n;
+    memset(dst->adj, 0, (size_t)n * sizeof(dst->adj[0]));
+    for (int i = 0; i < n; i++) {
+        for (int j = i + 1; j < n; j++) {
+            if (((uint64_t)src->adj[verts[i]] >> verts[j]) & 1U) {
+                dst->adj[i] |= (AdjWord)(UINT64_C(1) << j);
+                dst->adj[j] |= (AdjWord)(UINT64_C(1) << i);
+            }
+        }
+    }
+    return n;
+}
+
+static int peel_to_4_core(const Graph* src, Graph* core, int* peel_order, int* peel_len,
+                          int* core_vertices) {
+    int degree[MAXN_NAUTY];
+    uint64_t active = graph_row_mask(src->n);
+    uint64_t queue = 0;
+
+    for (int v = 0; v < src->n; v++) {
+        degree[v] = __builtin_popcountll((uint64_t)src->adj[v] & active);
+        if (degree[v] <= 3) queue |= UINT64_C(1) << v;
+    }
+
+    *peel_len = 0;
+    while (queue) {
+        int v = __builtin_ctzll(queue);
+        queue &= queue - 1;
+        if (((active >> v) & 1U) == 0) continue;
+
+        active &= ~(UINT64_C(1) << v);
+        peel_order[(*peel_len)++] = v;
+
+        uint64_t neighbours = (uint64_t)src->adj[v] & active;
+        while (neighbours) {
+            int u = __builtin_ctzll(neighbours);
+            degree[u]--;
+            if (degree[u] == 3) queue |= UINT64_C(1) << u;
+            neighbours &= neighbours - 1;
+        }
+    }
+
+    return induced_subgraph_with_vertices(src, active, core, core_vertices);
+}
+
+static int extend_colouring_over_peel(const Graph* g, const int* peel_order, int peel_len,
+                                      int8_t* colour) {
+    for (int i = peel_len - 1; i >= 0; i--) {
+        int v = peel_order[i];
+        uint8_t used = 0;
+        uint64_t neighbours = (uint64_t)g->adj[v];
+        while (neighbours) {
+            int u = __builtin_ctzll(neighbours);
+            if (colour[u] >= 0) used |= (uint8_t)(1U << colour[u]);
+            neighbours &= neighbours - 1;
+        }
+        uint8_t available = (uint8_t)(0x0fU & (uint8_t)~used);
+        if (available == 0) return 0;
+        colour[v] = (int8_t)__builtin_ctz((unsigned)available);
+    }
+    return 1;
+}
+
+static int graph_component_colourable(const Graph* g, int8_t* out_colour) {
+    if (g->n == 0) return 1;
+    if (g->n == 1) {
+        if (out_colour) out_colour[0] = 0;
+        return 1;
+    }
+
+    int start = 0;
+    int best_deg = -1;
+    for (int v = 0; v < g->n; v++) {
+        int deg = __builtin_popcountll((uint64_t)g->adj[v]);
+        if (deg > best_deg) {
+            best_deg = deg;
+            start = v;
+        }
+    }
+
+    int8_t colour[MAXN_NAUTY];
+    uint8_t saturation[MAXN_NAUTY];
+    for (int i = 0; i < MAXN_NAUTY; i++) {
+        colour[i] = -1;
+        saturation[i] = 0;
+    }
+
+    colour[start] = 0;
+    uint64_t neighbours = (uint64_t)g->adj[start];
+    while (neighbours) {
+        int u = __builtin_ctzll(neighbours);
+        saturation[u] |= 1U;
+        neighbours &= neighbours - 1;
+    }
+
+    return dsatur_is_4_colourable(g, 1, colour, saturation, out_colour);
+}
+
+static int partial_graph_is_feasible(const PartialGraphState* st, int cols_left) {
+    if (cols_left <= 0) return 1;
+    if (st->remaining_capacity < min_partition_pairs * cols_left) return 0;
+
+    Graph core;
+    int peel_order[MAXN_NAUTY];
+    int peel_len = 0;
+    int core_vertices[MAXN_NAUTY];
+    int core_n = peel_to_4_core(&st->g, &core, peel_order, &peel_len, core_vertices);
+    if (core_n == 0) {
+        int8_t colour[MAXN_NAUTY];
+        memset(colour, -1, sizeof(colour));
+        return extend_colouring_over_peel(&st->g, peel_order, peel_len, colour);
+    }
+
+    if (partial_graph_new_has_k5(st)) return 0;
+
+    int8_t core_colour[MAXN_NAUTY];
+    if (!graph_component_colourable(&core, core_colour)) return 0;
+
+    int8_t colour[MAXN_NAUTY];
+    memset(colour, -1, sizeof(colour));
+    for (int i = 0; i < core_n; i++) colour[core_vertices[i]] = core_colour[i];
+    return extend_colouring_over_peel(&st->g, peel_order, peel_len, colour);
+}
+#endif
 #endif
 
 void print_u128(PolyCoeff n) {
@@ -1865,6 +2175,57 @@ void build_overlap_table() {
         }
     }
 }
+
+#if RECT_SPECIAL_K4_FEASIBILITY
+static void init_pair_index(void) {
+    memset(pair_index, -1, sizeof(pair_index));
+    num_row_pairs = 0;
+    for (int i = 0; i < g_rows; i++) {
+        for (int j = i + 1; j < g_rows; j++) {
+            pair_index[i][j] = num_row_pairs;
+            pair_index[j][i] = num_row_pairs;
+            num_row_pairs++;
+        }
+    }
+}
+
+static void build_partition_shadow_table(void) {
+    min_partition_pairs = MAX_ROW_PAIRS;
+    memset(pair_shadow_mask, 0, (size_t)num_partitions * sizeof(*pair_shadow_mask));
+    memset(pair_shadow_pairs, 0, (size_t)num_partitions * sizeof(*pair_shadow_pairs));
+    memset(suffix_min_pairs, 0, (size_t)num_partitions * sizeof(*suffix_min_pairs));
+
+    for (int pid = 0; pid < num_partitions; pid++) {
+        uint32_t shadow = 0;
+        const Partition* part = &partitions[pid];
+        for (int ci = 0; ci < part->num_complex; ci++) {
+            int block = part->complex_blocks[ci];
+            uint32_t mask = part->block_masks[block];
+            for (int i = 0; i < g_rows; i++) {
+                if (((mask >> i) & 1U) == 0) continue;
+                for (int j = i + 1; j < g_rows; j++) {
+                    if ((mask >> j) & 1U) {
+                        shadow |= (uint32_t)(1U << pair_index[i][j]);
+                    }
+                }
+            }
+        }
+        pair_shadow_mask[pid] = shadow;
+        pair_shadow_pairs[pid] = (uint8_t)__builtin_popcount(shadow);
+        if (pair_shadow_pairs[pid] < min_partition_pairs) {
+            min_partition_pairs = pair_shadow_pairs[pid];
+        }
+    }
+
+    if (num_partitions == 0) min_partition_pairs = 0;
+    for (int pid = num_partitions - 1; pid >= 0; pid--) {
+        if (pid == num_partitions - 1) suffix_min_pairs[pid] = pair_shadow_pairs[pid];
+        else suffix_min_pairs[pid] = pair_shadow_pairs[pid] < suffix_min_pairs[pid + 1]
+                                       ? pair_shadow_pairs[pid]
+                                       : suffix_min_pairs[pid + 1];
+    }
+}
+#endif
 
 static void build_partition_weight_table(void) {
     for (int pid = 0; pid < num_partitions; pid++) {
@@ -3728,12 +4089,23 @@ static void partial_graph_reset(PartialGraphState* st) {
     st->g.n = 0;
     memset(st->g.adj, 0, sizeof(st->g.adj));
     memset(st->base, 0, sizeof(st->base));
+#if RECT_SPECIAL_K4_FEASIBILITY
+    memset(st->pair_count, 0, sizeof(st->pair_count));
+    st->remaining_capacity = (uint8_t)(4 * num_row_pairs);
+    st->full_pair_mask = 0;
+    st->last_base = 0;
+    st->last_num_new = 0;
+#endif
 }
 
 static int partial_graph_append(PartialGraphState* st, int depth, int pid, const int* stack) {
     int base_new = st->g.n;
     int num_complex = partitions[pid].num_complex;
     st->base[depth] = base_new;
+#if RECT_SPECIAL_K4_FEASIBILITY
+    st->last_base = (uint8_t)base_new;
+    st->last_num_new = (uint8_t)num_complex;
+#endif
     st->g.n = (uint8_t)(st->g.n + num_complex);
     for (int i = 0; i < num_complex; i++) st->g.adj[base_new + i] = 0;
 
@@ -3759,6 +4131,45 @@ static int partial_graph_append(PartialGraphState* st, int depth, int pid, const
         }
     }
 
+#if RECT_SPECIAL_K4_FEASIBILITY
+    uint32_t shadow = pair_shadow_mask[pid];
+    while (shadow) {
+        int pair = __builtin_ctz(shadow);
+        st->pair_count[pair]++;
+        if (st->pair_count[pair] == 4) {
+            st->full_pair_mask |= (uint32_t)(1U << pair);
+        }
+        shadow &= shadow - 1;
+    }
+    st->remaining_capacity = (uint8_t)(st->remaining_capacity - pair_shadow_pairs[pid]);
+#endif
+    return 1;
+}
+
+static inline int partial_graph_candidate_can_fit(const PartialGraphState* st, int pid,
+                                                  int cols_left) {
+#if RECT_SPECIAL_K4_FEASIBILITY
+    uint32_t shadow = pair_shadow_mask[pid];
+    if (shadow & st->full_pair_mask) return 0;
+    if (st->remaining_capacity <
+        (int)pair_shadow_pairs[pid] + (int)suffix_min_pairs[pid] * cols_left) {
+        return 0;
+    }
+#else
+    (void)st;
+    (void)pid;
+    (void)cols_left;
+#endif
+    return 1;
+}
+
+static inline int partial_graph_append_checked(PartialGraphState* st, int depth, int pid,
+                                               const int* stack, int cols_left) {
+    if (!partial_graph_candidate_can_fit(st, pid, cols_left)) return 0;
+    if (!partial_graph_append(st, depth, pid, stack)) return 0;
+#if RECT_SPECIAL_K4_FEASIBILITY
+    if (!partial_graph_is_feasible(st, cols_left)) return 0;
+#endif
     return 1;
 }
 
@@ -3783,7 +4194,7 @@ static void build_live_prefix2_tasks(PrefixId** live_i_out, PrefixId** live_j_ou
             continue;
         }
         canon_state_commit_push(&canon_state, i, &canon_scratch, next_stabilizer);
-        if (!partial_graph_append(&partial_graph, 0, i, stack)) {
+        if (!partial_graph_append_checked(&partial_graph, 0, i, stack, g_cols - 1)) {
             canon_state_pop(&canon_state);
             continue;
         }
@@ -3795,7 +4206,7 @@ static void build_live_prefix2_tasks(PrefixId** live_i_out, PrefixId** live_j_ou
             }
             canon_state_commit_push(&canon_state, j, &canon_scratch, next_stabilizer);
             PartialGraphState prefix_graph = partial_graph;
-            if (partial_graph_append(&prefix_graph, 1, j, stack)) {
+            if (partial_graph_append_checked(&prefix_graph, 1, j, stack, g_cols - 2)) {
                 prefix_task_buffer_push2(&live, i, j);
             }
             canon_state_pop(&canon_state);
@@ -3877,6 +4288,10 @@ void dfs(int depth, int min_idx, int* stack, CanonState* canon_state, const Part
     for (int i = min_idx; i < num_partitions; i++) {
         double t0 = 0.0;
         int is_terminal = (depth + 1 == g_cols);
+        int cols_left = g_cols - depth - 1;
+        if (!partial_graph_candidate_can_fit(partial_graph, i, cols_left)) {
+            continue;
+        }
         if (!canon_state_partition_is_rep(canon_state, min_idx, i)) {
             continue;
         }
@@ -3920,7 +4335,7 @@ void dfs(int depth, int min_idx, int* stack, CanonState* canon_state, const Part
             profile->partial_append_calls++;
             t0 = omp_get_wtime();
         }
-        int ok = partial_graph_append(&next_graph, depth, i, stack);
+        int ok = partial_graph_append_checked(&next_graph, depth, i, stack, cols_left);
         if (g_profile && profile) profile->partial_append_time += omp_get_wtime() - t0;
         if (ok) {
             if (is_terminal) {
@@ -3992,7 +4407,7 @@ static void execute_prefix2_fixed_batch(PrefixId i, const PrefixId* js, const lo
         profile->partial_append_calls++;
         t0 = omp_get_wtime();
     }
-    if (!partial_graph_append(partial_graph, 0, (int)i, stack)) {
+    if (!partial_graph_append_checked(partial_graph, 0, (int)i, stack, g_cols - 1)) {
         if (g_profile) profile->partial_append_time += omp_get_wtime() - t0;
         canon_state_pop(canon_state);
         return;
@@ -4033,7 +4448,7 @@ static void execute_prefix2_fixed_batch(PrefixId i, const PrefixId* js, const lo
             profile->partial_append_calls++;
             t0 = omp_get_wtime();
         }
-        int ok = partial_graph_append(&prefix_graph, 1, (int)j, stack);
+        int ok = partial_graph_append_checked(&prefix_graph, 1, (int)j, stack, g_cols - 2);
         if (g_profile) profile->partial_append_time += omp_get_wtime() - t0;
         if (ok) {
             WeightAccum prefix_weight;
@@ -4098,7 +4513,8 @@ static int replay_local_task_prefix(const LocalTask* task, WorkerCtx* ctx,
             tls_profile->partial_append_calls++;
             t0 = omp_get_wtime();
         }
-        if (!partial_graph_append(&ctx->partial_graph, depth, pid, ctx->stack)) {
+        if (!partial_graph_append_checked(&ctx->partial_graph, depth, pid, ctx->stack,
+                                          g_cols - depth - 1)) {
             if (g_profile) tls_profile->partial_append_time += omp_get_wtime() - t0;
             canon_state_pop(&ctx->canon_state);
             return 0;
@@ -4209,7 +4625,8 @@ static void dfs_runtime_split_local(int depth, int start_pid, int end_pid, long 
             tls_profile->partial_append_calls++;
             t0 = omp_get_wtime();
         }
-        if (partial_graph_append(&ctx->partial_graph, depth, pid, ctx->stack)) {
+        if (partial_graph_append_checked(&ctx->partial_graph, depth, pid, ctx->stack,
+                                         g_cols - depth - 1)) {
             if (g_profile) tls_profile->partial_append_time += omp_get_wtime() - t0;
             WeightAccum next_weight_prod;
             weight_accum_mul_partition(weight_prod, pid, &next_weight_prod);
@@ -4393,6 +4810,9 @@ int main(int argc, char** argv) {
     generate_permutations();
     uint8_t buffer[MAX_ROWS] = {0};
     generate_partitions_recursive(0, buffer, -1);
+#if RECT_SPECIAL_K4_FEASIBILITY
+    init_pair_index();
+#endif
     if (num_partitions >= (1u << (16 - CANON_FG_BITS))) {
         fprintf(stderr, "CanonPackedState too small for %d partitions\n", num_partitions);
         return 1;
@@ -4407,6 +4827,9 @@ int main(int argc, char** argv) {
     build_partition_weight4_table();
 #else
     build_partition_weight_table();
+#endif
+#if RECT_SPECIAL_K4_FEASIBILITY
+    build_partition_shadow_table();
 #endif
     
     printf("Grid: %dx%d\n", g_rows, g_cols);
@@ -4815,7 +5238,7 @@ int main(int argc, char** argv) {
                     profile->partial_append_calls++;
                     t0 = omp_get_wtime();
                 }
-                int ok = partial_graph_append(&partial_graph, 0, (int)i, stack);
+                int ok = partial_graph_append_checked(&partial_graph, 0, (int)i, stack, g_cols - 1);
                 if (g_profile) profile->partial_append_time += omp_get_wtime() - t0;
                 if (ok) {
                     WeightAccum initial_weight;
@@ -4909,7 +5332,7 @@ int main(int argc, char** argv) {
                         profile->partial_append_calls++;
                         t0 = omp_get_wtime();
                     }
-                    int ok = partial_graph_append(&partial_graph, 0, i, stack);
+                    int ok = partial_graph_append_checked(&partial_graph, 0, i, stack, g_cols - 1);
                     if (g_profile) profile->partial_append_time += omp_get_wtime() - t0;
                     if (!ok) {
                         canon_state_pop(&canon_state);
@@ -4946,7 +5369,7 @@ int main(int argc, char** argv) {
                         profile->partial_append_calls++;
                         t0 = omp_get_wtime();
                     }
-                    ok = partial_graph_append(&prefix_graph, 1, j, stack);
+                    ok = partial_graph_append_checked(&prefix_graph, 1, j, stack, g_cols - 2);
                     if (g_profile) profile->partial_append_time += omp_get_wtime() - t0;
                     if (ok) {
                         WeightAccum prefix_weight;
@@ -4987,7 +5410,7 @@ int main(int argc, char** argv) {
                     continue;
                 }
                 canon_state_commit_push(&canon_state, i, &canon_scratch, next_stabilizer);
-                if (!partial_graph_append(&partial_graph, 0, i, stack)) {
+                if (!partial_graph_append_checked(&partial_graph, 0, i, stack, g_cols - 1)) {
                     canon_state_pop(&canon_state);
                     complete_task_report_and_time(total_tasks, progress_report_step, start_time,
                                                   &pending_completed, task_timing, p, task_t0);
@@ -5003,7 +5426,7 @@ int main(int argc, char** argv) {
                 }
                 canon_state_commit_push(&canon_state, j, &canon_scratch, next_stabilizer);
                 PartialGraphState prefix_graph = partial_graph;
-                if (!partial_graph_append(&prefix_graph, 1, j, stack)) {
+                if (!partial_graph_append_checked(&prefix_graph, 1, j, stack, g_cols - 2)) {
                     canon_state_pop(&canon_state);
                     canon_state_pop(&canon_state);
                     complete_task_report_and_time(total_tasks, progress_report_step, start_time,
@@ -5021,7 +5444,7 @@ int main(int argc, char** argv) {
                 }
                 canon_state_commit_push(&canon_state, k, &canon_scratch, next_stabilizer);
                 PartialGraphState prefix_graph2 = prefix_graph;
-                int ok = partial_graph_append(&prefix_graph2, 2, k, stack);
+                int ok = partial_graph_append_checked(&prefix_graph2, 2, k, stack, g_cols - 3);
                 if (ok) {
                     WeightAccum prefix_weight;
                     weight_accum_from_partition(i, &prefix_weight);
@@ -5070,7 +5493,7 @@ int main(int argc, char** argv) {
                     continue;
                 }
                 canon_state_commit_push(&canon_state, i, &canon_scratch, next_stabilizer);
-                if (!partial_graph_append(&partial_graph, 0, i, stack)) {
+                if (!partial_graph_append_checked(&partial_graph, 0, i, stack, g_cols - 1)) {
                     canon_state_pop(&canon_state);
                     complete_task_report_and_time(total_tasks, progress_report_step, start_time,
                                                   &pending_completed, task_timing, p, task_t0);
@@ -5086,7 +5509,7 @@ int main(int argc, char** argv) {
                 }
                 canon_state_commit_push(&canon_state, j, &canon_scratch, next_stabilizer);
                 PartialGraphState prefix_graph = partial_graph;
-                if (!partial_graph_append(&prefix_graph, 1, j, stack)) {
+                if (!partial_graph_append_checked(&prefix_graph, 1, j, stack, g_cols - 2)) {
                     canon_state_pop(&canon_state);
                     canon_state_pop(&canon_state);
                     complete_task_report_and_time(total_tasks, progress_report_step, start_time,
@@ -5104,7 +5527,7 @@ int main(int argc, char** argv) {
                 }
                 canon_state_commit_push(&canon_state, k, &canon_scratch, next_stabilizer);
                 PartialGraphState prefix_graph2 = prefix_graph;
-                if (!partial_graph_append(&prefix_graph2, 2, k, stack)) {
+                if (!partial_graph_append_checked(&prefix_graph2, 2, k, stack, g_cols - 3)) {
                     canon_state_pop(&canon_state);
                     canon_state_pop(&canon_state);
                     canon_state_pop(&canon_state);
@@ -5124,7 +5547,7 @@ int main(int argc, char** argv) {
                 }
                 canon_state_commit_push(&canon_state, l, &canon_scratch, next_stabilizer);
                 PartialGraphState prefix_graph3 = prefix_graph2;
-                int ok = partial_graph_append(&prefix_graph3, 3, l, stack);
+                int ok = partial_graph_append_checked(&prefix_graph3, 3, l, stack, g_cols - 4);
                 if (ok) {
                     WeightAccum prefix_weight;
                     weight_accum_from_partition(i, &prefix_weight);
