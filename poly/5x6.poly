@@ -1,0 +1,39 @@
+RECT_POLY_V1
+rows 5
+cols 6
+task_start 0
+task_end 54
+full_tasks 54
+deg 30
+coeff 0 0
+coeff 1 -62953920
+coeff 2 103821120
+coeff 3 -138288240
+coeff 4 1404060400
+coeff 5 -2527883400
+coeff 6 -894970896
+coeff 7 4455635760
+coeff 8 -1084640400
+coeff 9 -2450378300
+coeff 10 113457900
+coeff 11 1797635850
+coeff 12 -393435965
+coeff 13 -463628700
+coeff 14 38993800
+coeff 15 112726110
+coeff 16 17198880
+coeff 17 -27614900
+coeff 18 -3062025
+coeff 19 2628600
+coeff 20 1055800
+coeff 21 -273300
+coeff 22 -86300
+coeff 23 -8550
+coeff 24 10125
+coeff 25 700
+coeff 26 0
+coeff 27 -150
+coeff 28 0
+coeff 29 0
+coeff 30 1
+end
