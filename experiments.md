@@ -4867,3 +4867,70 @@
   - `16/8` shifts work in the expected direction, with more raw hits and fewer canonicalisations, but it regresses `7x5` badly and is only essentially flat on `7x6`
   - that makes the current `15/12` setting still the best overall tradeoff among the tested nearby points
 - Outcome: rejected; keep `RAW_CACHE_BITS=15`, `RAW_CACHE_PROBE=12`.
+
+### Experiment 132: Canonical-cache size sweep for `partition_poly_7`
+- Goal: test whether the current `CACHE_BITS=17` canonical cache is leaving an easy win on the table now that the raw-cache tuning appears locally optimised.
+- Change:
+  - temporary no-source build sweep only:
+    - baseline: `CACHE_BITS=17`
+    - variant A: `CACHE_BITS=18`
+    - variant B: `CACHE_BITS=19`
+  - all three builds kept the accepted `RAW_CACHE_BITS=15`, `RAW_CACHE_PROBE=12` and one-word nauty settings
+- Baseline binary:
+  - `/tmp/partition_poly_7_cache17`, copied from committed `HEAD` at `76a3359`
+- Exactness checks:
+  - baseline command: `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_cache17 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/cache17_7x2.poly`
+  - variant A command: `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_cache18 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/cache18_7x2.poly`
+  - variant B command: `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_cache19 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/cache19_7x2.poly`
+  - `cmp -s /tmp/cache17_7x2.poly /tmp/cache18_7x2.poly` succeeded
+  - `cmp -s /tmp/cache17_7x2.poly /tmp/cache19_7x2.poly` succeeded
+- `7x5 --task-end 4 --profile`:
+  - baseline `CACHE_BITS=17`:
+    - `Worker Complete in 9.03s`
+    - `Canonicalisation calls: 89357`
+    - `Canonical cache hits: 62203 (69.6%)`
+    - `Raw cache hits: 242261`
+    - `solve_graph_poly: 1442988 calls, 1.756s`
+    - `get_canonical_graph/densenauty: 89357 calls, 0.155s`
+  - variant A `CACHE_BITS=18`:
+    - `Worker Complete in 9.08s`
+    - `Canonicalisation calls: 89357`
+    - `Canonical cache hits: 62203 (69.6%)`
+    - `Raw cache hits: 242261`
+    - `solve_graph_poly: 1442988 calls, 1.863s`
+    - `get_canonical_graph/densenauty: 89357 calls, 0.157s`
+  - variant B `CACHE_BITS=19`:
+    - `Worker Complete in 9.10s`
+    - `Canonicalisation calls: 89357`
+    - `Canonical cache hits: 62203 (69.6%)`
+    - `Raw cache hits: 242261`
+    - `solve_graph_poly: 1442988 calls, 1.969s`
+    - `get_canonical_graph/densenauty: 89357 calls, 0.158s`
+- `7x6 --task-end 1 --profile`:
+  - baseline `CACHE_BITS=17`:
+    - `Worker Complete in 40.62s`
+    - `Canonicalisation calls: 497075`
+    - `Canonical cache hits: 326174 (65.6%)`
+    - `Raw cache hits: 1908378`
+    - `solve_graph_poly: 6229795 calls, 18.158s`
+    - `get_canonical_graph/densenauty: 497075 calls, 1.104s`
+  - variant A `CACHE_BITS=18`:
+    - `Worker Complete in 40.70s`
+    - `Canonicalisation calls: 493511`
+    - `Canonical cache hits: 324639 (65.8%)`
+    - `Raw cache hits: 1908483`
+    - `solve_graph_poly: 6225737 calls, 18.432s`
+    - `get_canonical_graph/densenauty: 493511 calls, 1.097s`
+  - variant B `CACHE_BITS=19`:
+    - `Worker Complete in 40.84s`
+    - `Canonicalisation calls: 493485`
+    - `Canonical cache hits: 324624 (65.8%)`
+    - `Raw cache hits: 1908488`
+    - `solve_graph_poly: 6225715 calls, 19.120s`
+    - `get_canonical_graph/densenauty: 493485 calls, 1.108s`
+- Interpretation:
+  - larger canonical caches do reduce canonicalisation a little on the heavy shard, so the knob is doing real work
+  - however, the extra lookup footprint costs more than the saved canonical work at both `18` and `19`
+  - on `7x5`, the larger cache changes nothing about hit counts and only adds overhead
+  - the current `CACHE_BITS=17` setting therefore remains the best tradeoff among the tested nearby points
+- Outcome: rejected; keep `CACHE_BITS=17`.
