@@ -4112,3 +4112,59 @@
   - that is not a stable enough result to keep a larger mutable-state rewrite in a correctness-sensitive DFS hot path
   - the safer conclusion is that Experiment 117 is the real gain, while the append/restore rewrite remains too noisy and too risky for the observed payoff
 - Outcome: rejected and reverted.
+
+### Experiment 119: Re-try 1-byte overlap masks and 16-bit packed canon state on top of Experiment 117
+- Goal: revisit the earlier `7x7` data-shrinking idea from Experiment 112, but re-test it on top of the accepted one-word nauty build from Experiment 117 rather than the older baseline.
+- Change:
+  - narrowed `overlap_mask[]` and `intra_mask[]` to a `ComplexMask` type, which is `uint8_t` when `MAX_ROWS <= 7`
+  - narrowed the packed canon state arrays to a `CanonPackedState` type, which is `uint16_t` with a `5/11` split for `(first_greater, partition_id)`
+  - added a runtime sanity check after partition generation to ensure the `uint16_t` canon packing remains large enough for the generated partition count
+- Baseline binary:
+  - `/tmp/partition_poly_7_pre119`, compiled from committed `HEAD` at `b903eb8` before these changes
+- Exactness checks:
+  - baseline command: `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre119 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/pre119_7x2.poly`
+  - experiment command: `env OMP_NUM_THREADS=1 ./partition_poly_7 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/post119_7x2.poly`
+  - `cmp -s /tmp/pre119_7x2.poly /tmp/post119_7x2.poly` succeeded
+- `7x4 --task-end 16 --profile`:
+  - baseline:
+    - `Worker Complete in 0.38s`
+    - `canon_state_prepare_push: 79611 calls, 0.265s`
+    - `partial_graph_append: 43601 calls, 0.006s`
+  - experiment:
+    - `Worker Complete in 0.37s`
+    - `canon_state_prepare_push: 79611 calls, 0.260s`
+    - `partial_graph_append: 43601 calls, 0.005s`
+- `7x5 --task-end 4 --profile`:
+  - baseline:
+    - `Worker Complete in 9.11s`
+    - `canon_state_prepare_push: 2188134 calls, 7.081s`
+    - `partial_graph_append: 1398473 calls, 0.169s`
+    - `solve_graph_poly: 1442988 calls, 1.958s`
+    - `get_canonical_graph/densenauty: 98166 calls, 0.189s`
+  - experiment:
+    - `Worker Complete in 9.03s`
+    - `canon_state_prepare_push: 2188134 calls, 7.053s`
+    - `partial_graph_append: 1398473 calls, 0.163s`
+    - `solve_graph_poly: 1442988 calls, 1.835s`
+    - `get_canonical_graph/densenauty: 98166 calls, 0.174s`
+- `7x6 --task-end 1 --profile`:
+  - baseline:
+    - `Worker Complete in 40.96s`
+    - `canon_state_prepare_push: 9458098 calls, 30.843s`
+    - `partial_graph_append: 5929660 calls, 0.721s`
+    - `solve_graph_poly: 6229781 calls, 21.736s`
+    - `get_canonical_graph/densenauty: 543290 calls, 1.370s`
+  - experiment:
+    - `Worker Complete in 40.72s`
+    - `canon_state_prepare_push: 9458098 calls, 30.805s`
+    - `partial_graph_append: 5929660 calls, 0.737s`
+    - `solve_graph_poly: 6229781 calls, 20.026s`
+    - `get_canonical_graph/densenauty: 543290 calls, 1.257s`
+- Verification:
+  - `make partition_poly_7` succeeded
+  - `make partition_poly` succeeded
+- Interpretation:
+  - this re-test behaves differently from the earlier Experiment 112 result: on top of the accepted Experiment 117 nauty specialisation, the smaller mask tables and 16-bit packed canon state now give a consistent win across all three samples
+  - `7x4` improves slightly, `7x5` improves by about `0.08s`, and `7x6` improves by about `0.24s`
+  - the main hot-path effect is modest but in the right direction: `canon_state_prepare_push()` gets a little cheaper, `partial_graph_append()` improves on the smaller samples, and the full run still comes out ahead even where `partial_graph_append()` is roughly flat
+- Outcome: accepted.

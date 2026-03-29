@@ -317,8 +317,13 @@ static uint16_t* perm_table = NULL;
 static uint16_t* partition_id_lookup = NULL;
 static uint32_t partition_id_lookup_size = 0;
 static uint64_t factorial[20];
-static uint32_t* overlap_mask = NULL;
-static uint32_t* intra_mask = NULL;
+#if MAX_ROWS <= 7
+typedef uint8_t ComplexMask;
+#else
+typedef uint32_t ComplexMask;
+#endif
+static ComplexMask* overlap_mask = NULL;
+static ComplexMask* intra_mask = NULL;
 static Poly* partition_weight_poly = NULL;
 static PrefixId* g_live_prefix2_i = NULL;
 static PrefixId* g_live_prefix2_j = NULL;
@@ -371,21 +376,21 @@ void store_graph_cache_entry(GraphCache* cache, uint64_t key_hash, uint32_t key_
 static void small_graph_lookup_init(void);
 static void small_graph_lookup_free(void);
 
-static inline uint32_t* intra_mask_row(int partition_id) {
+static inline ComplexMask* intra_mask_row(int partition_id) {
     return intra_mask + (size_t)partition_id * (size_t)max_complex_per_partition;
 }
 
-static inline uint32_t intra_mask_get(int partition_id, int complex_idx) {
+static inline ComplexMask intra_mask_get(int partition_id, int complex_idx) {
     return intra_mask_row(partition_id)[complex_idx];
 }
 
-static inline uint32_t* overlap_mask_row(int lhs_partition_id, int rhs_partition_id) {
+static inline ComplexMask* overlap_mask_row(int lhs_partition_id, int rhs_partition_id) {
     return overlap_mask +
            (((size_t)lhs_partition_id * (size_t)num_partitions + (size_t)rhs_partition_id) *
             (size_t)max_complex_per_partition);
 }
 
-static inline uint32_t overlap_mask_get(int lhs_partition_id, int rhs_partition_id, int complex_idx) {
+static inline ComplexMask overlap_mask_get(int lhs_partition_id, int rhs_partition_id, int complex_idx) {
     return overlap_mask_row(lhs_partition_id, rhs_partition_id)[complex_idx];
 }
 
@@ -1635,9 +1640,9 @@ void build_overlap_table() {
            (size_t)num_partitions * (size_t)max_complex_per_partition * sizeof(*intra_mask));
     for (int pid1 = 0; pid1 < num_partitions; pid1++) {
         for (int i1 = 0; i1 < partitions[pid1].num_complex; i1++) {
-            uint32_t mask = 0;
+            ComplexMask mask = 0;
             for (int i2 = 0; i2 < partitions[pid1].num_complex; i2++) {
-                if (i1 != i2) mask |= (1u << i2);
+                if (i1 != i2) mask |= (ComplexMask)(1u << i2);
             }
             intra_mask_row(pid1)[i1] = mask;
         }
@@ -1645,12 +1650,12 @@ void build_overlap_table() {
             int b1 = partitions[pid1].complex_blocks[i1];
             uint32_t m1 = partitions[pid1].block_masks[b1];
             for (int pid2 = 0; pid2 < num_partitions; pid2++) {
-                uint32_t mask = 0;
+                ComplexMask mask = 0;
                 for (int i2 = 0; i2 < partitions[pid2].num_complex; i2++) {
                     int b2 = partitions[pid2].complex_blocks[i2];
                     uint32_t m2 = partitions[pid2].block_masks[b2];
                     if (__builtin_popcount(m1 & m2) >= 2) {
-                        mask |= (1u << i2);
+                        mask |= (ComplexMask)(1u << i2);
                     }
                 }
                 overlap_mask_row(pid1, pid2)[i1] = mask;
@@ -1674,13 +1679,17 @@ static void build_partition_weight_table(void) {
 
 // --- SYMMETRY LOGIC ---
 
+typedef uint16_t CanonPackedState;
+#define CANON_FG_BITS 5u
+#define CANON_FG_MASK ((1u << CANON_FG_BITS) - 1u)
+
 typedef struct {
     int limit;
     int depth;
-    uint32_t* state;
+    CanonPackedState* state;
     uint16_t* equal_perm;
     uint16_t* changed_first_greater_idx;
-    uint32_t* changed_first_greater_old_state;
+    CanonPackedState* changed_first_greater_old_state;
     uint16_t equal_count[MAX_COLS + 1];
     uint16_t changed_first_greater_count[MAX_COLS];
     uint16_t stack_vals[MAX_COLS];
@@ -1689,7 +1698,7 @@ typedef struct {
 
 typedef struct {
     int limit;
-    uint32_t* next_state;
+    CanonPackedState* next_state;
     uint16_t* active_idx;
     uint16_t* next_equal_perm;
     uint16_t* changed_first_greater_idx;
@@ -1715,7 +1724,7 @@ static inline uint16_t* canon_state_changed_first_greater_idx_row(CanonState* st
     return st->changed_first_greater_idx + (size_t)depth * (size_t)st->limit;
 }
 
-static inline uint32_t* canon_state_changed_first_greater_old_state_row(CanonState* st, int depth) {
+static inline CanonPackedState* canon_state_changed_first_greater_old_state_row(CanonState* st, int depth) {
     return st->changed_first_greater_old_state + (size_t)depth * (size_t)st->limit;
 }
 
@@ -1727,16 +1736,17 @@ static inline const uint16_t* canon_state_equal_perm_row_const(const CanonState*
     return st->equal_perm + (size_t)depth * (size_t)st->limit;
 }
 
-static inline uint32_t canon_state_pack(uint8_t first_greater, uint16_t first_greater_val) {
-    return (uint32_t)first_greater | ((uint32_t)first_greater_val << 8);
+static inline CanonPackedState canon_state_pack(uint8_t first_greater, uint16_t first_greater_val) {
+    return (CanonPackedState)((CanonPackedState)first_greater |
+                              ((CanonPackedState)first_greater_val << CANON_FG_BITS));
 }
 
-static inline uint8_t canon_state_unpack_first_greater(uint32_t state) {
-    return (uint8_t)(state & 0xffU);
+static inline uint8_t canon_state_unpack_first_greater(CanonPackedState state) {
+    return (uint8_t)(state & CANON_FG_MASK);
 }
 
-static inline uint16_t canon_state_unpack_first_greater_val(uint32_t state) {
-    return (uint16_t)(state >> 8);
+static inline uint16_t canon_state_unpack_first_greater_val(CanonPackedState state) {
+    return (uint16_t)(state >> CANON_FG_BITS);
 }
 
 static void solve_structure_with_row_orbit(const Graph* partial_graph, long long row_orbit,
@@ -1896,13 +1906,13 @@ static int canon_state_prepare_terminal(const CanonState* st, int partition_id,
     uint16_t pid = (uint16_t)partition_id;
     const uint16_t* partition_perm_row =
         perm_table + (size_t)partition_id * (size_t)perm_count;
-    const uint32_t* state = st->state;
+    const CanonPackedState* state = st->state;
     const uint16_t* stack_vals = st->stack_vals;
 
     for (int p = 0; p < st->limit; p++) {
-        uint32_t old_state = state[p];
+        CanonPackedState old_state = state[p];
         uint16_t x = partition_perm_row[p];
-        uint8_t g = (uint8_t)(old_state & 0xffU);
+        uint8_t g = canon_state_unpack_first_greater(old_state);
 
         if (__builtin_expect(g != (uint8_t)depth, 1)) {
             uint16_t c = stack_vals[g];
@@ -2018,9 +2028,9 @@ int canon_state_prepare_push(const CanonState* st, int partition_id, CanonScratc
     uint16_t pid = (uint16_t)partition_id;
     const uint16_t* partition_perm_row =
         perm_table + (size_t)partition_id * (size_t)perm_count;
-    const uint32_t* state = st->state;
+    const CanonPackedState* state = st->state;
     const uint16_t* stack_vals = st->stack_vals;
-    uint32_t* next_state = scratch->next_state;
+    CanonPackedState* next_state = scratch->next_state;
     uint16_t* active_idx = scratch->active_idx;
     uint16_t* next_equal_perm = scratch->next_equal_perm;
     uint16_t* changed_first_greater_idx = scratch->changed_first_greater_idx;
@@ -2032,14 +2042,14 @@ int canon_state_prepare_push(const CanonState* st, int partition_id, CanonScratc
     scratch->changed_first_greater_count = 0;
 
     for (int p = 0; p < st->limit; p++) {
-        uint32_t old_state = state[p];
+        CanonPackedState old_state = state[p];
         uint16_t x = partition_perm_row[p];
-        uint8_t g = (uint8_t)(old_state & 0xffU);
+        uint8_t g = canon_state_unpack_first_greater(old_state);
         uint8_t next_fg;
         uint16_t next_fg_val;
 
         if (__builtin_expect(g != (uint8_t)depth, 1)) {
-            uint16_t r = (uint16_t)(old_state >> 8);
+            uint16_t r = canon_state_unpack_first_greater_val(old_state);
             if (__builtin_expect(x >= r, 1)) continue;
 
             uint16_t c = stack_vals[g];
@@ -2069,7 +2079,7 @@ int canon_state_prepare_push(const CanonState* st, int partition_id, CanonScratc
         }
 
         uint16_t new_fg_val = (next_fg < new_depth) ? next_fg_val : 0;
-        uint32_t new_state = canon_state_pack(next_fg, new_fg_val);
+        CanonPackedState new_state = canon_state_pack(next_fg, new_fg_val);
         next_state[p] = new_state;
         active_idx[active_count++] = (uint16_t)p;
         if (next_fg == new_depth) {
@@ -2097,7 +2107,7 @@ void canon_state_commit_push(CanonState* st, int partition_id, const CanonScratc
     int new_depth = depth + 1;
     uint16_t* equal_perm = canon_state_equal_perm_row(st, new_depth);
     uint16_t* changed_first_greater_idx = canon_state_changed_first_greater_idx_row(st, depth);
-    uint32_t* changed_first_greater_old_state = canon_state_changed_first_greater_old_state_row(st, depth);
+    CanonPackedState* changed_first_greater_old_state = canon_state_changed_first_greater_old_state_row(st, depth);
     uint16_t changed_fg_count = scratch->changed_first_greater_count;
     st->stack_vals[depth] = (uint16_t)partition_id;
 
@@ -2120,7 +2130,7 @@ void canon_state_commit_push(CanonState* st, int partition_id, const CanonScratc
 void canon_state_pop(CanonState* st) {
     int depth = st->depth - 1;
     uint16_t* changed_first_greater_idx = canon_state_changed_first_greater_idx_row(st, depth);
-    uint32_t* changed_first_greater_old_state = canon_state_changed_first_greater_old_state_row(st, depth);
+    CanonPackedState* changed_first_greater_old_state = canon_state_changed_first_greater_old_state_row(st, depth);
     for (uint16_t i = 0; i < st->changed_first_greater_count[depth]; i++) {
         uint16_t p = changed_first_greater_idx[i];
         st->state[p] = changed_first_greater_old_state[i];
@@ -3721,6 +3731,10 @@ int main(int argc, char** argv) {
     generate_permutations();
     uint8_t buffer[MAX_ROWS] = {0};
     generate_partitions_recursive(0, buffer, -1);
+    if (num_partitions >= (1u << (16 - CANON_FG_BITS))) {
+        fprintf(stderr, "CanonPackedState too small for %d partitions\n", num_partitions);
+        return 1;
+    }
     
     // 3. Build lookup tables
     init_partition_lookup_tables();
