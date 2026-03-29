@@ -3878,3 +3878,54 @@
   - since the solver is dominated by `canon_state_prepare_push()`, the net effect is a small but repeatable end-to-end regression on both `7x5` and `7x6`
   - this looks like the same lesson as Experiment 98: shrinking the hot representation is not automatically a win if the narrower packing makes the front-end harder for the compiler to optimise
 - Outcome: rejected and reverted.
+
+### Experiment 113: Re-test `PartialGraphState` append/pop on the current `partition_poly_7`
+- Goal: revisit the old rejected Experiment 80 on the much faster current solver, where the remaining graph-side copy traffic might plausibly matter more than it did before.
+- Change:
+  - added `partial_graph_pop()` that clears the appended suffix bits from earlier rows and restores `g.n`
+  - changed the DFS hot path, fixed depth-2 batching, live depth-2 prefix generation, the local runtime splitter, and the fixed depth-2/3/4 execution paths to mutate one `PartialGraphState` in place and pop on return instead of copying the whole struct
+  - left the graph representation itself unchanged
+- Baseline binary:
+  - `/tmp/partition_poly_7_pre113`, compiled from committed `HEAD` at `2eb6b76` before this change
+- Exactness checks:
+  - baseline command: `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre113 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/pre113_7x2.poly`
+  - experiment command: `env OMP_NUM_THREADS=1 ./partition_poly_7 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/post113_7x2.poly`
+  - `cmp -s /tmp/pre113_7x2.poly /tmp/post113_7x2.poly` succeeded
+- `7x4 --task-end 16 --profile`:
+  - baseline:
+    - `Worker Complete in 0.38s`
+    - `canon_state_prepare_push: 79611 calls, 0.268s`
+    - `partial_graph_append: 43601 calls, 0.006s`
+    - `solve_graph_poly: 43817 calls, 0.043s`
+  - experiment:
+    - `Worker Complete in 0.38s`
+    - `canon_state_prepare_push: 79611 calls, 0.272s`
+    - `partial_graph_append: 43601 calls, 0.006s`
+    - `solve_graph_poly: 43817 calls, 0.043s`
+- `7x5 --task-end 4 --profile`:
+  - baseline:
+    - `Worker Complete in 9.05s`
+    - `canon_state_prepare_push: 2188134 calls, 7.024s`
+    - `partial_graph_append: 1398473 calls, 0.172s`
+    - `solve_graph_poly: 1442988 calls, 1.942s`
+  - experiment:
+    - `Worker Complete in 9.06s`
+    - `canon_state_prepare_push: 2188134 calls, 7.042s`
+    - `partial_graph_append: 1398473 calls, 0.166s`
+    - `solve_graph_poly: 1442988 calls, 1.948s`
+- `7x6 --task-end 1 --profile`:
+  - baseline:
+    - `Worker Complete in 41.07s`
+    - `canon_state_prepare_push: 9458098 calls, 30.843s`
+    - `partial_graph_append: 5929660 calls, 0.747s`
+    - `solve_graph_poly: 6229781 calls, 21.673s`
+  - experiment:
+    - `Worker Complete in 41.15s`
+    - `canon_state_prepare_push: 9458098 calls, 30.886s`
+    - `partial_graph_append: 5929660 calls, 0.749s`
+    - `solve_graph_poly: 6229781 calls, 22.017s`
+- Interpretation:
+  - on the current code, this rewrite is much closer to flat than the old Experiment 80 result, but it is still not a clear win
+  - the profile does not show a material improvement in the measured append cost, and end-to-end time is flat on `7x4` and slightly worse on the heavier `7x5` and `7x6` samples
+  - that is not enough to justify keeping a larger mutable-state rewrite in a correctness-sensitive hot path
+- Outcome: rejected and reverted.
