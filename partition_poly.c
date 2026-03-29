@@ -183,6 +183,7 @@ typedef struct {
     long long solve_graph_canon_hits_by_n[MAXN_NAUTY + 1];
     long long hard_graph_nodes_by_n[MAXN_NAUTY + 1];
     long long solve_graph_lookup_calls_by_n[MAXN_NAUTY + 1];
+    long long solve_graph_connected_lookup_calls_by_n[MAXN_NAUTY + 1];
     long long solve_graph_component_calls_by_n[MAXN_NAUTY + 1];
     long long solve_graph_hard_misses_by_n[MAXN_NAUTY + 1];
     long long hard_graph_articulation_by_n[MAXN_NAUTY + 1];
@@ -198,6 +199,7 @@ typedef struct {
     double nauty_time;
     double solve_graph_time_by_n[MAXN_NAUTY + 1];
     double solve_graph_lookup_time_by_n[MAXN_NAUTY + 1];
+    double solve_graph_connected_lookup_time_by_n[MAXN_NAUTY + 1];
     double solve_graph_raw_hit_time_by_n[MAXN_NAUTY + 1];
     double solve_graph_canon_hit_time_by_n[MAXN_NAUTY + 1];
     double solve_graph_component_time_by_n[MAXN_NAUTY + 1];
@@ -318,6 +320,22 @@ typedef struct {
     double next_profile_report_at;
 } LocalTaskQueue;
 
+typedef struct {
+    uint64_t mask;
+    int32_t coeffs[10];
+} ConnectedCanonLookupEntryN9;
+
+typedef struct {
+    uint64_t magic;
+    uint32_t version;
+    uint32_t n;
+    uint32_t count;
+} ConnectedCanonLookupHeader;
+
+#define CONNECTED_CANON_LOOKUP_MAGIC UINT64_C(0x43434c394741424c)
+#define CONNECTED_CANON_LOOKUP_VERSION 1U
+#define CONNECTED_CANON_LOOKUP_N 9
+
 // --- GLOBALS ---
 static int num_partitions = 0;
 static int perm_count = 0;
@@ -375,6 +393,11 @@ static uint8_t g_small_graph_edge_u[SMALL_GRAPH_LOOKUP_MAX_N + 1][21];
 static uint8_t g_small_graph_edge_v[SMALL_GRAPH_LOOKUP_MAX_N + 1][21];
 static uint32_t g_small_graph_graph_count[SMALL_GRAPH_LOOKUP_MAX_N + 1] = {0};
 static uint8_t g_small_graph_edge_count[SMALL_GRAPH_LOOKUP_MAX_N + 1] = {0};
+static ConnectedCanonLookupEntryN9* g_connected_canon_lookup_n9 = NULL;
+static uint32_t g_connected_canon_lookup_n9_count = 0;
+static int g_connected_canon_lookup_n9_ready = 0;
+static int g_connected_canon_lookup_n9_loaded = 0;
+static double g_connected_canon_lookup_n9_load_time = 0.0;
 
 static void* checked_calloc(size_t count, size_t size, const char* label);
 static void* checked_aligned_alloc(size_t alignment, size_t size, const char* label);
@@ -400,7 +423,8 @@ static void store_row_graph_cache_entry(RowGraphCache* cache, uint64_t key_hash,
                                         const GraphPoly* value);
 static void small_graph_lookup_init(void);
 static void small_graph_lookup_free(void);
-
+static void connected_canon_lookup_n9_init(void);
+static void connected_canon_lookup_n9_free(void);
 static inline ComplexMask* intra_mask_row(int partition_id) {
     return intra_mask + (size_t)partition_id * (size_t)max_complex_per_partition;
 }
@@ -2349,6 +2373,22 @@ static uint32_t small_graph_pack_mask(const Graph* g) {
     return mask;
 }
 
+static uint64_t graph_pack_upper_mask64(const Graph* g) {
+    int edge_total = g->n * (g->n - 1) / 2;
+    if (edge_total > 64) {
+        fprintf(stderr, "graph_pack_upper_mask64 only supports graphs with at most 64 edge bits\n");
+        exit(1);
+    }
+    uint64_t mask = 0;
+    int bit = 0;
+    for (int j = 1; j < g->n; j++) {
+        for (int i = 0; i < j; i++, bit++) {
+            if ((g->adj[i] >> j) & 1ULL) mask |= 1ULL << bit;
+        }
+    }
+    return mask;
+}
+
 static uint32_t small_graph_contract_mask(uint32_t mask, int n, int u, int v) {
     uint8_t rows[SMALL_GRAPH_LOOKUP_MAX_N] = {0};
     int bit = 0;
@@ -2498,6 +2538,83 @@ static void small_graph_lookup_load_graph_poly(int n, uint32_t mask, GraphPoly* 
     const int32_t* coeffs = small_graph_poly_slot(n, mask);
     out->deg = (uint8_t)n;
     for (int i = 0; i <= n; i++) out->coeffs[i] = coeffs[i];
+}
+
+static const char* connected_canon_lookup_n9_default_path(void) {
+    const char* env_path = getenv("RECT_CONNECTED_CANON_LOOKUP_N9");
+    if (env_path && *env_path) return env_path;
+    return "connected_canon_lookup_n9.bin";
+}
+
+static int connected_canon_lookup_n9_entry_cmp(const void* lhs, const void* rhs) {
+    const ConnectedCanonLookupEntryN9* a = lhs;
+    const ConnectedCanonLookupEntryN9* b = rhs;
+    if (a->mask < b->mask) return -1;
+    if (a->mask > b->mask) return 1;
+    return 0;
+}
+
+static int connected_canon_lookup_n9_try_load_file(const char* path) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return 0;
+
+    ConnectedCanonLookupHeader header;
+    int ok = fread(&header, sizeof(header), 1, f) == 1 &&
+             header.magic == CONNECTED_CANON_LOOKUP_MAGIC &&
+             header.version == CONNECTED_CANON_LOOKUP_VERSION &&
+             header.n == CONNECTED_CANON_LOOKUP_N;
+    if (!ok) {
+        fclose(f);
+        return 0;
+    }
+
+    ConnectedCanonLookupEntryN9* entries =
+        checked_calloc((size_t)header.count, sizeof(*entries), "connected_canon_lookup_n9");
+    if (fread(entries, sizeof(*entries), header.count, f) != header.count) {
+        fclose(f);
+        free(entries);
+        return 0;
+    }
+    fclose(f);
+
+    g_connected_canon_lookup_n9 = entries;
+    g_connected_canon_lookup_n9_count = header.count;
+    g_connected_canon_lookup_n9_ready = 1;
+    g_connected_canon_lookup_n9_loaded = 1;
+    return 1;
+}
+
+static void connected_canon_lookup_n9_init(void) {
+    if (g_connected_canon_lookup_n9_ready) return;
+    double t0 = omp_get_wtime();
+    g_connected_canon_lookup_n9_loaded =
+        connected_canon_lookup_n9_try_load_file(connected_canon_lookup_n9_default_path());
+    g_connected_canon_lookup_n9_load_time = omp_get_wtime() - t0;
+}
+
+static void connected_canon_lookup_n9_free(void) {
+    free(g_connected_canon_lookup_n9);
+    g_connected_canon_lookup_n9 = NULL;
+    g_connected_canon_lookup_n9_count = 0;
+    g_connected_canon_lookup_n9_ready = 0;
+    g_connected_canon_lookup_n9_loaded = 0;
+    g_connected_canon_lookup_n9_load_time = 0.0;
+}
+
+static int connected_canon_lookup_n9_load_graph_poly(const Graph* g, GraphPoly* out) {
+    if (!g_connected_canon_lookup_n9_ready || g->n != CONNECTED_CANON_LOOKUP_N) return 0;
+
+    uint64_t mask = graph_pack_upper_mask64(g);
+    ConnectedCanonLookupEntryN9 key = {.mask = mask};
+    ConnectedCanonLookupEntryN9* entry = bsearch(&key, g_connected_canon_lookup_n9,
+                                                 g_connected_canon_lookup_n9_count,
+                                                 sizeof(*g_connected_canon_lookup_n9),
+                                                 connected_canon_lookup_n9_entry_cmp);
+    if (!entry) return 0;
+
+    out->deg = CONNECTED_CANON_LOOKUP_N;
+    for (int i = 0; i <= CONNECTED_CANON_LOOKUP_N; i++) out->coeffs[i] = entry->coeffs[i];
+    return 1;
 }
 
 static inline uint64_t graph_row_mask(int n) {
@@ -2957,6 +3074,7 @@ static void solve_graph_poly(const Graph* input_g, RowGraphCache* cache, RowGrap
     enum {
         SG_OUTCOME_NONE = 0,
         SG_OUTCOME_LOOKUP,
+        SG_OUTCOME_CONNECTED_LOOKUP,
         SG_OUTCOME_RAW_HIT,
         SG_OUTCOME_CANON_HIT,
         SG_OUTCOME_COMPONENTS,
@@ -3086,6 +3204,15 @@ static void solve_graph_poly(const Graph* input_g, RowGraphCache* cache, RowGrap
             goto done;
         }
 
+        if (connected_canon_lookup_n9_load_graph_poly(&canon, &res)) {
+            store_row_graph_cache_entry(cache, hash, (uint32_t)canon.n, &canon,
+                                        (AdjWord)ADJWORD_MASK, &res);
+            store_row_graph_cache_entry(raw_cache, raw_hash, (uint32_t)g.n, &g, row_mask, &res);
+            graph_poly_mul_ref(&multiplier, &res, out_result);
+            outcome = SG_OUTCOME_CONNECTED_LOOKUP;
+            goto done;
+        }
+
         // Deletion-contraction on canonical graph
         const Graph* branch_g = &canon;
         int max_deg = -1, u = -1;
@@ -3167,6 +3294,10 @@ done:
                     break;
                 case SG_OUTCOME_RAW_HIT:
                     profile->solve_graph_raw_hit_time_by_n[profile_n] += dt;
+                    break;
+                case SG_OUTCOME_CONNECTED_LOOKUP:
+                    profile->solve_graph_connected_lookup_calls_by_n[profile_n]++;
+                    profile->solve_graph_connected_lookup_time_by_n[profile_n] += dt;
                     break;
                 case SG_OUTCOME_CANON_HIT:
                     profile->solve_graph_canon_hit_time_by_n[profile_n] += dt;
@@ -4090,10 +4221,15 @@ int main(int argc, char** argv) {
     double start_time = omp_get_wtime();
     if (total_tasks > 0) {
         small_graph_lookup_init();
+        connected_canon_lookup_n9_init();
         if (g_profile) {
             printf("Small-graph lookup %s: %.2f seconds\n",
                    g_small_graph_lookup_loaded_from_file ? "load" : "initialisation",
                    g_small_graph_lookup_init_time);
+            if (g_connected_canon_lookup_n9_loaded) {
+                printf("Connected canonical lookup n=9 load: %.2f seconds\n",
+                       g_connected_canon_lookup_n9_load_time);
+            }
         }
     }
     
@@ -4662,12 +4798,16 @@ int main(int argc, char** argv) {
             total_profile.solve_graph_canon_hits_by_n[n] += src->solve_graph_canon_hits_by_n[n];
             total_profile.hard_graph_nodes_by_n[n] += src->hard_graph_nodes_by_n[n];
             total_profile.solve_graph_lookup_calls_by_n[n] += src->solve_graph_lookup_calls_by_n[n];
+            total_profile.solve_graph_connected_lookup_calls_by_n[n] +=
+                src->solve_graph_connected_lookup_calls_by_n[n];
             total_profile.solve_graph_component_calls_by_n[n] += src->solve_graph_component_calls_by_n[n];
             total_profile.solve_graph_hard_misses_by_n[n] += src->solve_graph_hard_misses_by_n[n];
             total_profile.hard_graph_articulation_by_n[n] += src->hard_graph_articulation_by_n[n];
             total_profile.hard_graph_k2_separator_by_n[n] += src->hard_graph_k2_separator_by_n[n];
             total_profile.solve_graph_time_by_n[n] += src->solve_graph_time_by_n[n];
             total_profile.solve_graph_lookup_time_by_n[n] += src->solve_graph_lookup_time_by_n[n];
+            total_profile.solve_graph_connected_lookup_time_by_n[n] +=
+                src->solve_graph_connected_lookup_time_by_n[n];
             total_profile.solve_graph_raw_hit_time_by_n[n] += src->solve_graph_raw_hit_time_by_n[n];
             total_profile.solve_graph_canon_hit_time_by_n[n] += src->solve_graph_canon_hit_time_by_n[n];
             total_profile.solve_graph_component_time_by_n[n] += src->solve_graph_component_time_by_n[n];
@@ -4748,17 +4888,20 @@ int main(int argc, char** argv) {
         printf("  Graph solver outcomes by simplified n:\n");
         for (int n = 0; n <= MAXN_NAUTY; n++) {
             long long lookup_calls = total_profile.solve_graph_lookup_calls_by_n[n];
+            long long connected_lookup_calls = total_profile.solve_graph_connected_lookup_calls_by_n[n];
             long long raw_hits = total_profile.solve_graph_raw_hits_by_n[n];
             long long canon_hits = total_profile.solve_graph_canon_hits_by_n[n];
             long long component_calls = total_profile.solve_graph_component_calls_by_n[n];
             long long hard_misses = total_profile.solve_graph_hard_misses_by_n[n];
-            if (lookup_calls == 0 && raw_hits == 0 && canon_hits == 0 &&
+            if (lookup_calls == 0 && connected_lookup_calls == 0 &&
+                raw_hits == 0 && canon_hits == 0 &&
                 component_calls == 0 && hard_misses == 0) {
                 continue;
             }
-            printf("    n=%d: lookup %lld/%.3fs, raw-hit %lld/%.3fs, canon-hit %lld/%.3fs, components %lld/%.3fs, hard-miss %lld/%.3fs\n",
+            printf("    n=%d: lookup %lld/%.3fs, connected-lookup %lld/%.3fs, raw-hit %lld/%.3fs, canon-hit %lld/%.3fs, components %lld/%.3fs, hard-miss %lld/%.3fs\n",
                    n,
                    lookup_calls, total_profile.solve_graph_lookup_time_by_n[n],
+                   connected_lookup_calls, total_profile.solve_graph_connected_lookup_time_by_n[n],
                    raw_hits, total_profile.solve_graph_raw_hit_time_by_n[n],
                    canon_hits, total_profile.solve_graph_canon_hit_time_by_n[n],
                    component_calls, total_profile.solve_graph_component_time_by_n[n],
@@ -4881,13 +5024,13 @@ int main(int argc, char** argv) {
     
     printf("\nChromatic Polynomial P(x):\n");
     print_poly(global_poly);
-    
+
     printf("\nValues:\n");
     long long k_test = 4;
     printf("P(%lld) = ", k_test);
     print_u128(poly_eval(global_poly, k_test));
     printf("\n");
-    
+
     k_test = 5;
     printf("P(%lld) = ", k_test);
     print_u128(poly_eval(global_poly, k_test));
@@ -4920,6 +5063,7 @@ int main(int argc, char** argv) {
         g_shared_graph_cache = NULL;
     }
     small_graph_lookup_free();
+    connected_canon_lookup_n9_free();
     free_row_dependent_tables();
 
     return 0;

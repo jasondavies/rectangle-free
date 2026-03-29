@@ -5117,3 +5117,224 @@
   - unlike Experiments 133 and 134, replacing shared signature slots with shared row slots did not pay for the extra footprint and lock-protected table traffic
   - the slightly worse serial, `4`-thread, and `8`-thread timings are enough to reject it without pursuing a larger multi-threaded run
 - Outcome: rejected and reverted.
+
+### Experiment 136: Replace propagated `Poly` weights with factor-count `WeightState`
+- Goal: test whether the DFS hot path can avoid carrying and multiplying full `Poly` objects by propagating only singleton-factor multiplicities and materialising the polynomial at the leaf.
+- Change:
+  - replaced propagated `Poly weight_prod` state with a compact `WeightState` holding multiplicities for roots `0..6`
+  - added a small per-thread memo cache keyed by the packed multiplicity vector
+  - materialised the full `Poly` only inside `solve_structure_with_row_orbit()`
+- Baseline binary:
+  - `/tmp/partition_poly_7_pre136`, compiled from committed `HEAD` at `ba1bf90` before this change
+- Exactness checks:
+  - baseline command: `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre136 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/pre136_7x2.poly`
+  - experiment command: `env OMP_NUM_THREADS=1 ./partition_poly_7 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/post136_7x2.poly`
+  - `cmp -s /tmp/pre136_7x2.poly /tmp/post136_7x2.poly` succeeded
+- `7x5 --task-end 4 --profile`:
+  - baseline:
+    - `Worker Complete in 8.95s`
+    - `Canonicalisation calls: 89357`
+    - `Canonical cache hits: 62203 (69.6%)`
+    - `Raw cache hits: 242261`
+    - `solve_graph_poly: 1442988 calls, 1.569s`
+    - `get_canonical_graph/densenauty: 89357 calls, 0.152s`
+  - experiment:
+    - `Worker Complete in 9.37s`
+    - `Canonicalisation calls: 89357`
+    - `Canonical cache hits: 62203 (69.6%)`
+    - `Raw cache hits: 242261`
+    - `weight_state_push: 1398473 calls, 0.059s`
+    - `materialise_weight_poly: 1388678 calls, 0.288s, 890115 cache hits`
+    - `solve_graph_poly: 1442988 calls, 1.584s`
+    - `get_canonical_graph/densenauty: 89357 calls, 0.154s`
+- `7x6 --task-end 1 --profile`:
+  - baseline:
+    - `Worker Complete in 40.17s`
+    - `Canonicalisation calls: 497075`
+    - `Canonical cache hits: 326174 (65.6%)`
+    - `Raw cache hits: 1908378`
+    - `solve_graph_poly: 6229795 calls, 15.487s`
+    - `get_canonical_graph/densenauty: 497075 calls, 1.094s`
+  - experiment:
+    - `Worker Complete in 42.56s`
+    - `Canonicalisation calls: 497075`
+    - `Canonical cache hits: 326174 (65.6%)`
+    - `Raw cache hits: 1908378`
+    - `weight_state_push: 5929660 calls, 0.256s`
+    - `materialise_weight_poly: 5887919 calls, 1.253s, 3761431 cache hits`
+    - `solve_graph_poly: 6229795 calls, 15.422s`
+    - `get_canonical_graph/densenauty: 497075 calls, 1.107s`
+- `7x6 --task-end 1` re-run without `--profile`:
+  - baseline:
+    - `Worker Complete in 38.70s`
+    - `Canonicalisation calls: 497075`
+    - `Canonical cache hits: 326174 (65.6%)`
+    - `Raw cache hits: 1908378`
+  - experiment:
+    - `Worker Complete in 40.16s`
+    - `Canonicalisation calls: 497075`
+    - `Canonical cache hits: 326174 (65.6%)`
+    - `Raw cache hits: 1908378`
+- Interpretation:
+  - the compact propagated state itself is cheap: even on the heavy `7x6` shard, all `weight_state_push` calls total only `0.256s`
+  - the leaf-side rebuild is not cheap enough to pay that back; `materialise_weight_poly` adds `1.253s` on the same shard even with about `63.9%` cache hits
+  - the graph-solver counters stay identical, so this is a clean measurement of the weighting rewrite rather than a search-tree change
+  - the slight `solve_graph_poly` reduction is too small to matter once the new leaf materialisation cost is included
+- Outcome: rejected and reverted.
+
+### Experiment 137: Hard-band-only max-degree neighbour scan with common-neighbour tie-breaks
+- Goal: revisit branch-edge choice in a form narrower than the old rejected triangle-count heuristic:
+  - keep the current max-degree pivot `u`
+  - keep the old first-neighbour rule on smaller hard misses
+  - only for canonical hard misses with `n >= 11`, scan neighbours of `u` and choose `v` by:
+    - largest `popcount(adj[u] & adj[v])`
+    - tie-break by `deg(v)`
+    - then by `deg(u) + deg(v)`
+- Change:
+  - added a `choose_branch_edge()` helper
+  - left the deletion-contraction code unchanged apart from replacing the old first-neighbour selection
+  - kept the max-degree pivot and hard-miss profiling unchanged
+- Baseline binary:
+  - `/tmp/partition_poly_7_pre137`, copied from the accepted `partition_poly_7` build before this change
+- Exactness checks:
+  - baseline command: `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre137 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/pre137_7x2.poly`
+  - experiment command: `env OMP_NUM_THREADS=1 ./partition_poly_7 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/post137_7x2.poly`
+  - `cmp -s /tmp/pre137_7x2.poly /tmp/post137_7x2.poly` succeeded
+- `7x5 --task-end 4 --profile`:
+  - baseline:
+    - `Worker Complete in 9.01s`
+    - `Canonicalisation calls: 89357`
+    - `Canonical cache hits: 62203 (69.6%)`
+    - `Raw cache hits: 242261`
+    - `solve_graph_poly: 1442988 calls, 1.591s`
+    - `get_canonical_graph/densenauty: 89357 calls, 0.153s`
+  - experiment:
+    - `Worker Complete in 9.24s`
+    - `Canonicalisation calls: 176516`
+    - `Canonical cache hits: 103293 (58.5%)`
+    - `Raw cache hits: 240284`
+    - `solve_graph_poly: 1535156 calls, 4.785s`
+    - `get_canonical_graph/densenauty: 176516 calls, 0.286s`
+- `7x6 --task-end 1 --profile`:
+  - baseline:
+    - `Worker Complete in 40.23s`
+    - `Canonicalisation calls: 497075`
+    - `Canonical cache hits: 326174 (65.6%)`
+    - `Raw cache hits: 1908378`
+    - `solve_graph_poly: 6229795 calls, 15.507s`
+    - `get_canonical_graph/densenauty: 497075 calls, 1.088s`
+  - experiment:
+    - `Worker Complete in 61.41s`
+    - `Canonicalisation calls: 8055775`
+    - `Canonical cache hits: 3953705 (49.1%)`
+    - `Raw cache hits: 1900420`
+    - `solve_graph_poly: 14093561 calls, 377.059s`
+    - `get_canonical_graph/densenauty: 8055775 calls, 12.649s`
+- `7x6 --task-end 1` re-run without `--profile`:
+  - baseline:
+    - `Worker Complete in 38.67s`
+    - `Canonicalisation calls: 497075`
+    - `Canonical cache hits: 326174 (65.6%)`
+    - `Raw cache hits: 1908378`
+  - experiment:
+    - `Worker Complete in 59.32s`
+    - `Canonicalisation calls: 8055775`
+    - `Canonical cache hits: 3953705 (49.1%)`
+    - `Raw cache hits: 1900420`
+- Interpretation:
+  - this is a strong regression even after restricting the heuristic to the hard band and keeping the existing max-degree pivot
+  - the branch tree becomes dramatically worse: the heavy `7x6` shard drives about `16.2x` more canonicalisations and about `2.27x` more `solve_graph_poly()` calls
+  - the smaller `7x5` shard also regresses materially, so this is not just a pathological `7x6` corner case
+  - together with Experiments 39, 106, and 108, this is enough evidence that the common-neighbour branch-selection family is not promising for this solver
+- Outcome: rejected and reverted.
+
+### Experiment 138: Offline connected canonical lookup table for `n=9`
+- Goal: extend the existing offline small-graph-table idea into the first hard-miss band that is still small enough to be practical:
+  - generate a read-only table for connected canonical graphs on `n=9`
+  - consult it after canonicalisation and canonical-cache misses, before deletion-contraction
+  - keep the feature inert when no table file is present
+- Change:
+  - added `connected_canon_lookup_n9.bin`, keyed by the packed canonical upper-triangle mask for `n=9`
+  - added a runtime loader and binary-search lookup in `solve_graph_poly()` after shared/local canonical-cache misses
+  - added `connected_canon_lookup_gen`, which reads graph6 lines from stdin and writes the offline table
+  - added `RECT_CONNECTED_CANON_LOOKUP_N9` to override the table path; otherwise the solver tries `connected_canon_lookup_n9.bin` if present
+- Baseline binary:
+  - `/tmp/partition_poly_7_pre137`, copied from the accepted `partition_poly_7` build before this change
+- Offline table generation:
+  - build command: `make -C third_party/nauty-build geng`
+  - generator build command: `make connected_canon_lookup_gen`
+  - generator command: `./third_party/nauty-build/geng -q -c 9 | ./connected_canon_lookup_gen /tmp/connected_canon_lookup_n9.bin`
+  - result:
+    - `Wrote /tmp/connected_canon_lookup_n9.bin with 261080 connected canonical graphs on n=9 in 1.51 seconds`
+    - `Generator stats: canon_calls=292359 cache_hits=193930 raw_hits=38780 max_abs_coeff=118124`
+- Exactness checks:
+  - baseline command: `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre137 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/pre138_7x2.poly`
+  - experiment command: `env OMP_NUM_THREADS=1 RECT_CONNECTED_CANON_LOOKUP_N9=/tmp/connected_canon_lookup_n9.bin ./partition_poly_7 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/post138_7x2.poly`
+  - `cmp -s /tmp/pre138_7x2.poly /tmp/post138_7x2.poly` succeeded
+- Startup benchmark method:
+  - repeated no-work `7x7 --task-end 0` launches with `OMP_NUM_THREADS=1`
+- Baseline startup command: `/usr/bin/time -f '%e' bash -lc 'for i in $(seq 1 10); do env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre137 7 7 --task-end 0 >/dev/null; done'`
+- Baseline startup result: `1.12s`
+- Experiment startup command: `/usr/bin/time -f '%e' bash -lc 'for i in $(seq 1 10); do env OMP_NUM_THREADS=1 RECT_CONNECTED_CANON_LOOKUP_N9=/tmp/connected_canon_lookup_n9.bin ./partition_poly_7 7 7 --task-end 0 >/dev/null; done'`
+- Experiment startup result: `1.18s`
+- `7x5 --task-end 4 --profile`:
+  - baseline:
+    - `Worker Complete in 9.00s`
+    - `Canonicalisation calls: 89357`
+    - `Canonical cache hits: 62203 (69.6%)`
+    - `Raw cache hits: 242261`
+    - `solve_graph_poly: 1442988 calls, 1.594s`
+    - `get_canonical_graph/densenauty: 89357 calls, 0.153s`
+  - experiment:
+    - `Connected canonical lookup n=9 load: 0.01 seconds`
+    - `Worker Complete in 8.94s`
+    - `Canonicalisation calls: 74405`
+    - `Canonical cache hits: 51229 (68.9%)`
+    - `Raw cache hits: 242524`
+    - `solve_graph_poly: 1422976 calls, 1.279s`
+    - `get_canonical_graph/densenauty: 74405 calls, 0.131s`
+    - `n=9 connected-lookup: 6028 calls, 0.032s`
+- `7x6 --task-end 1 --profile`:
+  - baseline:
+    - `Worker Complete in 40.07s`
+    - `Canonicalisation calls: 497075`
+    - `Canonical cache hits: 326174 (65.6%)`
+    - `Raw cache hits: 1908378`
+    - `solve_graph_poly: 6229795 calls, 15.391s`
+    - `get_canonical_graph/densenauty: 497075 calls, 1.091s`
+  - experiment:
+    - `Connected canonical lookup n=9 load: 0.01 seconds`
+    - `Worker Complete in 40.05s`
+    - `Canonicalisation calls: 472527`
+    - `Canonical cache hits: 305781 (64.7%)`
+    - `Raw cache hits: 1908696`
+    - `solve_graph_poly: 6198871 calls, 14.241s`
+    - `get_canonical_graph/densenauty: 472527 calls, 1.050s`
+    - `n=9 connected-lookup: 11306 calls, 0.047s`
+- `7x6 --task-end 1` re-runs without `--profile`:
+  - first run:
+    - baseline:
+      - `Worker Complete in 38.49s`
+      - `Canonicalisation calls: 497075`
+    - experiment:
+      - `Worker Complete in 38.39s`
+      - `Canonicalisation calls: 472527`
+  - repeat:
+    - baseline:
+      - `Worker Complete in 38.80s`
+      - `Canonicalisation calls: 497075`
+    - experiment:
+      - `Worker Complete in 38.50s`
+      - `Canonicalisation calls: 472527`
+- Verification:
+  - `make partition_poly_7` succeeded
+  - `make partition_poly` succeeded
+  - `make connected_canon_lookup_gen` succeeded
+- Interpretation:
+  - the read-only `n=9` table does exactly what it should: it converts all canonical `n=9` hard misses into a cheap lookup with no change to correctness
+  - the startup cost is small but measurable: about `0.06s` over ten no-work launches, or roughly `0.01s` per profiled run
+  - on real shards the gain is modest, but it is consistent:
+    - `7x5` improves slightly overall
+    - `7x6` cuts `solve_graph_poly()` time by about `1.15s`, reduces canonicalisations by about `4.9%`, and still edges out the baseline end-to-end in both non-profiled repeats
+  - because the table is offline and optional, the complexity is contained: when the file is absent the solver falls back to the old path
+- Outcome: accepted.
