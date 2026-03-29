@@ -4475,3 +4475,66 @@
   - however, even this corrected raw-store-only helper is still slower on the decisive `7x6` shard
   - that means signature reuse is not automatically a win here; if we revisit it, it should be for a larger cache-path simplification where the saved work clearly dominates the extra helper indirection
 - Outcome: rejected and reverted.
+
+### Experiment 126: Sweep larger raw-cache sizes for `partition_poly_7`
+- Goal: test whether a larger labelled-graph raw cache gives a cheaper win than further cache-path refactors, since raw hits bypass canonicalisation entirely.
+- Change:
+  - benchmarked three dedicated `7x7` binaries built from committed `HEAD` at `1910b94`:
+    - baseline: current defaults (`RAW_CACHE_BITS=13`, `RAW_CACHE_PROBE=8`)
+    - variant A: `RAW_CACHE_BITS=15`, `RAW_CACHE_PROBE=12`
+    - variant B: `RAW_CACHE_BITS=16`, `RAW_CACHE_PROBE=12`
+- Exactness checks:
+  - baseline command: `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre126 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/pre126_7x2.poly`
+  - variant A command: `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_raw15p12 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/raw15p12_7x2.poly`
+  - variant B command: `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_raw16p12 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/raw16p12_7x2.poly`
+  - `cmp -s` succeeded for both variants against the baseline shard output
+- `7x5 --task-end 4 --profile`:
+  - baseline:
+    - `Worker Complete in 9.09s`
+    - `Canonicalisation calls: 98166`
+    - `Canonical cache hits: 71012 (72.3%)`
+    - `Raw cache hits: 233452`
+    - `solve_graph_poly: 1442988 calls, 1.801s`
+    - `get_canonical_graph/densenauty: 98166 calls, 0.172s`
+  - `RAW_CACHE_BITS=15`, `RAW_CACHE_PROBE=12`:
+    - `Worker Complete in 9.01s`
+    - `Canonicalisation calls: 89357`
+    - `Canonical cache hits: 62203 (69.6%)`
+    - `Raw cache hits: 242261`
+    - `solve_graph_poly: 1442988 calls, 1.824s`
+    - `get_canonical_graph/densenauty: 89357 calls, 0.157s`
+  - `RAW_CACHE_BITS=16`, `RAW_CACHE_PROBE=12`:
+    - `Worker Complete in 9.03s`
+    - `Canonicalisation calls: 86374`
+    - `Canonical cache hits: 59220 (68.6%)`
+    - `Raw cache hits: 245244`
+    - `solve_graph_poly: 1442988 calls, 1.845s`
+    - `get_canonical_graph/densenauty: 86374 calls, 0.152s`
+- `7x6 --task-end 1 --profile`:
+  - baseline:
+    - `Worker Complete in 40.90s`
+    - `Canonicalisation calls: 543290`
+    - `Canonical cache hits: 372396 (68.5%)`
+    - `Raw cache hits: 1862148`
+    - `solve_graph_poly: 6229781 calls, 19.795s`
+    - `get_canonical_graph/densenauty: 543290 calls, 1.244s`
+  - `RAW_CACHE_BITS=15`, `RAW_CACHE_PROBE=12`:
+    - `Worker Complete in 40.76s`
+    - `Canonicalisation calls: 497075`
+    - `Canonical cache hits: 326174 (65.6%)`
+    - `Raw cache hits: 1908378`
+    - `solve_graph_poly: 6229795 calls, 20.171s`
+    - `get_canonical_graph/densenauty: 497075 calls, 1.122s`
+  - `RAW_CACHE_BITS=16`, `RAW_CACHE_PROBE=12`:
+    - `Worker Complete in 40.90s`
+    - `Canonicalisation calls: 473669`
+    - `Canonical cache hits: 302764 (63.9%)`
+    - `Raw cache hits: 1931788`
+    - `solve_graph_poly: 6229803 calls, 20.204s`
+    - `get_canonical_graph/densenauty: 473669 calls, 1.061s`
+- Interpretation:
+  - increasing the raw cache does exactly what we want: more raw hits and fewer canonicalisations on both heavy shards
+  - `RAW_CACHE_BITS=15`, `RAW_CACHE_PROBE=12` gives a small but consistent end-to-end win on both `7x5` and `7x6`
+  - pushing to `RAW_CACHE_BITS=16` reduces canonicalisation further, but no longer improves the decisive `7x6` wall-clock time
+  - the best tradeoff from this sweep is therefore `RAW_CACHE_BITS=15`, `RAW_CACHE_PROBE=12`
+- Outcome: accepted for `partition_poly_7`.
