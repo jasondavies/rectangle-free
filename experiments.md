@@ -4168,3 +4168,37 @@
   - `7x4` improves slightly, `7x5` improves by about `0.08s`, and `7x6` improves by about `0.24s`
   - the main hot-path effect is modest but in the right direction: `canon_state_prepare_push()` gets a little cheaper, `partial_graph_append()` improves on the smaller samples, and the full run still comes out ahead even where `partial_graph_append()` is roughly flat
 - Outcome: accepted.
+
+### Experiment 120: Make nauty `tc_level` tunable and sweep `0 / 1 / 2 / 100`
+- Goal: test whether nauty's target-cell heuristic level is leaving easy wins on the heavy `7x6` shard now that `partition_poly_7` already uses the accepted one-word nauty build from Experiment 117.
+- Change:
+  - added a temporary `RECT_NAUTY_TC_LEVEL` environment knob
+  - passed that value through to `options.tc_level` in `get_canonical_graph()`
+  - benchmarked the same `7x6 --task-end 1 --profile` shard at `tc_level = 0, 1, 2, 100`
+- Baseline binary:
+  - `/tmp/partition_poly_7_pre120`, compiled from committed `HEAD` at `3ee0581` before this change
+- Exactness checks:
+  - baseline command: `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre120 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/pre120_7x2.poly`
+  - experiment command: `env RECT_NAUTY_TC_LEVEL=0 OMP_NUM_THREADS=1 ./partition_poly_7 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/post120_tc0_7x2.poly`
+  - `cmp -s /tmp/pre120_7x2.poly /tmp/post120_tc0_7x2.poly` succeeded
+- `7x6 --task-end 1 --profile`:
+  - baseline:
+    - `Worker Complete in 40.82s`
+    - `get_canonical_graph/densenauty: 543290 calls, 1.233s`
+  - `RECT_NAUTY_TC_LEVEL=0`:
+    - `Worker Complete in 40.87s`
+    - `get_canonical_graph/densenauty: 542996 calls, 1.193s`
+  - `RECT_NAUTY_TC_LEVEL=1`:
+    - `Worker Complete in 40.98s`
+    - `get_canonical_graph/densenauty: 543300 calls, 1.224s`
+  - `RECT_NAUTY_TC_LEVEL=2`:
+    - `Worker Complete in 40.96s`
+    - `get_canonical_graph/densenauty: 543290 calls, 1.235s`
+  - `RECT_NAUTY_TC_LEVEL=100`:
+    - `Worker Complete in 40.92s`
+    - `get_canonical_graph/densenauty: 543290 calls, 1.241s`
+- Interpretation:
+  - `tc_level=0` does make the inner nauty call a little cheaper, but that does not translate into an end-to-end improvement on the heavy shard
+  - `1`, `2`, and `100` are all flat to slightly worse than the pre-change baseline
+  - once the accepted one-word nauty specialisation is already in place, this knob does not look like a useful runtime lever for the current `7x7` build
+- Outcome: rejected and reverted.
