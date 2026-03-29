@@ -4538,3 +4538,85 @@
   - pushing to `RAW_CACHE_BITS=16` reduces canonicalisation further, but no longer improves the decisive `7x6` wall-clock time
   - the best tradeoff from this sweep is therefore `RAW_CACHE_BITS=15`, `RAW_CACHE_PROBE=12`
 - Outcome: accepted for `partition_poly_7`.
+
+### Experiment 127: Remove dead `CanonScratch.active_idx` traffic in `canon_state_prepare_push()`
+- Goal: trim pure overhead from a very hot function by removing scratch storage that is written but never consumed.
+- Change:
+  - removed `CanonScratch.active_idx`
+  - removed its allocation/free path in `canon_scratch_init()` / `canon_scratch_free()`
+  - kept the local `active_count` tally in `canon_state_prepare_push()` because it still feeds the profile counters
+  - replaced the dead `active_idx[active_count++] = p` store with `active_count++`
+- Baseline binary:
+  - `/tmp/partition_poly_7_pre127`, compiled from committed `HEAD` at `9e7a924` before this change
+- Exactness checks:
+  - baseline command: `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre127 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/pre127_7x2.poly`
+  - experiment command: `env OMP_NUM_THREADS=1 ./partition_poly_7 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/post127_7x2.poly`
+  - `cmp -s /tmp/pre127_7x2.poly /tmp/post127_7x2.poly` succeeded
+- `7x4 --task-end 16 --profile`:
+  - baseline:
+    - `Worker Complete in 0.39s`
+    - `Canonicalisation calls: 683`
+    - `Canonical cache hits: 306 (44.8%)`
+    - `Raw cache hits: 1006`
+    - `canon_state_prepare_push: 79611 calls, 0.275s`
+    - `solve_graph_poly: 43817 calls, 0.045s`
+  - experiment:
+    - `Worker Complete in 0.35s`
+    - `Canonicalisation calls: 683`
+    - `Canonical cache hits: 306 (44.8%)`
+    - `Raw cache hits: 1006`
+    - `canon_state_prepare_push: 79611 calls, 0.243s`
+    - `solve_graph_poly: 43817 calls, 0.042s`
+- `7x5 --task-end 4 --profile`:
+  - baseline:
+    - `Worker Complete in 9.04s`
+    - `Canonicalisation calls: 89357`
+    - `Canonical cache hits: 62203 (69.6%)`
+    - `Raw cache hits: 242261`
+    - `canon_state_prepare_push: 2188134 calls, 7.085s`
+    - `solve_graph_poly: 1442988 calls, 1.821s`
+    - `get_canonical_graph/densenauty: 89357 calls, 0.156s`
+  - experiment:
+    - `Worker Complete in 9.00s`
+    - `Canonicalisation calls: 89357`
+    - `Canonical cache hits: 62203 (69.6%)`
+    - `Raw cache hits: 242261`
+    - `canon_state_prepare_push: 2188134 calls, 7.061s`
+    - `solve_graph_poly: 1442988 calls, 1.815s`
+    - `get_canonical_graph/densenauty: 89357 calls, 0.155s`
+- `7x6 --task-end 1 --profile`:
+  - baseline:
+    - `Worker Complete in 40.77s`
+    - `Canonicalisation calls: 497075`
+    - `Canonical cache hits: 326174 (65.6%)`
+    - `Raw cache hits: 1908378`
+    - `canon_state_prepare_push: 9458098 calls, 31.044s`
+    - `solve_graph_poly: 6229795 calls, 20.041s`
+    - `get_canonical_graph/densenauty: 497075 calls, 1.115s`
+  - experiment:
+    - `Worker Complete in 40.67s`
+    - `Canonicalisation calls: 497075`
+    - `Canonical cache hits: 326174 (65.6%)`
+    - `Raw cache hits: 1908378`
+    - `canon_state_prepare_push: 9458098 calls, 30.980s`
+    - `solve_graph_poly: 6229795 calls, 19.998s`
+    - `get_canonical_graph/densenauty: 497075 calls, 1.108s`
+- `7x6 --task-end 1` re-run without `--profile`:
+  - baseline:
+    - `Worker Complete in 39.03s`
+    - `Canonicalisation calls: 497075`
+    - `Canonical cache hits: 326174 (65.6%)`
+    - `Raw cache hits: 1908378`
+  - experiment:
+    - `Worker Complete in 38.90s`
+    - `Canonicalisation calls: 497075`
+    - `Canonical cache hits: 326174 (65.6%)`
+    - `Raw cache hits: 1908378`
+- Verification:
+  - `make partition_poly_7` succeeded
+  - `make partition_poly` succeeded
+- Interpretation:
+  - the cache counters stayed identical on every run, so this is a clean behavioural no-op
+  - `canon_state_prepare_push()` gets a little cheaper on all three samples, which is exactly what we would expect from removing a dead per-active-permutation store
+  - the end-to-end gain is modest but consistent, including on the decisive `7x6` shard with and without profiling
+- Outcome: accepted.
