@@ -55,8 +55,8 @@ $(NAUTY_BUILD_DIR)/nautyTL1.a: $(NAUTY_BUILD_DIR)/.configured-tls
 5xn_count4: 5xn_count4.c
 	$(CC) $(CFLAGS_5XN) -o $@ $<
 
-partition_count4: partition_count4.c $(NAUTY_BUILD_DIR)/nautyT.a
-	$(CC) $(PARTITION_CFLAGS) -o $@ $< $(LDFLAGS)
+partition_count4: partition_poly.c $(NAUTY_BUILD_DIR)/nautyT.a
+	$(CC) $(PARTITION_CFLAGS) -DRECT_COUNT_K4=1 -DRECT_COUNT_K4_FEASIBILITY=1 -o $@ $< $(LDFLAGS)
 
 partition_poly: partition_poly.c $(NAUTY_BUILD_DIR)/nautyT.a
 	$(CC) $(PARTITION_CFLAGS) -o $@ $< $(LDFLAGS)
