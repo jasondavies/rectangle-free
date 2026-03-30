@@ -5338,3 +5338,81 @@
     - `7x6` cuts `solve_graph_poly()` time by about `1.15s`, reduces canonicalisations by about `4.9%`, and still edges out the baseline end-to-end in both non-profiled repeats
   - because the table is offline and optional, the complexity is contained: when the file is absent the solver falls back to the old path
 - Outcome: accepted.
+
+### Experiment 139: Dedicated in-place checked `Poly` accumulator for hot alias-heavy merges
+- Goal: remove the hidden temporary/copy traffic from the hottest `Poly` accumulation sites without changing the generic polynomial helpers or the search tree.
+- Change:
+  - added `poly_accumulate_checked(Poly* acc, const Poly* add)` for in-place checked accumulation
+  - changed only the known alias-heavy hot sites to use it:
+    - leaf/result accumulation into `local_total`
+    - prefix-batch accumulation of `task_total` into `local_total`
+    - runtime-split leaf accumulation into `thread_total`
+    - final merge of `thread_polys[i]` into `global_poly`
+  - left the generic `poly_add_ref_checked()` helper unchanged for non-hot / non-alias cases
+- Baseline binary:
+  - `/tmp/partition_poly_7_pre139`, compiled from committed `HEAD` at `1091d23` before this change
+- Exactness checks:
+  - baseline command: `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre139 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/pre139_7x2.poly`
+  - experiment command: `env OMP_NUM_THREADS=1 ./partition_poly_7 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/post139_7x2.poly`
+  - `cmp -s /tmp/pre139_7x2.poly /tmp/post139_7x2.poly` succeeded
+- `7x5 --task-end 4 --profile`:
+  - baseline:
+    - `Worker Complete in 3.56s`
+    - `Canonicalisation calls: 89357`
+    - `Canonical cache hits: 62203 (69.6%)`
+    - `Raw cache hits: 242261`
+    - `solve_graph_poly: 1442988 calls, 0.485s`
+    - `get_canonical_graph/densenauty: 89357 calls, 0.051s`
+  - experiment:
+    - `Worker Complete in 3.50s`
+    - `Canonicalisation calls: 89357`
+    - `Canonical cache hits: 62203 (69.6%)`
+    - `Raw cache hits: 242261`
+    - `solve_graph_poly: 1442988 calls, 0.486s`
+    - `get_canonical_graph/densenauty: 89357 calls, 0.051s`
+- `7x6 --task-end 1 --profile`:
+  - baseline:
+    - `Worker Complete in 15.54s`
+    - `Canonicalisation calls: 497075`
+    - `Canonical cache hits: 326174 (65.6%)`
+    - `Raw cache hits: 1908378`
+    - `solve_graph_poly: 6229795 calls, 5.348s`
+    - `get_canonical_graph/densenauty: 497075 calls, 0.381s`
+  - experiment:
+    - `Worker Complete in 15.25s`
+    - `Canonicalisation calls: 497075`
+    - `Canonical cache hits: 326174 (65.6%)`
+    - `Raw cache hits: 1908378`
+    - `solve_graph_poly: 6229795 calls, 5.298s`
+    - `get_canonical_graph/densenauty: 497075 calls, 0.378s`
+- `7x6 --task-end 1` re-runs without `--profile`:
+  - first run:
+    - baseline:
+      - `Worker Complete in 14.99s`
+      - `Canonicalisation calls: 497075`
+      - `Canonical cache hits: 326174 (65.6%)`
+      - `Raw cache hits: 1908378`
+    - experiment:
+      - `Worker Complete in 14.78s`
+      - `Canonicalisation calls: 497075`
+      - `Canonical cache hits: 326174 (65.6%)`
+      - `Raw cache hits: 1908378`
+  - repeat:
+    - baseline:
+      - `Worker Complete in 15.00s`
+      - `Canonicalisation calls: 497075`
+      - `Canonical cache hits: 326174 (65.6%)`
+      - `Raw cache hits: 1908378`
+    - experiment:
+      - `Worker Complete in 14.76s`
+      - `Canonicalisation calls: 497075`
+      - `Canonical cache hits: 326174 (65.6%)`
+      - `Raw cache hits: 1908378`
+- Verification:
+  - `make partition_poly_7` succeeded
+  - `make partition_poly` succeeded
+- Interpretation:
+  - the unchanged canonicalisation/cache counters confirm this is a behaviour-preserving measurement of leaf/merge accumulation cost, not a search-tree change
+  - the `solve_graph_poly()` and nauty timings move only slightly, so most of the gain is outside the graph solver itself, exactly where the old aliasing helper was doing avoidable stack/copy work
+  - the win is modest but consistent in both profiled and non-profiled `7x6` runs, so this looks like a safe low-level cleanup rather than noise
+- Outcome: accepted.

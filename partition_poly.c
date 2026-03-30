@@ -1309,6 +1309,22 @@ static inline void poly_add_ref_checked(const Poly* a, const Poly* b, Poly* out)
     if (r != out) *out = *r;
 }
 
+static inline void poly_accumulate_checked(Poly* acc, const Poly* add) {
+    int old_deg = acc->deg;
+    if (add->deg > old_deg) {
+        memset(acc->coeffs + old_deg + 1, 0,
+               (size_t)(add->deg - old_deg) * sizeof(acc->coeffs[0]));
+        acc->deg = add->deg;
+    }
+    for (int i = 0; i <= add->deg; i++) {
+        if (__builtin_add_overflow(acc->coeffs[i], add->coeffs[i], &acc->coeffs[i])) {
+            fprintf(stderr, "128-bit overflow in polynomial accumulation\n");
+            abort();
+        }
+    }
+    while (acc->deg > 0 && acc->coeffs[acc->deg] == 0) acc->deg--;
+}
+
 Poly poly_add(Poly a, Poly b) {
     Poly r;
     poly_add_ref(&a, &b, &r);
@@ -4324,7 +4340,7 @@ void dfs(int depth, int min_idx, int* stack, CanonState* canon_state, const Part
         solve_structure(&partial_graph->g, canon_state, cache, raw_cache, ws,
                         local_canon_calls, local_cache_hits, local_raw_cache_hits,
                         weight_prod, mult_coeff, profile, &res);
-        poly_add_ref_checked(local_total, &res, local_total);
+        poly_accumulate_checked(local_total, &res);
         return;
     }
 
@@ -4389,7 +4405,7 @@ void dfs(int depth, int min_idx, int* stack, CanonState* canon_state, const Part
                                                local_canon_calls, local_cache_hits,
                                                local_raw_cache_hits, &next_weight_prod,
                                                next_mult_coeff, profile, &res);
-                poly_add_ref_checked(local_total, &res, local_total);
+                poly_accumulate_checked(local_total, &res);
             } else {
                 dfs(depth + 1, i, stack, canon_state, &next_graph, cache, raw_cache, ws, local_total,
                     local_canon_calls, local_cache_hits, local_raw_cache_hits, &next_weight_prod,
@@ -4503,7 +4519,7 @@ static void execute_prefix2_fixed_batch(PrefixId i, const PrefixId* js, const lo
             dfs(2, (int)j, stack, canon_state, &prefix_graph, cache, raw_cache, ws, &task_total,
                 local_canon_calls, local_cache_hits, local_raw_cache_hits,
                 &prefix_weight, prefix_mult, prefix_run, profile, canon_scratch);
-            poly_add_ref_checked(local_total, &task_total, local_total);
+            poly_accumulate_checked(local_total, &task_total);
         }
         canon_state_pop(canon_state);
         complete_task_report_and_time(total_tasks, progress_report_step, start_time,
@@ -4592,7 +4608,7 @@ static void dfs_runtime_split_local(int depth, int start_pid, int end_pid, long 
                         &ctx->cache, &ctx->raw_cache, &ctx->ws,
                         &ctx->local_canon_calls, &ctx->local_cache_hits,
                         &ctx->local_raw_cache_hits, weight_prod, mult_coeff, profile, &res);
-        poly_add_ref_checked(local_total, &res, local_total);
+        poly_accumulate_checked(local_total, &res);
         return;
     }
 
@@ -4689,7 +4705,7 @@ static void dfs_runtime_split_local(int depth, int start_pid, int end_pid, long 
                                                &ctx->local_canon_calls, &ctx->local_cache_hits,
                                                &ctx->local_raw_cache_hits, &next_weight_prod,
                                                next_mult_coeff, profile, &res);
-                poly_add_ref_checked(local_total, &res, local_total);
+                poly_accumulate_checked(local_total, &res);
             } else {
                 dfs_runtime_split_local(depth + 1, pid, num_partitions, root_id, ctx, local_total,
                                         &next_weight_prod, next_mult_coeff, next_run_len,
@@ -4733,7 +4749,7 @@ static void execute_local_runtime_task(const LocalTask* task, WorkerCtx* ctx, Po
                             &ctx->cache, &ctx->raw_cache, &ctx->ws,
                             &ctx->local_canon_calls, &ctx->local_cache_hits,
                             &ctx->local_raw_cache_hits, &weight_prod, mult_coeff, profile, &res);
-            poly_add_ref_checked(thread_total, &res, thread_total);
+            poly_accumulate_checked(thread_total, &res);
         } else {
             int start_pid = (int)task->lo;
             int end_pid = (int)task->hi;
@@ -5668,7 +5684,7 @@ int main(int argc, char** argv) {
     }
     
     for(int i=0; i<num_threads; i++) {
-        poly_add_ref_checked(&global_poly, &thread_polys[i], &global_poly);
+        poly_accumulate_checked(&global_poly, &thread_polys[i]);
     }
 
     ProfileStats total_profile = {0};
