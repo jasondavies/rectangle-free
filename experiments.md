@@ -5416,3 +5416,84 @@
   - the `solve_graph_poly()` and nauty timings move only slightly, so most of the gain is outside the graph solver itself, exactly where the old aliasing helper was doing avoidable stack/copy work
   - the win is modest but consistent in both profiled and non-profiled `7x6` runs, so this looks like a safe low-level cleanup rather than noise
 - Outcome: accepted.
+
+### Experiment 140: Orbit-mark bitset for `canon_state_partition_is_rep()` on large stabilizers
+- Goal: reduce symmetry-side overhead in DFS by replacing per-candidate smaller-image scans with per-orbit marking when the current equal-permutation set is large.
+- Change:
+  - added an orbit-mark bitset path gated by `RECT_REP_ORBIT_MARK_THRESHOLD` (set to `8`)
+  - when enabled, iterate candidates in increasing order, skip those already marked as non-representatives, and mark all larger orbit images of each surviving representative
+  - for runtime-split local ranges, seed the orbit-mark bitset from `rep_min_idx` up to the local `start_pid` so subranges still suppress candidates whose orbit minimum lies below the local start
+  - kept the old `canon_state_partition_is_rep()` scan as the fallback for smaller equal-permutation sets
+- Baseline binary:
+  - `/tmp/partition_poly_7_pre140`, copied from the accepted `partition_poly_7` build before this change at committed `HEAD` `22e1abe`
+- Exactness checks:
+  - baseline command: `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre140 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/pre140_7x2.poly`
+  - experiment command: `env OMP_NUM_THREADS=1 ./partition_poly_7 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/post140_7x2.poly`
+  - `cmp -s /tmp/pre140_7x2.poly /tmp/post140_7x2.poly` succeeded
+- `7x5 --task-end 4 --profile`:
+  - baseline:
+    - `Worker Complete in 3.52s`
+    - `Canonicalisation calls: 89357`
+    - `Canonical cache hits: 62203 (69.6%)`
+    - `Raw cache hits: 242261`
+    - `solve_graph_poly: 1442988 calls, 0.478s`
+    - `get_canonical_graph/densenauty: 89357 calls, 0.050s`
+  - experiment:
+    - `Worker Complete in 3.50s`
+    - `Canonicalisation calls: 89357`
+    - `Canonical cache hits: 62203 (69.6%)`
+    - `Raw cache hits: 242261`
+    - `solve_graph_poly: 1442988 calls, 0.488s`
+    - `get_canonical_graph/densenauty: 89357 calls, 0.051s`
+- `7x6 --task-end 1 --profile`:
+  - baseline:
+    - `Worker Complete in 15.47s`
+    - `Canonicalisation calls: 497075`
+    - `Canonical cache hits: 326174 (65.6%)`
+    - `Raw cache hits: 1908378`
+    - `solve_graph_poly: 6229795 calls, 5.273s`
+    - `get_canonical_graph/densenauty: 497075 calls, 0.376s`
+  - experiment:
+    - `Worker Complete in 15.26s`
+    - `Canonicalisation calls: 497075`
+    - `Canonical cache hits: 326174 (65.6%)`
+    - `Raw cache hits: 1908378`
+    - `solve_graph_poly: 6229795 calls, 5.291s`
+    - `get_canonical_graph/densenauty: 497075 calls, 0.377s`
+- `7x6 --task-end 1` re-runs without `--profile`:
+  - first run:
+    - baseline:
+      - `Worker Complete in 14.99s`
+      - `Canonicalisation calls: 497075`
+      - `Canonical cache hits: 326174 (65.6%)`
+      - `Raw cache hits: 1908378`
+    - experiment:
+      - `Worker Complete in 14.76s`
+      - `Canonicalisation calls: 497075`
+      - `Canonical cache hits: 326174 (65.6%)`
+      - `Raw cache hits: 1908378`
+  - repeat:
+    - baseline:
+      - `Worker Complete in 15.02s`
+      - `Canonicalisation calls: 497075`
+      - `Canonical cache hits: 326174 (65.6%)`
+      - `Raw cache hits: 1908378`
+    - experiment:
+      - `Worker Complete in 14.77s`
+      - `Canonicalisation calls: 497075`
+      - `Canonical cache hits: 326174 (65.6%)`
+      - `Raw cache hits: 1908378`
+  - reversed order sanity check:
+    - experiment first:
+      - `Worker Complete in 14.76s`
+    - baseline second:
+      - `Worker Complete in 15.02s`
+- Verification:
+  - `make partition_poly_7` succeeded
+  - `make partition_poly` succeeded
+- Interpretation:
+  - the unchanged canonicalisation/cache counters confirm that orbit marking is not changing the search tree; it is only reducing representative-testing overhead
+  - the improvement is small and concentrated on the heavier `7x6` shard; the lighter `7x5` shard is essentially flat
+  - the reversed-order check matters here: it suggests the `7x6` gain is not just a “second run is faster” artifact
+  - this makes the orbit-mark path worth keeping as a narrow, threshold-gated symmetry-side cleanup, even though it is not a large lever
+- Outcome: accepted.

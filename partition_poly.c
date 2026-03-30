@@ -87,6 +87,10 @@ typedef uint64_t AdjWord;
 #define RECT_COUNT_K4_FEASIBILITY 0
 #endif
 
+#ifndef RECT_REP_ORBIT_MARK_THRESHOLD
+#define RECT_REP_ORBIT_MARK_THRESHOLD 8
+#endif
+
 // --- DATA TYPES ---
 
 typedef __int128_t PolyCoeff;
@@ -2355,6 +2359,8 @@ static inline void weight_accum_mul_partition(const WeightAccum* src, int pid, W
 typedef uint16_t CanonPackedState;
 #define CANON_FG_BITS 5u
 #define CANON_FG_MASK ((1u << CANON_FG_BITS) - 1u)
+#define CANON_PARTITION_ID_LIMIT (1u << (16 - CANON_FG_BITS))
+#define REP_ORBIT_MARK_WORDS ((CANON_PARTITION_ID_LIMIT + 63u) / 64u)
 
 typedef struct {
     int limit;
@@ -2630,6 +2636,43 @@ static inline int canon_state_partition_is_rep(const CanonState* st, int min_idx
         }
     }
     return 1;
+}
+
+static inline int canon_state_use_orbit_marking(const CanonState* st) {
+    return st->equal_count[st->depth] >= RECT_REP_ORBIT_MARK_THRESHOLD;
+}
+
+static inline int orbit_mark_bit_test(const uint64_t* bits, int pid) {
+    return (bits[(unsigned)pid >> 6] >> ((unsigned)pid & 63u)) & 1u;
+}
+
+static inline void orbit_mark_bit_set(uint64_t* bits, int pid) {
+    bits[(unsigned)pid >> 6] |= 1ULL << ((unsigned)pid & 63u);
+}
+
+static inline void canon_state_mark_orbit_nonreps(const CanonState* st, int min_idx,
+                                                  int partition_id, uint64_t* orbit_mark_bits) {
+    uint16_t pid = (uint16_t)partition_id;
+    uint16_t min_pid = (uint16_t)min_idx;
+    uint16_t eq_count = st->equal_count[st->depth];
+    const uint16_t* eq = canon_state_equal_perm_row_const(st, st->depth);
+    const uint16_t* partition_perm_row =
+        perm_table + (size_t)partition_id * (size_t)perm_count;
+
+    for (uint16_t i = 0; i < eq_count; i++) {
+        uint16_t image = partition_perm_row[eq[i]];
+        if (image >= min_pid && image > pid) {
+            orbit_mark_bit_set(orbit_mark_bits, image);
+        }
+    }
+}
+
+static inline void canon_state_seed_orbit_marks(const CanonState* st, int min_idx, int start_pid,
+                                                uint64_t* orbit_mark_bits) {
+    for (int pid = min_idx; pid < start_pid; pid++) {
+        if (orbit_mark_bit_test(orbit_mark_bits, pid)) continue;
+        canon_state_mark_orbit_nonreps(st, min_idx, pid, orbit_mark_bits);
+    }
 }
 
 static void canon_state_init(CanonState* st, int limit) {
@@ -4345,14 +4388,23 @@ void dfs(int depth, int min_idx, int* stack, CanonState* canon_state, const Part
     }
 
     int next_stabilizer = 0;
+    uint64_t orbit_mark_bits[REP_ORBIT_MARK_WORDS];
+    int use_orbit_marking = canon_state_use_orbit_marking(canon_state);
+    if (use_orbit_marking) memset(orbit_mark_bits, 0, sizeof(orbit_mark_bits));
     for (int i = min_idx; i < num_partitions; i++) {
         double t0 = 0.0;
         int is_terminal = (depth + 1 == g_cols);
         int cols_left = g_cols - depth - 1;
+        if (use_orbit_marking) {
+            if (orbit_mark_bit_test(orbit_mark_bits, i)) {
+                continue;
+            }
+            canon_state_mark_orbit_nonreps(canon_state, min_idx, i, orbit_mark_bits);
+        }
         if (!partial_graph_candidate_can_fit(partial_graph, i, cols_left)) {
             continue;
         }
-        if (!canon_state_partition_is_rep(canon_state, min_idx, i)) {
+        if (!use_orbit_marking && !canon_state_partition_is_rep(canon_state, min_idx, i)) {
             continue;
         }
         if (g_profile && profile) {
@@ -4615,6 +4667,14 @@ static void dfs_runtime_split_local(int depth, int start_pid, int end_pid, long 
     int next_stabilizer = 0;
     int local_end = end_pid;
     int rep_min_idx = (depth > 0) ? ctx->stack[depth - 1] : 0;
+    uint64_t orbit_mark_bits[REP_ORBIT_MARK_WORDS];
+    int use_orbit_marking = canon_state_use_orbit_marking(&ctx->canon_state);
+    if (use_orbit_marking) {
+        memset(orbit_mark_bits, 0, sizeof(orbit_mark_bits));
+        if (start_pid > rep_min_idx) {
+            canon_state_seed_orbit_marks(&ctx->canon_state, rep_min_idx, start_pid, orbit_mark_bits);
+        }
+    }
     for (int pid = start_pid; pid < local_end; pid++) {
         if (g_adaptive_work_budget > 0 &&
             tls_adaptive_work_counter &&
@@ -4648,7 +4708,12 @@ static void dfs_runtime_split_local(int depth, int start_pid, int end_pid, long 
 
         double t0 = 0.0;
         int is_terminal = (depth + 1 == g_cols);
-        if (!canon_state_partition_is_rep(&ctx->canon_state, rep_min_idx, pid)) {
+        if (use_orbit_marking) {
+            if (orbit_mark_bit_test(orbit_mark_bits, pid)) {
+                continue;
+            }
+            canon_state_mark_orbit_nonreps(&ctx->canon_state, rep_min_idx, pid, orbit_mark_bits);
+        } else if (!canon_state_partition_is_rep(&ctx->canon_state, rep_min_idx, pid)) {
             continue;
         }
         ctx->stack[depth] = pid;
