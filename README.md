@@ -46,8 +46,8 @@ The repository currently contains:
   multisets, builds the induced conflict graph, and computes the chromatic
   polynomial.
 
-- `partition_count4.c`
-  Fixed-`k = 4` build wrapper around `partition_poly.c`. It uses the same
+- `partition_count4`
+  Fixed-`k = 4` build target for `partition_poly.c`. It uses the same
   search, but runs the direct exact 4-colouring path with the special-4
   pruning enabled.
 
@@ -88,7 +88,7 @@ canonicalises under row and colour permutations.
 Used by:
 
 - `partition_poly.c`
-- `partition_count4.c`
+- `partition_count4`
 - `partition_poly_7`
 
 These programs enumerate canonical multisets of column partitions, build a
@@ -105,7 +105,7 @@ The graph contribution differs by solver:
   computes the chromatic polynomial symbolically, with [nauty][nauty]-backed
   canonical graph caching.
 
-- `partition_count4.c`
+- `partition_count4`
   counts proper 4-colourings directly inside the shared solver, with
   special-4 pruning such as pair-shadow bounds, cheap obstruction checks,
   and exact 4-colourability tests.
@@ -133,7 +133,7 @@ make 5xn_count4
 
 ## Building the partition-based solvers
 
-`partition_poly.c` and `partition_count4.c` require:
+`partition_poly` and `partition_count4` require:
 
 - OpenMP,
 - the vendored nauty source under `third_party/nauty`.
@@ -261,7 +261,7 @@ Or pass the dimensions explicitly:
 Current limits in the checked-in C sources:
 
 - `partition_poly.c`: up to 7 rows and 16 columns.
-- `partition_count4.c`: up to 7 rows and 16 columns.
+- `partition_count4`: same solver limits as `partition_poly.c`.
 - `partition_poly_7`: 7 rows and up to 7 columns.
 
 These limits come from the current fixed-size structures and the size of the
