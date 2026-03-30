@@ -5497,3 +5497,88 @@
   - the reversed-order check matters here: it suggests the `7x6` gain is not just a “second run is faster” artifact
   - this makes the orbit-mark path worth keeping as a narrow, threshold-gated symmetry-side cleanup, even though it is not a large lever
 - Outcome: accepted.
+
+### Experiment 141: Remove row masking from row-key cache/hash hot paths after validating masked rows
+- Goal: test whether the row-key raw/local-cache hot paths can drop per-row masking work, on the assumption that active graph rows already stay masked to `g->n`.
+- Change:
+  - added a validation-only `assert_graph_rows_masked()` helper gated by `RECT_VALIDATE_GRAPH_MASKS`
+  - validated the invariant on:
+    - `7x5 --task-end 4 --profile`
+    - `7x6 --task-end 1`
+  - then removed row masking from:
+    - `hash_graph()`
+    - row-key cache slot comparison
+    - row-key cache store
+  - also removed the now-unused `row_mask` plumbing from the row-key lookup/store helpers and their hot call sites
+- Baseline binary:
+  - `/tmp/partition_poly_7_pre141`, compiled from committed `HEAD` at `9d82851` before this change
+- Exactness checks:
+  - baseline command: `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre141 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/pre141_7x2.poly`
+  - experiment command: `env OMP_NUM_THREADS=1 ./partition_poly_7 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/post141_7x2.poly`
+  - `cmp -s /tmp/pre141_7x2.poly /tmp/post141_7x2.poly` succeeded
+- Validation checks:
+  - validation build: `make partition_poly_7 PARTITION_POLY_7_CACHE_CFLAGS='-DRAW_CACHE_BITS=15 -DRAW_CACHE_PROBE=12 -DRECT_VALIDATE_GRAPH_MASKS=1'`
+  - `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_validate_masks 7 5 --task-end 4 --profile` completed without triggering the assertion
+  - `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_validate_masks 7 6 --task-end 1` completed without triggering the assertion
+- `7x5 --task-end 4 --profile`:
+  - baseline:
+    - `Worker Complete in 3.48s`
+    - `Canonicalisation calls: 89357`
+    - `Canonical cache hits: 62203 (69.6%)`
+    - `Raw cache hits: 242261`
+    - `solve_graph_poly: 1442988 calls, 0.473s`
+    - `get_canonical_graph/densenauty: 89357 calls, 0.050s`
+  - experiment:
+    - `Worker Complete in 3.49s`
+    - `Canonicalisation calls: 89357`
+    - `Canonical cache hits: 62203 (69.6%)`
+    - `Raw cache hits: 242261`
+    - `solve_graph_poly: 1442988 calls, 0.476s`
+    - `get_canonical_graph/densenauty: 89357 calls, 0.051s`
+- `7x6 --task-end 1 --profile`:
+  - baseline:
+    - `Worker Complete in 15.24s`
+    - `Canonicalisation calls: 497075`
+    - `Canonical cache hits: 326174 (65.6%)`
+    - `Raw cache hits: 1908378`
+    - `solve_graph_poly: 6229795 calls, 5.235s`
+    - `get_canonical_graph/densenauty: 497075 calls, 0.375s`
+  - experiment:
+    - `Worker Complete in 15.24s`
+    - `Canonicalisation calls: 497075`
+    - `Canonical cache hits: 326174 (65.6%)`
+    - `Raw cache hits: 1908378`
+    - `solve_graph_poly: 6229795 calls, 5.258s`
+    - `get_canonical_graph/densenauty: 497075 calls, 0.376s`
+- `7x6 --task-end 1` re-runs without `--profile`:
+  - first run:
+    - baseline:
+      - `Worker Complete in 14.72s`
+      - `Canonicalisation calls: 497075`
+      - `Canonical cache hits: 326174 (65.6%)`
+      - `Raw cache hits: 1908378`
+    - experiment:
+      - `Worker Complete in 14.78s`
+      - `Canonicalisation calls: 497075`
+      - `Canonical cache hits: 326174 (65.6%)`
+      - `Raw cache hits: 1908378`
+  - repeat:
+    - baseline:
+      - `Worker Complete in 14.75s`
+      - `Canonicalisation calls: 497075`
+      - `Canonical cache hits: 326174 (65.6%)`
+      - `Raw cache hits: 1908378`
+    - experiment:
+      - `Worker Complete in 14.78s`
+      - `Canonicalisation calls: 497075`
+      - `Canonical cache hits: 326174 (65.6%)`
+      - `Raw cache hits: 1908378`
+- Verification:
+  - `make partition_poly_7` succeeded
+  - `make partition_poly` succeeded
+- Interpretation:
+  - the validation-only assertions suggest the masked-row invariant really does hold on the tested workloads
+  - but removing the masking work still does not buy anything measurable; the heavy profiled shard is flat, and the non-profile repeats are slightly worse
+  - the unchanged counters confirm this is a clean hot-path data-work measurement rather than a search-tree change
+  - that makes the row-mask removal not worth keeping despite the invariant check passing
+- Outcome: rejected and reverted.
