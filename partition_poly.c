@@ -79,12 +79,12 @@ typedef uint64_t AdjWord;
 
 #define MAX_ROW_PAIRS ((MAX_ROWS * (MAX_ROWS - 1)) / 2)
 
-#ifndef RECT_SPECIAL_K4
-#define RECT_SPECIAL_K4 0
+#ifndef RECT_COUNT_K4
+#define RECT_COUNT_K4 0
 #endif
 
-#ifndef RECT_SPECIAL_K4_FEASIBILITY
-#define RECT_SPECIAL_K4_FEASIBILITY 0
+#ifndef RECT_COUNT_K4_FEASIBILITY
+#define RECT_COUNT_K4_FEASIBILITY 0
 #endif
 
 // --- DATA TYPES ---
@@ -131,7 +131,7 @@ typedef struct {
 typedef struct {
     Graph g;
     int base[MAX_COLS];
-#if RECT_SPECIAL_K4_FEASIBILITY
+#if RECT_COUNT_K4_FEASIBILITY
     uint8_t pair_count[MAX_ROW_PAIRS];
     uint8_t remaining_capacity;
     uint32_t full_pair_mask;
@@ -373,7 +373,7 @@ static ComplexMask* overlap_mask = NULL;
 static ComplexMask* intra_mask = NULL;
 static Poly* partition_weight_poly = NULL;
 static uint8_t* partition_weight4 = NULL;
-#if RECT_SPECIAL_K4_FEASIBILITY
+#if RECT_COUNT_K4_FEASIBILITY
 static uint32_t* pair_shadow_mask = NULL;
 static uint8_t* pair_shadow_pairs = NULL;
 static uint8_t* suffix_min_pairs = NULL;
@@ -480,7 +480,7 @@ static void unrank_prefix3(long long rank, int* i, int* j, int* k);
 static void unrank_prefix4(long long rank, int* i, int* j, int* k, int* l);
 static inline long long repeated_combo_count(int values, int slots);
 
-#if RECT_SPECIAL_K4
+#if RECT_COUNT_K4
 typedef unsigned __int128 WeightAccum;
 #else
 typedef Poly WeightAccum;
@@ -1198,7 +1198,7 @@ static void init_partition_lookup_tables(void) {
     partition_weight_poly =
         checked_calloc(partition_count, sizeof(*partition_weight_poly), "partition_weight_poly");
     partition_weight4 = checked_calloc(partition_count, sizeof(*partition_weight4), "partition_weight4");
-#if RECT_SPECIAL_K4_FEASIBILITY
+#if RECT_COUNT_K4_FEASIBILITY
     pair_shadow_mask = checked_calloc(partition_count, sizeof(*pair_shadow_mask), "pair_shadow_mask");
     pair_shadow_pairs = checked_calloc(partition_count, sizeof(*pair_shadow_pairs), "pair_shadow_pairs");
     suffix_min_pairs = checked_calloc(partition_count, sizeof(*suffix_min_pairs), "suffix_min_pairs");
@@ -1214,7 +1214,7 @@ static void free_row_dependent_tables(void) {
     free(intra_mask);
     free(partition_weight_poly);
     free(partition_weight4);
-#if RECT_SPECIAL_K4_FEASIBILITY
+#if RECT_COUNT_K4_FEASIBILITY
     free(pair_shadow_mask);
     free(pair_shadow_pairs);
     free(suffix_min_pairs);
@@ -1229,7 +1229,7 @@ static void free_row_dependent_tables(void) {
     intra_mask = NULL;
     partition_weight_poly = NULL;
     partition_weight4 = NULL;
-#if RECT_SPECIAL_K4_FEASIBILITY
+#if RECT_COUNT_K4_FEASIBILITY
     pair_shadow_mask = NULL;
     pair_shadow_pairs = NULL;
     suffix_min_pairs = NULL;
@@ -1526,7 +1526,7 @@ static inline void graph_poly_mul_linear_ref(const GraphPoly* a, int c, GraphPol
     if (r != out) *out = *r;
 }
 
-#if RECT_SPECIAL_K4
+#if RECT_COUNT_K4
 static inline void graph_poly_set_count4(uint64_t count, GraphPoly* out) {
     out->deg = 0;
     out->coeffs[0] = (PolyCoeff)count;
@@ -1651,7 +1651,7 @@ static uint64_t count_graph_4_dsat(const Graph* g) {
     return count_graph_4_rec(g, (AdjWord)graph_row_mask(g->n), forbid, 0);
 }
 
-#if RECT_SPECIAL_K4_FEASIBILITY
+#if RECT_COUNT_K4_FEASIBILITY
 static int contains_edge_mask(const Graph* g, uint64_t mask) {
     while (mask) {
         int a = __builtin_ctzll(mask);
@@ -2058,7 +2058,7 @@ void normalize_partition(uint8_t* p) {
     }
 }
 
-#if RECT_SPECIAL_K4
+#if RECT_COUNT_K4
 static int partition_pair_shadow_size(const Partition* part) {
     int pairs = 0;
     for (int ci = 0; ci < part->num_complex; ci++) {
@@ -2109,7 +2109,7 @@ void generate_partitions_recursive(int idx, uint8_t* current, int max_val) {
         memset(&part, 0, sizeof(part));
         memcpy(part.mapping, current, g_rows);
         part.num_blocks = max_val + 1;
-#if RECT_SPECIAL_K4
+#if RECT_COUNT_K4
         if (part.num_blocks > 4) return;
 #endif
         
@@ -2141,7 +2141,7 @@ void generate_partitions_recursive(int idx, uint8_t* current, int max_val) {
         generate_partitions_recursive(idx + 1, current, max_val);
     }
     if (max_val < g_rows - 1
-#if RECT_SPECIAL_K4
+#if RECT_COUNT_K4
         && max_val + 2 <= 4
 #endif
     ) {
@@ -2221,7 +2221,7 @@ void build_overlap_table() {
     }
 }
 
-#if RECT_SPECIAL_K4_FEASIBILITY
+#if RECT_COUNT_K4_FEASIBILITY
 static void init_pair_index(void) {
     memset(pair_index, -1, sizeof(pair_index));
     num_row_pairs = 0;
@@ -2299,7 +2299,7 @@ static void build_partition_weight4_table(void) {
     }
 }
 
-#if RECT_SPECIAL_K4
+#if RECT_COUNT_K4
 static inline void weight_accum_one(WeightAccum* out) {
     *out = 1;
 }
@@ -3677,7 +3677,7 @@ static void solve_graph_poly(const Graph* input_g, RowGraphCache* cache, RowGrap
                              NautyWorkspace* ws, long long* local_canon_calls,
                              long long* local_cache_hits, long long* local_raw_cache_hits,
                              ProfileStats* profile, GraphPoly* out_result) {
-#if RECT_SPECIAL_K4
+#if RECT_COUNT_K4
     Graph g = *input_g;
     double solve_t0 = 0.0;
     int profile_n = 0;
@@ -4134,7 +4134,7 @@ static void partial_graph_reset(PartialGraphState* st) {
     st->g.n = 0;
     memset(st->g.adj, 0, sizeof(st->g.adj));
     memset(st->base, 0, sizeof(st->base));
-#if RECT_SPECIAL_K4_FEASIBILITY
+#if RECT_COUNT_K4_FEASIBILITY
     memset(st->pair_count, 0, sizeof(st->pair_count));
     st->remaining_capacity = (uint8_t)(4 * num_row_pairs);
     st->full_pair_mask = 0;
@@ -4147,7 +4147,7 @@ static int partial_graph_append(PartialGraphState* st, int depth, int pid, const
     int base_new = st->g.n;
     int num_complex = partitions[pid].num_complex;
     st->base[depth] = base_new;
-#if RECT_SPECIAL_K4_FEASIBILITY
+#if RECT_COUNT_K4_FEASIBILITY
     st->last_base = (uint8_t)base_new;
     st->last_num_new = (uint8_t)num_complex;
 #endif
@@ -4176,7 +4176,7 @@ static int partial_graph_append(PartialGraphState* st, int depth, int pid, const
         }
     }
 
-#if RECT_SPECIAL_K4_FEASIBILITY
+#if RECT_COUNT_K4_FEASIBILITY
     uint32_t shadow = pair_shadow_mask[pid];
     while (shadow) {
         int pair = __builtin_ctz(shadow);
@@ -4193,7 +4193,7 @@ static int partial_graph_append(PartialGraphState* st, int depth, int pid, const
 
 static inline int partial_graph_candidate_can_fit(const PartialGraphState* st, int pid,
                                                   int cols_left) {
-#if RECT_SPECIAL_K4_FEASIBILITY
+#if RECT_COUNT_K4_FEASIBILITY
     uint32_t shadow = pair_shadow_mask[pid];
     if (shadow & st->full_pair_mask) return 0;
     if (st->remaining_capacity <
@@ -4212,7 +4212,7 @@ static inline int partial_graph_append_checked(PartialGraphState* st, int depth,
                                                const int* stack, int cols_left) {
     if (!partial_graph_candidate_can_fit(st, pid, cols_left)) return 0;
     if (!partial_graph_append(st, depth, pid, stack)) return 0;
-#if RECT_SPECIAL_K4_FEASIBILITY
+#if RECT_COUNT_K4_FEASIBILITY
     if (!partial_graph_is_feasible(st, cols_left)) return 0;
 #endif
     return 1;
@@ -4279,7 +4279,7 @@ static void solve_structure_with_row_orbit(const Graph* partial_graph, long long
         profile->solve_structure_calls++;
         t0 = omp_get_wtime();
     }
-#if RECT_SPECIAL_K4
+#if RECT_COUNT_K4
     unsigned __int128 structure_weight =
         (*weight_prod) * (WeightAccum)mult_coeff * (WeightAccum)row_orbit;
     if (g_profile && profile) profile->build_weight_time += omp_get_wtime() - t0;
@@ -4296,7 +4296,7 @@ static void solve_structure_with_row_orbit(const Graph* partial_graph, long long
     solve_graph_poly(partial_graph, cache, raw_cache, ws,
                      local_canon_calls, local_cache_hits, local_raw_cache_hits,
                      profile, &graph_poly_small);
-#if RECT_SPECIAL_K4
+#if RECT_COUNT_K4
     weight_accum_scale_to_poly(weight_prod, mult_coeff, row_orbit,
                                graph_poly_get_count4(&graph_poly_small), out_result);
 #else
@@ -4855,10 +4855,10 @@ int main(int argc, char** argv) {
     generate_permutations();
     uint8_t buffer[MAX_ROWS] = {0};
     generate_partitions_recursive(0, buffer, -1);
-#if RECT_SPECIAL_K4
+#if RECT_COUNT_K4
     reorder_partitions_by_hardness();
 #endif
-#if RECT_SPECIAL_K4_FEASIBILITY
+#if RECT_COUNT_K4_FEASIBILITY
     init_pair_index();
 #endif
     if (num_partitions >= (1u << (16 - CANON_FG_BITS))) {
@@ -4871,19 +4871,19 @@ int main(int argc, char** argv) {
     build_partition_id_lookup();
     build_perm_table();
     build_overlap_table();
-#if RECT_SPECIAL_K4
+#if RECT_COUNT_K4
     build_partition_weight4_table();
 #else
     build_partition_weight_table();
 #endif
-#if RECT_SPECIAL_K4_FEASIBILITY
+#if RECT_COUNT_K4_FEASIBILITY
     build_partition_shadow_table();
 #endif
     
     printf("Grid: %dx%d\n", g_rows, g_cols);
     printf("Partitions: %d\n", num_partitions);
     printf("Threads: %d\n", omp_get_max_threads());
-#if RECT_SPECIAL_K4
+#if RECT_COUNT_K4
     printf("Mode: fixed 4-colour count\n");
 #else
     printf("Mode: chromatic polynomial\n");
@@ -4971,7 +4971,7 @@ int main(int argc, char** argv) {
     }
     g_effective_prefix_depth = prefix_depth;
 
-    int graph_poly_len = RECT_SPECIAL_K4 ? 1 : (g_cols * (g_rows / 2) + 1);
+    int graph_poly_len = RECT_COUNT_K4 ? 1 : (g_cols * (g_rows / 2) + 1);
     SharedGraphCache shared_graph_cache;
     int shared_graph_cache_active = 0;
     if (g_shared_cache_merge) {
@@ -5929,7 +5929,7 @@ int main(int argc, char** argv) {
         printf("Task timing CSV: %s\n", g_task_times_out_path);
     }
     
-#if RECT_SPECIAL_K4
+#if RECT_COUNT_K4
     printf("\nRectangle-free 4-colourings:\n");
     print_u128(global_poly.coeffs[0]);
     printf("\n");
@@ -5958,7 +5958,7 @@ int main(int argc, char** argv) {
             .full_tasks = full_tasks,
         };
         write_poly_file(poly_out_path, &global_poly, &meta);
-#if RECT_SPECIAL_K4
+#if RECT_COUNT_K4
         printf("\nWrote fixed-4 shard to %s\n", poly_out_path);
 #else
         printf("\nWrote polynomial shard to %s\n", poly_out_path);

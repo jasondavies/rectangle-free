@@ -47,8 +47,9 @@ The repository currently contains:
   polynomial.
 
 - `partition_count4.c`
-  `k = 4` specialisation of the same search, with direct exact 4-colouring
-  counts, stronger pruning, and shard merge support.
+  Fixed-`k = 4` build wrapper around `partition_poly.c`. It uses the same
+  search, but runs the direct exact 4-colouring path with the special-4
+  pruning enabled.
 
 - `partition_poly_7`
   Build target that compiles `partition_poly.c` with `DEFAULT_ROWS=7`,
@@ -105,8 +106,9 @@ The graph contribution differs by solver:
   canonical graph caching.
 
 - `partition_count4.c`
-  counts proper 4-colourings directly and adds pruning such as pair-shadow
-  bounds, cheap obstruction checks, and exact 4-colourability tests.
+  counts proper 4-colourings directly inside the shared solver, with
+  special-4 pruning such as pair-shadow bounds, cheap obstruction checks,
+  and exact 4-colourability tests.
 
 - `partition_poly_7`
   is the `7 x 7` build of `partition_poly.c`, used for the current 7-row
@@ -221,21 +223,18 @@ Useful options:
 
 - `--profile`
 - `--prefix-depth N`
-- `--count-out FILE`
 - `--task-start N --task-end M`
-- `--task-stride N --task-offset N`
-- `--merge`
+- `--adaptive-subdivide`
+- `--adaptive-max-depth N`
+- `--adaptive-work-budget N`
 
 Examples:
 
 ```bash
 ./partition_count4 6 8 --profile
-./partition_count4 6 8 --prefix-depth 4 --count-out shard.count
-./partition_count4 6 8 --task-start 0 --task-end 100000 --count-out shard0.count
-./partition_count4 --merge --count-out merged.count shard0.count shard1.count
+./partition_count4 6 8 --prefix-depth 4
+./partition_count4 6 8 --task-start 0 --task-end 100
 ```
-
-Count shard files use the header `RECT_COUNT4_V1`.
 
 ## Using `partition_poly_7`
 
@@ -262,7 +261,7 @@ Or pass the dimensions explicitly:
 Current limits in the checked-in C sources:
 
 - `partition_poly.c`: up to 7 rows and 16 columns.
-- `partition_count4.c`: up to 6 rows and 8 columns.
+- `partition_count4.c`: up to 7 rows and 16 columns.
 - `partition_poly_7`: 7 rows and up to 7 columns.
 
 These limits come from the current fixed-size structures and the size of the
