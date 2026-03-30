@@ -1970,11 +1970,12 @@ void print_poly(Poly p) {
 static void usage(const char* prog) {
     fprintf(stderr,
             "Usage:\n"
-            "  %s [rows cols] [--task-start N] [--task-end N] [--prefix-depth N] [--adaptive-subdivide] [--adaptive-max-depth N] [--adaptive-work-budget N] [--poly-out FILE] [--profile] [--task-times-out FILE]\n"
+            "  %s [rows cols] [--task-start N] [--task-end N] [--prefix-depth N] [--reorder] [--adaptive-subdivide] [--adaptive-max-depth N] [--adaptive-work-budget N] [--poly-out FILE] [--profile] [--task-times-out FILE]\n"
             "\n"
             "Notes:\n"
             "  --task-start/--task-end define a half-open task range [start, end).\n"
             "  --prefix-depth may be 2, 3, or 4.\n"
+            "  --reorder changes partition IDs and task numbering.\n"
             "  Adaptive subdivision currently supports only --prefix-depth 2.\n"
             "  In full polynomial mode it uses a local runtime queue of donated subtrees.\n"
             "  --profile prints coarse timing counters for the main phases.\n",
@@ -4773,6 +4774,7 @@ int main(int argc, char** argv) {
     long long task_end = -1;
     const char* poly_out_path = NULL;
     int prefix_depth_override = -1;
+    int reorder_partitions_flag = 0;
     int positional_count = 0;
 
     for (int i = 1; i < argc; i++) {
@@ -4800,6 +4802,8 @@ int main(int argc, char** argv) {
                 return 1;
             }
             prefix_depth_override = (int)parse_ll_or_die(argv[++i], "--prefix-depth");
+        } else if (strcmp(argv[i], "--reorder") == 0) {
+            reorder_partitions_flag = 1;
         } else if (strcmp(argv[i], "--adaptive-subdivide") == 0) {
             g_adaptive_subdivide = 1;
         } else if (strcmp(argv[i], "--adaptive-max-depth") == 0) {
@@ -4853,7 +4857,9 @@ int main(int argc, char** argv) {
     generate_permutations();
     uint8_t buffer[MAX_ROWS] = {0};
     generate_partitions_recursive(0, buffer, -1);
-    reorder_partitions_by_hardness();
+    if (reorder_partitions_flag) {
+        reorder_partitions_by_hardness();
+    }
 #if RECT_COUNT_K4_FEASIBILITY
     init_pair_index();
 #endif
@@ -4879,6 +4885,9 @@ int main(int argc, char** argv) {
     printf("Grid: %dx%d\n", g_rows, g_cols);
     printf("Partitions: %d\n", num_partitions);
     printf("Threads: %d\n", omp_get_max_threads());
+    if (reorder_partitions_flag) {
+        printf("Partition hardness reorder: enabled\n");
+    }
 #if RECT_COUNT_K4
     printf("Mode: fixed 4-colour count\n");
 #else
