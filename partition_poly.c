@@ -2058,7 +2058,6 @@ void normalize_partition(uint8_t* p) {
     }
 }
 
-#if RECT_COUNT_K4
 static int partition_pair_shadow_size(const Partition* part) {
     int pairs = 0;
     for (int ci = 0; ci < part->num_complex; ci++) {
@@ -2101,7 +2100,6 @@ static int compare_partition_hardness(const void* lhs, const void* rhs) {
 static void reorder_partitions_by_hardness(void) {
     qsort(partitions, (size_t)num_partitions, sizeof(partitions[0]), compare_partition_hardness);
 }
-#endif
 
 void generate_partitions_recursive(int idx, uint8_t* current, int max_val) {
     if (idx == g_rows) {
@@ -4855,9 +4853,7 @@ int main(int argc, char** argv) {
     generate_permutations();
     uint8_t buffer[MAX_ROWS] = {0};
     generate_partitions_recursive(0, buffer, -1);
-#if RECT_COUNT_K4
     reorder_partitions_by_hardness();
-#endif
 #if RECT_COUNT_K4_FEASIBILITY
     init_pair_index();
 #endif
