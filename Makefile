@@ -4,6 +4,7 @@ NAUTY_DIR ?= ./third_party/nauty
 NAUTY_BUILD_DIR ?= ./third_party/nauty-build
 NAUTY_CONFIGURE_FLAGS ?= --enable-tls
 NAUTY_BUILD_CFLAGS ?= -O3 -march=native
+LTO ?= 0
 UNAME_S := $(shell uname -s)
 LIBOMP_DIR ?= /opt/homebrew/opt/libomp
 
@@ -25,6 +26,14 @@ NVCC ?= nvcc
 NVCCFLAGS ?= -O3 -arch=sm_89 -std=c++17 -I./inspiration/cpads/include
 
 CFLAGS_5XN ?= -O3 -march=native -std=c11
+
+ifneq ($(LTO),0)
+NAUTY_BUILD_CFLAGS += -flto
+PARTITION_CFLAGS += -flto
+LDFLAGS += -flto
+PARTITION_POLY_7_LDFLAGS += -flto
+CFLAGS_5XN += -flto
+endif
 
 all: 5xn_count4 partition_count4 partition_poly partition_poly_7 small_graph_lookup_gen connected_canon_lookup_gen
 
