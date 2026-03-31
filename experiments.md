@@ -5582,3 +5582,65 @@
   - the unchanged counters confirm this is a clean hot-path data-work measurement rather than a search-tree change
   - that makes the row-mask removal not worth keeping despite the invariant check passing
 - Outcome: rejected and reverted.
+
+### Experiment 142: Split the raw cache by simplified `n`
+- Goal: reduce cross-`n` eviction in the hottest cache by segmenting the raw row-key cache by simplified graph size, while keeping the total raw-cache slot budget bounded.
+- Change:
+  - replaced the single per-thread raw `RowGraphCache` with a `RawGraphCacheSet` containing one row-key cache per simplified `n`
+  - preserved the total raw-cache budget by distributing `RAW_CACHE_SIZE` across `n > SMALL_GRAPH_LOOKUP_MAX_N`, with larger shares for smaller simplified sizes
+  - left the local canonical cache unchanged
+- Baseline binary:
+  - `/tmp/partition_poly_7_pre142`, copied from committed `HEAD` `24a8564` before this change
+- Exactness checks:
+  - baseline command: `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre142 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/pre142_7x2.poly`
+  - experiment command: `env OMP_NUM_THREADS=1 ./partition_poly_7 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/post142_7x2.poly`
+  - `cmp -s /tmp/pre142_7x2.poly /tmp/post142_7x2.poly` succeeded
+- `7x5 --task-end 4 --profile`:
+  - baseline:
+    - `Worker Complete in 3.40s`
+    - `Canonicalisation calls: 89357`
+    - `Canonical cache hits: 62203 (69.6%)`
+    - `Raw cache hits: 242261`
+    - `solve_graph_poly: 1442988 calls, 0.461s`
+    - `get_canonical_graph/densenauty: 89357 calls, 0.049s`
+  - experiment:
+    - `Worker Complete in 3.45s`
+    - `Canonicalisation calls: 93797`
+    - `Canonical cache hits: 66643 (71.1%)`
+    - `Raw cache hits: 237821`
+    - `solve_graph_poly: 1442988 calls, 0.461s`
+    - `get_canonical_graph/densenauty: 93797 calls, 0.052s`
+- `7x6 --task-end 1 --profile`:
+  - baseline:
+    - `Worker Complete in 15.13s`
+    - `Canonicalisation calls: 497075`
+    - `Canonical cache hits: 326174 (65.6%)`
+    - `Raw cache hits: 1908378`
+    - `solve_graph_poly: 6229795 calls, 5.097s`
+    - `get_canonical_graph/densenauty: 497075 calls, 0.367s`
+  - experiment:
+    - `Worker Complete in 15.45s`
+    - `Canonicalisation calls: 515511`
+    - `Canonical cache hits: 344612 (66.8%)`
+    - `Raw cache hits: 1889938`
+    - `solve_graph_poly: 6229791 calls, 5.361s`
+    - `get_canonical_graph/densenauty: 515511 calls, 0.399s`
+- `7x6 --task-end 1` re-run without `--profile`:
+  - baseline:
+    - `Worker Complete in 14.73s`
+    - `Canonicalisation calls: 497075`
+    - `Canonical cache hits: 326174 (65.6%)`
+    - `Raw cache hits: 1908378`
+  - experiment:
+    - `Worker Complete in 15.58s`
+    - `Canonicalisation calls: 515511`
+    - `Canonical cache hits: 344612 (66.8%)`
+    - `Raw cache hits: 1889938`
+- Verification:
+  - `make partition_poly_7` succeeded
+  - `make partition_poly` succeeded
+- Interpretation:
+  - the segmented raw cache does reduce cross-`n` contention in one narrow sense, but at this size budget the smaller per-`n` tables lose too many raw hits overall
+  - the lost raw hits are replaced by more canonical-cache hits and more canonicalisations, which is a bad trade on both `7x5` and `7x6`
+  - the heavy non-profile shard regresses badly enough that this is not a close call
+- Outcome: rejected and reverted.
