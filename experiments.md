@@ -5644,3 +5644,140 @@
   - the lost raw hits are replaced by more canonical-cache hits and more canonicalisations, which is a bad trade on both `7x5` and `7x6`
   - the heavy non-profile shard regresses badly enough that this is not a close call
 - Outcome: rejected and reverted.
+
+### Experiment 143: Vertex-mask graph state with deferred defragmentation (attribution: Adam P. Goucher)
+- Goal: test whether graph simplification can avoid eager vertex compaction by keeping sparse vertex ids alive behind a `uint64_t vertex_mask`, making `remove_vertex()` a mask update and defragmenting only when materialising connected components or canonical forms.
+- Change:
+  - added `uint64_t vertex_mask` to `Graph` and changed `remove_vertex()` to clear only the live-bit and decrement `n`
+  - kept the construction path dense, but changed graph hashing, raw-cache row keys, small-graph packing, shared-cache signatures, and nauty input conversion to serialise only active vertices in ascending mask order
+  - changed connected-component collection and induced-subgraph extraction to operate on the live mask, with compaction deferred to component extraction and canonicalisation
+- Baseline binary:
+  - `/tmp/partition_poly_7_pre143`, compiled from committed `HEAD` at `f2c0092` before this change
+- Exactness checks:
+  - baseline command: `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre143 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/pre143_7x2.poly`
+  - experiment command: `env OMP_NUM_THREADS=1 ./partition_poly_7 7 2 --prefix-depth 2 --task-end 50 --poly-out /tmp/post143_7x2.poly`
+  - `cmp -s /tmp/pre143_7x2.poly /tmp/post143_7x2.poly` succeeded
+  - baseline command: `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre143 7 5 --task-end 4 --poly-out /tmp/pre143_7x5.poly`
+  - experiment command: `env OMP_NUM_THREADS=1 ./partition_poly_7 7 5 --task-end 4 --poly-out /tmp/post143_7x5.poly`
+  - `cmp -s /tmp/pre143_7x5.poly /tmp/post143_7x5.poly` succeeded
+- `7x5 --task-end 4 --profile`:
+  - baseline:
+    - `Worker Complete in 3.50 seconds`
+    - `Canonicalisation calls: 89357`
+    - `Canonical cache hits: 62203 (69.6%)`
+    - `Raw cache hits: 242261`
+    - `solve_graph_poly: 1442988 calls, 0.511s`
+    - `get_canonical_graph/densenauty: 89357 calls, 0.053s`
+  - experiment:
+    - `Worker Complete in 3.54 seconds`
+    - `Canonicalisation calls: 70144`
+    - `Canonical cache hits: 42990 (61.3%)`
+    - `Raw cache hits: 261474`
+    - `solve_graph_poly: 1442988 calls, 0.577s`
+    - `get_canonical_graph/densenauty: 70144 calls, 0.043s`
+- `7x6 --task-end 1 --profile`:
+  - baseline:
+    - `Worker Complete in 15.25 seconds`
+    - `Canonicalisation calls: 497075`
+    - `Canonical cache hits: 326174 (65.6%)`
+    - `Raw cache hits: 1908378`
+    - `solve_graph_poly: 6229795 calls, 5.324s`
+    - `get_canonical_graph/densenauty: 497075 calls, 0.378s`
+  - experiment:
+    - `Worker Complete in 15.44 seconds`
+    - `Canonicalisation calls: 414376`
+    - `Canonical cache hits: 243471 (58.8%)`
+    - `Raw cache hits: 1991082`
+    - `solve_graph_poly: 6229803 calls, 6.268s`
+    - `get_canonical_graph/densenauty: 414376 calls, 0.321s`
+- `7x6 --task-end 1` re-run without `--profile`:
+  - baseline:
+    - `Worker Complete in 14.80 seconds`
+    - `Canonicalisation calls: 497075`
+    - `Canonical cache hits: 326174 (65.6%)`
+    - `Raw cache hits: 1908378`
+  - experiment:
+    - `Worker Complete in 15.06 seconds`
+    - `Canonicalisation calls: 414376`
+    - `Canonical cache hits: 243471 (58.8%)`
+    - `Raw cache hits: 1991082`
+- Verification:
+  - `make partition_poly_7` succeeded
+  - `make partition_poly` succeeded
+- Interpretation:
+  - the masked representation behaves as intended in one narrow sense: canonicalisation work drops materially and raw-cache hits rise because sparse delete histories now collide earlier
+  - that win is outweighed by the cost of repeatedly serialising active vertices for hashing, cache probes, small-graph packing, and nauty input; on the heavy profiled shard, `solve_graph_poly` grows from `5.324s` to `6.268s` while nauty time only falls from `0.378s` to `0.321s`
+  - the exact polynomial stays unchanged, but the altered raw-cache equivalence classes slightly perturb the recursive call pattern (`6229795` to `6229803` calls on the profiled `7x6` shard), so this is not just a pure bookkeeping swap
+- Outcome: rejected and reverted.
+
+### Experiment 144: Keep masked internal graph state, but normalize only the raw-cache key (attribution: Adam P. Goucher)
+- Goal: revisit the masked-vertex idea without paying the full cost of sparse cache keys everywhere; keep the recursive graph state non-contiguous internally, but normalize only at the raw-cache boundary and dense-only external boundaries.
+- Change:
+  - kept `Graph.vertex_mask` and mask-only `remove_vertex()` in the recursive solver
+  - left nauty, small-graph lookup, and connected-canonical lookup as dense boundaries
+  - changed the raw cache to use a normalized dense live-order row key derived from the masked graph, while keeping the canonical caches on dense canonical graphs
+  - made the hard-miss contraction step propagate the merged neighbor bitset directly instead of rescanning every vertex row
+  - updated the DSAT / feasibility helpers to be mask-native as well, though those matter only for `RECT_COUNT_K4_FEASIBILITY` builds
+  - added a `RECT_USE_RAW_CACHE=0` runtime toggle for comparison; disabling the raw cache regressed badly and was not kept as a candidate
+- Baseline binary:
+  - `/tmp/partition_poly_7_pre143`, compiled from committed `HEAD` at `f2c0092` before the masked-graph work
+- Exactness checks:
+  - baseline command: `env OMP_NUM_THREADS=1 /tmp/partition_poly_7_pre143 7 5 --task-end 4 --poly-out /tmp/pre143_7x5.poly`
+  - experiment command: `env OMP_NUM_THREADS=1 ./partition_poly_7 7 5 --task-end 4 --poly-out /tmp/post148_7x5.poly`
+  - `cmp -s /tmp/pre143_7x5.poly /tmp/post148_7x5.poly` succeeded
+- `7x5 --task-end 4 --profile`:
+  - baseline:
+    - `Worker Complete in 3.56 seconds`
+    - `Canonicalisation calls: 89357`
+    - `Canonical cache hits: 62203 (69.6%)`
+    - `Raw cache hits: 242261`
+    - `solve_graph_poly: 1442988 calls, 0.515s`
+    - `get_canonical_graph/densenauty: 89357 calls, 0.052s`
+  - experiment:
+    - `Worker Complete in 3.57 seconds`
+    - `Canonicalisation calls: 70144`
+    - `Canonical cache hits: 42990 (61.3%)`
+    - `Raw cache hits: 261474`
+    - `solve_graph_poly: 1442988 calls, 0.525s`
+    - `get_canonical_graph/densenauty: 70144 calls, 0.043s`
+- `7x6 --task-end 1 --profile`:
+  - baseline:
+    - `Worker Complete in 15.49 seconds`
+    - `Canonicalisation calls: 497075`
+    - `Canonical cache hits: 326174 (65.6%)`
+    - `Raw cache hits: 1908378`
+    - `solve_graph_poly: 6229795 calls, 5.453s`
+    - `get_canonical_graph/densenauty: 497075 calls, 0.385s`
+  - experiment:
+    - `Worker Complete in 15.32 seconds`
+    - `Canonicalisation calls: 414470`
+    - `Canonical cache hits: 243501 (58.7%)`
+    - `Raw cache hits: 1991130`
+    - `solve_graph_poly: 6229933 calls, 5.568s`
+    - `get_canonical_graph/densenauty: 414470 calls, 0.322s`
+- `7x6 --task-end 1` re-run without `--profile`:
+  - baseline:
+    - `Worker Complete in 15.08 seconds`
+    - `Canonicalisation calls: 497075`
+    - `Canonical cache hits: 326174 (65.6%)`
+    - `Raw cache hits: 1908378`
+  - experiment:
+    - `Worker Complete in 15.03 seconds`
+    - `Canonicalisation calls: 414470`
+    - `Canonical cache hits: 243501 (58.7%)`
+    - `Raw cache hits: 1991130`
+- Raw-cache-off side check:
+  - `env RECT_USE_RAW_CACHE=0 ./partition_poly_7 7 6 --task-end 1 --profile`:
+    - `Worker Complete in 17.15 seconds`
+    - `Canonicalisation calls: 2405580`
+    - `Canonical cache hits: 2234621 (92.9%)`
+    - `Raw cache hits: 0`
+- Verification:
+  - `make partition_poly_7` succeeded
+  - `make partition_poly` succeeded
+- Interpretation:
+  - the masked internal state now buys a real reduction in canonicalisation work while preserving or improving raw-cache effectiveness once the raw key is normalized densely
+  - the earlier regression mostly came from a bad interaction between sparse internal labels and sparse raw-cache keys, plus unnecessary work in hard-miss contraction
+  - on the heavier `7x6` shard, the canonicalisation drop is large enough to outweigh the remaining normalization overhead; on the lighter `7x5` shard, the result is effectively flat
+  - turning the raw cache off is clearly not viable: canonicalisation explodes and runtime regresses hard
+- Outcome: accepted for the `7x6`-heavy path and kept for further tuning.
