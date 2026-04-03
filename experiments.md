@@ -5983,3 +5983,65 @@
   - keeping the profiled path separate preserves the existing diagnostics while letting the normal path compile to a much tighter inner loop
   - the first version of this split crashed in prefix generation because `tls_profile` is null before worker startup; dispatching to the fast path when `tls_profile == NULL` fixed that without changing semantics
 - Outcome: accepted on `mask2`.
+
+### Experiment 150: Specialize unprofiled `dfs()` rep/orbit gating
+- Goal: reduce per-candidate symmetry overhead in the default non-adaptive search path by removing the inner-loop `g_profile` and `use_orbit_marking` dispatch from `dfs()`.
+- Change:
+  - added two unprofiled `dfs()` helpers:
+    - `dfs_fast_orbit()` for the orbit-marking case
+    - `dfs_fast_rep()` for the direct representative-test case
+  - both hoist `is_terminal` and `cols_left` out of the loop and keep the per-candidate body branch-light
+  - `dfs()` now dispatches to one of those helpers only when profiling is disabled; the profiled path stays unchanged
+  - the adaptive runtime-queue path (`dfs_runtime_split_local()`) was left alone in this round
+- Baseline binary:
+  - current committed `mask2` tip `b687f71`
+- Unprofiled `7x5 --task-end 4`:
+  - baseline:
+    - `real 2.90`
+  - experiment:
+    - `real 2.84`
+- Unprofiled `7x6 --task-end 1`:
+  - baseline:
+    - `real 11.39`
+  - experiment:
+    - `real 11.27`
+- Profiled `7x5 --task-end 4`:
+  - baseline:
+    - `Worker Complete in 2.56 seconds`
+    - `Canonicalisation calls: 70144`
+    - `Canonical cache hits: 42990`
+    - `Raw cache hits: 261474`
+    - `canon_state_prepare_push: 2188134 calls, 1.932s`
+    - `solve_graph_poly: 1442988 calls, 0.470s`
+  - experiment:
+    - `Worker Complete in 2.56 seconds`
+    - `Canonicalisation calls: 70144`
+    - `Canonical cache hits: 42990`
+    - `Raw cache hits: 261474`
+    - `canon_state_prepare_push: 2188134 calls, 1.931s`
+    - `solve_graph_poly: 1442988 calls, 0.467s`
+- Profiled `7x6 --task-end 1`:
+  - baseline:
+    - `Worker Complete in 11.69 seconds`
+    - `Canonicalisation calls: 414470`
+    - `Canonical cache hits: 243501`
+    - `Raw cache hits: 1991130`
+    - `canon_state_prepare_push: 9458098 calls, 9.034s`
+    - `solve_graph_poly: 6229933 calls, 5.347s`
+  - experiment:
+    - `Worker Complete in 11.43 seconds`
+    - `Canonicalisation calls: 414470`
+    - `Canonical cache hits: 243501`
+    - `Raw cache hits: 1991130`
+    - `canon_state_prepare_push: 9458098 calls, 8.802s`
+    - `solve_graph_poly: 6229933 calls, 5.297s`
+- Verification:
+  - `make partition_poly_7` succeeded
+  - `make partition_poly` succeeded
+  - both profiled shards printed the same polynomial and evaluation values as the baseline
+- Interpretation:
+  - recursion shape is unchanged on the profiled shards: canon calls, cache hits, raw hits, and `solve_graph_poly` calls are identical
+  - the win is again symmetry-side, but now higher up in the default search loop rather than inside `CanonState` itself
+  - the light shard is effectively flat in profiled mode, but the heavy shard still shows a measurable reduction in both `canon_state_prepare_push` time and total wall time
+  - keeping this specialization out of the profiled and adaptive-runtime paths keeps the change low-risk
+- Outcome: accepted on `mask2`.

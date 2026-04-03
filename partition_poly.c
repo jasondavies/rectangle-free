@@ -4826,6 +4826,137 @@ static void solve_structure(const Graph* partial_graph, CanonState* canon_state,
                                    weight_prod, mult_coeff, profile, out_result);
 }
 
+static void dfs(int depth, int min_idx, int* stack, CanonState* canon_state,
+                const PartialGraphState* partial_graph, RowGraphCache* cache,
+                RowGraphCache* raw_cache, NautyWorkspace* ws, Poly* local_total,
+                long long* local_canon_calls, long long* local_cache_hits,
+                long long* local_raw_cache_hits, const WeightAccum* weight_prod,
+                long long mult_coeff, int run_len, ProfileStats* profile,
+                CanonScratch* canon_scratch);
+
+static void dfs_fast_orbit(int depth, int min_idx, int* stack, CanonState* canon_state,
+                           const PartialGraphState* partial_graph, RowGraphCache* cache,
+                           RowGraphCache* raw_cache, NautyWorkspace* ws, Poly* local_total,
+                           long long* local_canon_calls, long long* local_cache_hits,
+                           long long* local_raw_cache_hits, const WeightAccum* weight_prod,
+                           long long mult_coeff, int run_len, ProfileStats* profile,
+                           CanonScratch* canon_scratch) {
+    int next_stabilizer = 0;
+    int is_terminal = (depth + 1 == g_cols);
+    int cols_left = g_cols - depth - 1;
+    uint64_t orbit_mark_bits[REP_ORBIT_MARK_WORDS];
+    memset(orbit_mark_bits, 0, sizeof(orbit_mark_bits));
+
+    for (int i = min_idx; i < num_partitions; i++) {
+        if (orbit_mark_bit_test(orbit_mark_bits, i)) {
+            continue;
+        }
+        canon_state_mark_orbit_nonreps(canon_state, min_idx, i, orbit_mark_bits);
+        if (!partial_graph_candidate_can_fit(partial_graph, i, cols_left)) {
+            continue;
+        }
+        int ok_prepare = is_terminal
+            ? canon_state_prepare_terminal(canon_state, i, &next_stabilizer)
+            : canon_state_prepare_push(canon_state, i, canon_scratch, &next_stabilizer);
+        if (!ok_prepare) {
+            continue;
+        }
+
+        stack[depth] = i;
+        WeightAccum next_weight_prod;
+        weight_accum_mul_partition(weight_prod, i, &next_weight_prod);
+        long long next_mult_coeff = mult_coeff * (depth + 1);
+        int next_run_len = 1;
+        if (depth > 0 && i == stack[depth - 1]) {
+            next_run_len = run_len + 1;
+            next_mult_coeff /= next_run_len;
+        }
+        PartialGraphState next_graph = *partial_graph;
+        if (!is_terminal) {
+            canon_state_commit_push(canon_state, i, canon_scratch, next_stabilizer);
+        }
+        int ok = partial_graph_append_checked(&next_graph, depth, i, stack, cols_left);
+        if (ok) {
+            if (is_terminal) {
+                long long row_orbit = factorial[g_rows] / next_stabilizer;
+                Poly res;
+                solve_structure_with_row_orbit(&next_graph.g, row_orbit, cache, raw_cache, ws,
+                                               local_canon_calls, local_cache_hits,
+                                               local_raw_cache_hits, &next_weight_prod,
+                                               next_mult_coeff, profile, &res);
+                poly_accumulate_checked(local_total, &res);
+            } else {
+                dfs(depth + 1, i, stack, canon_state, &next_graph, cache, raw_cache, ws, local_total,
+                    local_canon_calls, local_cache_hits, local_raw_cache_hits, &next_weight_prod,
+                    next_mult_coeff, next_run_len, profile, canon_scratch);
+            }
+        }
+        if (!is_terminal) {
+            canon_state_pop(canon_state);
+        }
+    }
+}
+
+static void dfs_fast_rep(int depth, int min_idx, int* stack, CanonState* canon_state,
+                         const PartialGraphState* partial_graph, RowGraphCache* cache,
+                         RowGraphCache* raw_cache, NautyWorkspace* ws, Poly* local_total,
+                         long long* local_canon_calls, long long* local_cache_hits,
+                         long long* local_raw_cache_hits, const WeightAccum* weight_prod,
+                         long long mult_coeff, int run_len, ProfileStats* profile,
+                         CanonScratch* canon_scratch) {
+    int next_stabilizer = 0;
+    int is_terminal = (depth + 1 == g_cols);
+    int cols_left = g_cols - depth - 1;
+
+    for (int i = min_idx; i < num_partitions; i++) {
+        if (!partial_graph_candidate_can_fit(partial_graph, i, cols_left)) {
+            continue;
+        }
+        if (!canon_state_partition_is_rep(canon_state, min_idx, i)) {
+            continue;
+        }
+        int ok_prepare = is_terminal
+            ? canon_state_prepare_terminal(canon_state, i, &next_stabilizer)
+            : canon_state_prepare_push(canon_state, i, canon_scratch, &next_stabilizer);
+        if (!ok_prepare) {
+            continue;
+        }
+
+        stack[depth] = i;
+        WeightAccum next_weight_prod;
+        weight_accum_mul_partition(weight_prod, i, &next_weight_prod);
+        long long next_mult_coeff = mult_coeff * (depth + 1);
+        int next_run_len = 1;
+        if (depth > 0 && i == stack[depth - 1]) {
+            next_run_len = run_len + 1;
+            next_mult_coeff /= next_run_len;
+        }
+        PartialGraphState next_graph = *partial_graph;
+        if (!is_terminal) {
+            canon_state_commit_push(canon_state, i, canon_scratch, next_stabilizer);
+        }
+        int ok = partial_graph_append_checked(&next_graph, depth, i, stack, cols_left);
+        if (ok) {
+            if (is_terminal) {
+                long long row_orbit = factorial[g_rows] / next_stabilizer;
+                Poly res;
+                solve_structure_with_row_orbit(&next_graph.g, row_orbit, cache, raw_cache, ws,
+                                               local_canon_calls, local_cache_hits,
+                                               local_raw_cache_hits, &next_weight_prod,
+                                               next_mult_coeff, profile, &res);
+                poly_accumulate_checked(local_total, &res);
+            } else {
+                dfs(depth + 1, i, stack, canon_state, &next_graph, cache, raw_cache, ws, local_total,
+                    local_canon_calls, local_cache_hits, local_raw_cache_hits, &next_weight_prod,
+                    next_mult_coeff, next_run_len, profile, canon_scratch);
+            }
+        }
+        if (!is_terminal) {
+            canon_state_pop(canon_state);
+        }
+    }
+}
+
 void dfs(int depth, int min_idx, int* stack, CanonState* canon_state, const PartialGraphState* partial_graph,
          RowGraphCache* cache, RowGraphCache* raw_cache, NautyWorkspace* ws, Poly* local_total,
          long long* local_canon_calls, long long* local_cache_hits,
@@ -4837,6 +4968,19 @@ void dfs(int depth, int min_idx, int* stack, CanonState* canon_state, const Part
                         local_canon_calls, local_cache_hits, local_raw_cache_hits,
                         weight_prod, mult_coeff, profile, &res);
         poly_accumulate_checked(local_total, &res);
+        return;
+    }
+
+    if (__builtin_expect(!g_profile, 1)) {
+        if (canon_state_use_orbit_marking(canon_state)) {
+            dfs_fast_orbit(depth, min_idx, stack, canon_state, partial_graph, cache, raw_cache, ws,
+                           local_total, local_canon_calls, local_cache_hits, local_raw_cache_hits,
+                           weight_prod, mult_coeff, run_len, profile, canon_scratch);
+        } else {
+            dfs_fast_rep(depth, min_idx, stack, canon_state, partial_graph, cache, raw_cache, ws,
+                         local_total, local_canon_calls, local_cache_hits, local_raw_cache_hits,
+                         weight_prod, mult_coeff, run_len, profile, canon_scratch);
+        }
         return;
     }
 
