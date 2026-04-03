@@ -3582,26 +3582,38 @@ static uint32_t graph_build_dense_rows(const Graph* g, AdjWord* rows) {
     return n;
 }
 
-static void induced_subgraph_from_mask(const Graph* src, uint64_t mask, Graph* dst) {
+static uint32_t graph_build_dense_rows_from_mask(const Graph* src, uint64_t mask, AdjWord* rows) {
+    int dense_index[MAXN_NAUTY];
     int verts[MAXN_NAUTY];
-    int n = 0;
-    uint64_t rem = mask & src->vertex_mask;
+    for (int i = 0; i < MAXN_NAUTY; i++) dense_index[i] = -1;
+
+    uint64_t active = mask & src->vertex_mask & ADJWORD_MASK;
+    uint64_t rem = active;
+    uint32_t n = 0;
     while (rem) {
-        verts[n++] = __builtin_ctzll(rem);
+        int v = __builtin_ctzll(rem);
+        dense_index[v] = (int)n;
+        verts[n++] = v;
         rem &= rem - 1;
     }
 
-    dst->n = (uint8_t)n;
-    dst->vertex_mask = graph_row_mask(n);
-    memset(dst->adj, 0, sizeof(dst->adj));
-    for (int i = 0; i < n; i++) {
-        for (int j = i + 1; j < n; j++) {
-            if ((src->adj[verts[i]] >> verts[j]) & 1ULL) {
-                dst->adj[i] |= 1ULL << j;
-                dst->adj[j] |= 1ULL << i;
-            }
+    for (uint32_t i = 0; i < n; i++) {
+        uint64_t row_bits = (uint64_t)src->adj[verts[i]] & active;
+        AdjWord row = 0;
+        while (row_bits) {
+            int u = __builtin_ctzll(row_bits);
+            row |= (AdjWord)(UINT64_C(1) << dense_index[u]);
+            row_bits &= row_bits - 1;
         }
+        rows[i] = row;
     }
+    return n;
+}
+
+static void induced_subgraph_from_mask(const Graph* src, uint64_t mask, Graph* dst) {
+    uint32_t n = graph_build_dense_rows_from_mask(src, mask, dst->adj);
+    dst->n = (uint8_t)n;
+    dst->vertex_mask = graph_row_mask((int)n);
 }
 
 static int graph_collect_components(const Graph* g, uint64_t* component_masks) {
