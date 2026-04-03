@@ -5983,3 +5983,35 @@
   - keeping the profiled path separate preserves the existing diagnostics while letting the normal path compile to a much tighter inner loop
   - the first version of this split crashed in prefix generation because `tls_profile` is null before worker startup; dispatching to the fast path when `tls_profile == NULL` fixed that without changing semantics
 - Outcome: accepted on `mask2`.
+
+### Experiment 150: Build induced subgraphs by direct row compaction
+- Goal: reduce graph-side overhead in connected-component splitting by replacing the quadratic edge rebuild in `induced_subgraph_from_mask()` with direct dense-row compaction from the source graph.
+- Change:
+  - added `graph_build_dense_rows_from_mask(const Graph* src, uint64_t mask, AdjWord* rows)`
+  - changed `induced_subgraph_from_mask()` to call that helper and then set only `n` and `vertex_mask`
+  - avoided the old nested `for (i) for (j)` induced-edge reconstruction loop
+- Baseline binary:
+  - committed `mask2` tip `b687f71`
+- Matching 32-thread benchmark command:
+  - `env OMP_NUM_THREADS=32 ./partition_poly_7 6 6 --prefix-depth 2 --adaptive-subdivide --adaptive-work-budget 1000 --adaptive-max-depth 5`
+- Benchmark method:
+  - ran benchmarks strictly one at a time
+  - compared the same exact command before and after the code change
+- 32-thread result:
+  - baseline:
+    - `Worker Complete in 28.26 seconds`
+    - `Worker Complete in 28.35 seconds`
+  - experiment:
+    - `Worker Complete in 27.69 seconds`
+    - `Worker Complete in 27.74 seconds`
+- Verification:
+  - `make partition_poly_7` succeeded
+  - all four runs printed the same chromatic polynomial
+  - all four runs printed the same values:
+    - `P(4) = 203716633441803914880`
+    - `P(5) = 2852707805646422930409600`
+- Interpretation:
+  - this is a clean graph-side locality win on the `6x6` benchmark used for the post-`a832389` regression review
+  - component materialisation is on the hot path whenever simplification splits a graph, so avoiding the quadratic induced-edge rebuild pays back even though the helper still remaps vertex ids
+  - unlike the earlier partial block-cut experiment, this change is narrow and leaves the recursion shape and cache semantics unchanged
+- Outcome: accepted on `mask2`.
