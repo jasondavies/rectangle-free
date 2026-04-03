@@ -5841,3 +5841,42 @@
   - the light shard is effectively flat in wall time but still shows the expected graph-side reduction
   - the heavier shard shows the same direction in both wall time and `solve_graph_poly` time, which makes this worth keeping
 - Outcome: accepted on `mask2` for further tuning.
+
+### Experiment 147: Reduce CanonState prepare/commit scratch traffic and cache stack permutation rows
+- Goal: cut `canon_state_prepare_push()` overhead without changing the search shape, by removing redundant scratch writes and repeated permutation-row address recomputation in equal-case rebuilds.
+- Change:
+  - added `CanonState.stack_perm_rows[]` so `canon_rebuild_equal_case()` can reuse cached `perm_table` row pointers for the current stack instead of recomputing them from `stack_vals[]` on every call
+  - changed `CanonScratch` to store a compact list of changed states in prepare order rather than a full `next_state[p]` array indexed by all permutations
+  - simplified `canon_state_prepare_push()` / `canon_state_commit_push()` to write and consume that compact changed-state list directly
+- Baseline binary:
+  - current committed `mask2` tip `afce9c4`
+- `7x5 --task-end 4 --profile`:
+  - baseline:
+    - `Worker Complete in 3.54 seconds`
+    - `canon_state_prepare_push: 2188134 calls, 2.908s`
+    - `solve_graph_poly: 1442988 calls, 0.460s`
+  - experiment:
+    - `Worker Complete in 3.54 seconds`
+    - `canon_state_prepare_push: 2188134 calls, 2.899s`
+    - `solve_graph_poly: 1442988 calls, 0.458s`
+- `7x6 --task-end 1 --profile`:
+  - baseline:
+    - `Worker Complete in 15.16 seconds`
+    - `canon_state_prepare_push: 9458098 calls, 12.598s`
+    - `solve_graph_poly: 6229933 calls, 5.204s`
+  - experiment:
+    - `Worker Complete in 15.09 seconds`
+    - `canon_state_prepare_push: 9458098 calls, 12.516s`
+    - `solve_graph_poly: 6229933 calls, 5.135s`
+- Side investigation:
+  - compiled `RECT_REP_ORBIT_MARK_THRESHOLD=4` and `=16` variants from the accepted `mask2` baseline for the heavy shard
+  - both were slower than the default threshold `8`, so orbit-mark threshold tuning is not the next likely win
+- Verification:
+  - `make partition_poly_7` succeeded
+  - `make partition_poly` succeeded
+  - both benchmark shards printed the same polynomial as the baseline
+- Interpretation:
+  - the recursive shape, cache-hit counts, and canonicalisation counts stay unchanged, so the improvement comes from lower symmetry bookkeeping overhead rather than changed pruning
+  - the compact changed-state list removes a large amount of dead scratch traffic from `canon_state_prepare_push()` / `canon_state_commit_push()`
+  - caching stack permutation rows helps the equal-case rebuild path, which is one of the few remaining expensive branches inside the prepare logic
+- Outcome: accepted on `mask2`.
