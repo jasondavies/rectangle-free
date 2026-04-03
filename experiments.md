@@ -6107,3 +6107,64 @@
   - the merged branch keeps the improved search shape and symmetry-side reductions from `mask2`
   - `canon_state_prepare_push()` remains the dominant hotspot by a large margin, so the next optimization pass should still target non-terminal `CanonState` work rather than graph recursion shape
 - Outcome: recorded baseline for future experiments on `main`.
+
+### Experiment 153: Split `CanonState` first-greater state into separate arrays
+- Goal: simplify the hot `CanonState` representation and remove bit packing/unpacking from `canon_state_prepare_push()` and the terminal prepare path.
+- Branch / commit:
+  - `main` at `a6836e7` baseline
+- Change:
+  - replace packed `CanonPackedState` with separate `first_greater` and `first_greater_val` arrays
+  - store changed old/new values in split arrays as well, so prepare/commit/pop no longer pack or unpack state in the inner loops
+  - keep search order and cache keys unchanged
+- Build:
+  - `make partition_poly_7`
+  - `make partition_poly_7_profile`
+- Unprofiled benchmarks:
+  - `./partition_poly_7 7 5 --task-end 4`
+    - baseline:
+      - `real 8.78`
+    - experiment:
+      - `real 8.32`
+  - `./partition_poly_7 7 6 --task-end 1`
+    - baseline:
+      - `real 37.10`
+    - experiment:
+      - `real 35.38`
+- Profiled benchmarks:
+  - `OMP_NUM_THREADS=1 ./partition_poly_7_profile 7 5 --task-end 4`
+    - baseline:
+      - `Worker Complete in 9.66 seconds`
+      - `Canonicalisation calls: 70144`
+      - `Canonical cache hits: 42990`
+      - `Raw cache hits: 261474`
+      - `canon_state_prepare_push: 2188134 calls, 7.408s`
+      - `solve_graph_poly: 1442988 calls, 1.664s`
+    - experiment:
+      - `Worker Complete in 9.13 seconds`
+      - `Canonicalisation calls: 70144`
+      - `Canonical cache hits: 42990`
+      - `Raw cache hits: 261474`
+      - `canon_state_prepare_push: 2188134 calls, 6.991s`
+      - `solve_graph_poly: 1442988 calls, 1.523s`
+  - `OMP_NUM_THREADS=1 ./partition_poly_7_profile 7 6 --task-end 1`
+    - baseline:
+      - `Worker Complete in 39.31 seconds`
+      - `Canonicalisation calls: 414470`
+      - `Canonical cache hits: 243501`
+      - `Raw cache hits: 1991130`
+      - `canon_state_prepare_push: 9458098 calls, 30.863s`
+      - `solve_graph_poly: 6229933 calls, 14.985s`
+    - experiment:
+      - `Worker Complete in 37.54 seconds`
+      - `Canonicalisation calls: 414470`
+      - `Canonical cache hits: 243501`
+      - `Raw cache hits: 1991130`
+      - `canon_state_prepare_push: 9458098 calls, 29.319s`
+      - `solve_graph_poly: 6229933 calls, 13.733s`
+- Correctness:
+  - both shards produced the same polynomial and evaluation values as the baseline
+- Interpretation:
+  - recursion shape is unchanged: canonicalisation calls, canonical cache hits, raw cache hits, and `solve_graph_poly` calls are identical on both profiled shards
+  - the split representation simplifies the code and also reduces hot-loop work in both prepare paths enough to give a real speedup
+  - the `solve_graph_poly` reduction appears to come from lower surrounding symmetry overhead rather than graph-side search changes
+- Outcome: accepted on `main`.
