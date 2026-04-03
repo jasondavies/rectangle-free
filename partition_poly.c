@@ -3534,11 +3534,52 @@ static inline uint64_t hash_dense_rows(uint32_t n, const AdjWord* rows) {
 
 static inline uint64_t graph_fill_dense_key_rows(const Graph* g, AdjWord row_mask, AdjWord* rows) {
     if (g->vertex_mask == graph_row_mask(g->n)) {
-        for (uint32_t i = 0; i < g->n; i++) rows[i] = g->adj[i] & row_mask;
-        return hash_dense_rows((uint32_t)g->n, rows);
+        uint64_t h = 14695981039346656037ULL;
+        for (uint32_t i = 0; i < g->n; i++) {
+            AdjWord row = g->adj[i] & row_mask;
+            rows[i] = row;
+            h ^= (uint64_t)row;
+            h *= 1099511628211ULL;
+        }
+        h ^= (uint64_t)g->n;
+        h *= 1099511628211ULL;
+        return h;
     }
-    graph_build_dense_rows(g, rows);
-    return hash_dense_rows((uint32_t)g->n, rows);
+
+    int dense_index[MAXN_NAUTY];
+    int dense_vertices[MAXN_NAUTY];
+    uint64_t rem = g->vertex_mask & ADJWORD_MASK;
+    uint32_t n = 0;
+    while (rem) {
+        int v = __builtin_ctzll(rem);
+        dense_index[v] = (int)n;
+        dense_vertices[n++] = v;
+        rem &= rem - 1;
+    }
+
+    if (n != g->n) {
+        fprintf(stderr, "Graph vertex mask/count mismatch: n=%u mask_popcount=%u\n",
+                (unsigned)g->n, (unsigned)n);
+        exit(1);
+    }
+
+    uint64_t h = 14695981039346656037ULL;
+    for (uint32_t dense_v = 0; dense_v < n; dense_v++) {
+        int v = dense_vertices[dense_v];
+        uint64_t row_bits = (uint64_t)g->adj[v] & g->vertex_mask;
+        AdjWord row = 0;
+        while (row_bits) {
+            int u = __builtin_ctzll(row_bits);
+            row |= (AdjWord)(UINT64_C(1) << dense_index[u]);
+            row_bits &= row_bits - 1;
+        }
+        rows[dense_v] = row;
+        h ^= (uint64_t)row;
+        h *= 1099511628211ULL;
+    }
+    h ^= (uint64_t)n;
+    h *= 1099511628211ULL;
+    return h;
 }
 
 static inline int graph_cache_slot_matches_sig(const GraphCache* cache, int slot, uint64_t key_hash,

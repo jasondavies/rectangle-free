@@ -5781,3 +5781,63 @@
   - on the heavier `7x6` shard, the canonicalisation drop is large enough to outweigh the remaining normalization overhead; on the lighter `7x5` shard, the result is effectively flat
   - turning the raw cache off is clearly not viable: canonicalisation explodes and runtime regresses hard
 - Outcome: accepted for the `7x6`-heavy path and kept for further tuning.
+
+### Experiment 145: Stop graph simplification once the residual graph is lookup-small
+- Goal: preserve `main`'s solver ordering while avoiding extra isolated/clique simplification work after the graph has already reached the small-graph lookup range.
+- Change:
+  - in both `solve_graph_poly()` variants, changed the initial simplification loop guard from "run until no more removals" to "run until no more removals and `g.n > SMALL_GRAPH_LOOKUP_MAX_N`"
+  - this leaves all graphs of size `<= 7` to the existing small-graph lookup instead of continuing to strip them further
+- Baseline binary:
+  - `/private/tmp/partition_poly_7_main_base`, compiled from committed `main` at `a832389`
+- `7x5 --task-end 4 --profile`:
+  - baseline:
+    - `Worker Complete in 3.56 seconds`
+    - `solve_graph_poly: 1442988 calls, 0.502s`
+  - experiment:
+    - `Worker Complete in 3.52 seconds`
+    - `solve_graph_poly: 1442988 calls, 0.475s`
+- `7x6 --task-end 1 --profile`:
+  - baseline:
+    - `Worker Complete in 15.34 seconds`
+    - `solve_graph_poly: 6229933 calls, 5.391s`
+  - experiment:
+    - `Worker Complete in 15.21 seconds`
+    - `solve_graph_poly: 6229933 calls, 5.276s`
+- Verification:
+  - `make partition_poly_7` succeeded
+  - both benchmark shards printed the same polynomial as the baseline snapshot
+- Interpretation:
+  - the solver call counts and cache-hit counts stay unchanged, so this is not changing the recursion shape
+  - the win comes from avoiding redundant late simplification work on graphs that are already about to be discharged by the lookup table
+  - the simplified-`n` histogram shifts upward, as intended: more work now terminates directly at `n=5..7` instead of being simplified below the lookup cutoff first
+- Outcome: accepted and committed as `d04390b`.
+
+### Experiment 146: Hash raw-cache key rows while packing them
+- Goal: reduce constant-factor overhead on the dense raw-cache path without changing solver ordering, cache semantics, or recursion shape.
+- Change:
+  - rewrote `graph_fill_dense_key_rows()` to hash rows as they are written instead of calling `hash_dense_rows()` in a second pass
+  - for masked graphs, build the live-vertex dense index/list once and hash each packed row immediately instead of materialising all rows and then rescanning them for hashing
+- Baseline binary:
+  - `/private/tmp/partition_poly_7_mask2_base`, compiled from `d04390b`
+- `7x5 --task-end 4 --profile`:
+  - baseline:
+    - `Worker Complete in 3.52 seconds`
+    - `solve_graph_poly: 1442988 calls, 0.475s`
+  - experiment:
+    - `Worker Complete in 3.54 seconds`
+    - `solve_graph_poly: 1442988 calls, 0.460s`
+- `7x6 --task-end 1 --profile`:
+  - baseline:
+    - `Worker Complete in 15.21 seconds`
+    - `solve_graph_poly: 6229933 calls, 5.276s`
+  - experiment:
+    - `Worker Complete in 15.16 seconds`
+    - `solve_graph_poly: 6229933 calls, 5.204s`
+- Verification:
+  - `make partition_poly_7` succeeded
+  - both benchmark shards printed the same polynomial as the `d04390b` snapshot
+- Interpretation:
+  - canonicalisation counts, raw-cache hits, and recursive call counts are identical to `d04390b`, so this is a pure raw-key bookkeeping win
+  - the light shard is effectively flat in wall time but still shows the expected graph-side reduction
+  - the heavier shard shows the same direction in both wall time and `solve_graph_poly` time, which makes this worth keeping
+- Outcome: accepted on `mask2` for further tuning.
