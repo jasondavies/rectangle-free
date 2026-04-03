@@ -6077,3 +6077,33 @@
   - the light shard is effectively flat in profiled mode, but the heavy shard still shows a measurable reduction in both `canon_state_prepare_push` time and total wall time
   - keeping this specialization out of the profiled and adaptive-runtime paths keeps the change low-risk
 - Outcome: accepted on `mask2`.
+
+### Experiment 152: Post-merge `main` baseline on `7x6 --task-end 1`
+- Goal: establish a fresh baseline on `main` after merging the accepted `mask2` work, before starting the next optimization round.
+- Branch / commit:
+  - `main` after merging `mask2`
+- Build:
+  - `make partition_poly_7`
+  - `make partition_poly_7_profile`
+- Unprofiled benchmark:
+  - command:
+    - `./partition_poly_7 7 6 --task-end 1`
+  - result:
+    - `real 37.10`
+- Profiled benchmark:
+  - command:
+    - `OMP_NUM_THREADS=1 ./partition_poly_7_profile 7 6 --task-end 1`
+  - result:
+    - `Worker Complete in 39.31 seconds`
+    - `Canonicalisation calls: 414470`
+    - `Canonical cache hits: 243501 (58.7%)`
+    - `Raw cache hits: 1991130`
+    - `canon_state_prepare_push: 9458098 calls, 30.863s`
+    - `solve_graph_poly: 6229933 calls, 14.985s`
+- Correctness:
+  - `P(4) = 43715355264000`
+  - `P(5) = 15297058957242888000`
+- Interpretation:
+  - the merged branch keeps the improved search shape and symmetry-side reductions from `mask2`
+  - `canon_state_prepare_push()` remains the dominant hotspot by a large margin, so the next optimization pass should still target non-terminal `CanonState` work rather than graph recursion shape
+- Outcome: recorded baseline for future experiments on `main`.
