@@ -2836,6 +2836,7 @@ int canon_state_prepare_push(const CanonState* st, int partition_id, CanonScratc
     CanonPackedState* changed_first_greater_new_state = scratch->changed_first_greater_new_state;
     uint16_t* next_equal_perm = scratch->next_equal_perm;
     uint16_t* changed_first_greater_idx = scratch->changed_first_greater_idx;
+    uint16_t active_count = 0;
     uint16_t next_equal_count = 0;
     uint16_t changed_first_greater_count = 0;
     ProfileStats* prof = (g_profile ? tls_profile : NULL);
@@ -2887,19 +2888,22 @@ int canon_state_prepare_push(const CanonState* st, int partition_id, CanonScratc
         }
 
         uint16_t new_fg_val = (next_fg < new_depth) ? next_fg_val : 0;
+        CanonPackedState new_state = canon_state_pack(next_fg, new_fg_val);
+        active_count++;
         if (next_fg == new_depth) {
             next_equal_perm[next_equal_count++] = (uint16_t)p;
         }
-        changed_first_greater_idx[changed_first_greater_count] = (uint16_t)p;
-        changed_first_greater_new_state[changed_first_greater_count] =
-            canon_state_pack(next_fg, new_fg_val);
-        changed_first_greater_count++;
+        if (old_state != new_state) {
+            changed_first_greater_idx[changed_first_greater_count] = (uint16_t)p;
+            changed_first_greater_new_state[changed_first_greater_count] = new_state;
+            changed_first_greater_count++;
+        }
     }
     scratch->next_equal_count = next_equal_count;
     scratch->changed_first_greater_count = changed_first_greater_count;
     if (prof) {
         prof->canon_prepare_scanned_by_depth[depth] += st->limit;
-        prof->canon_prepare_active_by_depth[depth] += changed_first_greater_count;
+        prof->canon_prepare_active_by_depth[depth] += active_count;
     }
     *next_stabilizer = stabilizer;
     return 1;
