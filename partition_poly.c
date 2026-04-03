@@ -3908,7 +3908,7 @@ static void solve_graph_poly(const Graph* input_g, RowGraphCache* cache, RowGrap
     uint64_t multiplier = 1;
 
     int changed = 1;
-    while (changed && g.n > 0) {
+    while (changed && g.n > SMALL_GRAPH_LOOKUP_MAX_N) {
         changed = 0;
         uint64_t active = g.vertex_mask;
         while (active) {
@@ -4123,7 +4123,7 @@ done:
     graph_poly_one_ref(&multiplier);
     
     int changed = 1;
-    while (changed && g.n > 0) {
+    while (changed && g.n > SMALL_GRAPH_LOOKUP_MAX_N) {
         changed = 0;
         uint64_t active = g.vertex_mask;
         while (active) {
