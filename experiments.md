@@ -5880,3 +5880,45 @@
   - the compact changed-state list removes a large amount of dead scratch traffic from `canon_state_prepare_push()` / `canon_state_commit_push()`
   - caching stack permutation rows helps the equal-case rebuild path, which is one of the few remaining expensive branches inside the prepare logic
 - Outcome: accepted on `mask2`.
+
+### Experiment 148: Pre-sort terminal permutation scans by image value
+- Goal: reduce the dominant deepest-level `CanonState` cost by avoiding full terminal scans over all permutations when only low partition-image values can affect the result.
+- Change:
+  - added `perm_order_by_value` and `perm_value_prefix_end` tables, built once after `perm_table`
+  - for each `partition_id`, `perm_order_by_value` stores permutation indices sorted by `perm_table[pid][p]`
+  - `perm_value_prefix_end[pid][t]` stores the number of permutations whose image is `<= t`
+  - rewrote `canon_state_prepare_terminal()` to scan only the prefix up to `max(pid, stack_vals[0..depth-1])`, instead of scanning all `st->limit` permutations
+  - kept the temporary prepare branch-mix counters, since they were what identified terminal scanning as the main remaining hotspot
+- Baseline binary:
+  - current committed `mask2` tip `ef6ec7f`
+- `7x5 --task-end 4 --profile`:
+  - baseline:
+    - `Worker Complete in 3.54 seconds`
+    - `canon_state_prepare_push: 2188134 calls, 2.899s`
+    - `solve_graph_poly: 1442988 calls, 0.458s`
+  - experiment:
+    - `Worker Complete in 2.79 seconds`
+    - `canon_state_prepare_push: 2188134 calls, 2.162s`
+    - `solve_graph_poly: 1442988 calls, 0.467s`
+- `7x6 --task-end 1 --profile`:
+  - baseline:
+    - `Worker Complete in 15.09 seconds`
+    - `canon_state_prepare_push: 9458098 calls, 12.516s`
+    - `solve_graph_poly: 6229933 calls, 5.135s`
+  - experiment:
+    - `Worker Complete in 12.88 seconds`
+    - `canon_state_prepare_push: 9458098 calls, 10.271s`
+    - `solve_graph_poly: 6229933 calls, 5.314s`
+- Branch-mix confirmation on the heavy shard:
+  - depth 5 remains the dominant terminal layer with `9381463` terminal calls
+  - the new terminal prefix scan reduced the effective depth-5 scan volume while keeping the same accept/reject shape and final polynomial
+  - the optimization attacks the real hotspot directly without changing `CanonState` commit/pop behavior or the graph recursion shape
+- Verification:
+  - `make partition_poly_7` succeeded
+  - `make partition_poly` succeeded
+  - both benchmark shards printed the same polynomial and evaluation values as the baseline
+- Interpretation:
+  - this is the first large symmetry-side win on `mask2`: the heavy shard drops by about `2.2s`, almost entirely from reduced terminal prepare work
+  - the slight `solve_graph_poly` noise on the heavy shard is not the story here; call counts are unchanged and the wall-clock gain tracks the much lower prepare time
+  - compared with the failed bucketed-terminal prototype, value-sorted prefix scans preserve the existing early-reject behavior while still skipping the useless high-image tail
+- Outcome: accepted on `mask2`.

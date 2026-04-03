@@ -200,6 +200,12 @@ typedef struct {
     long long stabilizer_sum_by_depth[MAX_COLS + 1];
     long long canon_prepare_scanned_by_depth[MAX_COLS + 1];
     long long canon_prepare_active_by_depth[MAX_COLS + 1];
+    long long canon_prepare_terminal_calls_by_depth[MAX_COLS + 1];
+    long long canon_prepare_fast_continue_by_depth[MAX_COLS + 1];
+    long long canon_prepare_terminal_continue_by_depth[MAX_COLS + 1];
+    long long canon_prepare_equal_case_calls_by_depth[MAX_COLS + 1];
+    long long canon_prepare_equal_case_rejects_by_depth[MAX_COLS + 1];
+    long long canon_prepare_order_rejects_by_depth[MAX_COLS + 1];
     long long solve_graph_calls_by_n[MAXN_NAUTY + 1];
     long long solve_graph_raw_hits_by_n[MAXN_NAUTY + 1];
     long long solve_graph_canon_hits_by_n[MAXN_NAUTY + 1];
@@ -366,6 +372,8 @@ static int max_complex_per_partition = 0;
 static Partition* partitions = NULL;
 static int (*perms)[MAX_ROWS] = NULL;
 static uint16_t* perm_table = NULL;
+static uint16_t* perm_order_by_value = NULL;
+static uint16_t* perm_value_prefix_end = NULL;
 static uint16_t* partition_id_lookup = NULL;
 static uint32_t partition_id_lookup_size = 0;
 static uint64_t factorial[20];
@@ -1194,6 +1202,12 @@ static void init_partition_lookup_tables(void) {
     partition_id_lookup_size = 1u << (3 * g_rows);
 
     perm_table = checked_calloc(partition_count * (size_t)perm_count, sizeof(*perm_table), "perm_table");
+    perm_order_by_value =
+        checked_calloc(partition_count * (size_t)perm_count, sizeof(*perm_order_by_value),
+                       "perm_order_by_value");
+    perm_value_prefix_end =
+        checked_calloc(partition_count * partition_count, sizeof(*perm_value_prefix_end),
+                       "perm_value_prefix_end");
     partition_id_lookup =
         checked_aligned_alloc(64, (size_t)partition_id_lookup_size * sizeof(*partition_id_lookup),
                               "partition_id_lookup");
@@ -1216,6 +1230,8 @@ static void free_row_dependent_tables(void) {
     free(partitions);
     free(perms);
     free(perm_table);
+    free(perm_order_by_value);
+    free(perm_value_prefix_end);
     free(partition_id_lookup);
     free(overlap_mask);
     free(intra_mask);
@@ -1230,6 +1246,8 @@ static void free_row_dependent_tables(void) {
     partitions = NULL;
     perms = NULL;
     perm_table = NULL;
+    perm_order_by_value = NULL;
+    perm_value_prefix_end = NULL;
     partition_id_lookup = NULL;
     partition_id_lookup_size = 0;
     overlap_mask = NULL;
@@ -2224,6 +2242,39 @@ void build_perm_table() {
     }
 }
 
+static void build_terminal_perm_order_tables(void) {
+    uint16_t* counts =
+        checked_calloc((size_t)num_partitions, sizeof(*counts), "terminal_perm_order_counts");
+    uint16_t* offsets =
+        checked_calloc((size_t)num_partitions, sizeof(*offsets), "terminal_perm_order_offsets");
+
+    for (int id = 0; id < num_partitions; id++) {
+        uint16_t* sorted_row = perm_order_by_value + (size_t)id * (size_t)perm_count;
+        uint16_t* prefix_row = perm_value_prefix_end + (size_t)id * (size_t)num_partitions;
+        const uint16_t* perm_row = perm_table + (size_t)id * (size_t)perm_count;
+
+        memset(counts, 0, (size_t)num_partitions * sizeof(*counts));
+        for (int p = 0; p < perm_count; p++) {
+            counts[perm_row[p]]++;
+        }
+
+        uint16_t next = 0;
+        for (int value = 0; value < num_partitions; value++) {
+            offsets[value] = next;
+            next = (uint16_t)(next + counts[value]);
+            prefix_row[value] = next;
+        }
+
+        for (int p = 0; p < perm_count; p++) {
+            uint16_t value = perm_row[p];
+            sorted_row[offsets[value]++] = (uint16_t)p;
+        }
+    }
+
+    free(counts);
+    free(offsets);
+}
+
 void build_overlap_table() {
     memset(overlap_mask, 0,
            (size_t)num_partitions * (size_t)num_partitions * (size_t)max_complex_per_partition *
@@ -2597,12 +2648,29 @@ static int canon_state_prepare_terminal(const CanonState* st, int partition_id,
     int new_depth = depth + 1;
     int stabilizer = 0;
     uint16_t pid = (uint16_t)partition_id;
+    uint16_t max_threshold = pid;
     const uint16_t* partition_perm_row =
         perm_table + (size_t)partition_id * (size_t)perm_count;
+    const uint16_t* perm_order_row =
+        perm_order_by_value + (size_t)partition_id * (size_t)perm_count;
+    const uint16_t* prefix_end_row =
+        perm_value_prefix_end + (size_t)partition_id * (size_t)num_partitions;
     const CanonPackedState* state = st->state;
     const uint16_t* stack_vals = st->stack_vals;
+    ProfileStats* prof = (g_profile ? tls_profile : NULL);
 
-    for (int p = 0; p < st->limit; p++) {
+    if (prof) prof->canon_prepare_terminal_calls_by_depth[depth]++;
+
+    for (int g = 0; g < depth; g++) {
+        if (stack_vals[g] > max_threshold) max_threshold = stack_vals[g];
+    }
+
+    uint16_t scan_count = prefix_end_row[max_threshold];
+
+    if (prof) prof->canon_prepare_terminal_continue_by_depth[depth] += (long long)st->limit - scan_count;
+
+    for (uint16_t i = 0; i < scan_count; i++) {
+        uint16_t p = perm_order_row[i];
         CanonPackedState old_state = state[p];
         uint16_t x = partition_perm_row[p];
         uint8_t g = canon_state_unpack_first_greater(old_state);
@@ -2610,13 +2678,17 @@ static int canon_state_prepare_terminal(const CanonState* st, int partition_id,
         if (__builtin_expect(g != (uint8_t)depth, 1)) {
             uint16_t c = stack_vals[g];
             if (__builtin_expect(x > c, 1)) {
+                if (prof) prof->canon_prepare_terminal_continue_by_depth[depth]++;
                 continue;
             } else if (x < c) {
+                if (prof) prof->canon_prepare_order_rejects_by_depth[depth]++;
                 return 0;
             } else {
                 uint8_t next_fg;
                 uint16_t next_fg_val;
+                if (prof) prof->canon_prepare_equal_case_calls_by_depth[depth]++;
                 if (!canon_rebuild_equal_case(st, p, g, pid, &next_fg, &next_fg_val)) {
+                    if (prof) prof->canon_prepare_equal_case_rejects_by_depth[depth]++;
                     return 0;
                 }
                 if (next_fg == new_depth) {
@@ -2624,7 +2696,10 @@ static int canon_state_prepare_terminal(const CanonState* st, int partition_id,
                 }
             }
         } else {
-            if (x < pid) return 0;
+            if (x < pid) {
+                if (prof) prof->canon_prepare_order_rejects_by_depth[depth]++;
+                return 0;
+            }
             if (x == pid) {
                 stabilizer++;
             }
@@ -2763,6 +2838,7 @@ int canon_state_prepare_push(const CanonState* st, int partition_id, CanonScratc
     uint16_t* changed_first_greater_idx = scratch->changed_first_greater_idx;
     uint16_t next_equal_count = 0;
     uint16_t changed_first_greater_count = 0;
+    ProfileStats* prof = (g_profile ? tls_profile : NULL);
 
     for (int p = 0; p < st->limit; p++) {
         CanonPackedState old_state = state[p];
@@ -2773,16 +2849,22 @@ int canon_state_prepare_push(const CanonState* st, int partition_id, CanonScratc
 
         if (__builtin_expect(g != (uint8_t)depth, 1)) {
             uint16_t r = canon_state_unpack_first_greater_val(old_state);
-            if (__builtin_expect(x >= r, 1)) continue;
+            if (__builtin_expect(x >= r, 1)) {
+                if (prof) prof->canon_prepare_fast_continue_by_depth[depth]++;
+                continue;
+            }
 
             uint16_t c = stack_vals[g];
             if (__builtin_expect(x > c, 1)) {
                 next_fg = g;
                 next_fg_val = x;
             } else if (x < c) {
+                if (prof) prof->canon_prepare_order_rejects_by_depth[depth]++;
                 return 0;
             } else {
+                if (prof) prof->canon_prepare_equal_case_calls_by_depth[depth]++;
                 if (!canon_rebuild_equal_case(st, p, g, pid, &next_fg, &next_fg_val)) {
+                    if (prof) prof->canon_prepare_equal_case_rejects_by_depth[depth]++;
                     return 0;
                 }
                 if (next_fg == new_depth) {
@@ -2790,7 +2872,10 @@ int canon_state_prepare_push(const CanonState* st, int partition_id, CanonScratc
                 }
             }
         } else {
-            if (x < pid) return 0;
+            if (x < pid) {
+                if (prof) prof->canon_prepare_order_rejects_by_depth[depth]++;
+                return 0;
+            }
             if (x == pid) {
                 next_fg = (uint8_t)new_depth;
                 next_fg_val = 0;
@@ -2812,9 +2897,9 @@ int canon_state_prepare_push(const CanonState* st, int partition_id, CanonScratc
     }
     scratch->next_equal_count = next_equal_count;
     scratch->changed_first_greater_count = changed_first_greater_count;
-    if (g_profile && tls_profile) {
-        tls_profile->canon_prepare_scanned_by_depth[depth] += st->limit;
-        tls_profile->canon_prepare_active_by_depth[depth] += changed_first_greater_count;
+    if (prof) {
+        prof->canon_prepare_scanned_by_depth[depth] += st->limit;
+        prof->canon_prepare_active_by_depth[depth] += changed_first_greater_count;
     }
     *next_stabilizer = stabilizer;
     return 1;
@@ -5170,6 +5255,7 @@ int main(int argc, char** argv) {
     init_partition_lookup_tables();
     build_partition_id_lookup();
     build_perm_table();
+    build_terminal_perm_order_tables();
     build_overlap_table();
 #if RECT_COUNT_K4
     build_partition_weight4_table();
@@ -6006,6 +6092,18 @@ int main(int argc, char** argv) {
             total_profile.stabilizer_sum_by_depth[d] += src->stabilizer_sum_by_depth[d];
             total_profile.canon_prepare_scanned_by_depth[d] += src->canon_prepare_scanned_by_depth[d];
             total_profile.canon_prepare_active_by_depth[d] += src->canon_prepare_active_by_depth[d];
+            total_profile.canon_prepare_terminal_calls_by_depth[d] +=
+                src->canon_prepare_terminal_calls_by_depth[d];
+            total_profile.canon_prepare_fast_continue_by_depth[d] +=
+                src->canon_prepare_fast_continue_by_depth[d];
+            total_profile.canon_prepare_terminal_continue_by_depth[d] +=
+                src->canon_prepare_terminal_continue_by_depth[d];
+            total_profile.canon_prepare_equal_case_calls_by_depth[d] +=
+                src->canon_prepare_equal_case_calls_by_depth[d];
+            total_profile.canon_prepare_equal_case_rejects_by_depth[d] +=
+                src->canon_prepare_equal_case_rejects_by_depth[d];
+            total_profile.canon_prepare_order_rejects_by_depth[d] +=
+                src->canon_prepare_order_rejects_by_depth[d];
         }
         for (int n = 0; n <= MAXN_NAUTY; n++) {
             total_profile.solve_graph_calls_by_n[n] += src->solve_graph_calls_by_n[n];
@@ -6167,6 +6265,20 @@ int main(int argc, char** argv) {
                     : 0.0;
             printf("    depth %d: prepare %lld, accept %lld (%.1f%%), avg stabiliser %.1f, avg active %.1f/%.0f (%.1f%%)\n",
                    d, calls, accepts, accept_rate, avg_stabilizer, avg_active, avg_scanned, active_rate);
+        }
+        printf("  CanonState prepare branch mix by depth:\n");
+        for (int d = 0; d <= g_cols && d <= MAX_COLS; d++) {
+            long long calls = total_profile.canon_prepare_calls_by_depth[d];
+            long long terminal_calls = total_profile.canon_prepare_terminal_calls_by_depth[d];
+            long long fast_continue = total_profile.canon_prepare_fast_continue_by_depth[d];
+            long long terminal_continue = total_profile.canon_prepare_terminal_continue_by_depth[d];
+            long long equal_case = total_profile.canon_prepare_equal_case_calls_by_depth[d];
+            long long equal_reject = total_profile.canon_prepare_equal_case_rejects_by_depth[d];
+            long long order_reject = total_profile.canon_prepare_order_rejects_by_depth[d];
+            if (calls == 0 && equal_case == 0 && order_reject == 0) continue;
+            printf("    depth %d: terminal %lld, fast-continue %lld, terminal-continue %lld, equal-case %lld, equal-reject %lld, order-reject %lld\n",
+                   d, terminal_calls, fast_continue, terminal_continue, equal_case,
+                   equal_reject, order_reject);
         }
         if (total_task_timing.task_count > 0) {
             printf("  Task timings: %lld tasks, avg %.6fs, max %.6fs (task %lld)\n",
