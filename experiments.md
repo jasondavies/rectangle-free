@@ -5922,3 +5922,64 @@
   - the slight `solve_graph_poly` noise on the heavy shard is not the story here; call counts are unchanged and the wall-clock gain tracks the much lower prepare time
   - compared with the failed bucketed-terminal prototype, value-sorted prefix scans preserve the existing early-reject behavior while still skipping the useless high-image tail
 - Outcome: accepted on `mask2`.
+
+### Experiment 149: Split profiled and unprofiled CanonState prepare paths
+- Goal: reduce real runtime in `canon_state_prepare_push()` and `canon_state_prepare_terminal()` by removing profiling-condition branches from their hottest inner loops when `--profile` is not active, while preserving the existing profiled diagnostics.
+- Change:
+  - split `canon_state_prepare_push()` into:
+    - `canon_state_prepare_push_fast()` with no profile-counter branches in the inner loop
+    - `canon_state_prepare_push_profiled()` retaining the existing branch-mix accounting
+  - split `canon_state_prepare_terminal()` the same way
+  - dispatch to the fast path whenever profiling is disabled or `tls_profile` is not set yet, so prefix generation still uses the non-instrumented logic safely
+- Baseline binary:
+  - current committed `mask2` tip `2c85a75`
+- Unprofiled `7x5 --task-end 4`:
+  - baseline:
+    - `real 3.04`
+  - experiment:
+    - `real 2.90`
+- Unprofiled `7x6 --task-end 1`:
+  - baseline:
+    - `real 11.69`
+  - experiment:
+    - `real 11.39`
+- Profiled `7x5 --task-end 4`:
+  - baseline:
+    - `Worker Complete in 2.81 seconds`
+    - `Canonicalisation calls: 70144`
+    - `Canonical cache hits: 42990`
+    - `Raw cache hits: 261474`
+    - `canon_state_prepare_push: 2188134 calls, 2.176s`
+    - `solve_graph_poly: 1442988 calls, 0.467s`
+  - experiment:
+    - `Worker Complete in 2.56 seconds`
+    - `Canonicalisation calls: 70144`
+    - `Canonical cache hits: 42990`
+    - `Raw cache hits: 261474`
+    - `canon_state_prepare_push: 2188134 calls, 1.932s`
+    - `solve_graph_poly: 1442988 calls, 0.470s`
+- Profiled `7x6 --task-end 1`:
+  - baseline:
+    - `Worker Complete in 12.52 seconds`
+    - `Canonicalisation calls: 414470`
+    - `Canonical cache hits: 243501`
+    - `Raw cache hits: 1991130`
+    - `canon_state_prepare_push: 9458098 calls, 9.910s`
+    - `solve_graph_poly: 6229933 calls, 5.302s`
+  - experiment:
+    - `Worker Complete in 11.69 seconds`
+    - `Canonicalisation calls: 414470`
+    - `Canonical cache hits: 243501`
+    - `Raw cache hits: 1991130`
+    - `canon_state_prepare_push: 9458098 calls, 9.034s`
+    - `solve_graph_poly: 6229933 calls, 5.347s`
+- Verification:
+  - `make partition_poly_7` succeeded
+  - `make partition_poly` succeeded
+  - both profiled shards printed the same polynomial and evaluation values as the baseline binary compiled from `2c85a75`
+- Interpretation:
+  - the recursion shape is unchanged: canonicalisation calls, cache-hit counts, and `solve_graph_poly` call counts are identical to baseline on both profiled shards
+  - the win is symmetry-side only, and specifically in `canon_state_prepare_push()` / terminal prepare bookkeeping
+  - keeping the profiled path separate preserves the existing diagnostics while letting the normal path compile to a much tighter inner loop
+  - the first version of this split crashed in prefix generation because `tls_profile` is null before worker startup; dispatching to the fast path when `tls_profile == NULL` fixed that without changing semantics
+- Outcome: accepted on `mask2`.

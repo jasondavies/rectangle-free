@@ -2642,8 +2642,8 @@ static inline int canon_rebuild_equal_case(const CanonState* st, int p, int g, u
     return 1;
 }
 
-static int canon_state_prepare_terminal(const CanonState* st, int partition_id,
-                                        int* next_stabilizer) {
+static inline int canon_state_prepare_terminal_fast(const CanonState* st, int partition_id,
+                                                    int* next_stabilizer) {
     int depth = st->depth;
     int new_depth = depth + 1;
     int stabilizer = 0;
@@ -2657,17 +2657,12 @@ static int canon_state_prepare_terminal(const CanonState* st, int partition_id,
         perm_value_prefix_end + (size_t)partition_id * (size_t)num_partitions;
     const CanonPackedState* state = st->state;
     const uint16_t* stack_vals = st->stack_vals;
-    ProfileStats* prof = (g_profile ? tls_profile : NULL);
-
-    if (prof) prof->canon_prepare_terminal_calls_by_depth[depth]++;
 
     for (int g = 0; g < depth; g++) {
         if (stack_vals[g] > max_threshold) max_threshold = stack_vals[g];
     }
 
     uint16_t scan_count = prefix_end_row[max_threshold];
-
-    if (prof) prof->canon_prepare_terminal_continue_by_depth[depth] += (long long)st->limit - scan_count;
 
     for (uint16_t i = 0; i < scan_count; i++) {
         uint16_t p = perm_order_row[i];
@@ -2678,17 +2673,13 @@ static int canon_state_prepare_terminal(const CanonState* st, int partition_id,
         if (__builtin_expect(g != (uint8_t)depth, 1)) {
             uint16_t c = stack_vals[g];
             if (__builtin_expect(x > c, 1)) {
-                if (prof) prof->canon_prepare_terminal_continue_by_depth[depth]++;
                 continue;
             } else if (x < c) {
-                if (prof) prof->canon_prepare_order_rejects_by_depth[depth]++;
                 return 0;
             } else {
                 uint8_t next_fg;
                 uint16_t next_fg_val;
-                if (prof) prof->canon_prepare_equal_case_calls_by_depth[depth]++;
                 if (!canon_rebuild_equal_case(st, p, g, pid, &next_fg, &next_fg_val)) {
-                    if (prof) prof->canon_prepare_equal_case_rejects_by_depth[depth]++;
                     return 0;
                 }
                 if (next_fg == new_depth) {
@@ -2697,7 +2688,6 @@ static int canon_state_prepare_terminal(const CanonState* st, int partition_id,
             }
         } else {
             if (x < pid) {
-                if (prof) prof->canon_prepare_order_rejects_by_depth[depth]++;
                 return 0;
             }
             if (x == pid) {
@@ -2708,6 +2698,81 @@ static int canon_state_prepare_terminal(const CanonState* st, int partition_id,
 
     *next_stabilizer = stabilizer;
     return 1;
+}
+
+static int canon_state_prepare_terminal_profiled(const CanonState* st, int partition_id,
+                                                 int* next_stabilizer) {
+    int depth = st->depth;
+    int new_depth = depth + 1;
+    int stabilizer = 0;
+    uint16_t pid = (uint16_t)partition_id;
+    uint16_t max_threshold = pid;
+    const uint16_t* partition_perm_row =
+        perm_table + (size_t)partition_id * (size_t)perm_count;
+    const uint16_t* perm_order_row =
+        perm_order_by_value + (size_t)partition_id * (size_t)perm_count;
+    const uint16_t* prefix_end_row =
+        perm_value_prefix_end + (size_t)partition_id * (size_t)num_partitions;
+    const CanonPackedState* state = st->state;
+    const uint16_t* stack_vals = st->stack_vals;
+    ProfileStats* prof = tls_profile;
+
+    prof->canon_prepare_terminal_calls_by_depth[depth]++;
+
+    for (int g = 0; g < depth; g++) {
+        if (stack_vals[g] > max_threshold) max_threshold = stack_vals[g];
+    }
+
+    uint16_t scan_count = prefix_end_row[max_threshold];
+    prof->canon_prepare_terminal_continue_by_depth[depth] += (long long)st->limit - scan_count;
+
+    for (uint16_t i = 0; i < scan_count; i++) {
+        uint16_t p = perm_order_row[i];
+        CanonPackedState old_state = state[p];
+        uint16_t x = partition_perm_row[p];
+        uint8_t g = canon_state_unpack_first_greater(old_state);
+
+        if (__builtin_expect(g != (uint8_t)depth, 1)) {
+            uint16_t c = stack_vals[g];
+            if (__builtin_expect(x > c, 1)) {
+                prof->canon_prepare_terminal_continue_by_depth[depth]++;
+                continue;
+            } else if (x < c) {
+                prof->canon_prepare_order_rejects_by_depth[depth]++;
+                return 0;
+            } else {
+                uint8_t next_fg;
+                uint16_t next_fg_val;
+                prof->canon_prepare_equal_case_calls_by_depth[depth]++;
+                if (!canon_rebuild_equal_case(st, p, g, pid, &next_fg, &next_fg_val)) {
+                    prof->canon_prepare_equal_case_rejects_by_depth[depth]++;
+                    return 0;
+                }
+                if (next_fg == new_depth) {
+                    stabilizer++;
+                }
+            }
+        } else {
+            if (x < pid) {
+                prof->canon_prepare_order_rejects_by_depth[depth]++;
+                return 0;
+            }
+            if (x == pid) {
+                stabilizer++;
+            }
+        }
+    }
+
+    *next_stabilizer = stabilizer;
+    return 1;
+}
+
+static int canon_state_prepare_terminal(const CanonState* st, int partition_id,
+                                        int* next_stabilizer) {
+    if (__builtin_expect(!g_profile || tls_profile == NULL, 1)) {
+        return canon_state_prepare_terminal_fast(st, partition_id, next_stabilizer);
+    }
+    return canon_state_prepare_terminal_profiled(st, partition_id, next_stabilizer);
 }
 
 static inline int canon_state_partition_is_rep(const CanonState* st, int min_idx,
@@ -2823,8 +2888,84 @@ void canon_state_reset(CanonState* st, int limit) {
     memset(st->state, 0, (size_t)limit * sizeof(*st->state));
 }
 
-int canon_state_prepare_push(const CanonState* st, int partition_id, CanonScratch* scratch,
-                             int* next_stabilizer) {
+static inline int canon_state_prepare_push_fast(const CanonState* st, int partition_id,
+                                                CanonScratch* scratch,
+                                                int* next_stabilizer) {
+    int depth = st->depth;
+    int new_depth = depth + 1;
+    int stabilizer = 0;
+    uint16_t pid = (uint16_t)partition_id;
+    const uint16_t* partition_perm_row =
+        perm_table + (size_t)partition_id * (size_t)perm_count;
+    const CanonPackedState* state = st->state;
+    const uint16_t* stack_vals = st->stack_vals;
+    CanonPackedState* changed_first_greater_new_state = scratch->changed_first_greater_new_state;
+    uint16_t* next_equal_perm = scratch->next_equal_perm;
+    uint16_t* changed_first_greater_idx = scratch->changed_first_greater_idx;
+    uint16_t next_equal_count = 0;
+    uint16_t changed_first_greater_count = 0;
+
+    for (int p = 0; p < st->limit; p++) {
+        CanonPackedState old_state = state[p];
+        uint16_t x = partition_perm_row[p];
+        uint8_t g = canon_state_unpack_first_greater(old_state);
+        uint8_t next_fg;
+        uint16_t next_fg_val;
+
+        if (__builtin_expect(g != (uint8_t)depth, 1)) {
+            uint16_t r = canon_state_unpack_first_greater_val(old_state);
+            if (__builtin_expect(x >= r, 1)) {
+                continue;
+            }
+
+            uint16_t c = stack_vals[g];
+            if (__builtin_expect(x > c, 1)) {
+                next_fg = g;
+                next_fg_val = x;
+            } else if (x < c) {
+                return 0;
+            } else {
+                if (!canon_rebuild_equal_case(st, p, g, pid, &next_fg, &next_fg_val)) {
+                    return 0;
+                }
+                if (next_fg == new_depth) {
+                    stabilizer++;
+                }
+            }
+        } else {
+            if (x < pid) {
+                return 0;
+            }
+            if (x == pid) {
+                next_fg = (uint8_t)new_depth;
+                next_fg_val = 0;
+                stabilizer++;
+            } else {
+                next_fg = (uint8_t)depth;
+                next_fg_val = x;
+            }
+        }
+
+        uint16_t new_fg_val = (next_fg < new_depth) ? next_fg_val : 0;
+        CanonPackedState new_state = canon_state_pack(next_fg, new_fg_val);
+        if (next_fg == new_depth) {
+            next_equal_perm[next_equal_count++] = (uint16_t)p;
+        }
+        if (old_state != new_state) {
+            changed_first_greater_idx[changed_first_greater_count] = (uint16_t)p;
+            changed_first_greater_new_state[changed_first_greater_count] = new_state;
+            changed_first_greater_count++;
+        }
+    }
+    scratch->next_equal_count = next_equal_count;
+    scratch->changed_first_greater_count = changed_first_greater_count;
+    *next_stabilizer = stabilizer;
+    return 1;
+}
+
+static int canon_state_prepare_push_profiled(const CanonState* st, int partition_id,
+                                             CanonScratch* scratch,
+                                             int* next_stabilizer) {
     int depth = st->depth;
     int new_depth = depth + 1;
     int stabilizer = 0;
@@ -2839,7 +2980,7 @@ int canon_state_prepare_push(const CanonState* st, int partition_id, CanonScratc
     uint16_t active_count = 0;
     uint16_t next_equal_count = 0;
     uint16_t changed_first_greater_count = 0;
-    ProfileStats* prof = (g_profile ? tls_profile : NULL);
+    ProfileStats* prof = tls_profile;
 
     for (int p = 0; p < st->limit; p++) {
         CanonPackedState old_state = state[p];
@@ -2851,7 +2992,7 @@ int canon_state_prepare_push(const CanonState* st, int partition_id, CanonScratc
         if (__builtin_expect(g != (uint8_t)depth, 1)) {
             uint16_t r = canon_state_unpack_first_greater_val(old_state);
             if (__builtin_expect(x >= r, 1)) {
-                if (prof) prof->canon_prepare_fast_continue_by_depth[depth]++;
+                prof->canon_prepare_fast_continue_by_depth[depth]++;
                 continue;
             }
 
@@ -2860,12 +3001,12 @@ int canon_state_prepare_push(const CanonState* st, int partition_id, CanonScratc
                 next_fg = g;
                 next_fg_val = x;
             } else if (x < c) {
-                if (prof) prof->canon_prepare_order_rejects_by_depth[depth]++;
+                prof->canon_prepare_order_rejects_by_depth[depth]++;
                 return 0;
             } else {
-                if (prof) prof->canon_prepare_equal_case_calls_by_depth[depth]++;
+                prof->canon_prepare_equal_case_calls_by_depth[depth]++;
                 if (!canon_rebuild_equal_case(st, p, g, pid, &next_fg, &next_fg_val)) {
-                    if (prof) prof->canon_prepare_equal_case_rejects_by_depth[depth]++;
+                    prof->canon_prepare_equal_case_rejects_by_depth[depth]++;
                     return 0;
                 }
                 if (next_fg == new_depth) {
@@ -2874,7 +3015,7 @@ int canon_state_prepare_push(const CanonState* st, int partition_id, CanonScratc
             }
         } else {
             if (x < pid) {
-                if (prof) prof->canon_prepare_order_rejects_by_depth[depth]++;
+                prof->canon_prepare_order_rejects_by_depth[depth]++;
                 return 0;
             }
             if (x == pid) {
@@ -2901,12 +3042,18 @@ int canon_state_prepare_push(const CanonState* st, int partition_id, CanonScratc
     }
     scratch->next_equal_count = next_equal_count;
     scratch->changed_first_greater_count = changed_first_greater_count;
-    if (prof) {
-        prof->canon_prepare_scanned_by_depth[depth] += st->limit;
-        prof->canon_prepare_active_by_depth[depth] += active_count;
-    }
+    prof->canon_prepare_scanned_by_depth[depth] += st->limit;
+    prof->canon_prepare_active_by_depth[depth] += active_count;
     *next_stabilizer = stabilizer;
     return 1;
+}
+
+int canon_state_prepare_push(const CanonState* st, int partition_id, CanonScratch* scratch,
+                             int* next_stabilizer) {
+    if (__builtin_expect(!g_profile || tls_profile == NULL, 1)) {
+        return canon_state_prepare_push_fast(st, partition_id, scratch, next_stabilizer);
+    }
+    return canon_state_prepare_push_profiled(st, partition_id, scratch, next_stabilizer);
 }
 
 void canon_state_commit_push(CanonState* st, int partition_id, const CanonScratch* scratch,
