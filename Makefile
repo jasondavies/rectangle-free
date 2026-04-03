@@ -17,6 +17,7 @@ OPENMP_LDFLAGS ?=
 endif
 
 PARTITION_CFLAGS ?= -O3 -march=native $(OPENMP_CFLAGS) -DUSE_TLS -I$(NAUTY_BUILD_DIR) -I$(NAUTY_DIR)
+PARTITION_PROFILE_CFLAGS ?= -DRECT_PROFILE=1
 LDFLAGS ?= $(NAUTY_BUILD_DIR)/nautyT.a -lm $(OPENMP_LDFLAGS)
 PARTITION_POLY_7_NAUTY_CFLAGS ?= -DWORDSIZE=64 -DMAXN=WORDSIZE
 PARTITION_POLY_7_CACHE_CFLAGS ?= -DRAW_CACHE_BITS=15 -DRAW_CACHE_PROBE=12
@@ -35,7 +36,7 @@ PARTITION_POLY_7_LDFLAGS += -flto
 CFLAGS_5XN += -flto
 endif
 
-all: 5xn_count4 partition_count4 partition_poly partition_poly_7 small_graph_lookup_gen connected_canon_lookup_gen
+all: 5xn_count4 partition_count4 partition_poly partition_poly_7 partition_poly_profile partition_poly_7_profile small_graph_lookup_gen connected_canon_lookup_gen
 
 $(NAUTY_BUILD_DIR)/.prepared:
 	rm -rf $(NAUTY_BUILD_DIR)
@@ -61,8 +62,14 @@ partition_count4: partition_poly.c $(NAUTY_BUILD_DIR)/nautyT.a
 partition_poly: partition_poly.c $(NAUTY_BUILD_DIR)/nautyT.a
 	$(CC) $(PARTITION_CFLAGS) -o $@ $< $(LDFLAGS)
 
+partition_poly_profile: partition_poly.c $(NAUTY_BUILD_DIR)/nautyT.a
+	$(CC) $(PARTITION_CFLAGS) $(PARTITION_PROFILE_CFLAGS) -o $@ $< $(LDFLAGS)
+
 partition_poly_7: partition_poly.c $(NAUTY_BUILD_DIR)/nautyTL1.a
 	$(CC) $(PARTITION_CFLAGS) $(PARTITION_POLY_7_NAUTY_CFLAGS) $(PARTITION_POLY_7_CACHE_CFLAGS) -DMAX_COLS=7 -DDEFAULT_ROWS=7 -DDEFAULT_COLS=7 -DCACHE_BITS=17 -o $@ $< $(PARTITION_POLY_7_LDFLAGS)
+
+partition_poly_7_profile: partition_poly.c $(NAUTY_BUILD_DIR)/nautyTL1.a
+	$(CC) $(PARTITION_CFLAGS) $(PARTITION_PROFILE_CFLAGS) $(PARTITION_POLY_7_NAUTY_CFLAGS) $(PARTITION_POLY_7_CACHE_CFLAGS) -DMAX_COLS=7 -DDEFAULT_ROWS=7 -DDEFAULT_COLS=7 -DCACHE_BITS=17 -o $@ $< $(PARTITION_POLY_7_LDFLAGS)
 
 small_graph_lookup_gen: small_graph_lookup_gen.c
 	$(CC) $(CFLAGS_5XN) -o $@ $<
@@ -71,9 +78,9 @@ connected_canon_lookup_gen: connected_canon_lookup_gen.c partition_poly.c $(NAUT
 	$(CC) $(PARTITION_CFLAGS) $(PARTITION_POLY_7_NAUTY_CFLAGS) $(PARTITION_POLY_7_CACHE_CFLAGS) -DMAX_COLS=7 -DDEFAULT_ROWS=7 -DDEFAULT_COLS=7 -DCACHE_BITS=17 -o $@ $< $(PARTITION_POLY_7_LDFLAGS)
 
 clean:
-	rm -f 5xn_count4 partition_count4 partition_poly partition_poly_7 small_graph_lookup_gen connected_canon_lookup_gen
+	rm -f 5xn_count4 partition_count4 partition_poly partition_poly_7 partition_poly_profile partition_poly_7_profile small_graph_lookup_gen connected_canon_lookup_gen
 
 clean-nauty:
 	rm -rf $(NAUTY_BUILD_DIR)
 
-.PHONY: all clean clean-nauty 5xn_count4 partition_count4 partition_poly partition_poly_7 small_graph_lookup_gen connected_canon_lookup_gen
+.PHONY: all clean clean-nauty 5xn_count4 partition_count4 partition_poly partition_poly_profile partition_poly_7 partition_poly_7_profile small_graph_lookup_gen connected_canon_lookup_gen

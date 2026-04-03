@@ -11,6 +11,12 @@
 #include <omp.h>
 #include "progress_util.h"
 
+#ifndef RECT_PROFILE
+#define RECT_PROFILE 0
+#endif
+
+#define PROFILE_BUILD RECT_PROFILE
+
 // --- CONFIGURATION ---
 #ifndef DEFAULT_ROWS
 #define DEFAULT_ROWS 6
@@ -409,7 +415,6 @@ static long long progress_last_reported = 0;
 static int g_adaptive_subdivide = 0;
 static int g_adaptive_max_depth = 3;
 static long long g_adaptive_work_budget = 0;
-static int g_profile = 0;
 static __thread ProfileStats* tls_profile = NULL;
 static __thread GraphHardStats* tls_hard_graph_stats = NULL;
 static __thread long long* tls_adaptive_work_counter = NULL;
@@ -749,7 +754,7 @@ static inline void complete_task_report_and_time(long long total_tasks, long lon
                                                  TaskTimingStats* task_timing, long long task_index,
                                                  double task_t0) {
     complete_task_and_report(total_tasks, report_step, start_time, pending_completed);
-    if (g_profile && task_timing) {
+    if (PROFILE_BUILD && task_timing) {
         double elapsed = omp_get_wtime() - task_t0;
         task_timing_record(task_timing, task_index, elapsed);
         record_task_time_value(task_index, elapsed);
@@ -887,7 +892,7 @@ static void local_queue_finish_item(LocalTaskQueue* queue, long long root_id,
 
     if (remaining == 0) {
         complete_task_and_report(total_tasks, report_step, start_time, pending_completed);
-        if (g_profile && task_timing && queue->roots[root_id].launched_at >= 0.0) {
+        if (PROFILE_BUILD && task_timing && queue->roots[root_id].launched_at >= 0.0) {
             double elapsed = omp_get_wtime() - queue->roots[root_id].launched_at;
             task_timing_record(task_timing, queue->roots[root_id].task_index, elapsed);
             record_task_time_value(queue->roots[root_id].task_index, elapsed);
@@ -2024,7 +2029,11 @@ void print_poly(Poly p) {
 static void usage(const char* prog) {
     fprintf(stderr,
             "Usage:\n"
-            "  %s [rows cols] [--task-start N] [--task-end N] [--prefix-depth N] [--reorder] [--adaptive-subdivide] [--adaptive-max-depth N] [--adaptive-work-budget N] [--poly-out FILE] [--profile] [--task-times-out FILE]\n"
+            "  %s [rows cols] [--task-start N] [--task-end N] [--prefix-depth N] [--reorder] [--adaptive-subdivide] [--adaptive-max-depth N] [--adaptive-work-budget N] [--poly-out FILE]"
+#if RECT_PROFILE
+            " [--task-times-out FILE]"
+#endif
+            "\n"
             "\n"
             "Notes:\n"
             "  --task-start/--task-end define a half-open task range [start, end).\n"
@@ -2032,7 +2041,7 @@ static void usage(const char* prog) {
             "  --reorder changes partition IDs and task numbering.\n"
             "  Adaptive subdivision currently supports only --prefix-depth 2.\n"
             "  In full polynomial mode it uses a local runtime queue of donated subtrees.\n"
-            "  --profile prints coarse timing counters for the main phases.\n",
+            "  Profiling is selected at compile time.\n",
             prog);
 }
 
@@ -2769,10 +2778,14 @@ static int canon_state_prepare_terminal_profiled(const CanonState* st, int parti
 
 static int canon_state_prepare_terminal(const CanonState* st, int partition_id,
                                         int* next_stabilizer) {
-    if (__builtin_expect(!g_profile || tls_profile == NULL, 1)) {
+#if RECT_PROFILE
+    if (tls_profile == NULL) {
         return canon_state_prepare_terminal_fast(st, partition_id, next_stabilizer);
     }
     return canon_state_prepare_terminal_profiled(st, partition_id, next_stabilizer);
+#else
+    return canon_state_prepare_terminal_fast(st, partition_id, next_stabilizer);
+#endif
 }
 
 static inline int canon_state_partition_is_rep(const CanonState* st, int min_idx,
@@ -3050,10 +3063,14 @@ static int canon_state_prepare_push_profiled(const CanonState* st, int partition
 
 int canon_state_prepare_push(const CanonState* st, int partition_id, CanonScratch* scratch,
                              int* next_stabilizer) {
-    if (__builtin_expect(!g_profile || tls_profile == NULL, 1)) {
+#if RECT_PROFILE
+    if (tls_profile == NULL) {
         return canon_state_prepare_push_fast(st, partition_id, scratch, next_stabilizer);
     }
     return canon_state_prepare_push_profiled(st, partition_id, scratch, next_stabilizer);
+#else
+    return canon_state_prepare_push_fast(st, partition_id, scratch, next_stabilizer);
+#endif
 }
 
 void canon_state_commit_push(CanonState* st, int partition_id, const CanonScratch* scratch,
@@ -3200,9 +3217,9 @@ void get_canonical_graph(Graph* g, Graph* canon, NautyWorkspace* ws, ProfileStat
     statsblk stats;
     
     // Compute canonical form
-    if (g_profile && profile) t0 = omp_get_wtime();
+    if (PROFILE_BUILD && profile) t0 = omp_get_wtime();
     densenauty(ng, lab, ptn, orbits, &options, &stats, m, n, cg);
-    if (g_profile && profile) {
+    if (PROFILE_BUILD && profile) {
         profile->nauty_calls++;
         profile->nauty_time += omp_get_wtime() - t0;
     }
@@ -4137,7 +4154,7 @@ void remove_vertex(Graph* g, int i) {
 }
 
 static inline void record_hard_graph_node(ProfileStats* profile, int n, int max_degree) {
-    if (g_profile && profile) {
+    if (PROFILE_BUILD && profile) {
         profile->hard_graph_nodes++;
         if (n >= 0 && n <= MAXN_NAUTY) profile->hard_graph_nodes_by_n[n]++;
         if (n >= 0 && n <= MAXN_NAUTY && max_degree >= 0 && max_degree <= MAXN_NAUTY) {
@@ -4173,7 +4190,7 @@ static void solve_graph_poly(const Graph* input_g, RowGraphCache* cache, RowGrap
         SG_OUTCOME_COMPONENTS,
         SG_OUTCOME_HARD_MISS,
     } outcome = SG_OUTCOME_NONE;
-    if (g_profile && profile) {
+    if (PROFILE_BUILD && profile) {
         profile->solve_graph_calls++;
         solve_t0 = omp_get_wtime();
     }
@@ -4222,7 +4239,7 @@ static void solve_graph_poly(const Graph* input_g, RowGraphCache* cache, RowGrap
     }
 
     profile_n = g.n;
-    if (g_profile && profile && profile_n >= 0 && profile_n <= MAXN_NAUTY) {
+    if (PROFILE_BUILD && profile && profile_n >= 0 && profile_n <= MAXN_NAUTY) {
         profile->solve_graph_calls_by_n[profile_n]++;
     }
 
@@ -4247,7 +4264,7 @@ static void solve_graph_poly(const Graph* input_g, RowGraphCache* cache, RowGrap
         if (row_graph_cache_lookup_rows(raw_cache, raw_hash, (uint32_t)g.n, raw_rows,
                                         &raw_cached, 1)) {
             (*local_raw_cache_hits)++;
-            if (g_profile && profile && g.n <= MAXN_NAUTY) {
+            if (PROFILE_BUILD && profile && g.n <= MAXN_NAUTY) {
                 profile->solve_graph_raw_hits_by_n[g.n]++;
             }
             graph_poly_set_count4(multiplier * graph_poly_get_count4(&raw_cached), out_result);
@@ -4284,7 +4301,7 @@ static void solve_graph_poly(const Graph* input_g, RowGraphCache* cache, RowGrap
             if (g_use_raw_cache) {
                 store_row_graph_cache_entry_rows(raw_cache, raw_hash, (uint32_t)g.n, raw_rows, &res);
             }
-            if (g_profile && profile && canon.n <= MAXN_NAUTY) {
+            if (PROFILE_BUILD && profile && canon.n <= MAXN_NAUTY) {
                 profile->solve_graph_canon_hits_by_n[canon.n]++;
             }
             graph_poly_set_count4(multiplier * graph_poly_get_count4(&res), out_result);
@@ -4297,7 +4314,7 @@ static void solve_graph_poly(const Graph* input_g, RowGraphCache* cache, RowGrap
             store_row_graph_cache_entry(cache, hash, (uint32_t)canon.n, &canon,
                                         (AdjWord)ADJWORD_MASK, &res);
             (*local_cache_hits)++;
-            if (g_profile && profile && canon.n <= MAXN_NAUTY) {
+            if (PROFILE_BUILD && profile && canon.n <= MAXN_NAUTY) {
                 profile->solve_graph_canon_hits_by_n[canon.n]++;
             }
             if (g_use_raw_cache) {
@@ -4341,7 +4358,7 @@ static void solve_graph_poly(const Graph* input_g, RowGraphCache* cache, RowGrap
     }
     graph_poly_set_count4(multiplier * graph_poly_get_count4(&res), out_result);
 done:
-    if (g_profile && profile) {
+    if (PROFILE_BUILD && profile) {
         double dt = omp_get_wtime() - solve_t0;
         profile->solve_graph_time += dt;
         if (profile_n >= 0 && profile_n <= MAXN_NAUTY) {
@@ -4388,7 +4405,7 @@ done:
         SG_OUTCOME_COMPONENTS,
         SG_OUTCOME_HARD_MISS,
     } outcome = SG_OUTCOME_NONE;
-    if (g_profile && profile) {
+    if (PROFILE_BUILD && profile) {
         profile->solve_graph_calls++;
         solve_t0 = omp_get_wtime();
     }
@@ -4432,7 +4449,7 @@ done:
     }
 
     profile_n = g.n;
-    if (g_profile && profile && profile_n >= 0 && profile_n <= MAXN_NAUTY) {
+    if (PROFILE_BUILD && profile && profile_n >= 0 && profile_n <= MAXN_NAUTY) {
         profile->solve_graph_calls_by_n[profile_n]++;
     }
     
@@ -4460,7 +4477,7 @@ done:
         if (row_graph_cache_lookup_rows(raw_cache, raw_hash, (uint32_t)g.n, raw_rows,
                                         &raw_cached, 1)) {
             (*local_raw_cache_hits)++;
-            if (g_profile && profile && g.n <= MAXN_NAUTY) {
+            if (PROFILE_BUILD && profile && g.n <= MAXN_NAUTY) {
                 profile->solve_graph_raw_hits_by_n[g.n]++;
             }
             graph_poly_mul_ref(&multiplier, &raw_cached, out_result);
@@ -4499,7 +4516,7 @@ done:
             if (g_use_raw_cache) {
                 store_row_graph_cache_entry_rows(raw_cache, raw_hash, (uint32_t)g.n, raw_rows, &res);
             }
-            if (g_profile && profile && canon.n <= MAXN_NAUTY) {
+            if (PROFILE_BUILD && profile && canon.n <= MAXN_NAUTY) {
                 profile->solve_graph_canon_hits_by_n[canon.n]++;
             }
             graph_poly_mul_ref(&multiplier, &res, out_result);
@@ -4512,7 +4529,7 @@ done:
             store_row_graph_cache_entry(cache, hash, (uint32_t)canon.n, &canon,
                                         (AdjWord)ADJWORD_MASK, &res);
             (*local_cache_hits)++;
-            if (g_profile && profile && canon.n <= MAXN_NAUTY) {
+            if (PROFILE_BUILD && profile && canon.n <= MAXN_NAUTY) {
                 profile->solve_graph_canon_hits_by_n[canon.n]++;
             }
             if (g_use_raw_cache) {
@@ -4543,7 +4560,7 @@ done:
         }
         if (u != -1 && max_deg > 0) record_hard_graph_node(profile, branch_g->n, max_deg);
         outcome = SG_OUTCOME_HARD_MISS;
-        if (g_profile && g_profile_separators && profile &&
+        if (PROFILE_BUILD && g_profile_separators && profile &&
             branch_g->n >= 10 && branch_g->n <= MAXN_NAUTY) {
             if (graph_has_articulation_point(branch_g)) {
                 profile->hard_graph_articulation_by_n[branch_g->n]++;
@@ -4603,7 +4620,7 @@ done:
     }
     graph_poly_mul_ref(&multiplier, &res, out_result);
 done:
-    if (g_profile && profile) {
+    if (PROFILE_BUILD && profile) {
         double dt = omp_get_wtime() - solve_t0;
         profile->solve_graph_time += dt;
         if (profile_n >= 0 && profile_n <= MAXN_NAUTY) {
@@ -4786,14 +4803,14 @@ static void solve_structure_with_row_orbit(const Graph* partial_graph, long long
                                            const WeightAccum* weight_prod, long long mult_coeff,
                                            ProfileStats* profile, Poly* out_result) {
     double t0 = 0.0;
-    if (g_profile && profile) {
+    if (PROFILE_BUILD && profile) {
         profile->solve_structure_calls++;
         t0 = omp_get_wtime();
     }
 #if RECT_COUNT_K4
     unsigned __int128 structure_weight =
         (*weight_prod) * (WeightAccum)mult_coeff * (WeightAccum)row_orbit;
-    if (g_profile && profile) profile->build_weight_time += omp_get_wtime() - t0;
+    if (PROFILE_BUILD && profile) profile->build_weight_time += omp_get_wtime() - t0;
     if (structure_weight == 0) {
         poly_zero(out_result);
         return;
@@ -4801,7 +4818,7 @@ static void solve_structure_with_row_orbit(const Graph* partial_graph, long long
 #else
     Poly weight;
     poly_scale_ref(weight_prod, mult_coeff * row_orbit, &weight);
-    if (g_profile && profile) profile->build_weight_time += omp_get_wtime() - t0;
+    if (PROFILE_BUILD && profile) profile->build_weight_time += omp_get_wtime() - t0;
 #endif
     GraphPoly graph_poly_small;
     solve_graph_poly(partial_graph, cache, raw_cache, ws,
@@ -4971,18 +4988,18 @@ void dfs(int depth, int min_idx, int* stack, CanonState* canon_state, const Part
         return;
     }
 
-    if (__builtin_expect(!g_profile, 1)) {
-        if (canon_state_use_orbit_marking(canon_state)) {
-            dfs_fast_orbit(depth, min_idx, stack, canon_state, partial_graph, cache, raw_cache, ws,
-                           local_total, local_canon_calls, local_cache_hits, local_raw_cache_hits,
-                           weight_prod, mult_coeff, run_len, profile, canon_scratch);
-        } else {
-            dfs_fast_rep(depth, min_idx, stack, canon_state, partial_graph, cache, raw_cache, ws,
-                         local_total, local_canon_calls, local_cache_hits, local_raw_cache_hits,
-                         weight_prod, mult_coeff, run_len, profile, canon_scratch);
-        }
-        return;
+#if !RECT_PROFILE
+    if (canon_state_use_orbit_marking(canon_state)) {
+        dfs_fast_orbit(depth, min_idx, stack, canon_state, partial_graph, cache, raw_cache, ws,
+                       local_total, local_canon_calls, local_cache_hits, local_raw_cache_hits,
+                       weight_prod, mult_coeff, run_len, profile, canon_scratch);
+    } else {
+        dfs_fast_rep(depth, min_idx, stack, canon_state, partial_graph, cache, raw_cache, ws,
+                     local_total, local_canon_calls, local_cache_hits, local_raw_cache_hits,
+                     weight_prod, mult_coeff, run_len, profile, canon_scratch);
     }
+    return;
+#endif
 
     int next_stabilizer = 0;
     uint64_t orbit_mark_bits[REP_ORBIT_MARK_WORDS];
@@ -5004,7 +5021,7 @@ void dfs(int depth, int min_idx, int* stack, CanonState* canon_state, const Part
         if (!use_orbit_marking && !canon_state_partition_is_rep(canon_state, min_idx, i)) {
             continue;
         }
-        if (g_profile && profile) {
+        if (PROFILE_BUILD && profile) {
             profile->canon_prepare_calls++;
             profile->canon_prepare_calls_by_depth[depth]++;
             t0 = omp_get_wtime();
@@ -5013,10 +5030,10 @@ void dfs(int depth, int min_idx, int* stack, CanonState* canon_state, const Part
             ? canon_state_prepare_terminal(canon_state, i, &next_stabilizer)
             : canon_state_prepare_push(canon_state, i, canon_scratch, &next_stabilizer);
         if (!ok_prepare) {
-            if (g_profile && profile) profile->canon_prepare_time += omp_get_wtime() - t0;
+            if (PROFILE_BUILD && profile) profile->canon_prepare_time += omp_get_wtime() - t0;
             continue;
         }
-        if (g_profile && profile) {
+        if (PROFILE_BUILD && profile) {
             profile->canon_prepare_time += omp_get_wtime() - t0;
             profile->canon_prepare_accepts++;
             profile->canon_prepare_accepts_by_depth[depth]++;
@@ -5038,14 +5055,14 @@ void dfs(int depth, int min_idx, int* stack, CanonState* canon_state, const Part
         PartialGraphState next_graph = *partial_graph;
         if (!is_terminal) {
             canon_state_commit_push(canon_state, i, canon_scratch, next_stabilizer);
-            if (g_profile && profile) profile->canon_commit_time += omp_get_wtime() - t0;
+            if (PROFILE_BUILD && profile) profile->canon_commit_time += omp_get_wtime() - t0;
         }
-        if (g_profile && profile) {
+        if (PROFILE_BUILD && profile) {
             profile->partial_append_calls++;
             t0 = omp_get_wtime();
         }
         int ok = partial_graph_append_checked(&next_graph, depth, i, stack, cols_left);
-        if (g_profile && profile) profile->partial_append_time += omp_get_wtime() - t0;
+        if (PROFILE_BUILD && profile) profile->partial_append_time += omp_get_wtime() - t0;
         if (ok) {
             if (is_terminal) {
                 long long row_orbit = factorial[g_rows] / next_stabilizer;
@@ -5093,16 +5110,16 @@ static void execute_prefix2_fixed_batch(PrefixId i, const PrefixId* js, const lo
     partial_graph_reset(partial_graph);
 
     stack[0] = (int)i;
-    if (g_profile) {
+    if (PROFILE_BUILD) {
         profile->canon_prepare_calls++;
         profile->canon_prepare_calls_by_depth[0]++;
         t0 = omp_get_wtime();
     }
     if (!canon_state_prepare_push(canon_state, (int)i, canon_scratch, &next_stabilizer)) {
-        if (g_profile) profile->canon_prepare_time += omp_get_wtime() - t0;
+        if (PROFILE_BUILD) profile->canon_prepare_time += omp_get_wtime() - t0;
         return;
     }
-    if (g_profile) {
+    if (PROFILE_BUILD) {
         profile->canon_prepare_time += omp_get_wtime() - t0;
         profile->canon_prepare_accepts++;
         profile->canon_prepare_accepts_by_depth[0]++;
@@ -5111,38 +5128,38 @@ static void execute_prefix2_fixed_batch(PrefixId i, const PrefixId* js, const lo
         t0 = omp_get_wtime();
     }
     canon_state_commit_push(canon_state, (int)i, canon_scratch, next_stabilizer);
-    if (g_profile) profile->canon_commit_time += omp_get_wtime() - t0;
-    if (g_profile) {
+    if (PROFILE_BUILD) profile->canon_commit_time += omp_get_wtime() - t0;
+    if (PROFILE_BUILD) {
         profile->partial_append_calls++;
         t0 = omp_get_wtime();
     }
     if (!partial_graph_append_checked(partial_graph, 0, (int)i, stack, g_cols - 1)) {
-        if (g_profile) profile->partial_append_time += omp_get_wtime() - t0;
+        if (PROFILE_BUILD) profile->partial_append_time += omp_get_wtime() - t0;
         canon_state_pop(canon_state);
         return;
     }
-    if (g_profile) profile->partial_append_time += omp_get_wtime() - t0;
+    if (PROFILE_BUILD) profile->partial_append_time += omp_get_wtime() - t0;
 
     for (int idx = 0; idx < count; idx++) {
         long long p = ps[idx];
-        double task_t0 = g_profile ? omp_get_wtime() : 0.0;
+        double task_t0 = PROFILE_BUILD ? omp_get_wtime() : 0.0;
         PrefixId j = js[idx];
         Poly task_total;
         poly_zero(&task_total);
 
         stack[1] = (int)j;
-        if (g_profile) {
+        if (PROFILE_BUILD) {
             profile->canon_prepare_calls++;
             profile->canon_prepare_calls_by_depth[1]++;
             t0 = omp_get_wtime();
         }
         if (!canon_state_prepare_push(canon_state, (int)j, canon_scratch, &next_stabilizer)) {
-            if (g_profile) profile->canon_prepare_time += omp_get_wtime() - t0;
+            if (PROFILE_BUILD) profile->canon_prepare_time += omp_get_wtime() - t0;
             complete_task_report_and_time(total_tasks, progress_report_step, start_time,
                                           pending_completed, task_timing, p, task_t0);
             continue;
         }
-        if (g_profile) {
+        if (PROFILE_BUILD) {
             profile->canon_prepare_time += omp_get_wtime() - t0;
             profile->canon_prepare_accepts++;
             profile->canon_prepare_accepts_by_depth[1]++;
@@ -5151,14 +5168,14 @@ static void execute_prefix2_fixed_batch(PrefixId i, const PrefixId* js, const lo
             t0 = omp_get_wtime();
         }
         canon_state_commit_push(canon_state, (int)j, canon_scratch, next_stabilizer);
-        if (g_profile) profile->canon_commit_time += omp_get_wtime() - t0;
+        if (PROFILE_BUILD) profile->canon_commit_time += omp_get_wtime() - t0;
         PartialGraphState prefix_graph = *partial_graph;
-        if (g_profile) {
+        if (PROFILE_BUILD) {
             profile->partial_append_calls++;
             t0 = omp_get_wtime();
         }
         int ok = partial_graph_append_checked(&prefix_graph, 1, (int)j, stack, g_cols - 2);
-        if (g_profile) profile->partial_append_time += omp_get_wtime() - t0;
+        if (PROFILE_BUILD) profile->partial_append_time += omp_get_wtime() - t0;
         if (ok) {
             WeightAccum prefix_weight;
             weight_accum_from_partition((int)i, &prefix_weight);
@@ -5196,17 +5213,17 @@ static int replay_local_task_prefix(const LocalTask* task, WorkerCtx* ctx,
         double t0 = 0.0;
         ctx->stack[depth] = pid;
 
-        if (g_profile) {
+        if (PROFILE_BUILD) {
             tls_profile->canon_prepare_calls++;
             tls_profile->canon_prepare_calls_by_depth[depth]++;
             t0 = omp_get_wtime();
         }
         if (!canon_state_prepare_push(&ctx->canon_state, pid,
                                       &ctx->canon_scratch, &next_stabilizer)) {
-            if (g_profile) tls_profile->canon_prepare_time += omp_get_wtime() - t0;
+            if (PROFILE_BUILD) tls_profile->canon_prepare_time += omp_get_wtime() - t0;
             return 0;
         }
-        if (g_profile) {
+        if (PROFILE_BUILD) {
             tls_profile->canon_prepare_time += omp_get_wtime() - t0;
             tls_profile->canon_prepare_accepts++;
             tls_profile->canon_prepare_accepts_by_depth[depth]++;
@@ -5216,19 +5233,19 @@ static int replay_local_task_prefix(const LocalTask* task, WorkerCtx* ctx,
         }
         canon_state_commit_push(&ctx->canon_state, pid,
                                 &ctx->canon_scratch, next_stabilizer);
-        if (g_profile) tls_profile->canon_commit_time += omp_get_wtime() - t0;
+        if (PROFILE_BUILD) tls_profile->canon_commit_time += omp_get_wtime() - t0;
 
-        if (g_profile) {
+        if (PROFILE_BUILD) {
             tls_profile->partial_append_calls++;
             t0 = omp_get_wtime();
         }
         if (!partial_graph_append_checked(&ctx->partial_graph, depth, pid, ctx->stack,
                                           g_cols - depth - 1)) {
-            if (g_profile) tls_profile->partial_append_time += omp_get_wtime() - t0;
+            if (PROFILE_BUILD) tls_profile->partial_append_time += omp_get_wtime() - t0;
             canon_state_pop(&ctx->canon_state);
             return 0;
         }
-        if (g_profile) tls_profile->partial_append_time += omp_get_wtime() - t0;
+        if (PROFILE_BUILD) tls_profile->partial_append_time += omp_get_wtime() - t0;
 
         weight_accum_mul_partition(weight_prod, pid, weight_prod);
 
@@ -5314,7 +5331,7 @@ static void dfs_runtime_split_local(int depth, int start_pid, int end_pid, long 
             continue;
         }
         ctx->stack[depth] = pid;
-        if (g_profile) {
+        if (PROFILE_BUILD) {
             tls_profile->canon_prepare_calls++;
             tls_profile->canon_prepare_calls_by_depth[depth]++;
             t0 = omp_get_wtime();
@@ -5323,10 +5340,10 @@ static void dfs_runtime_split_local(int depth, int start_pid, int end_pid, long 
             ? canon_state_prepare_terminal(&ctx->canon_state, pid, &next_stabilizer)
             : canon_state_prepare_push(&ctx->canon_state, pid, &ctx->canon_scratch, &next_stabilizer);
         if (!ok_prepare) {
-            if (g_profile) tls_profile->canon_prepare_time += omp_get_wtime() - t0;
+            if (PROFILE_BUILD) tls_profile->canon_prepare_time += omp_get_wtime() - t0;
             continue;
         }
-        if (g_profile) {
+        if (PROFILE_BUILD) {
             tls_profile->canon_prepare_time += omp_get_wtime() - t0;
             tls_profile->canon_prepare_accepts++;
             tls_profile->canon_prepare_accepts_by_depth[depth]++;
@@ -5340,16 +5357,16 @@ static void dfs_runtime_split_local(int depth, int start_pid, int end_pid, long 
         PartialGraphState saved_graph = ctx->partial_graph;
         if (!is_terminal) {
             canon_state_commit_push(&ctx->canon_state, pid, &ctx->canon_scratch, next_stabilizer);
-            if (g_profile) tls_profile->canon_commit_time += omp_get_wtime() - t0;
+            if (PROFILE_BUILD) tls_profile->canon_commit_time += omp_get_wtime() - t0;
         }
 
-        if (g_profile) {
+        if (PROFILE_BUILD) {
             tls_profile->partial_append_calls++;
             t0 = omp_get_wtime();
         }
         if (partial_graph_append_checked(&ctx->partial_graph, depth, pid, ctx->stack,
                                          g_cols - depth - 1)) {
-            if (g_profile) tls_profile->partial_append_time += omp_get_wtime() - t0;
+            if (PROFILE_BUILD) tls_profile->partial_append_time += omp_get_wtime() - t0;
             WeightAccum next_weight_prod;
             weight_accum_mul_partition(weight_prod, pid, &next_weight_prod);
             long long next_mult_coeff = mult_coeff * (depth + 1);
@@ -5373,7 +5390,7 @@ static void dfs_runtime_split_local(int depth, int start_pid, int end_pid, long 
                                         &next_weight_prod, next_mult_coeff, next_run_len,
                                         profile, queue);
             }
-        } else if (g_profile) {
+        } else if (PROFILE_BUILD) {
             tls_profile->partial_append_time += omp_get_wtime() - t0;
         }
 
@@ -5394,13 +5411,13 @@ static void execute_local_runtime_task(const LocalTask* task, WorkerCtx* ctx, Po
     long long mult_coeff = 1;
     int run_len = 0;
     int min_idx = 0;
-    double subtask_t0 = g_profile ? omp_get_wtime() : 0.0;
-    long long solve_graph_before = g_profile ? profile->solve_graph_calls : 0;
-    long long nauty_before = g_profile ? profile->nauty_calls : 0;
+    double subtask_t0 = PROFILE_BUILD ? omp_get_wtime() : 0.0;
+    long long solve_graph_before = PROFILE_BUILD ? profile->solve_graph_calls : 0;
+    long long nauty_before = PROFILE_BUILD ? profile->nauty_calls : 0;
     long long adaptive_work_counter = 0;
     GraphHardStats subtask_hard = {0};
     GraphHardStats* prev_hard_stats = tls_hard_graph_stats;
-    if (g_profile) tls_hard_graph_stats = &subtask_hard;
+    if (PROFILE_BUILD) tls_hard_graph_stats = &subtask_hard;
     long long* prev_work_counter = tls_adaptive_work_counter;
     if (g_adaptive_work_budget > 0) tls_adaptive_work_counter = &adaptive_work_counter;
 
@@ -5428,7 +5445,7 @@ static void execute_local_runtime_task(const LocalTask* task, WorkerCtx* ctx, Po
     tls_hard_graph_stats = prev_hard_stats;
     tls_adaptive_work_counter = prev_work_counter;
 
-    if (g_profile && queue_subtask_stats && task->depth <= MAX_COLS) {
+    if (PROFILE_BUILD && queue_subtask_stats && task->depth <= MAX_COLS) {
         double elapsed = omp_get_wtime() - subtask_t0;
         long long solve_graph_delta = profile->solve_graph_calls - solve_graph_before;
         long long nauty_delta = profile->nauty_calls - nauty_before;
@@ -5496,14 +5513,20 @@ int main(int argc, char** argv) {
                 return 1;
             }
             g_adaptive_work_budget = parse_ll_or_die(argv[++i], "--adaptive-work-budget");
-        } else if (strcmp(argv[i], "--profile") == 0) {
-            g_profile = 1;
         } else if (strcmp(argv[i], "--task-times-out") == 0) {
+#if !RECT_PROFILE
+            fprintf(stderr, "--task-times-out requires a profiling build\n");
+            return 1;
+#else
             if (i + 1 >= argc) {
                 usage(argv[0]);
                 return 1;
             }
             g_task_times_out_path = argv[++i];
+#endif
+        } else if (argv[i][0] == '-') {
+            usage(argv[0]);
+            return 1;
         } else if (positional_count == 0) {
             g_rows = (int)parse_ll_or_die(argv[i], "rows");
             positional_count++;
@@ -5572,6 +5595,11 @@ int main(int argc, char** argv) {
 #else
     printf("Mode: chromatic polynomial\n");
 #endif
+#if RECT_PROFILE
+    printf("Profiling build: enabled\n");
+#else
+    printf("Profiling build: disabled\n");
+#endif
     printf("Using nauty for canonical graph caching\n");
 
     // Build prefix list for work distribution.
@@ -5617,10 +5645,6 @@ int main(int argc, char** argv) {
         fprintf(stderr, "--adaptive-work-budget requires --adaptive-subdivide\n");
         return 1;
     }
-    if (g_task_times_out_path && !g_profile) {
-        fprintf(stderr, "--task-times-out requires --profile\n");
-        return 1;
-    }
     {
         const char* queue_profile_step_env = getenv("RECT_QUEUE_PROFILE_STEP");
         if (queue_profile_step_env && *queue_profile_step_env) {
@@ -5639,11 +5663,13 @@ int main(int argc, char** argv) {
                 return 1;
             }
         }
+#if RECT_PROFILE
         const char* profile_separators_env = getenv("RECT_PROFILE_SEPARATORS");
         if (profile_separators_env && *profile_separators_env &&
             strcmp(profile_separators_env, "0") != 0) {
             g_profile_separators = 1;
         }
+#endif
         const char* raw_cache_env = getenv("RECT_USE_RAW_CACHE");
         if (raw_cache_env && *raw_cache_env) {
             g_use_raw_cache = (strcmp(raw_cache_env, "0") != 0);
@@ -5814,7 +5840,7 @@ int main(int argc, char** argv) {
     if (total_tasks > 0) {
         small_graph_lookup_init();
         connected_canon_lookup_n9_init();
-        if (g_profile) {
+        if (PROFILE_BUILD) {
             printf("Small-graph lookup %s: %.2f seconds\n",
                    g_small_graph_lookup_loaded_from_file ? "load" : "initialisation",
                    g_small_graph_lookup_init_time);
@@ -5873,7 +5899,7 @@ int main(int argc, char** argv) {
     for(int i=0; i<num_threads; i++) poly_zero(&thread_polys[i]);
     memset(thread_profiles, 0, (size_t)num_threads * sizeof(ProfileStats));
     memset(thread_task_timing, 0, (size_t)num_threads * sizeof(TaskTimingStats));
-    if (use_runtime_split_queue && g_profile) {
+    if (use_runtime_split_queue && PROFILE_BUILD) {
         thread_queue_subtask_timing = checked_aligned_alloc(
             64, (size_t)num_threads * (size_t)(MAX_COLS + 1) * sizeof(QueueSubtaskTimingStats),
             "thread_queue_subtask_timing");
@@ -5944,24 +5970,24 @@ int main(int argc, char** argv) {
             // Original 1-column parallelism (nothing to prefix)
             #pragma omp for schedule(runtime)
             for (long long i = first_task; i < active_task_end; i++) {
-                double task_t0 = g_profile ? omp_get_wtime() : 0.0;
+                double task_t0 = PROFILE_BUILD ? omp_get_wtime() : 0.0;
                 double t0 = 0.0;
                 stack[0] = i;
                 canon_state_reset(&canon_state, perm_count);
                 partial_graph_reset(&partial_graph);
                 int next_stabilizer = 0;
-                if (g_profile) {
+                if (PROFILE_BUILD) {
                     profile->canon_prepare_calls++;
                     profile->canon_prepare_calls_by_depth[0]++;
                     t0 = omp_get_wtime();
                 }
                 if (!canon_state_prepare_push(&canon_state, (int)i, &canon_scratch, &next_stabilizer)) {
-                    if (g_profile) profile->canon_prepare_time += omp_get_wtime() - t0;
+                    if (PROFILE_BUILD) profile->canon_prepare_time += omp_get_wtime() - t0;
                     complete_task_report_and_time(total_tasks, progress_report_step, start_time,
                                                   &pending_completed, task_timing, i, task_t0);
                     continue;
                 }
-                if (g_profile) {
+                if (PROFILE_BUILD) {
                     profile->canon_prepare_time += omp_get_wtime() - t0;
                     profile->canon_prepare_accepts++;
                     profile->canon_prepare_accepts_by_depth[0]++;
@@ -5970,13 +5996,13 @@ int main(int argc, char** argv) {
                     t0 = omp_get_wtime();
                 }
                 canon_state_commit_push(&canon_state, (int)i, &canon_scratch, next_stabilizer);
-                if (g_profile) profile->canon_commit_time += omp_get_wtime() - t0;
-                if (g_profile) {
+                if (PROFILE_BUILD) profile->canon_commit_time += omp_get_wtime() - t0;
+                if (PROFILE_BUILD) {
                     profile->partial_append_calls++;
                     t0 = omp_get_wtime();
                 }
                 int ok = partial_graph_append_checked(&partial_graph, 0, (int)i, stack, g_cols - 1);
-                if (g_profile) profile->partial_append_time += omp_get_wtime() - t0;
+                if (PROFILE_BUILD) profile->partial_append_time += omp_get_wtime() - t0;
                 if (ok) {
                     WeightAccum initial_weight;
                     weight_accum_from_partition((int)i, &initial_weight);
@@ -6032,7 +6058,7 @@ int main(int argc, char** argv) {
             } else {
                 #pragma omp for schedule(runtime)
                 for (long long t = 0; t < total_tasks; t++) {
-                    double task_t0 = g_profile ? omp_get_wtime() : 0.0;
+                    double task_t0 = PROFILE_BUILD ? omp_get_wtime() : 0.0;
                     double t0 = 0.0;
                     long long p = first_task + t;
                     int i = 0;
@@ -6044,18 +6070,18 @@ int main(int argc, char** argv) {
                     partial_graph_reset(&partial_graph);
 
                     stack[0] = i;
-                    if (g_profile) {
+                    if (PROFILE_BUILD) {
                         profile->canon_prepare_calls++;
                         profile->canon_prepare_calls_by_depth[0]++;
                         t0 = omp_get_wtime();
                     }
                     if (!canon_state_prepare_push(&canon_state, i, &canon_scratch, &next_stabilizer)) {
-                        if (g_profile) profile->canon_prepare_time += omp_get_wtime() - t0;
+                        if (PROFILE_BUILD) profile->canon_prepare_time += omp_get_wtime() - t0;
                         complete_task_report_and_time(total_tasks, progress_report_step, start_time,
                                                       &pending_completed, task_timing, p, task_t0);
                         continue;
                     }
-                    if (g_profile) {
+                    if (PROFILE_BUILD) {
                         profile->canon_prepare_time += omp_get_wtime() - t0;
                         profile->canon_prepare_accepts++;
                         profile->canon_prepare_accepts_by_depth[0]++;
@@ -6064,13 +6090,13 @@ int main(int argc, char** argv) {
                         t0 = omp_get_wtime();
                     }
                     canon_state_commit_push(&canon_state, i, &canon_scratch, next_stabilizer);
-                    if (g_profile) profile->canon_commit_time += omp_get_wtime() - t0;
-                    if (g_profile) {
+                    if (PROFILE_BUILD) profile->canon_commit_time += omp_get_wtime() - t0;
+                    if (PROFILE_BUILD) {
                         profile->partial_append_calls++;
                         t0 = omp_get_wtime();
                     }
                     int ok = partial_graph_append_checked(&partial_graph, 0, i, stack, g_cols - 1);
-                    if (g_profile) profile->partial_append_time += omp_get_wtime() - t0;
+                    if (PROFILE_BUILD) profile->partial_append_time += omp_get_wtime() - t0;
                     if (!ok) {
                         canon_state_pop(&canon_state);
                         complete_task_report_and_time(total_tasks, progress_report_step, start_time,
@@ -6079,19 +6105,19 @@ int main(int argc, char** argv) {
                     }
 
                     stack[1] = j;
-                    if (g_profile) {
+                    if (PROFILE_BUILD) {
                         profile->canon_prepare_calls++;
                         profile->canon_prepare_calls_by_depth[1]++;
                         t0 = omp_get_wtime();
                     }
                     if (!canon_state_prepare_push(&canon_state, j, &canon_scratch, &next_stabilizer)) {
-                        if (g_profile) profile->canon_prepare_time += omp_get_wtime() - t0;
+                        if (PROFILE_BUILD) profile->canon_prepare_time += omp_get_wtime() - t0;
                         canon_state_pop(&canon_state);
                         complete_task_report_and_time(total_tasks, progress_report_step, start_time,
                                                       &pending_completed, task_timing, p, task_t0);
                         continue;
                     }
-                    if (g_profile) {
+                    if (PROFILE_BUILD) {
                         profile->canon_prepare_time += omp_get_wtime() - t0;
                         profile->canon_prepare_accepts++;
                         profile->canon_prepare_accepts_by_depth[1]++;
@@ -6100,14 +6126,14 @@ int main(int argc, char** argv) {
                         t0 = omp_get_wtime();
                     }
                     canon_state_commit_push(&canon_state, j, &canon_scratch, next_stabilizer);
-                    if (g_profile) profile->canon_commit_time += omp_get_wtime() - t0;
+                    if (PROFILE_BUILD) profile->canon_commit_time += omp_get_wtime() - t0;
                     PartialGraphState prefix_graph = partial_graph;
-                    if (g_profile) {
+                    if (PROFILE_BUILD) {
                         profile->partial_append_calls++;
                         t0 = omp_get_wtime();
                     }
                     ok = partial_graph_append_checked(&prefix_graph, 1, j, stack, g_cols - 2);
-                    if (g_profile) profile->partial_append_time += omp_get_wtime() - t0;
+                    if (PROFILE_BUILD) profile->partial_append_time += omp_get_wtime() - t0;
                     if (ok) {
                         WeightAccum prefix_weight;
                         weight_accum_from_partition(i, &prefix_weight);
@@ -6129,7 +6155,7 @@ int main(int argc, char** argv) {
         } else if (prefix_depth == 3) {
             #pragma omp for schedule(runtime)
             for (long long t = 0; t < total_tasks; t++) {
-                double task_t0 = g_profile ? omp_get_wtime() : 0.0;
+                double task_t0 = PROFILE_BUILD ? omp_get_wtime() : 0.0;
                 long long p = first_task + t;
                 int i = 0;
                 int j = 0;
@@ -6211,7 +6237,7 @@ int main(int argc, char** argv) {
         } else {
             #pragma omp for schedule(runtime)
             for (long long t = 0; t < total_tasks; t++) {
-                double task_t0 = g_profile ? omp_get_wtime() : 0.0;
+                double task_t0 = PROFILE_BUILD ? omp_get_wtime() : 0.0;
                 long long p = first_task + t;
                 int i = 0;
                 int j = 0;
@@ -6464,7 +6490,7 @@ int main(int argc, char** argv) {
     printf("Canonical cache hits: %lld (%.1f%%)\n", total_cache_hits,
            total_canon_calls > 0 ? 100.0 * total_cache_hits / total_canon_calls : 0.0);
     printf("Raw cache hits: %lld\n", total_raw_cache_hits);
-    if (g_profile) {
+    if (PROFILE_BUILD) {
         printf("Profile:\n");
         printf("  canon_state_prepare_push: %lld calls, %.3fs\n",
                total_profile.canon_prepare_calls, total_profile.canon_prepare_time);
