@@ -4,45 +4,6 @@
 
 #define REP_ORBIT_MARK_WORDS ((CANON_PARTITION_ID_LIMIT + 63u) / 64u)
 
-typedef struct {
-    int limit;
-    int depth;
-    uint8_t* first_greater;
-    uint16_t* first_greater_val;
-    uint16_t* equal_perm;
-    uint16_t* changed_first_greater_idx;
-    uint8_t* changed_first_greater_old_idx;
-    uint16_t* changed_first_greater_old_val;
-    uint16_t equal_count[MAX_COLS + 1];
-    uint16_t changed_first_greater_count[MAX_COLS];
-    uint16_t stack_vals[MAX_COLS];
-    const uint16_t* stack_perm_rows[MAX_COLS];
-    int stabilizer[MAX_COLS + 1];
-} CanonState;
-
-typedef struct {
-    int limit;
-    uint8_t* changed_first_greater_new_idx;
-    uint16_t* changed_first_greater_new_val;
-    uint16_t* next_equal_perm;
-    uint16_t* changed_first_greater_idx;
-    uint16_t next_equal_count;
-    uint16_t changed_first_greater_count;
-} CanonScratch;
-
-typedef struct {
-    RowGraphCache cache;
-    RowGraphCache raw_cache;
-    NautyWorkspace ws;
-    CanonState canon_state;
-    CanonScratch canon_scratch;
-    PartialGraphState partial_graph;
-    int stack[MAX_COLS];
-    long long local_canon_calls;
-    long long local_cache_hits;
-    long long local_raw_cache_hits;
-} WorkerCtx;
-
 static inline uint16_t* canon_state_changed_first_greater_idx_row(CanonState* st, int depth) {
     return st->changed_first_greater_idx + (size_t)depth * (size_t)st->limit;
 }
@@ -583,7 +544,7 @@ static inline void canon_state_seed_orbit_marks(const CanonState* st, int min_id
     }
 }
 
-static void canon_state_init(CanonState* st, int limit) {
+void canon_state_init(CanonState* st, int limit) {
     memset(st, 0, sizeof(*st));
     st->limit = limit;
     st->first_greater =
@@ -604,7 +565,7 @@ static void canon_state_init(CanonState* st, int limit) {
                        "canon_state_changed_first_greater_old_val");
 }
 
-static void canon_state_free(CanonState* st) {
+void canon_state_free(CanonState* st) {
     free(st->first_greater);
     free(st->first_greater_val);
     free(st->equal_perm);
@@ -614,7 +575,7 @@ static void canon_state_free(CanonState* st) {
     memset(st, 0, sizeof(*st));
 }
 
-static void canon_scratch_init(CanonScratch* scratch, int limit) {
+void canon_scratch_init(CanonScratch* scratch, int limit) {
     memset(scratch, 0, sizeof(*scratch));
     scratch->limit = limit;
     scratch->changed_first_greater_new_idx =
@@ -631,7 +592,7 @@ static void canon_scratch_init(CanonScratch* scratch, int limit) {
                                                         "canon_scratch_changed_first_greater_idx");
 }
 
-static void canon_scratch_free(CanonScratch* scratch) {
+void canon_scratch_free(CanonScratch* scratch) {
     free(scratch->changed_first_greater_new_idx);
     free(scratch->changed_first_greater_new_val);
     free(scratch->next_equal_perm);
@@ -1226,7 +1187,7 @@ static int small_graph_lookup_try_load_file(const char* path) {
     return 1;
 }
 
-static void small_graph_lookup_init(void) {
+void small_graph_lookup_init(void) {
     if (g_small_graph_lookup_ready) return;
 
     double t0 = omp_get_wtime();
@@ -1241,7 +1202,7 @@ static void small_graph_lookup_init(void) {
     g_small_graph_lookup_init_time = omp_get_wtime() - t0;
 }
 
-static void small_graph_lookup_free(void) {
+void small_graph_lookup_free(void) {
     for (int n = 0; n <= SMALL_GRAPH_LOOKUP_MAX_N; n++) {
         free(g_small_graph_lookup_coeffs[n]);
         g_small_graph_lookup_coeffs[n] = NULL;
@@ -1324,7 +1285,7 @@ static int connected_canon_lookup_try_load_file(const char* path) {
     return 1;
 }
 
-static void connected_canon_lookup_init(void) {
+void connected_canon_lookup_init(void) {
     if (g_connected_canon_lookup_ready) return;
     double t0 = omp_get_wtime();
     const char* env_path = connected_canon_lookup_default_path();
@@ -1340,7 +1301,7 @@ static void connected_canon_lookup_init(void) {
     g_connected_canon_lookup_load_time = omp_get_wtime() - t0;
 }
 
-static void connected_canon_lookup_free(void) {
+void connected_canon_lookup_free(void) {
     free(g_connected_canon_lookup);
     g_connected_canon_lookup = NULL;
     g_connected_canon_lookup_count = 0;
@@ -1789,7 +1750,7 @@ static inline void row_graph_cache_load_poly(const RowGraphCache* cache, int slo
            (size_t)(deg + 1) * sizeof(value->coeffs[0]));
 }
 
-static void shared_graph_cache_init(SharedGraphCache* shared, int bits, int poly_len) {
+void shared_graph_cache_init(SharedGraphCache* shared, int bits, int poly_len) {
     size_t size = (size_t)1 << bits;
     memset(shared, 0, sizeof(*shared));
     pthread_rwlock_init(&shared->lock, NULL);
@@ -1808,7 +1769,7 @@ static void shared_graph_cache_init(SharedGraphCache* shared, int bits, int poly
     shared->enabled = 1;
 }
 
-static void shared_graph_cache_free(SharedGraphCache* shared) {
+void shared_graph_cache_free(SharedGraphCache* shared) {
     if (!shared) return;
     free(shared->cache.keys);
     free(shared->cache.stamps);
@@ -2003,7 +1964,7 @@ static void store_row_graph_cache_entry_rows(RowGraphCache* cache, uint64_t key_
     row_graph_cache_touch_slot(cache, best_slot);
 }
 
-static void partial_graph_reset(PartialGraphState* st) {
+void partial_graph_reset(PartialGraphState* st) {
     st->g.n = 0;
     st->g.vertex_mask = 0;
     memset(st->g.adj, 0, sizeof(st->g.adj));
@@ -2083,8 +2044,8 @@ static inline int partial_graph_candidate_can_fit(const PartialGraphState* st, i
     return 1;
 }
 
-static inline int partial_graph_append_checked(PartialGraphState* st, int depth, int pid,
-                                               const int* stack, int cols_left) {
+int partial_graph_append_checked(PartialGraphState* st, int depth, int pid,
+                                 const int* stack, int cols_left) {
     if (!partial_graph_candidate_can_fit(st, pid, cols_left)) return 0;
     if (!partial_graph_append(st, depth, pid, stack)) return 0;
 #if RECT_COUNT_K4_FEASIBILITY
@@ -2093,8 +2054,8 @@ static inline int partial_graph_append_checked(PartialGraphState* st, int depth,
     return 1;
 }
 
-static void build_live_prefix2_tasks(PrefixId** live_i_out, PrefixId** live_j_out,
-                                     long long* live_count_out) {
+void build_live_prefix2_tasks(PrefixId** live_i_out, PrefixId** live_j_out,
+                              long long* live_count_out) {
     PrefixTaskBuffer live = {0};
     CanonState canon_state;
     CanonScratch canon_scratch;
@@ -2190,13 +2151,13 @@ static void solve_structure(const Graph* partial_graph, CanonState* canon_state,
                                    weight_prod, mult_coeff, profile, out_result);
 }
 
-static void dfs(int depth, int min_idx, int* stack, CanonState* canon_state,
-                const PartialGraphState* partial_graph, RowGraphCache* cache,
-                RowGraphCache* raw_cache, NautyWorkspace* ws, Poly* local_total,
-                long long* local_canon_calls, long long* local_cache_hits,
-                long long* local_raw_cache_hits, const WeightAccum* weight_prod,
-                long long mult_coeff, int run_len, ProfileStats* profile,
-                CanonScratch* canon_scratch);
+void dfs(int depth, int min_idx, int* stack, CanonState* canon_state,
+         const PartialGraphState* partial_graph, RowGraphCache* cache,
+         RowGraphCache* raw_cache, NautyWorkspace* ws, Poly* local_total,
+         long long* local_canon_calls, long long* local_cache_hits,
+         long long* local_raw_cache_hits, const WeightAccum* weight_prod,
+         long long mult_coeff, int run_len, ProfileStats* profile,
+         CanonScratch* canon_scratch);
 
 static void dfs_fast_orbit(int depth, int min_idx, int* stack, CanonState* canon_state,
                            const PartialGraphState* partial_graph, RowGraphCache* cache,
@@ -2441,15 +2402,15 @@ PolyCoeff poly_eval(Poly p, long long x) {
     return res;
 }
 
-static void execute_prefix2_fixed_batch(PrefixId i, const PrefixId* js, const long long* ps, int count,
-                                        RowGraphCache* cache, RowGraphCache* raw_cache, NautyWorkspace* ws,
-                                        CanonState* canon_state, CanonScratch* canon_scratch,
-                                        PartialGraphState* partial_graph, int* stack, Poly* local_total,
-                                        long long* local_canon_calls, long long* local_cache_hits,
-                                        long long* local_raw_cache_hits, ProfileStats* profile,
-                                        long long total_tasks, long long progress_report_step,
-                                        double start_time, long long* pending_completed,
-                                        TaskTimingStats* task_timing) {
+void execute_prefix2_fixed_batch(PrefixId i, const PrefixId* js, const long long* ps, int count,
+                                 RowGraphCache* cache, RowGraphCache* raw_cache, NautyWorkspace* ws,
+                                 CanonState* canon_state, CanonScratch* canon_scratch,
+                                 PartialGraphState* partial_graph, int* stack, Poly* local_total,
+                                 long long* local_canon_calls, long long* local_cache_hits,
+                                 long long* local_raw_cache_hits, ProfileStats* profile,
+                                 long long total_tasks, long long progress_report_step,
+                                 double start_time, long long* pending_completed,
+                                 TaskTimingStats* task_timing) {
     double t0 = 0.0;
     int next_stabilizer = 0;
 
@@ -2748,12 +2709,12 @@ static void dfs_runtime_split_local(int depth, int start_pid, int end_pid, long 
     }
 }
 
-static void execute_local_runtime_task(const LocalTask* task, WorkerCtx* ctx, Poly* thread_total,
-                                       LocalTaskQueue* queue, ProfileStats* profile,
-                                       long long total_tasks, long long report_step,
-                                       double start_time, long long* pending_completed,
-                                       TaskTimingStats* task_timing,
-                                       QueueSubtaskTimingStats* queue_subtask_stats) {
+void execute_local_runtime_task(const LocalTask* task, WorkerCtx* ctx, Poly* thread_total,
+                                LocalTaskQueue* queue, ProfileStats* profile,
+                                long long total_tasks, long long report_step,
+                                double start_time, long long* pending_completed,
+                                TaskTimingStats* task_timing,
+                                QueueSubtaskTimingStats* queue_subtask_stats) {
     WeightAccum weight_prod;
     long long mult_coeff = 1;
     int run_len = 0;

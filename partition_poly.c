@@ -89,10 +89,6 @@ static int row_graph_cache_lookup_poly(RowGraphCache* cache, uint64_t key_hash, 
 static void store_row_graph_cache_entry(RowGraphCache* cache, uint64_t key_hash, uint32_t key_n,
                                         const Graph* g, AdjWord row_mask,
                                         const GraphPoly* value);
-static void small_graph_lookup_init(void);
-static void small_graph_lookup_free(void);
-static void connected_canon_lookup_init(void);
-static void connected_canon_lookup_free(void);
 static uint32_t small_graph_pack_mask(const Graph* g);
 static uint32_t graph_build_dense_rows(const Graph* g, AdjWord* rows);
 static void graph_apply_permutation_dense_rows(uint32_t n, const AdjWord* dense_rows,
@@ -100,28 +96,7 @@ static void graph_apply_permutation_dense_rows(uint32_t n, const AdjWord* dense_
 static void get_canonical_graph_from_dense_rows(int n, const AdjWord* rows, Graph* canon,
                                                 NautyWorkspace* ws, ProfileStats* profile);
 
-static void usage(const char* prog) {
-    fprintf(stderr,
-            "Usage:\n"
-            "  %s [rows cols] [--task-start N] [--task-end N] [--prefix-depth N] [--reorder] [--adaptive-subdivide] [--adaptive-max-depth N] [--adaptive-work-budget N] [--poly-out FILE]"
-#if RECT_PROFILE
-            " [--task-times-out FILE]"
-#endif
-            "\n"
-            "\n"
-            "Notes:\n"
-            "  --task-start/--task-end define a half-open task range [start, end).\n"
-            "  --prefix-depth may be 2, 3, or 4.\n"
-            "  --reorder changes partition IDs and task numbering.\n"
-            "  Adaptive subdivision currently supports only --prefix-depth 2.\n"
-            "  In full polynomial mode it uses a local runtime queue of donated subtrees.\n"
-            "  Profiling is selected at compile time.\n",
-            prog);
-}
-
 // Canonical-state, DFS, and runtime-prefix replay logic live separately.
 #include "src/canon.c"
 // Graph solving and canonical cache logic live separately.
 #include "src/solver.c"
-// Main/orchestration code lives separately to keep the core solver readable.
-#include "src/main.c"

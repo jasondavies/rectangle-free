@@ -1,5 +1,24 @@
 #include "partition_poly.h"
 
+static void usage(const char* prog) {
+    fprintf(stderr,
+            "Usage:\n"
+            "  %s [rows cols] [--task-start N] [--task-end N] [--prefix-depth N] [--reorder] [--adaptive-subdivide] [--adaptive-max-depth N] [--adaptive-work-budget N] [--poly-out FILE]"
+#if RECT_PROFILE
+            " [--task-times-out FILE]"
+#endif
+            "\n"
+            "\n"
+            "Notes:\n"
+            "  --task-start/--task-end define a half-open task range [start, end).\n"
+            "  --prefix-depth may be 2, 3, or 4.\n"
+            "  --reorder changes partition IDs and task numbering.\n"
+            "  Adaptive subdivision currently supports only --prefix-depth 2.\n"
+            "  In full polynomial mode it uses a local runtime queue of donated subtrees.\n"
+            "  Profiling is selected at compile time.\n",
+            prog);
+}
+
 static int parse_main_options(int argc, char** argv, MainOptions* opts) {
     int positional_count = 0;
 
