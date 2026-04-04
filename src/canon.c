@@ -840,6 +840,291 @@ long long get_orbit_multiplier_state(const CanonState* st) {
     return factorial[g_rows] / stabilizer;
 }
 
+#if RECT_COUNT_K4_FEASIBILITY
+static int contains_edge_mask(const Graph* g, uint64_t mask) {
+    while (mask) {
+        int a = __builtin_ctzll(mask);
+        uint64_t na = (uint64_t)g->adj[a] & mask & ~((UINT64_C(1) << (a + 1)) - 1U);
+        if (na) return 1;
+        mask &= mask - 1;
+    }
+    return 0;
+}
+
+static int contains_triangle_mask(const Graph* g, uint64_t mask) {
+    while (mask) {
+        int a = __builtin_ctzll(mask);
+        uint64_t na = (uint64_t)g->adj[a] & mask & ~((UINT64_C(1) << (a + 1)) - 1U);
+        while (na) {
+            int b = __builtin_ctzll(na);
+            if ((na & (uint64_t)g->adj[b]) & ~((UINT64_C(1) << (b + 1)) - 1U)) return 1;
+            na &= na - 1;
+        }
+        mask &= mask - 1;
+    }
+    return 0;
+}
+
+static int contains_k4_mask(const Graph* g, uint64_t mask) {
+    while (mask) {
+        int a = __builtin_ctzll(mask);
+        uint64_t na = (uint64_t)g->adj[a] & mask & ~((UINT64_C(1) << (a + 1)) - 1U);
+        while (na) {
+            int b = __builtin_ctzll(na);
+            uint64_t nb = (na & (uint64_t)g->adj[b]) & ~((UINT64_C(1) << (b + 1)) - 1U);
+            while (nb) {
+                int c = __builtin_ctzll(nb);
+                if ((nb & (uint64_t)g->adj[c]) & ~((UINT64_C(1) << (c + 1)) - 1U)) return 1;
+                nb &= nb - 1;
+            }
+            na &= na - 1;
+        }
+        mask &= mask - 1;
+    }
+    return 0;
+}
+
+static int partial_graph_new_has_k5(const PartialGraphState* st) {
+    if (st->g.n < 5 || st->last_num_new == 0) return 0;
+
+    uint64_t old_mask = st->last_base > 0 ? ((UINT64_C(1) << st->last_base) - 1U) : 0;
+    int base_new = st->last_base;
+    int num_new = st->last_num_new;
+
+    for (int i = 0; i < num_new; i++) {
+        int u = base_new + i;
+        if (contains_k4_mask(&st->g, (uint64_t)st->g.adj[u] & old_mask)) return 1;
+    }
+
+    for (int i = 0; i < num_new; i++) {
+        int u = base_new + i;
+        for (int j = i + 1; j < num_new; j++) {
+            int v = base_new + j;
+            if (contains_triangle_mask(&st->g,
+                                       ((uint64_t)st->g.adj[u] & (uint64_t)st->g.adj[v] & old_mask))) {
+                return 1;
+            }
+        }
+    }
+
+    if (num_new >= 3) {
+        uint64_t common = old_mask;
+        for (int i = 0; i < 3; i++) common &= (uint64_t)st->g.adj[base_new + i];
+        if (contains_edge_mask(&st->g, common)) return 1;
+    }
+
+    return 0;
+}
+
+static int choose_dsat_vertex_colourable(const Graph* g, const int8_t* colour,
+                                         const uint8_t* saturation) {
+    int best = -1;
+    int best_sat = -1;
+    int best_deg = -1;
+    uint64_t rem = g->vertex_mask;
+    while (rem) {
+        int v = __builtin_ctzll(rem);
+        rem &= rem - 1;
+        if (colour[v] >= 0) continue;
+        int sat = __builtin_popcount((unsigned)saturation[v]);
+        int deg = __builtin_popcountll((uint64_t)g->adj[v] & g->vertex_mask);
+        if (sat > best_sat || (sat == best_sat && deg > best_deg)) {
+            best = v;
+            best_sat = sat;
+            best_deg = deg;
+        }
+    }
+    return best;
+}
+
+static int dsatur_is_4_colourable(const Graph* g, int coloured, const int8_t* colour,
+                                  const uint8_t* saturation, int8_t* solution) {
+    if (coloured == g->n) {
+        if (solution) memcpy(solution, colour, sizeof(int8_t) * MAXN_NAUTY);
+        return 1;
+    }
+
+    int v = choose_dsat_vertex_colourable(g, colour, saturation);
+    if (v < 0) {
+        if (solution) memcpy(solution, colour, sizeof(int8_t) * MAXN_NAUTY);
+        return 1;
+    }
+
+    uint8_t available = (uint8_t)(0x0fU & (uint8_t)~saturation[v]);
+    while (available) {
+        unsigned bit_u = (unsigned)available & (unsigned)(-(int)available);
+        uint8_t bit = (uint8_t)bit_u;
+        int c = __builtin_ctz((unsigned)bit);
+        available &= (uint8_t)(available - 1);
+
+        int8_t next_colour[MAXN_NAUTY];
+        uint8_t next_saturation[MAXN_NAUTY];
+        memcpy(next_colour, colour, sizeof(next_colour));
+        memcpy(next_saturation, saturation, sizeof(next_saturation));
+        next_colour[v] = (int8_t)c;
+
+        uint64_t neighbours = (uint64_t)g->adj[v] & g->vertex_mask;
+        int stuck = 0;
+        while (neighbours) {
+            int u = __builtin_ctzll(neighbours);
+            if (next_colour[u] < 0) {
+                next_saturation[u] |= bit;
+                if (next_saturation[u] == 0x0fU) stuck = 1;
+            }
+            neighbours &= neighbours - 1;
+        }
+
+        if (!stuck && dsatur_is_4_colourable(g, coloured + 1, next_colour, next_saturation,
+                                             solution)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int induced_subgraph_with_vertices(const Graph* src, uint64_t mask, Graph* dst, int* verts) {
+    int n = 0;
+    uint64_t rem = mask & src->vertex_mask;
+    while (rem) {
+        verts[n++] = __builtin_ctzll(rem);
+        rem &= rem - 1;
+    }
+
+    dst->n = (uint8_t)n;
+    dst->vertex_mask = graph_row_mask(n);
+    memset(dst->adj, 0, (size_t)n * sizeof(dst->adj[0]));
+    for (int i = 0; i < n; i++) {
+        for (int j = i + 1; j < n; j++) {
+            if (((uint64_t)src->adj[verts[i]] >> verts[j]) & 1U) {
+                dst->adj[i] |= (AdjWord)(UINT64_C(1) << j);
+                dst->adj[j] |= (AdjWord)(UINT64_C(1) << i);
+            }
+        }
+    }
+    return n;
+}
+
+static int peel_to_4_core(const Graph* src, Graph* core, int* peel_order, int* peel_len,
+                          int* core_vertices) {
+    int degree[MAXN_NAUTY];
+    uint64_t active = src->vertex_mask;
+    uint64_t queue = 0;
+
+    uint64_t rem = active;
+    while (rem) {
+        int v = __builtin_ctzll(rem);
+        degree[v] = __builtin_popcountll((uint64_t)src->adj[v] & active);
+        if (degree[v] <= 3) queue |= UINT64_C(1) << v;
+        rem &= rem - 1;
+    }
+
+    *peel_len = 0;
+    while (queue) {
+        int v = __builtin_ctzll(queue);
+        queue &= queue - 1;
+        if (((active >> v) & 1U) == 0) continue;
+
+        active &= ~(UINT64_C(1) << v);
+        peel_order[(*peel_len)++] = v;
+
+        uint64_t neighbours = (uint64_t)src->adj[v] & active;
+        while (neighbours) {
+            int u = __builtin_ctzll(neighbours);
+            degree[u]--;
+            if (degree[u] == 3) queue |= UINT64_C(1) << u;
+            neighbours &= neighbours - 1;
+        }
+    }
+
+    return induced_subgraph_with_vertices(src, active, core, core_vertices);
+}
+
+static int extend_colouring_over_peel(const Graph* g, const int* peel_order, int peel_len,
+                                      int8_t* colour) {
+    for (int i = peel_len - 1; i >= 0; i--) {
+        int v = peel_order[i];
+        uint8_t used = 0;
+        uint64_t neighbours = (uint64_t)g->adj[v] & g->vertex_mask;
+        while (neighbours) {
+            int u = __builtin_ctzll(neighbours);
+            if (colour[u] >= 0) used |= (uint8_t)(1U << colour[u]);
+            neighbours &= neighbours - 1;
+        }
+        uint8_t available = (uint8_t)(0x0fU & (uint8_t)~used);
+        if (available == 0) return 0;
+        colour[v] = (int8_t)__builtin_ctz((unsigned)available);
+    }
+    return 1;
+}
+
+static int graph_component_colourable(const Graph* g, int8_t* out_colour) {
+    if (g->n == 0) return 1;
+    if (g->n == 1) {
+        if (out_colour) {
+            memset(out_colour, -1, sizeof(int8_t) * MAXN_NAUTY);
+            out_colour[__builtin_ctzll(g->vertex_mask)] = 0;
+        }
+        return 1;
+    }
+
+    int start = __builtin_ctzll(g->vertex_mask);
+    int best_deg = -1;
+    uint64_t rem = g->vertex_mask;
+    while (rem) {
+        int v = __builtin_ctzll(rem);
+        int deg = __builtin_popcountll((uint64_t)g->adj[v] & g->vertex_mask);
+        if (deg > best_deg) {
+            best_deg = deg;
+            start = v;
+        }
+        rem &= rem - 1;
+    }
+
+    int8_t colour[MAXN_NAUTY];
+    uint8_t saturation[MAXN_NAUTY];
+    for (int i = 0; i < MAXN_NAUTY; i++) {
+        colour[i] = -1;
+        saturation[i] = 0;
+    }
+
+    colour[start] = 0;
+    uint64_t neighbours = (uint64_t)g->adj[start] & g->vertex_mask;
+    while (neighbours) {
+        int u = __builtin_ctzll(neighbours);
+        saturation[u] |= 1U;
+        neighbours &= neighbours - 1;
+    }
+
+    return dsatur_is_4_colourable(g, 1, colour, saturation, out_colour);
+}
+
+static int partial_graph_is_feasible(const PartialGraphState* st, int cols_left) {
+    if (cols_left <= 0) return 1;
+    if (st->remaining_capacity < min_partition_pairs * cols_left) return 0;
+
+    Graph core;
+    int peel_order[MAXN_NAUTY];
+    int peel_len = 0;
+    int core_vertices[MAXN_NAUTY];
+    int core_n = peel_to_4_core(&st->g, &core, peel_order, &peel_len, core_vertices);
+    if (core_n == 0) {
+        int8_t colour[MAXN_NAUTY];
+        memset(colour, -1, sizeof(colour));
+        return extend_colouring_over_peel(&st->g, peel_order, peel_len, colour);
+    }
+
+    if (partial_graph_new_has_k5(st)) return 0;
+
+    int8_t core_colour[MAXN_NAUTY];
+    if (!graph_component_colourable(&core, core_colour)) return 0;
+
+    int8_t colour[MAXN_NAUTY];
+    memset(colour, -1, sizeof(colour));
+    for (int i = 0; i < core_n; i++) colour[core_vertices[i]] = core_colour[i];
+    return extend_colouring_over_peel(&st->g, peel_order, peel_len, colour);
+}
+#endif
+
 void partial_graph_reset(PartialGraphState* st) {
     st->g.n = 0;
     st->g.vertex_mask = 0;
