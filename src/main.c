@@ -58,7 +58,7 @@ static int parse_main_options(int argc, char** argv, MainOptions* opts) {
         } else if (strcmp(argv[i], "--adaptive-max-depth") == 0) {
             if (i + 1 >= argc) {
                 usage(argv[0]);
-                return 1;
+                return 0;
             }
             g_adaptive_max_depth = (int)parse_ll_or_die(argv[++i], "--adaptive-max-depth");
         } else if (strcmp(argv[i], "--adaptive-work-budget") == 0) {

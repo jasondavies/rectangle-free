@@ -17,14 +17,6 @@ void poly_one_ref(Poly* p) {
     p->coeffs[0] = 1;
 }
 
-Poly poly_one() {
-    Poly p;
-    poly_one_ref(&p);
-    return p;
-}
-
-PolyCoeff poly_eval(Poly p, long long x);
-
 long long parse_ll_or_die(const char* text, const char* label) {
     char* end = NULL;
     errno = 0;
@@ -34,37 +26,6 @@ long long parse_ll_or_die(const char* text, const char* label) {
         exit(1);
     }
     return value;
-}
-
-static inline void poly_add_ref(const Poly* a, const Poly* b, Poly* out) {
-    Poly tmp;
-    Poly* r = out;
-    if (out == a || out == b) r = &tmp;
-    r->deg = (a->deg > b->deg) ? a->deg : b->deg;
-    for (int i = 0; i <= r->deg; i++) {
-        PolyCoeff av = (i <= a->deg) ? a->coeffs[i] : 0;
-        PolyCoeff bv = (i <= b->deg) ? b->coeffs[i] : 0;
-        r->coeffs[i] = av + bv;
-    }
-    while (r->deg > 0 && r->coeffs[r->deg] == 0) r->deg--;
-    if (r != out) *out = *r;
-}
-
-static inline void poly_add_ref_checked(const Poly* a, const Poly* b, Poly* out) {
-    Poly tmp;
-    Poly* r = out;
-    if (out == a || out == b) r = &tmp;
-    r->deg = (a->deg > b->deg) ? a->deg : b->deg;
-    for (int i = 0; i <= r->deg; i++) {
-        PolyCoeff av = (i <= a->deg) ? a->coeffs[i] : 0;
-        PolyCoeff bv = (i <= b->deg) ? b->coeffs[i] : 0;
-        if (__builtin_add_overflow(av, bv, &r->coeffs[i])) {
-            fprintf(stderr, "128-bit overflow in polynomial accumulation\n");
-            abort();
-        }
-    }
-    while (r->deg > 0 && r->coeffs[r->deg] == 0) r->deg--;
-    if (r != out) *out = *r;
 }
 
 void poly_accumulate_checked(Poly* acc, const Poly* add) {
@@ -81,32 +42,6 @@ void poly_accumulate_checked(Poly* acc, const Poly* add) {
         }
     }
     while (acc->deg > 0 && acc->coeffs[acc->deg] == 0) acc->deg--;
-}
-
-Poly poly_add(Poly a, Poly b) {
-    Poly r;
-    poly_add_ref(&a, &b, &r);
-    return r;
-}
-
-static inline void poly_sub_ref(const Poly* a, const Poly* b, Poly* out) {
-    Poly tmp;
-    Poly* r = out;
-    if (out == a || out == b) r = &tmp;
-    r->deg = (a->deg > b->deg) ? a->deg : b->deg;
-    for (int i = 0; i <= r->deg; i++) {
-        PolyCoeff av = (i <= a->deg) ? a->coeffs[i] : 0;
-        PolyCoeff bv = (i <= b->deg) ? b->coeffs[i] : 0;
-        r->coeffs[i] = av - bv;
-    }
-    while (r->deg > 0 && r->coeffs[r->deg] == 0) r->deg--;
-    if (r != out) *out = *r;
-}
-
-Poly poly_sub(Poly a, Poly b) {
-    Poly r;
-    poly_sub_ref(&a, &b, &r);
-    return r;
 }
 
 void poly_mul_ref(const Poly* a, const Poly* b, Poly* out) {
@@ -134,12 +69,6 @@ void poly_mul_ref(const Poly* a, const Poly* b, Poly* out) {
     if (r != out) *out = *r;
 }
 
-Poly poly_mul(Poly a, Poly b) {
-    Poly r;
-    poly_mul_ref(&a, &b, &r);
-    return r;
-}
-
 void poly_scale_ref(const Poly* a, long long s, Poly* out) {
     if (s == 0) {
         poly_zero(out);
@@ -147,12 +76,6 @@ void poly_scale_ref(const Poly* a, long long s, Poly* out) {
     }
     out->deg = a->deg;
     for (int i = 0; i <= a->deg; i++) out->coeffs[i] = a->coeffs[i] * (PolyCoeff)s;
-}
-
-Poly poly_scale(Poly a, long long s) {
-    Poly r;
-    poly_scale_ref(&a, s, &r);
-    return r;
 }
 
 static inline void poly_mul_linear_ref(const Poly* a, int c, Poly* out) {
@@ -176,23 +99,11 @@ static inline void poly_mul_linear_ref(const Poly* a, int c, Poly* out) {
     if (r != out) *out = *r;
 }
 
-Poly poly_mul_linear(Poly a, int c) {
-    Poly r;
-    poly_mul_linear_ref(&a, c, &r);
-    return r;
-}
-
 void poly_mul_falling_ref(const Poly* p, int start, int count, Poly* out) {
     if (out != p) *out = *p;
     for (int i = 0; i < count; i++) {
         poly_mul_linear_ref(out, start + i, out);
     }
-}
-
-Poly poly_mul_falling(Poly p, int start, int count) {
-    Poly r;
-    poly_mul_falling_ref(&p, start, count, &r);
-    return r;
 }
 
 static inline void graph_poly_degree_overflow(int deg) {
@@ -208,17 +119,6 @@ static inline void graph_poly_zero(GraphPoly* p) {
 void graph_poly_one_ref(GraphPoly* p) {
     graph_poly_zero(p);
     p->coeffs[0] = 1;
-}
-
-static inline void graph_poly_from_poly(const Poly* src, GraphPoly* dst) {
-    if (src->deg > MAXN_NAUTY) graph_poly_degree_overflow(src->deg);
-    dst->deg = (uint8_t)src->deg;
-    memcpy(dst->coeffs, src->coeffs, (size_t)(src->deg + 1) * sizeof(src->coeffs[0]));
-}
-
-static inline void graph_poly_to_poly(const GraphPoly* src, Poly* dst) {
-    dst->deg = src->deg;
-    memcpy(dst->coeffs, src->coeffs, (size_t)(src->deg + 1) * sizeof(src->coeffs[0]));
 }
 
 void poly_mul_graph_ref(const Poly* a, const GraphPoly* b, Poly* out) {

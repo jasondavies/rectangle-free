@@ -115,7 +115,7 @@ void free_row_dependent_tables(void) {
     max_complex_per_partition = 0;
 }
 
-void generate_permutations() {
+void generate_permutations(void) {
     int p[MAX_ROWS];
     for (int i = 0; i < g_rows; i++) p[i] = i;
     int count = 0;
@@ -134,7 +134,7 @@ void generate_permutations() {
     perm_count = count;
 }
 
-void normalize_partition(uint8_t* p) {
+static void normalize_partition(uint8_t* p) {
     uint8_t map[MAX_ROWS];
     memset(map, 255, sizeof(map));
     uint8_t next = 0;
@@ -234,7 +234,7 @@ void generate_partitions_recursive(int idx, uint8_t* current, int max_val) {
     }
 }
 
-int get_partition_id(uint8_t* map) {
+static int get_partition_id(uint8_t* map) {
     uint32_t key = 0;
     for (int i = 0; i < g_rows; i++) {
         key |= (uint32_t)map[i] << (3 * i);
@@ -254,7 +254,7 @@ void build_partition_id_lookup(void) {
     }
 }
 
-void build_perm_table() {
+void build_perm_table(void) {
     uint8_t temp[MAX_ROWS];
     
     for (int id = 0; id < num_partitions; id++) {
@@ -306,7 +306,7 @@ void build_terminal_perm_order_tables(void) {
     free(offsets);
 }
 
-void build_overlap_table() {
+void build_overlap_table(void) {
     memset(overlap_mask, 0,
            (size_t)num_partitions * (size_t)num_partitions * (size_t)max_complex_per_partition *
                sizeof(*overlap_mask));
@@ -402,6 +402,7 @@ void build_partition_weight_table(void) {
     }
 }
 
+#if RECT_COUNT_K4
 static inline uint8_t falling4_weight(int c, int s) {
     if (c + s > 4) return 0;
     uint8_t w = 1;
@@ -415,6 +416,7 @@ void build_partition_weight4_table(void) {
             falling4_weight(partitions[pid].num_complex, partitions[pid].num_singletons);
     }
 }
+#endif
 
 #if RECT_COUNT_K4
 void weight_accum_one(WeightAccum* out) {

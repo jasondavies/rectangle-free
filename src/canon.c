@@ -835,7 +835,7 @@ void canon_state_pop(CanonState* st) {
     st->depth = depth;
 }
 
-long long get_orbit_multiplier_state(const CanonState* st) {
+static long long get_orbit_multiplier_state(const CanonState* st) {
     int stabilizer = st->stabilizer[st->depth];
     return factorial[g_rows] / stabilizer;
 }
@@ -1791,12 +1791,16 @@ static void dfs_runtime_split_local(int depth, int start_pid, int end_pid, long 
 
         double t0 = 0.0;
         int is_terminal = (depth + 1 == g_cols);
+        int cols_left = g_cols - depth - 1;
         if (use_orbit_marking) {
             if (orbit_mark_bit_test(orbit_mark_bits, pid)) {
                 continue;
             }
             canon_state_mark_orbit_nonreps(&ctx->canon_state, rep_min_idx, pid, orbit_mark_bits);
         } else if (!canon_state_partition_is_rep(&ctx->canon_state, rep_min_idx, pid)) {
+            continue;
+        }
+        if (!partial_graph_candidate_can_fit(&ctx->partial_graph, pid, cols_left)) {
             continue;
         }
         ctx->stack[depth] = pid;
@@ -1834,7 +1838,7 @@ static void dfs_runtime_split_local(int depth, int start_pid, int end_pid, long 
             t0 = omp_get_wtime();
         }
         if (partial_graph_append_checked(&ctx->partial_graph, depth, pid, ctx->stack,
-                                         g_cols - depth - 1)) {
+                                         cols_left)) {
             if (PROFILE_BUILD) tls_profile->partial_append_time += omp_get_wtime() - t0;
             WeightAccum next_weight_prod;
             weight_accum_mul_partition(weight_prod, pid, &next_weight_prod);
