@@ -4,6 +4,7 @@
 #include "partition_poly.h"
 
 typedef struct {
+    int capacity;
     int limit;
     int depth;
     uint8_t* first_greater;

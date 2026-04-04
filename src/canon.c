@@ -548,6 +548,7 @@ static inline void canon_state_seed_orbit_marks(const CanonState* st, int min_id
 
 void canon_state_init(CanonState* st, int limit) {
     memset(st, 0, sizeof(*st));
+    st->capacity = limit;
     st->limit = limit;
     st->first_greater =
         checked_calloc((size_t)limit, sizeof(*st->first_greater), "canon_state_first_greater");
@@ -603,6 +604,11 @@ void canon_scratch_free(CanonScratch* scratch) {
 }
 
 void canon_state_reset(CanonState* st, int limit) {
+    if (limit < 0 || limit > st->capacity) {
+        fprintf(stderr, "canon_state_reset limit %d out of range [0, %d]\n", limit, st->capacity);
+        abort();
+    }
+    size_t count = (size_t)limit;
     st->limit = limit;
     st->depth = 0;
     st->stabilizer[0] = limit;
@@ -611,8 +617,8 @@ void canon_state_reset(CanonState* st, int limit) {
     for (int p = 0; p < limit; p++) {
         equal_perm0[p] = (uint16_t)p;
     }
-    memset(st->first_greater, 0, (size_t)limit * sizeof(*st->first_greater));
-    memset(st->first_greater_val, 0, (size_t)limit * sizeof(*st->first_greater_val));
+    memset(st->first_greater, 0, count * sizeof(*st->first_greater));
+    memset(st->first_greater_val, 0, count * sizeof(*st->first_greater_val));
 }
 
 static inline int canon_state_prepare_push_fast(const CanonState* st, int partition_id,
