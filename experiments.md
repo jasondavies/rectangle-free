@@ -6304,3 +6304,56 @@
   - the dominant remaining equal-case is `depth == 5 && g == 2`, and replacing the generic rebuild there is enough to shave a few tenths off the heavy unprofiled shard
   - the profiled binary gets slightly slower because the specialization interacts differently with instrumentation-heavy builds, so profiled timings are not a useful acceptance signal for this change
 - Outcome: accepted on `main` based on repeated unprofiled heavy-shard wins.
+
+### Experiment 157: Special-case the next-most-common equal-case rebuilds
+- Goal: keep reducing `canon_rebuild_equal_case()` cost by specializing the next highest-frequency `(depth, g)` cases after the accepted `depth == 5 && g == 2` fast path.
+- Branch / commit:
+  - baseline parent `9fd260a`
+- Change:
+  - add a fixed-size `sort4_u16()` helper
+  - special-case these equal-case rebuild shapes:
+    - `depth == 3 && g == 2`
+    - `depth == 4 && g == 2`
+    - `depth == 4 && g == 3`
+    - `depth == 5 && g == 3`
+    - `depth == 5 && g == 4`
+  - use direct loads from `stack_perm_rows[]`, tiny fixed-size sorts or max reductions, and direct comparisons against `stack_vals[]` / `pid`
+  - leave the generic rebuild path unchanged for all other cases
+- Temporary profiling:
+  - added a temporary `(depth, g)` equal-case histogram in the profile build only
+  - heavy-shard distribution on top of `9fd260a`:
+    - depth 3: `g2=5578`
+    - depth 4: `g2=132424`, `g3=22004`
+    - depth 5: `g2=15956692`, `g3=758573`, `g4=220845`
+  - removed the histogram before keeping the patch
+- Single-thread unprofiled `7x6 --task-end 1`:
+  - baseline (`9fd260a`, built in `/tmp/rectangle-free-9fd260a`):
+    - `Worker Complete in 10.95 seconds`
+    - `Worker Complete in 10.78 seconds`
+    - `Canonicalisation calls: 177708`
+    - `Canonical cache hits: 130730`
+    - `Raw cache hits: 1991443`
+  - experiment:
+    - `Worker Complete in 10.36 seconds`
+    - `Worker Complete in 10.47 seconds`
+    - `Canonicalisation calls: 177708`
+    - `Canonical cache hits: 130730`
+    - `Raw cache hits: 1991443`
+- Single-thread unprofiled `7x5 --task-end 4`:
+  - baseline (`9fd260a`, built in `/tmp/rectangle-free-9fd260a`):
+    - `Worker Complete in 2.47 seconds`
+    - `Canonicalisation calls: 32772`
+    - `Canonical cache hits: 26498`
+    - `Raw cache hits: 262718`
+  - experiment:
+    - `Worker Complete in 2.32 seconds`
+    - `Canonicalisation calls: 32772`
+    - `Canonical cache hits: 26498`
+    - `Raw cache hits: 262718`
+- Correctness:
+  - both shards produced the same polynomial and evaluation values as the baseline
+- Interpretation:
+  - this is another small symmetry-side constant-factor win with unchanged search shape
+  - most of the remaining equal-case traffic is concentrated in a handful of fixed small rebuild shapes, so specializing those shapes pays better than broader prepare-loop rewrites
+  - single-thread unprofiled runs were a clearer acceptance signal than profiled runs or multi-thread timings for this class of micro-optimization
+- Outcome: accepted on `main`.
