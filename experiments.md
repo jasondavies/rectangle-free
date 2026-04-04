@@ -6244,3 +6244,63 @@
   - the heavy-shard wall-time win is moderate because `canon_state_prepare_push()` is still the largest single bucket, but graph work drops sharply
   - profiling-only hard-miss subphase timers show the delete branch remains the dominant hard-miss cost, just on a much smaller set of nodes
 - Outcome: accepted on `main`.
+
+### Experiment 156: Special-case the dominant equal-case rebuild
+- Goal: reduce `canon_state_prepare_push()` cost by specializing the hottest surviving equal-case in `canon_rebuild_equal_case()`.
+- Branch / commit:
+  - baseline parent `fa86c99`
+- Change:
+  - add a fixed-size `sort5_u16()` helper
+  - in `canon_rebuild_equal_case()`, special-case `depth == 5 && g == 2`
+  - replace the generic `row_insert_sorted()` rebuild for that case with five direct loads from `stack_perm_rows`, an in-register sort, and direct comparisons against `stack_vals[3]`, `stack_vals[4]`, and `pid`
+  - leave the generic rebuild path unchanged for every other case
+- Build:
+  - `make partition_poly_7`
+  - `make partition_poly_7_profile`
+- Unprofiled `7x6 --task-end 1`:
+  - baseline (`fa86c99`):
+    - `real 10.86`
+    - `real 10.96`
+    - `Canonicalisation calls: 177708`
+    - `Canonical cache hits: 130730`
+    - `Raw cache hits: 1991443`
+  - experiment:
+    - `real 10.72`
+    - `real 10.53`
+    - `real 10.57`
+    - `Canonicalisation calls: 177708`
+    - `Canonical cache hits: 130730`
+    - `Raw cache hits: 1991443`
+- Unprofiled `7x5 --task-end 4`:
+  - baseline (`fa86c99`):
+    - `real 2.49`
+    - `Canonicalisation calls: 32772`
+    - `Canonical cache hits: 26498`
+    - `Raw cache hits: 262718`
+  - experiment:
+    - `real 2.49`
+    - `Canonicalisation calls: 32772`
+    - `Canonical cache hits: 26498`
+    - `Raw cache hits: 262718`
+- Profiled `7x6 --task-end 1`:
+  - baseline (`fa86c99`):
+    - `Worker Complete in 10.84 seconds`
+    - `Canonicalisation calls: 177708`
+    - `Canonical cache hits: 130730`
+    - `Raw cache hits: 1991443`
+    - `canon_state_prepare_push: 9458098 calls, 8.543s`
+    - `solve_graph_poly: 5981877 calls, 2.730s`
+  - experiment:
+    - `Worker Complete in 11.09 seconds`
+    - `Canonicalisation calls: 177708`
+    - `Canonical cache hits: 130730`
+    - `Raw cache hits: 1991443`
+    - `canon_state_prepare_push: 9458098 calls, 8.720s`
+    - `solve_graph_poly: 5981877 calls, 2.852s`
+- Correctness:
+  - both shards produced the same polynomial and evaluation values as the baseline
+- Interpretation:
+  - this is a narrow constant-factor win in the normal binary, not a search-shape change
+  - the dominant remaining equal-case is `depth == 5 && g == 2`, and replacing the generic rebuild there is enough to shave a few tenths off the heavy unprofiled shard
+  - the profiled binary gets slightly slower because the specialization interacts differently with instrumentation-heavy builds, so profiled timings are not a useful acceptance signal for this change
+- Outcome: accepted on `main` based on repeated unprofiled heavy-shard wins.

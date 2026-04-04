@@ -2613,10 +2613,64 @@ static inline int row_insert_sorted(uint16_t* row, int len, uint16_t val) {
     }
 }
 
+static inline void sort5_u16(uint16_t* a, uint16_t* b, uint16_t* c, uint16_t* d, uint16_t* e) {
+#define SORT_SWAP_U16(x, y) \
+    do { \
+        if (*(x) > *(y)) { \
+            uint16_t tmp = *(x); \
+            *(x) = *(y); \
+            *(y) = tmp; \
+        } \
+    } while (0)
+    SORT_SWAP_U16(a, b);
+    SORT_SWAP_U16(d, e);
+    SORT_SWAP_U16(a, c);
+    SORT_SWAP_U16(b, c);
+    SORT_SWAP_U16(a, d);
+    SORT_SWAP_U16(c, d);
+    SORT_SWAP_U16(b, e);
+    SORT_SWAP_U16(b, c);
+    SORT_SWAP_U16(d, e);
+    SORT_SWAP_U16(c, d);
+#undef SORT_SWAP_U16
+}
+
 static inline int canon_rebuild_equal_case(const CanonState* st, int p, int g, uint16_t pid,
                                            uint8_t* next_first_greater, uint16_t* next_first_greater_val) {
     int depth = st->depth;
     int new_depth = depth + 1;
+
+    if (depth == 5 && g == 2) {
+        uint16_t a = st->stack_perm_rows[0][p];
+        uint16_t b = st->stack_perm_rows[1][p];
+        uint16_t c = st->stack_perm_rows[2][p];
+        uint16_t d = st->stack_perm_rows[3][p];
+        uint16_t e = st->stack_perm_rows[4][p];
+        sort5_u16(&a, &b, &c, &d, &e);
+
+        if (c < st->stack_vals[3]) return 0;
+        if (c > st->stack_vals[3]) {
+            *next_first_greater = 3;
+            *next_first_greater_val = c;
+            return 1;
+        }
+        if (d < st->stack_vals[4]) return 0;
+        if (d > st->stack_vals[4]) {
+            *next_first_greater = 4;
+            *next_first_greater_val = d;
+            return 1;
+        }
+        if (e < pid) return 0;
+        if (e > pid) {
+            *next_first_greater = 5;
+            *next_first_greater_val = e;
+        } else {
+            *next_first_greater = (uint8_t)new_depth;
+            *next_first_greater_val = 0;
+        }
+        return 1;
+    }
+
     uint16_t row[MAX_COLS];
     int len = 0;
 
