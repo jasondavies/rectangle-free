@@ -1,3 +1,5 @@
+#include "partition_poly.h"
+
 // --- INITIALISATION ---
 
 static int bell_number_upper_bound(int rows) {

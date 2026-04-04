@@ -1,3 +1,5 @@
+#include "partition_poly.h"
+
 static void degree_overflow(int deg) {
     fprintf(stderr, "Polynomial degree %d exceeds MAX_DEGREE=%d\n", deg, MAX_DEGREE - 1);
     exit(1);

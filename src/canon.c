@@ -1,3 +1,5 @@
+#include "partition_poly.h"
+
 // --- SYMMETRY LOGIC ---
 
 #define REP_ORBIT_MARK_WORDS ((CANON_PARTITION_ID_LIMIT + 63u) / 64u)
@@ -68,6 +70,10 @@ static void solve_structure_with_row_orbit(const Graph* partial_graph, long long
                                            long long* local_raw_cache_hits,
                                            const WeightAccum* weight_prod, long long mult_coeff,
                                            ProfileStats* profile, Poly* out_result);
+static void solve_graph_poly(const Graph* input_g, RowGraphCache* cache, RowGraphCache* raw_cache,
+                             NautyWorkspace* ws, long long* local_canon_calls,
+                             long long* local_cache_hits, long long* local_raw_cache_hits,
+                             ProfileStats* profile, GraphPoly* out);
 
 static inline int row_insert_sorted(uint16_t* row, int len, uint16_t val) {
     switch (len) {
@@ -1996,9 +2002,6 @@ static void store_row_graph_cache_entry_rows(RowGraphCache* cache, uint64_t key_
     cache->keys[best_slot].used = 1;
     row_graph_cache_touch_slot(cache, best_slot);
 }
-
-// Solver/cache/canonicalisation code lives separately to keep graph-state logic grouped.
-#include "solver.c"
 
 static void partial_graph_reset(PartialGraphState* st) {
     st->g.n = 0;

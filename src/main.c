@@ -1,3 +1,5 @@
+#include "partition_poly.h"
+
 static int parse_main_options(int argc, char** argv, MainOptions* opts) {
     int positional_count = 0;
 

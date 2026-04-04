@@ -1,3 +1,5 @@
+#include "partition_poly.h"
+
 void remove_vertex(Graph* g, int i) {
     uint64_t bit = UINT64_C(1) << i;
     if ((g->vertex_mask & bit) == 0) return;

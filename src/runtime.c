@@ -1,3 +1,5 @@
+#include "partition_poly.h"
+
 static void task_timing_insert_topk(TaskTimingStats* stats, long long task_index, double elapsed) {
     for (int i = 0; i < TASK_PROFILE_TOPK; i++) {
         if (elapsed > stats->top_times[i]) {
