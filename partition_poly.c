@@ -61,6 +61,7 @@ typedef uint64_t AdjWord;
 
 #define MAX_PERMUTATIONS 5040 // 7!
 #define MAX_DEGREE ((MAX_ROWS * MAX_COLS) + 1)
+#define CANON_PARTITION_ID_LIMIT (1u << 11)
 
 // Cache settings - tuned for better locality
 #ifndef CACHE_BITS
@@ -383,6 +384,35 @@ typedef struct {
     uint32_t count;
 } ConnectedCanonLookupHeader;
 
+typedef struct {
+    long long task_start;
+    long long task_end;
+    const char* poly_out_path;
+    int prefix_depth_override;
+    int reorder_partitions_flag;
+} MainOptions;
+
+typedef struct {
+    int prefix_depth;
+    int graph_poly_len;
+    long long total_prefixes;
+    long long nominal_prefixes;
+    Prefix2Batch* prefix2_batches;
+    PrefixId* prefix2_batch_js;
+    long long* prefix2_batch_ps;
+    long long prefix2_batch_count;
+    double prefix_generation_time;
+    int use_runtime_split_queue;
+    SharedGraphCache shared_graph_cache;
+    int shared_graph_cache_active;
+    long long full_tasks;
+    long long active_task_start;
+    long long active_task_end;
+    long long total_tasks;
+    long long first_task;
+    long long progress_report_step;
+} RunConfig;
+
 // --- GLOBALS ---
 static int num_partitions = 0;
 static int perm_count = 0;
@@ -442,6 +472,20 @@ static int g_shared_cache_merge = 0;
 static int g_shared_cache_bits = 16;
 static int g_profile_separators = 0;
 static SharedGraphCache* g_shared_graph_cache = NULL;
+
+static void generate_permutations(void);
+static void generate_partitions_recursive(int idx, uint8_t* current, int max_val);
+static void reorder_partitions_by_hardness(void);
+static void build_partition_id_lookup(void);
+static void build_perm_table(void);
+static void build_terminal_perm_order_tables(void);
+static void build_overlap_table(void);
+static void build_partition_weight_table(void);
+static void shared_graph_cache_init(SharedGraphCache* shared, int bits, int poly_len);
+static void shared_graph_cache_free(SharedGraphCache* shared);
+static void build_live_prefix2_tasks(PrefixId** live_i_out, PrefixId** live_j_out,
+                                     long long* live_count_out);
+
 #define SMALL_GRAPH_LOOKUP_MAX_N 7
 static int g_small_graph_lookup_ready = 0;
 static double g_small_graph_lookup_init_time = 0.0;
@@ -2109,6 +2153,430 @@ static void write_poly_file(const char* path, const Poly* poly, const PolyFileMe
     }
 }
 
+static int parse_main_options(int argc, char** argv, MainOptions* opts) {
+    int positional_count = 0;
+
+    memset(opts, 0, sizeof(*opts));
+    opts->task_end = -1;
+    opts->prefix_depth_override = -1;
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--poly-out") == 0) {
+            if (i + 1 >= argc) {
+                usage(argv[0]);
+                return 0;
+            }
+            opts->poly_out_path = argv[++i];
+        } else if (strcmp(argv[i], "--task-start") == 0) {
+            if (i + 1 >= argc) {
+                usage(argv[0]);
+                return 0;
+            }
+            opts->task_start = parse_ll_or_die(argv[++i], "--task-start");
+        } else if (strcmp(argv[i], "--task-end") == 0) {
+            if (i + 1 >= argc) {
+                usage(argv[0]);
+                return 0;
+            }
+            opts->task_end = parse_ll_or_die(argv[++i], "--task-end");
+        } else if (strcmp(argv[i], "--prefix-depth") == 0) {
+            if (i + 1 >= argc) {
+                usage(argv[0]);
+                return 0;
+            }
+            opts->prefix_depth_override = (int)parse_ll_or_die(argv[++i], "--prefix-depth");
+        } else if (strcmp(argv[i], "--reorder") == 0) {
+            opts->reorder_partitions_flag = 1;
+        } else if (strcmp(argv[i], "--adaptive-subdivide") == 0) {
+            g_adaptive_subdivide = 1;
+        } else if (strcmp(argv[i], "--adaptive-max-depth") == 0) {
+            if (i + 1 >= argc) {
+                usage(argv[0]);
+                return 1;
+            }
+            g_adaptive_max_depth = (int)parse_ll_or_die(argv[++i], "--adaptive-max-depth");
+        } else if (strcmp(argv[i], "--adaptive-work-budget") == 0) {
+            if (i + 1 >= argc) {
+                usage(argv[0]);
+                return 0;
+            }
+            g_adaptive_work_budget = parse_ll_or_die(argv[++i], "--adaptive-work-budget");
+        } else if (strcmp(argv[i], "--task-times-out") == 0) {
+#if !RECT_PROFILE
+            fprintf(stderr, "--task-times-out requires a profiling build\n");
+            return 0;
+#else
+            if (i + 1 >= argc) {
+                usage(argv[0]);
+                return 0;
+            }
+            g_task_times_out_path = argv[++i];
+#endif
+        } else if (argv[i][0] == '-') {
+            usage(argv[0]);
+            return 0;
+        } else if (positional_count == 0) {
+            g_rows = (int)parse_ll_or_die(argv[i], "rows");
+            positional_count++;
+        } else if (positional_count == 1) {
+            g_cols = (int)parse_ll_or_die(argv[i], "cols");
+            positional_count++;
+        } else {
+            usage(argv[0]);
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+static int choose_prefix_depth(int prefix_depth_override) {
+    if (prefix_depth_override != -1) return prefix_depth_override;
+    if (g_rows == 7 && g_cols >= 6) return 2;
+    if (g_cols >= 6) return 3;
+    if (g_cols >= 2) return 2;
+    return 0;
+}
+
+static int init_problem_and_run_config(const MainOptions* opts, RunConfig* cfg) {
+    memset(cfg, 0, sizeof(*cfg));
+
+    if (g_rows < 1 || g_cols < 1 || g_rows > MAX_ROWS || g_cols > MAX_COLS) {
+        fprintf(stderr, "Rows/cols must be in range 1..%d and 1..%d\n", MAX_ROWS, MAX_COLS);
+        return 0;
+    }
+
+    {
+        int max_n = MAXN_NAUTY;
+        int max_m = SETWORDSNEEDED(max_n);
+        nauty_check(WORDSIZE, max_m, max_n, NAUTYVERSIONID);
+    }
+
+    factorial[0] = 1;
+    for (int i = 1; i <= 19; i++) factorial[i] = factorial[i - 1] * i;
+
+    init_row_dependent_tables();
+    generate_permutations();
+    {
+        uint8_t buffer[MAX_ROWS] = {0};
+        generate_partitions_recursive(0, buffer, -1);
+    }
+    if (opts->reorder_partitions_flag) {
+        reorder_partitions_by_hardness();
+    }
+#if RECT_COUNT_K4_FEASIBILITY
+    init_pair_index();
+#endif
+    if (num_partitions >= CANON_PARTITION_ID_LIMIT) {
+        fprintf(stderr, "Partition ID limit too small for %d partitions\n", num_partitions);
+        return 0;
+    }
+
+    init_partition_lookup_tables();
+    build_partition_id_lookup();
+    build_perm_table();
+    build_terminal_perm_order_tables();
+    build_overlap_table();
+#if RECT_COUNT_K4
+    build_partition_weight4_table();
+#else
+    build_partition_weight_table();
+#endif
+#if RECT_COUNT_K4_FEASIBILITY
+    build_partition_shadow_table();
+#endif
+
+    printf("Grid: %dx%d\n", g_rows, g_cols);
+    printf("Partitions: %d\n", num_partitions);
+    printf("Threads: %d\n", omp_get_max_threads());
+    if (opts->reorder_partitions_flag) {
+        printf("Partition hardness reorder: enabled\n");
+    }
+#if RECT_COUNT_K4
+    printf("Mode: fixed 4-colour count\n");
+#else
+    printf("Mode: chromatic polynomial\n");
+#endif
+#if RECT_PROFILE
+    printf("Profiling build: enabled\n");
+#else
+    printf("Profiling build: disabled\n");
+#endif
+    printf("Using nauty for canonical graph caching\n");
+
+    cfg->prefix_depth = choose_prefix_depth(opts->prefix_depth_override);
+    if (cfg->prefix_depth != 0 && cfg->prefix_depth != 2 && cfg->prefix_depth != 3 &&
+        cfg->prefix_depth != 4) {
+        fprintf(stderr, "--prefix-depth must be 2, 3, or 4\n");
+        return 0;
+    }
+    if (cfg->prefix_depth > g_cols) {
+        fprintf(stderr, "--prefix-depth must not exceed cols\n");
+        return 0;
+    }
+    if (g_cols >= 2 && cfg->prefix_depth == 0) {
+        fprintf(stderr, "Internal error: invalid zero prefix depth for cols >= 2\n");
+        return 0;
+    }
+    if (g_adaptive_subdivide && cfg->prefix_depth != 2) {
+        fprintf(stderr, "Adaptive subdivision currently supports only --prefix-depth 2\n");
+        return 0;
+    }
+    if (g_adaptive_subdivide && g_cols < 3) {
+        fprintf(stderr, "--adaptive-subdivide requires cols >= 3\n");
+        return 0;
+    }
+    if (g_adaptive_work_budget < 0) {
+        fprintf(stderr, "--adaptive-work-budget must be non-negative\n");
+        return 0;
+    }
+    if (g_adaptive_subdivide && g_adaptive_max_depth < 3) {
+        fprintf(stderr, "--adaptive-max-depth must be at least 3 with --adaptive-subdivide\n");
+        return 0;
+    }
+    if (g_adaptive_work_budget > 0 && !g_adaptive_subdivide) {
+        fprintf(stderr, "--adaptive-work-budget requires --adaptive-subdivide\n");
+        return 0;
+    }
+
+    {
+        const char* queue_profile_step_env = getenv("RECT_QUEUE_PROFILE_STEP");
+        if (queue_profile_step_env && *queue_profile_step_env) {
+            g_queue_profile_report_step = strtod(queue_profile_step_env, NULL);
+            if (g_queue_profile_report_step < 0.0) g_queue_profile_report_step = 0.0;
+        }
+        {
+            const char* shared_cache_env = getenv("RECT_SHARED_CACHE_MERGE");
+            if (shared_cache_env && *shared_cache_env && strcmp(shared_cache_env, "0") != 0) {
+                g_shared_cache_merge = 1;
+            }
+        }
+        {
+            const char* shared_cache_bits_env = getenv("RECT_SHARED_CACHE_BITS");
+            if (shared_cache_bits_env && *shared_cache_bits_env) {
+                g_shared_cache_bits =
+                    (int)parse_ll_or_die(shared_cache_bits_env, "RECT_SHARED_CACHE_BITS");
+                if (g_shared_cache_bits < 10 || g_shared_cache_bits > 24) {
+                    fprintf(stderr, "RECT_SHARED_CACHE_BITS must be between 10 and 24\n");
+                    return 0;
+                }
+            }
+        }
+#if RECT_PROFILE
+        {
+            const char* profile_separators_env = getenv("RECT_PROFILE_SEPARATORS");
+            if (profile_separators_env && *profile_separators_env &&
+                strcmp(profile_separators_env, "0") != 0) {
+                g_profile_separators = 1;
+            }
+        }
+#endif
+        {
+            const char* raw_cache_env = getenv("RECT_USE_RAW_CACHE");
+            if (raw_cache_env && *raw_cache_env) {
+                g_use_raw_cache = (strcmp(raw_cache_env, "0") != 0);
+            }
+        }
+    }
+
+    if (opts->task_start < 0) {
+        fprintf(stderr, "--task-start must be non-negative\n");
+        return 0;
+    }
+    if (opts->task_end >= 0 && opts->task_end < opts->task_start) {
+        fprintf(stderr, "Task range must satisfy 0 <= start <= end\n");
+        return 0;
+    }
+
+    printf("Raw cache: %s\n", g_use_raw_cache ? "enabled" : "disabled");
+    g_effective_prefix_depth = cfg->prefix_depth;
+    cfg->graph_poly_len = RECT_COUNT_K4 ? 1 : (g_cols * (g_rows / 2) + 1);
+
+    return 1;
+}
+
+static int prepare_run_config(const MainOptions* opts, RunConfig* cfg) {
+    if (g_shared_cache_merge) {
+        shared_graph_cache_init(&cfg->shared_graph_cache, g_shared_cache_bits, cfg->graph_poly_len);
+        g_shared_graph_cache = &cfg->shared_graph_cache;
+        cfg->shared_graph_cache_active = 1;
+        printf("Shared canonical cache merge enabled: 2^%d slots\n", g_shared_cache_bits);
+    }
+
+    if (cfg->prefix_depth > 0) {
+        double prefix_start_time = omp_get_wtime();
+        if (cfg->prefix_depth == 2) {
+            cfg->nominal_prefixes = (long long)num_partitions * (num_partitions + 1) / 2;
+            build_live_prefix2_tasks(&g_live_prefix2_i, &g_live_prefix2_j, &g_live_prefix2_count);
+            cfg->total_prefixes = g_live_prefix2_count;
+        } else if (cfg->prefix_depth == 3) {
+            cfg->total_prefixes =
+                (long long)num_partitions * (num_partitions + 1) * (num_partitions + 2) / 6;
+        } else if (cfg->prefix_depth == 4) {
+            cfg->total_prefixes = (long long)num_partitions * (num_partitions + 1) *
+                                  (num_partitions + 2) * (num_partitions + 3) / 24;
+        }
+        cfg->prefix_generation_time = omp_get_wtime() - prefix_start_time;
+    }
+
+    completed_tasks = 0;
+    cfg->use_runtime_split_queue = (cfg->prefix_depth == 2 && g_adaptive_subdivide);
+    cfg->full_tasks = (g_cols == 1) ? (long long)num_partitions : cfg->total_prefixes;
+    cfg->active_task_start = opts->task_start;
+    cfg->active_task_end = (opts->task_end < 0) ? cfg->full_tasks : opts->task_end;
+    if (cfg->active_task_end < cfg->active_task_start || cfg->active_task_end > cfg->full_tasks) {
+        fprintf(stderr, "Task range must satisfy 0 <= start <= end <= %lld\n", cfg->full_tasks);
+        return 0;
+    }
+    cfg->total_tasks = cfg->active_task_end - cfg->active_task_start;
+    cfg->first_task = cfg->active_task_start;
+    g_task_times_first_task = cfg->first_task;
+    g_task_times_count = cfg->total_tasks;
+
+    if (g_task_times_out_path && cfg->total_tasks > 0) {
+        g_task_times_values = checked_calloc((size_t)cfg->total_tasks, sizeof(*g_task_times_values),
+                                             "task_times_values");
+        for (long long t = 0; t < cfg->total_tasks; t++) {
+            g_task_times_values[t] = -1.0;
+        }
+    }
+
+    if (cfg->prefix_depth == 2 && !g_adaptive_subdivide && cfg->total_tasks > 0) {
+        double batch_start_time = omp_get_wtime();
+        build_fixed_prefix2_batches(g_live_prefix2_i, g_live_prefix2_j, cfg->active_task_start,
+                                    cfg->total_tasks, &cfg->prefix2_batches,
+                                    &cfg->prefix2_batch_count, &cfg->prefix2_batch_js,
+                                    &cfg->prefix2_batch_ps);
+        cfg->prefix_generation_time += omp_get_wtime() - batch_start_time;
+    }
+
+    printf("Prefix depth: %d (%lld tasks)\n", cfg->prefix_depth, cfg->total_prefixes);
+    if (cfg->prefix_depth == 2 && cfg->nominal_prefixes > 0) {
+        printf("Live depth-2 prefixes: %lld of %lld nominal\n",
+               cfg->total_prefixes, cfg->nominal_prefixes);
+    }
+    if (g_adaptive_subdivide) {
+        if (cfg->use_runtime_split_queue) {
+            printf("Runtime subdivision enabled: max depth %d", g_adaptive_max_depth);
+            if (g_adaptive_work_budget > 0) {
+                printf(", work budget %lld", g_adaptive_work_budget);
+            }
+            printf("\n");
+        } else {
+            printf("Adaptive subdivision: max depth %d\n", g_adaptive_max_depth);
+        }
+    }
+    printf("Prefix generation: %.2f seconds\n", cfg->prefix_generation_time);
+    if (cfg->prefix_depth > 0) {
+        if (cfg->prefix_depth == 2 && cfg->prefix2_batch_count > 0) {
+            size_t bytes_per_task = sizeof(PrefixId) + sizeof(long long);
+            size_t bytes_per_batch = sizeof(*cfg->prefix2_batches);
+            double total_mib =
+                (((double)bytes_per_task * (double)cfg->total_tasks) +
+                 ((double)bytes_per_batch * (double)cfg->prefix2_batch_count)) /
+                (1024.0 * 1024.0);
+            printf("Fixed depth-2 batching: %lld batches, %.2f MiB total\n",
+                   cfg->prefix2_batch_count, total_mib);
+        } else {
+            printf("Prefix task storage: unranked on demand for selected tasks\n");
+        }
+    }
+
+    {
+        long long progress_updates = DEFAULT_PROGRESS_UPDATES;
+        const char* progress_step_env = getenv("RECT_PROGRESS_STEP");
+        const char* progress_updates_env = getenv("RECT_PROGRESS_UPDATES");
+        if (progress_step_env && *progress_step_env) {
+            char* end = NULL;
+            long long parsed = strtoll(progress_step_env, &end, 10);
+            if (end && *end == '\0' && parsed > 0) {
+                cfg->progress_report_step = parsed;
+            }
+        }
+        if (cfg->progress_report_step == 0 && progress_updates_env && *progress_updates_env) {
+            char* end = NULL;
+            long long parsed = strtoll(progress_updates_env, &end, 10);
+            if (end && *end == '\0' && parsed > 0) {
+                progress_updates = parsed;
+            }
+        }
+        if (cfg->progress_report_step == 0) {
+            cfg->progress_report_step = cfg->total_tasks / progress_updates;
+            if (cfg->progress_report_step < 1) cfg->progress_report_step = 1;
+        }
+        if (cfg->total_tasks > 0 && cfg->progress_report_step > cfg->total_tasks) {
+            cfg->progress_report_step = cfg->total_tasks;
+        }
+        printf("Task range: [%lld, %lld) of %lld\n",
+               cfg->active_task_start, cfg->active_task_end, cfg->full_tasks);
+
+        {
+            const char* omp_static_env = getenv("RECT_OMP_STATIC");
+            const char* omp_schedule_env = getenv("OMP_SCHEDULE");
+            int use_static_schedule =
+                (omp_static_env && *omp_static_env && strcmp(omp_static_env, "0") != 0);
+            int omp_chunk = 1;
+            if (!use_static_schedule) {
+                omp_chunk = (cfg->prefix_depth == 2 && g_rows < 7 && !g_adaptive_subdivide) ? 8 : 1;
+            }
+            if (use_static_schedule) {
+                printf("OpenMP scheduling: static,1 (RECT_OMP_STATIC override)\n");
+                omp_set_schedule(omp_sched_static, 1);
+            } else if (omp_schedule_env && *omp_schedule_env) {
+                printf("OpenMP scheduling: runtime from OMP_SCHEDULE=%s\n", omp_schedule_env);
+            } else {
+                printf("OpenMP scheduling: dynamic,%d\n", omp_chunk);
+                omp_set_schedule(omp_sched_dynamic, omp_chunk);
+            }
+        }
+        if (cfg->total_tasks == 0) {
+            printf("No tasks selected; producing the zero polynomial for this shard.\n");
+        }
+        printf("Progress updates every %lld tasks", cfg->progress_report_step);
+        if (progress_step_env && *progress_step_env) {
+            printf(" (RECT_PROGRESS_STEP override)");
+        } else {
+            printf(" (target ~%lld updates)", progress_updates);
+        }
+        printf("\n");
+    }
+
+    progress_last_reported = 0;
+    progress_reporter_init(&progress_reporter, stdout);
+    progress_reporter_print_initial(&progress_reporter, cfg->total_tasks);
+
+    return 1;
+}
+
+static void cleanup_run_config(RunConfig* cfg) {
+    free(g_live_prefix2_i);
+    free(g_live_prefix2_j);
+    g_live_prefix2_i = NULL;
+    g_live_prefix2_j = NULL;
+    g_live_prefix2_count = 0;
+
+    free(cfg->prefix2_batches);
+    free(cfg->prefix2_batch_js);
+    free(cfg->prefix2_batch_ps);
+    cfg->prefix2_batches = NULL;
+    cfg->prefix2_batch_js = NULL;
+    cfg->prefix2_batch_ps = NULL;
+    cfg->prefix2_batch_count = 0;
+
+    free(g_task_times_values);
+    g_task_times_values = NULL;
+
+    if (cfg->shared_graph_cache_active) {
+        shared_graph_cache_free(&cfg->shared_graph_cache);
+        g_shared_graph_cache = NULL;
+        cfg->shared_graph_cache_active = 0;
+    }
+
+    small_graph_lookup_free();
+    connected_canon_lookup_free();
+    free_row_dependent_tables();
+}
+
 // --- INITIALISATION ---
 
 void generate_permutations() {
@@ -2450,7 +2918,6 @@ static inline void weight_accum_mul_partition(const WeightAccum* src, int pid, W
 
 // --- SYMMETRY LOGIC ---
 
-#define CANON_PARTITION_ID_LIMIT (1u << 11)
 #define REP_ORBIT_MARK_WORDS ((CANON_PARTITION_ID_LIMIT + 63u) / 64u)
 
 typedef struct {
@@ -5874,379 +6341,37 @@ static void execute_local_runtime_task(const LocalTask* task, WorkerCtx* ctx, Po
 }
 
 int main(int argc, char** argv) {
-    long long task_start = 0;
-    long long task_end = -1;
-    const char* poly_out_path = NULL;
-    int prefix_depth_override = -1;
-    int reorder_partitions_flag = 0;
-    int positional_count = 0;
+    MainOptions opts;
+    RunConfig run;
 
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--poly-out") == 0) {
-            if (i + 1 >= argc) {
-                usage(argv[0]);
-                return 1;
-            }
-            poly_out_path = argv[++i];
-        } else if (strcmp(argv[i], "--task-start") == 0) {
-            if (i + 1 >= argc) {
-                usage(argv[0]);
-                return 1;
-            }
-            task_start = parse_ll_or_die(argv[++i], "--task-start");
-        } else if (strcmp(argv[i], "--task-end") == 0) {
-            if (i + 1 >= argc) {
-                usage(argv[0]);
-                return 1;
-            }
-            task_end = parse_ll_or_die(argv[++i], "--task-end");
-        } else if (strcmp(argv[i], "--prefix-depth") == 0) {
-            if (i + 1 >= argc) {
-                usage(argv[0]);
-                return 1;
-            }
-            prefix_depth_override = (int)parse_ll_or_die(argv[++i], "--prefix-depth");
-        } else if (strcmp(argv[i], "--reorder") == 0) {
-            reorder_partitions_flag = 1;
-        } else if (strcmp(argv[i], "--adaptive-subdivide") == 0) {
-            g_adaptive_subdivide = 1;
-        } else if (strcmp(argv[i], "--adaptive-max-depth") == 0) {
-            if (i + 1 >= argc) {
-                usage(argv[0]);
-                return 1;
-            }
-            g_adaptive_max_depth = (int)parse_ll_or_die(argv[++i], "--adaptive-max-depth");
-        } else if (strcmp(argv[i], "--adaptive-work-budget") == 0) {
-            if (i + 1 >= argc) {
-                usage(argv[0]);
-                return 1;
-            }
-            g_adaptive_work_budget = parse_ll_or_die(argv[++i], "--adaptive-work-budget");
-        } else if (strcmp(argv[i], "--task-times-out") == 0) {
-#if !RECT_PROFILE
-            fprintf(stderr, "--task-times-out requires a profiling build\n");
-            return 1;
-#else
-            if (i + 1 >= argc) {
-                usage(argv[0]);
-                return 1;
-            }
-            g_task_times_out_path = argv[++i];
-#endif
-        } else if (argv[i][0] == '-') {
-            usage(argv[0]);
-            return 1;
-        } else if (positional_count == 0) {
-            g_rows = (int)parse_ll_or_die(argv[i], "rows");
-            positional_count++;
-        } else if (positional_count == 1) {
-            g_cols = (int)parse_ll_or_die(argv[i], "cols");
-            positional_count++;
-        } else {
-            usage(argv[0]);
-            return 1;
-        }
+    if (!parse_main_options(argc, argv, &opts)) return 1;
+    if (!init_problem_and_run_config(&opts, &run)) {
+        cleanup_run_config(&run);
+        return 1;
     }
-
-    if (g_rows < 1 || g_cols < 1 || g_rows > MAX_ROWS || g_cols > MAX_COLS) {
-        fprintf(stderr, "Rows/cols must be in range 1..%d and 1..%d\n", MAX_ROWS, MAX_COLS);
+    if (!prepare_run_config(&opts, &run)) {
+        cleanup_run_config(&run);
         return 1;
     }
 
-    // Verify nauty build/runtime compatibility.
-    int max_n = MAXN_NAUTY;
-    int max_m = SETWORDSNEEDED(max_n);
-    nauty_check(WORDSIZE, max_m, max_n, NAUTYVERSIONID);
-    
-    // 1. Initialise maths tables
-    factorial[0] = 1;
-    for(int i=1; i<=19; i++) factorial[i] = factorial[i-1]*i;
-
-    // 2. Data structures
-    init_row_dependent_tables();
-    generate_permutations();
-    uint8_t buffer[MAX_ROWS] = {0};
-    generate_partitions_recursive(0, buffer, -1);
-    if (reorder_partitions_flag) {
-        reorder_partitions_by_hardness();
-    }
-#if RECT_COUNT_K4_FEASIBILITY
-    init_pair_index();
-#endif
-    if (num_partitions >= CANON_PARTITION_ID_LIMIT) {
-        fprintf(stderr, "Partition ID limit too small for %d partitions\n", num_partitions);
-        return 1;
-    }
-    
-    // 3. Build lookup tables
-    init_partition_lookup_tables();
-    build_partition_id_lookup();
-    build_perm_table();
-    build_terminal_perm_order_tables();
-    build_overlap_table();
-#if RECT_COUNT_K4
-    build_partition_weight4_table();
-#else
-    build_partition_weight_table();
-#endif
-#if RECT_COUNT_K4_FEASIBILITY
-    build_partition_shadow_table();
-#endif
-    
-    printf("Grid: %dx%d\n", g_rows, g_cols);
-    printf("Partitions: %d\n", num_partitions);
-    printf("Threads: %d\n", omp_get_max_threads());
-    if (reorder_partitions_flag) {
-        printf("Partition hardness reorder: enabled\n");
-    }
-#if RECT_COUNT_K4
-    printf("Mode: fixed 4-colour count\n");
-#else
-    printf("Mode: chromatic polynomial\n");
-#endif
-#if RECT_PROFILE
-    printf("Profiling build: enabled\n");
-#else
-    printf("Profiling build: disabled\n");
-#endif
-    printf("Using nauty for canonical graph caching\n");
-
-    // Build prefix list for work distribution.
-    int prefix_depth = 0;
-    if (prefix_depth_override != -1) {
-        prefix_depth = prefix_depth_override;
-    } else if (g_rows == 7 && g_cols >= 6) {
-        prefix_depth = 2;
-    } else if (g_cols >= 6) {
-        prefix_depth = 3;
-    } else if (g_cols >= 2) {
-        prefix_depth = 2;
-    }
-    if (prefix_depth != 0 && prefix_depth != 2 && prefix_depth != 3 && prefix_depth != 4) {
-        fprintf(stderr, "--prefix-depth must be 2, 3, or 4\n");
-        return 1;
-    }
-    if (prefix_depth > g_cols) {
-        fprintf(stderr, "--prefix-depth must not exceed cols\n");
-        return 1;
-    }
-    if (g_cols >= 2 && prefix_depth == 0) {
-        fprintf(stderr, "Internal error: invalid zero prefix depth for cols >= 2\n");
-        return 1;
-    }
-    if (g_adaptive_subdivide && prefix_depth != 2) {
-        fprintf(stderr, "Adaptive subdivision currently supports only --prefix-depth 2\n");
-        return 1;
-    }
-    if (g_adaptive_subdivide && g_cols < 3) {
-        fprintf(stderr, "--adaptive-subdivide requires cols >= 3\n");
-        return 1;
-    }
-    if (g_adaptive_work_budget < 0) {
-        fprintf(stderr, "--adaptive-work-budget must be non-negative\n");
-        return 1;
-    }
-    if (g_adaptive_subdivide && g_adaptive_max_depth < 3) {
-        fprintf(stderr, "--adaptive-max-depth must be at least 3 with --adaptive-subdivide\n");
-        return 1;
-    }
-    if (g_adaptive_work_budget > 0 && !g_adaptive_subdivide) {
-        fprintf(stderr, "--adaptive-work-budget requires --adaptive-subdivide\n");
-        return 1;
-    }
-    {
-        const char* queue_profile_step_env = getenv("RECT_QUEUE_PROFILE_STEP");
-        if (queue_profile_step_env && *queue_profile_step_env) {
-            g_queue_profile_report_step = strtod(queue_profile_step_env, NULL);
-            if (g_queue_profile_report_step < 0.0) g_queue_profile_report_step = 0.0;
-        }
-        const char* shared_cache_env = getenv("RECT_SHARED_CACHE_MERGE");
-        if (shared_cache_env && *shared_cache_env && strcmp(shared_cache_env, "0") != 0) {
-            g_shared_cache_merge = 1;
-        }
-        const char* shared_cache_bits_env = getenv("RECT_SHARED_CACHE_BITS");
-        if (shared_cache_bits_env && *shared_cache_bits_env) {
-            g_shared_cache_bits = (int)parse_ll_or_die(shared_cache_bits_env, "RECT_SHARED_CACHE_BITS");
-            if (g_shared_cache_bits < 10 || g_shared_cache_bits > 24) {
-                fprintf(stderr, "RECT_SHARED_CACHE_BITS must be between 10 and 24\n");
-                return 1;
-            }
-        }
-#if RECT_PROFILE
-        const char* profile_separators_env = getenv("RECT_PROFILE_SEPARATORS");
-        if (profile_separators_env && *profile_separators_env &&
-            strcmp(profile_separators_env, "0") != 0) {
-            g_profile_separators = 1;
-        }
-#endif
-        const char* raw_cache_env = getenv("RECT_USE_RAW_CACHE");
-        if (raw_cache_env && *raw_cache_env) {
-            g_use_raw_cache = (strcmp(raw_cache_env, "0") != 0);
-        }
-    }
-    if (task_start < 0) {
-        fprintf(stderr, "--task-start must be non-negative\n");
-        return 1;
-    }
-    if (task_end >= 0 && task_end < task_start) {
-        fprintf(stderr, "Task range must satisfy 0 <= start <= end\n");
-        return 1;
-    }
-    printf("Raw cache: %s\n", g_use_raw_cache ? "enabled" : "disabled");
-    g_effective_prefix_depth = prefix_depth;
-
-    int graph_poly_len = RECT_COUNT_K4 ? 1 : (g_cols * (g_rows / 2) + 1);
-    SharedGraphCache shared_graph_cache;
-    int shared_graph_cache_active = 0;
-    if (g_shared_cache_merge) {
-        shared_graph_cache_init(&shared_graph_cache, g_shared_cache_bits, graph_poly_len);
-        g_shared_graph_cache = &shared_graph_cache;
-        shared_graph_cache_active = 1;
-        printf("Shared canonical cache merge enabled: 2^%d slots\n", g_shared_cache_bits);
-    }
-
-    long long total_prefixes = 0;
-    long long nominal_prefixes = 0;
-    Prefix2Batch* prefix2_batches = NULL;
-    PrefixId* prefix2_batch_js = NULL;
-    long long* prefix2_batch_ps = NULL;
-    long long prefix2_batch_count = 0;
-    double prefix_generation_time = 0.0;
-    int use_runtime_split_queue = (prefix_depth == 2 && g_adaptive_subdivide);
-
-    if (prefix_depth > 0) {
-        double prefix_start_time = omp_get_wtime();
-        if (prefix_depth == 2) {
-            long long base_prefixes = (long long)num_partitions * (num_partitions + 1) / 2;
-            nominal_prefixes = base_prefixes;
-            build_live_prefix2_tasks(&g_live_prefix2_i, &g_live_prefix2_j, &g_live_prefix2_count);
-            total_prefixes = g_live_prefix2_count;
-        } else if (prefix_depth == 3) {
-            total_prefixes = (long long)num_partitions * (num_partitions + 1) * (num_partitions + 2) / 6;
-        } else if (prefix_depth == 4) {
-            total_prefixes = (long long)num_partitions * (num_partitions + 1) *
-                             (num_partitions + 2) * (num_partitions + 3) / 24;
-        }
-        prefix_generation_time = omp_get_wtime() - prefix_start_time;
-    }
-
-    completed_tasks = 0;
-    long long full_tasks = (g_cols == 1) ? (long long)num_partitions : total_prefixes;
-    if (task_end < 0) task_end = full_tasks;
-    if (task_end < task_start || task_end > full_tasks) {
-        fprintf(stderr, "Task range must satisfy 0 <= start <= end <= %lld\n", full_tasks);
-        return 1;
-    }
-    long long active_task_start = task_start;
-    long long active_task_end = task_end;
-    long long total_tasks = active_task_end - active_task_start;
-    long long first_task = active_task_start;
-    g_task_times_first_task = first_task;
-    g_task_times_count = total_tasks;
-    if (g_task_times_out_path && total_tasks > 0) {
-        g_task_times_values = checked_calloc((size_t)total_tasks, sizeof(*g_task_times_values),
-                                             "task_times_values");
-        for (long long t = 0; t < total_tasks; t++) {
-            g_task_times_values[t] = -1.0;
-        }
-    }
-    if (prefix_depth == 2 && !g_adaptive_subdivide && total_tasks > 0) {
-        double batch_start_time = omp_get_wtime();
-        build_fixed_prefix2_batches(g_live_prefix2_i, g_live_prefix2_j,
-                                    active_task_start,
-                                    total_tasks, &prefix2_batches, &prefix2_batch_count,
-                                    &prefix2_batch_js, &prefix2_batch_ps);
-        prefix_generation_time += omp_get_wtime() - batch_start_time;
-    }
-    printf("Prefix depth: %d (%lld tasks)\n", prefix_depth, total_prefixes);
-    if (prefix_depth == 2 && nominal_prefixes > 0) {
-        printf("Live depth-2 prefixes: %lld of %lld nominal\n", total_prefixes, nominal_prefixes);
-    }
-    if (g_adaptive_subdivide) {
-        if (use_runtime_split_queue) {
-            printf("Runtime subdivision enabled: max depth %d",
-                   g_adaptive_max_depth);
-            if (g_adaptive_work_budget > 0) {
-                printf(", work budget %lld", g_adaptive_work_budget);
-            }
-            printf("\n");
-        } else {
-            printf("Adaptive subdivision: max depth %d\n",
-                   g_adaptive_max_depth);
-        }
-    }
-    printf("Prefix generation: %.2f seconds\n", prefix_generation_time);
-    if (prefix_depth > 0) {
-        if (prefix_depth == 2 && prefix2_batch_count > 0) {
-            size_t bytes_per_task = sizeof(PrefixId) + sizeof(long long);
-            size_t bytes_per_batch = sizeof(*prefix2_batches);
-            double total_mib =
-                (((double)bytes_per_task * (double)total_tasks) +
-                 ((double)bytes_per_batch * (double)prefix2_batch_count)) /
-                (1024.0 * 1024.0);
-            printf("Fixed depth-2 batching: %lld batches, %.2f MiB total\n",
-                   prefix2_batch_count, total_mib);
-        } else {
-            printf("Prefix task storage: unranked on demand for selected tasks\n");
-        }
-    }
-    long long progress_report_step = 0;
-    long long progress_updates = DEFAULT_PROGRESS_UPDATES;
-    const char* progress_step_env = getenv("RECT_PROGRESS_STEP");
-    const char* progress_updates_env = getenv("RECT_PROGRESS_UPDATES");
-    if (progress_step_env && *progress_step_env) {
-        char* end = NULL;
-        long long parsed = strtoll(progress_step_env, &end, 10);
-        if (end && *end == '\0' && parsed > 0) {
-            progress_report_step = parsed;
-        }
-    }
-    if (progress_report_step == 0 && progress_updates_env && *progress_updates_env) {
-        char* end = NULL;
-        long long parsed = strtoll(progress_updates_env, &end, 10);
-        if (end && *end == '\0' && parsed > 0) {
-            progress_updates = parsed;
-        }
-    }
-    if (progress_report_step == 0) {
-        progress_report_step = total_tasks / progress_updates;
-        if (progress_report_step < 1) progress_report_step = 1;
-    }
-    if (total_tasks > 0 && progress_report_step > total_tasks) progress_report_step = total_tasks;
-    printf("Task range: [%lld, %lld) of %lld\n", active_task_start, active_task_end, full_tasks);
-    const char* omp_static_env = getenv("RECT_OMP_STATIC");
-    int use_static_schedule =
-        (omp_static_env && *omp_static_env && strcmp(omp_static_env, "0") != 0);
-    const char* omp_schedule_env = getenv("OMP_SCHEDULE");
-    int omp_chunk = 1;
-    if (!use_static_schedule) {
-        omp_chunk = (prefix_depth == 2 && g_rows < 7 && !g_adaptive_subdivide) ? 8 : 1;
-    }
-    if (use_static_schedule) {
-        printf("OpenMP scheduling: static,1 (RECT_OMP_STATIC override)\n");
-        omp_set_schedule(omp_sched_static, 1);
-    } else if (omp_schedule_env && *omp_schedule_env) {
-        printf("OpenMP scheduling: runtime from OMP_SCHEDULE=%s\n", omp_schedule_env);
-    } else {
-        printf("OpenMP scheduling: dynamic,%d\n", omp_chunk);
-        omp_set_schedule(omp_sched_dynamic, omp_chunk);
-    }
-    if (total_tasks == 0) {
-        printf("No tasks selected; producing the zero polynomial for this shard.\n");
-    }
-    printf("Progress updates every %lld tasks", progress_report_step);
-    if (progress_step_env && *progress_step_env) {
-        printf(" (RECT_PROGRESS_STEP override)");
-    } else {
-        printf(" (target ~%lld updates)", progress_updates);
-    }
-    printf("\n");
-    progress_last_reported = 0;
-    progress_reporter_init(&progress_reporter, stdout);
-    progress_reporter_print_initial(&progress_reporter, total_tasks);
+    const int prefix_depth = run.prefix_depth;
+    const int graph_poly_len = run.graph_poly_len;
+    const Prefix2Batch* prefix2_batches = run.prefix2_batches;
+    const PrefixId* prefix2_batch_js = run.prefix2_batch_js;
+    const long long* prefix2_batch_ps = run.prefix2_batch_ps;
+    const long long prefix2_batch_count = run.prefix2_batch_count;
+    const double prefix_generation_time = run.prefix_generation_time;
+    const int use_runtime_split_queue = run.use_runtime_split_queue;
+    const long long full_tasks = run.full_tasks;
+    const long long active_task_start = run.active_task_start;
+    const long long active_task_end = run.active_task_end;
+    const long long total_tasks = run.total_tasks;
+    const long long first_task = run.first_task;
+    const long long progress_report_step = run.progress_report_step;
+    const char* poly_out_path = opts.poly_out_path;
 
     double start_time = omp_get_wtime();
-    if (total_tasks > 0) {
+    if (run.total_tasks > 0) {
         small_graph_lookup_init();
         connected_canon_lookup_init();
         if (PROFILE_BUILD) {
@@ -6263,18 +6388,19 @@ int main(int argc, char** argv) {
     int num_threads = omp_get_max_threads();
     LocalTaskQueue local_queue;
     int local_queue_active = 0;
-    if (use_runtime_split_queue) {
+    if (run.use_runtime_split_queue) {
         int queue_capacity_slack = 4 * num_threads;
 
-        long long queue_cap_ll = total_tasks + queue_capacity_slack + 64;
+        long long queue_cap_ll = run.total_tasks + queue_capacity_slack + 64;
         if (queue_cap_ll > INT_MAX) {
             fprintf(stderr, "Local task queue too large\n");
+            cleanup_run_config(&run);
             return 1;
         }
 
-        local_queue_init(&local_queue, (int)queue_cap_ll, total_tasks, num_threads);
-        for (long long t = 0; t < total_tasks; t++) {
-            long long p = first_task + t;
+        local_queue_init(&local_queue, (int)queue_cap_ll, run.total_tasks, num_threads);
+        for (long long t = 0; t < run.total_tasks; t++) {
+            long long p = run.first_task + t;
             int i = 0;
             int j = 0;
             LocalTask task;
@@ -6305,10 +6431,10 @@ int main(int argc, char** argv) {
     TaskTimingStats* thread_task_timing =
         checked_aligned_alloc(64, (size_t)num_threads * sizeof(TaskTimingStats), "thread_task_timing");
     QueueSubtaskTimingStats* thread_queue_subtask_timing = NULL;
-    for(int i=0; i<num_threads; i++) poly_zero(&thread_polys[i]);
+    for (int i = 0; i < num_threads; i++) poly_zero(&thread_polys[i]);
     memset(thread_profiles, 0, (size_t)num_threads * sizeof(ProfileStats));
     memset(thread_task_timing, 0, (size_t)num_threads * sizeof(TaskTimingStats));
-    if (use_runtime_split_queue && PROFILE_BUILD) {
+    if (run.use_runtime_split_queue && PROFILE_BUILD) {
         thread_queue_subtask_timing = checked_aligned_alloc(
             64, (size_t)num_threads * (size_t)(MAX_COLS + 1) * sizeof(QueueSubtaskTimingStats),
             "thread_queue_subtask_timing");
@@ -7152,23 +7278,7 @@ int main(int argc, char** argv) {
 #endif
     }
 
-    free(g_live_prefix2_i);
-    free(g_live_prefix2_j);
-    g_live_prefix2_i = NULL;
-    g_live_prefix2_j = NULL;
-    g_live_prefix2_count = 0;
-    free(prefix2_batches);
-    free(prefix2_batch_js);
-    free(prefix2_batch_ps);
-    free(g_task_times_values);
-    g_task_times_values = NULL;
-    if (shared_graph_cache_active) {
-        shared_graph_cache_free(&shared_graph_cache);
-        g_shared_graph_cache = NULL;
-    }
-    small_graph_lookup_free();
-    connected_canon_lookup_free();
-    free_row_dependent_tables();
+    cleanup_run_config(&run);
 
     return 0;
 }
