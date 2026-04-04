@@ -3415,22 +3415,19 @@ static void get_canonical_graph_from_dense_rows(int n, const AdjWord* rows, Grap
         profile->get_canonical_graph_build_input_time += omp_get_wtime() - phase_t0;
     }
 
+    int degree_counts[MAXN_NAUTY + 1] = {0};
     for (int i = 0; i < n; i++) {
-        lab[i] = i;
         degrees[i] = (uint8_t)__builtin_popcountll((uint64_t)rows[i]);
+        degree_counts[degrees[i]]++;
     }
-    for (int i = 1; i < n; i++) {
-        int v = lab[i];
-        uint8_t deg_v = degrees[v];
-        int j = i;
-        while (j > 0) {
-            int prev = lab[j - 1];
-            uint8_t deg_prev = degrees[prev];
-            if (deg_prev < deg_v || (deg_prev == deg_v && prev < v)) break;
-            lab[j] = prev;
-            j--;
-        }
-        lab[j] = v;
+    int degree_offsets[MAXN_NAUTY + 1];
+    int pos = 0;
+    for (int deg = 0; deg <= MAXN_NAUTY; deg++) {
+        degree_offsets[deg] = pos;
+        pos += degree_counts[deg];
+    }
+    for (int v = 0; v < n; v++) {
+        lab[degree_offsets[degrees[v]]++] = v;
     }
     for (int i = 0; i < n; i++) {
         ptn[i] = (i + 1 < n && degrees[lab[i]] == degrees[lab[i + 1]]) ? 1 : 0;

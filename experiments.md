@@ -6538,3 +6538,40 @@
   - on the hot `6x6` workload, handing nauty that partition trims a few nanoseconds from each canonicalisation, and that compounds over roughly `40M` calls into a measurable wall-time win
   - the one-thread `7x6` task is effectively flat, so this should be treated as a targeted improvement for the nauty-heavy benchmark rather than a universal speedup
 - Outcome: accepted on `main`.
+
+### Experiment 163: Replace degree-partition insertion sort with counting sort
+- Goal: keep the accepted degree-based initial partition for nauty, but reduce the per-call setup overhead of building `lab[]`.
+- Change:
+  - replace the insertion sort over vertices by degree with a tiny counting sort over degree buckets `0..n`
+  - keep exactly the same partition structure as Experiment 162:
+    - vertices ordered by ascending degree
+    - ties broken by ascending vertex id
+    - `ptn[]` splits only when the degree changes
+- Matching 32-thread benchmark command:
+  - `env OMP_NUM_THREADS=32 ./partition_poly_7 6 6 --prefix-depth 2 --adaptive-subdivide --adaptive-work-budget 1000 --adaptive-max-depth 5`
+- Baseline:
+  - current committed `main` tip before this change (`4c0314a`)
+  - `Worker Complete in 22.26 seconds`
+  - `Worker Complete in 22.23 seconds`
+- Experiment:
+  - `Worker Complete in 22.20 seconds`
+  - `Worker Complete in 22.25 seconds`
+- Additional single-thread check:
+  - command:
+    - `env OMP_NUM_THREADS=1 ./partition_poly_7 7 6 --prefix-depth 2 --task-end 1`
+  - baseline:
+    - `Worker Complete in 30.23 seconds`
+  - experiment:
+    - `Worker Complete in 30.27 seconds`
+- Profile evidence on the matching `6x6` benchmark:
+  - before this change, `get_canonical_graph()` accounted for about `128.273s` over `40,426,758` calls, including `96.533s` in `densenauty()`
+  - with counting sort, `get_canonical_graph()` dropped to about `124.583s` over `40,404,309` calls, while `densenauty()` stayed essentially flat at `96.505s`
+- Correctness:
+  - all benchmark runs printed the same chromatic polynomial and the same values:
+    - `6x6`: `P(4) = 203716633441803914880`, `P(5) = 2852707805646422930409600`
+    - `7x6 task 0`: `P(4) = 43715355264000`, `P(5) = 15297058957242888000`
+- Interpretation:
+  - the degree partition itself was good, but insertion-sorting it on every canonicalisation call was avoidable work
+  - a bucketed degree order preserves the same partition while shaving a few seconds from canonicalisation setup over roughly `40M` calls
+  - this is a small refinement on top of Experiment 162 rather than a new standalone algorithmic win
+- Outcome: accepted on `main`.
