@@ -937,8 +937,8 @@ static int choose_dsat_vertex_colourable(const Graph* g, const int8_t* colour,
     return best;
 }
 
-static int dsatur_is_4_colourable(const Graph* g, int coloured, const int8_t* colour,
-                                  const uint8_t* saturation, int8_t* solution) {
+static int dsatur_is_4_colourable(const Graph* g, int coloured, int8_t* colour,
+                                  uint8_t* saturation, int8_t* solution) {
     if (coloured == g->n) {
         if (solution) memcpy(solution, colour, sizeof(int8_t) * MAXN_NAUTY);
         return 1;
@@ -956,51 +956,62 @@ static int dsatur_is_4_colourable(const Graph* g, int coloured, const int8_t* co
         uint8_t bit = (uint8_t)bit_u;
         int c = __builtin_ctz((unsigned)bit);
         available &= (uint8_t)(available - 1);
-
-        int8_t next_colour[MAXN_NAUTY];
-        uint8_t next_saturation[MAXN_NAUTY];
-        memcpy(next_colour, colour, sizeof(next_colour));
-        memcpy(next_saturation, saturation, sizeof(next_saturation));
-        next_colour[v] = (int8_t)c;
+        int changed[MAXN_NAUTY];
+        int changed_count = 0;
+        colour[v] = (int8_t)c;
 
         uint64_t neighbours = (uint64_t)g->adj[v] & g->vertex_mask;
         int stuck = 0;
         while (neighbours) {
             int u = __builtin_ctzll(neighbours);
-            if (next_colour[u] < 0) {
-                next_saturation[u] |= bit;
-                if (next_saturation[u] == 0x0fU) stuck = 1;
+            if (colour[u] < 0 && !(saturation[u] & bit)) {
+                saturation[u] |= bit;
+                changed[changed_count++] = u;
+                if (saturation[u] == 0x0fU) stuck = 1;
             }
             neighbours &= neighbours - 1;
         }
 
-        if (!stuck && dsatur_is_4_colourable(g, coloured + 1, next_colour, next_saturation,
-                                             solution)) {
+        if (!stuck && dsatur_is_4_colourable(g, coloured + 1, colour, saturation, solution)) {
             return 1;
         }
+
+        while (changed_count) {
+            int u = changed[--changed_count];
+            saturation[u] &= (uint8_t)~bit;
+        }
+        colour[v] = -1;
     }
     return 0;
 }
 
 static int induced_subgraph_with_vertices(const Graph* src, uint64_t mask, Graph* dst, int* verts) {
+    uint64_t active = mask & src->vertex_mask & ADJWORD_MASK;
     int n = 0;
-    uint64_t rem = mask & src->vertex_mask;
+    uint64_t rem = active;
     while (rem) {
-        verts[n++] = __builtin_ctzll(rem);
+        int v = __builtin_ctzll(rem);
+        verts[n++] = v;
+#if defined(__BMI2__) && (defined(__x86_64__) || defined(__i386__))
+        dst->adj[n - 1] = (AdjWord)_pext_u64((uint64_t)src->adj[v] & active, active);
+#else
+        uint64_t row_bits = (uint64_t)src->adj[v] & active;
+        AdjWord row = 0;
+        uint64_t bit = active;
+        int dense_u = 0;
+        while (bit) {
+            int u = __builtin_ctzll(bit);
+            if ((row_bits >> u) & 1U) row |= (AdjWord)(UINT64_C(1) << dense_u);
+            dense_u++;
+            bit &= bit - 1;
+        }
+        dst->adj[n - 1] = row;
+#endif
         rem &= rem - 1;
     }
 
     dst->n = (uint8_t)n;
     dst->vertex_mask = graph_row_mask(n);
-    memset(dst->adj, 0, (size_t)n * sizeof(dst->adj[0]));
-    for (int i = 0; i < n; i++) {
-        for (int j = i + 1; j < n; j++) {
-            if (((uint64_t)src->adj[verts[i]] >> verts[j]) & 1U) {
-                dst->adj[i] |= (AdjWord)(UINT64_C(1) << j);
-                dst->adj[j] |= (AdjWord)(UINT64_C(1) << i);
-            }
-        }
-    }
     return n;
 }
 
