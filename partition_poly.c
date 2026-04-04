@@ -2440,14 +2440,12 @@ typedef struct {
     int depth;
     uint8_t* first_greater;
     uint16_t* first_greater_val;
-    uint16_t* non_equal_val_hist;
     uint16_t* equal_perm;
     uint16_t* changed_first_greater_idx;
     uint8_t* changed_first_greater_old_idx;
     uint16_t* changed_first_greater_old_val;
     uint16_t equal_count[MAX_COLS + 1];
     uint16_t changed_first_greater_count[MAX_COLS];
-    uint16_t max_non_equal_val[MAX_COLS + 1];
     uint16_t stack_vals[MAX_COLS];
     const uint16_t* stack_perm_rows[MAX_COLS];
     int stabilizer[MAX_COLS + 1];
@@ -2494,15 +2492,6 @@ static inline uint16_t* canon_state_equal_perm_row(CanonState* st, int depth) {
 
 static inline const uint16_t* canon_state_equal_perm_row_const(const CanonState* st, int depth) {
     return st->equal_perm + (size_t)depth * (size_t)st->limit;
-}
-
-static inline uint16_t* canon_state_non_equal_val_hist_row(CanonState* st, int depth) {
-    return st->non_equal_val_hist + (size_t)depth * (size_t)num_partitions;
-}
-
-static inline const uint16_t* canon_state_non_equal_val_hist_row_const(const CanonState* st,
-                                                                       int depth) {
-    return st->non_equal_val_hist + (size_t)depth * (size_t)num_partitions;
 }
 
 static void solve_structure_with_row_orbit(const Graph* partial_graph, long long row_orbit,
@@ -2851,9 +2840,6 @@ static void canon_state_init(CanonState* st, int limit) {
         checked_calloc((size_t)limit, sizeof(*st->first_greater), "canon_state_first_greater");
     st->first_greater_val =
         checked_calloc((size_t)limit, sizeof(*st->first_greater_val), "canon_state_first_greater_val");
-    st->non_equal_val_hist =
-        checked_calloc((size_t)(g_cols + 1) * (size_t)num_partitions,
-                       sizeof(*st->non_equal_val_hist), "canon_state_non_equal_val_hist");
     st->equal_perm =
         checked_calloc((size_t)(g_cols + 1) * (size_t)limit, sizeof(*st->equal_perm),
                        "canon_state_equal_perm");
@@ -2871,7 +2857,6 @@ static void canon_state_init(CanonState* st, int limit) {
 static void canon_state_free(CanonState* st) {
     free(st->first_greater);
     free(st->first_greater_val);
-    free(st->non_equal_val_hist);
     free(st->equal_perm);
     free(st->changed_first_greater_idx);
     free(st->changed_first_greater_old_idx);
@@ -2915,9 +2900,6 @@ void canon_state_reset(CanonState* st, int limit) {
     }
     memset(st->first_greater, 0, (size_t)limit * sizeof(*st->first_greater));
     memset(st->first_greater_val, 0, (size_t)limit * sizeof(*st->first_greater_val));
-    memset(st->non_equal_val_hist, 0,
-           (size_t)(g_cols + 1) * (size_t)num_partitions * sizeof(*st->non_equal_val_hist));
-    memset(st->max_non_equal_val, 0, sizeof(st->max_non_equal_val));
 }
 
 static inline int canon_state_prepare_push_fast(const CanonState* st, int partition_id,
@@ -2929,16 +2911,9 @@ static inline int canon_state_prepare_push_fast(const CanonState* st, int partit
     uint16_t pid = (uint16_t)partition_id;
     const uint16_t* partition_perm_row =
         perm_table + (size_t)partition_id * (size_t)perm_count;
-    const uint16_t* perm_order_row =
-        perm_order_by_value + (size_t)partition_id * (size_t)perm_count;
-    const uint16_t* prefix_end_row =
-        perm_value_prefix_end + (size_t)partition_id * (size_t)num_partitions;
     const uint8_t* first_greater = st->first_greater;
     const uint16_t* stack_vals = st->stack_vals;
     const uint16_t* first_greater_val = st->first_greater_val;
-    const uint16_t* equal_perm = canon_state_equal_perm_row_const(st, depth);
-    uint16_t equal_count = st->equal_count[depth];
-    uint16_t max_non_equal_val = st->max_non_equal_val[depth];
     uint8_t* changed_first_greater_new_idx = scratch->changed_first_greater_new_idx;
     uint16_t* changed_first_greater_new_val = scratch->changed_first_greater_new_val;
     uint16_t* next_equal_perm = scratch->next_equal_perm;
@@ -2946,68 +2921,45 @@ static inline int canon_state_prepare_push_fast(const CanonState* st, int partit
     uint16_t next_equal_count = 0;
     uint16_t changed_first_greater_count = 0;
 
-    for (uint16_t i = 0; i < equal_count; i++) {
-        uint16_t p = equal_perm[i];
-        uint8_t old_fg = (uint8_t)depth;
-        uint16_t old_fg_val = 0;
-        uint16_t x = partition_perm_row[p];
-        uint8_t next_fg;
-        uint16_t next_fg_val;
-
-        if (x < pid) {
-            return 0;
-        }
-        if (x == pid) {
-            next_fg = (uint8_t)new_depth;
-            next_fg_val = 0;
-            stabilizer++;
-        } else {
-            next_fg = (uint8_t)depth;
-            next_fg_val = x;
-        }
-
-        uint16_t new_fg_val = (next_fg < new_depth) ? next_fg_val : 0;
-        if (next_fg == new_depth) {
-            next_equal_perm[next_equal_count++] = p;
-        }
-        if (old_fg != next_fg || old_fg_val != new_fg_val) {
-            changed_first_greater_idx[changed_first_greater_count] = p;
-            changed_first_greater_new_idx[changed_first_greater_count] = next_fg;
-            changed_first_greater_new_val[changed_first_greater_count] = new_fg_val;
-            changed_first_greater_count++;
-        }
-    }
-
-    uint16_t scan_count = (max_non_equal_val == 0) ? 0 : prefix_end_row[max_non_equal_val - 1];
-    for (uint16_t i = 0; i < scan_count; i++) {
-        uint16_t p = perm_order_row[i];
+    for (int p = 0; p < st->limit; p++) {
         uint8_t old_fg = first_greater[p];
-        if (__builtin_expect(old_fg == (uint8_t)depth, 0)) {
-            continue;
-        }
         uint16_t old_fg_val = first_greater_val[p];
         uint16_t x = partition_perm_row[p];
         uint8_t g = old_fg;
         uint8_t next_fg;
         uint16_t next_fg_val;
 
-        uint16_t r = old_fg_val;
-        if (__builtin_expect(x >= r, 1)) {
-            continue;
-        }
+        if (__builtin_expect(g != (uint8_t)depth, 1)) {
+            uint16_t r = old_fg_val;
+            if (__builtin_expect(x >= r, 1)) {
+                continue;
+            }
 
-        uint16_t c = stack_vals[g];
-        if (__builtin_expect(x > c, 1)) {
-            next_fg = g;
-            next_fg_val = x;
-        } else if (x < c) {
-            return 0;
+            uint16_t c = stack_vals[g];
+            if (__builtin_expect(x > c, 1)) {
+                next_fg = g;
+                next_fg_val = x;
+            } else if (x < c) {
+                return 0;
+            } else {
+                if (!canon_rebuild_equal_case(st, p, g, pid, &next_fg, &next_fg_val)) {
+                    return 0;
+                }
+                if (next_fg == new_depth) {
+                    stabilizer++;
+                }
+            }
         } else {
-            if (!canon_rebuild_equal_case(st, p, g, pid, &next_fg, &next_fg_val)) {
+            if (x < pid) {
                 return 0;
             }
-            if (next_fg == new_depth) {
+            if (x == pid) {
+                next_fg = (uint8_t)new_depth;
+                next_fg_val = 0;
                 stabilizer++;
+            } else {
+                next_fg = (uint8_t)depth;
+                next_fg_val = x;
             }
         }
 
@@ -3037,16 +2989,9 @@ static int canon_state_prepare_push_profiled(const CanonState* st, int partition
     uint16_t pid = (uint16_t)partition_id;
     const uint16_t* partition_perm_row =
         perm_table + (size_t)partition_id * (size_t)perm_count;
-    const uint16_t* perm_order_row =
-        perm_order_by_value + (size_t)partition_id * (size_t)perm_count;
-    const uint16_t* prefix_end_row =
-        perm_value_prefix_end + (size_t)partition_id * (size_t)num_partitions;
     const uint8_t* first_greater = st->first_greater;
     const uint16_t* stack_vals = st->stack_vals;
     const uint16_t* first_greater_val = st->first_greater_val;
-    const uint16_t* equal_perm = canon_state_equal_perm_row_const(st, depth);
-    uint16_t equal_count = st->equal_count[depth];
-    uint16_t max_non_equal_val = st->max_non_equal_val[depth];
     uint8_t* changed_first_greater_new_idx = scratch->changed_first_greater_new_idx;
     uint16_t* changed_first_greater_new_val = scratch->changed_first_greater_new_val;
     uint16_t* next_equal_perm = scratch->next_equal_perm;
@@ -3056,81 +3001,55 @@ static int canon_state_prepare_push_profiled(const CanonState* st, int partition
     uint16_t changed_first_greater_count = 0;
     ProfileStats* prof = tls_profile;
 
-    for (uint16_t i = 0; i < equal_count; i++) {
-        uint16_t p = equal_perm[i];
-        uint8_t old_fg = (uint8_t)depth;
-        uint16_t old_fg_val = 0;
-        uint16_t x = partition_perm_row[p];
-        uint8_t next_fg;
-        uint16_t next_fg_val;
-
-        if (x < pid) {
-            prof->canon_prepare_order_rejects_by_depth[depth]++;
-            return 0;
-        }
-        active_count++;
-        if (x == pid) {
-            next_fg = (uint8_t)new_depth;
-            next_fg_val = 0;
-            stabilizer++;
-        } else {
-            next_fg = (uint8_t)depth;
-            next_fg_val = x;
-        }
-
-        uint16_t new_fg_val = (next_fg < new_depth) ? next_fg_val : 0;
-        if (next_fg == new_depth) {
-            next_equal_perm[next_equal_count++] = p;
-        }
-        if (old_fg != next_fg || old_fg_val != new_fg_val) {
-            changed_first_greater_idx[changed_first_greater_count] = p;
-            changed_first_greater_new_idx[changed_first_greater_count] = next_fg;
-            changed_first_greater_new_val[changed_first_greater_count] = new_fg_val;
-            changed_first_greater_count++;
-        }
-    }
-
-    uint16_t scan_count = (max_non_equal_val == 0) ? 0 : prefix_end_row[max_non_equal_val - 1];
-    prof->canon_prepare_fast_continue_by_depth[depth] +=
-        (long long)st->limit - (long long)equal_count - (long long)scan_count;
-    for (uint16_t i = 0; i < scan_count; i++) {
-        uint16_t p = perm_order_row[i];
+    for (int p = 0; p < st->limit; p++) {
         uint8_t old_fg = first_greater[p];
-        if (__builtin_expect(old_fg == (uint8_t)depth, 0)) {
-            continue;
-        }
         uint16_t old_fg_val = first_greater_val[p];
         uint16_t x = partition_perm_row[p];
         uint8_t g = old_fg;
         uint8_t next_fg;
         uint16_t next_fg_val;
 
-        uint16_t r = old_fg_val;
-        if (__builtin_expect(x >= r, 1)) {
-            prof->canon_prepare_fast_continue_by_depth[depth]++;
-            continue;
-        }
+        if (__builtin_expect(g != (uint8_t)depth, 1)) {
+            uint16_t r = old_fg_val;
+            if (__builtin_expect(x >= r, 1)) {
+                prof->canon_prepare_fast_continue_by_depth[depth]++;
+                continue;
+            }
 
-        active_count++;
-        uint16_t c = stack_vals[g];
-        if (__builtin_expect(x > c, 1)) {
-            next_fg = g;
-            next_fg_val = x;
-        } else if (x < c) {
-            prof->canon_prepare_order_rejects_by_depth[depth]++;
-            return 0;
+            uint16_t c = stack_vals[g];
+            if (__builtin_expect(x > c, 1)) {
+                next_fg = g;
+                next_fg_val = x;
+            } else if (x < c) {
+                prof->canon_prepare_order_rejects_by_depth[depth]++;
+                return 0;
+            } else {
+                prof->canon_prepare_equal_case_calls_by_depth[depth]++;
+                if (!canon_rebuild_equal_case(st, p, g, pid, &next_fg, &next_fg_val)) {
+                    prof->canon_prepare_equal_case_rejects_by_depth[depth]++;
+                    return 0;
+                }
+                if (next_fg == new_depth) {
+                    stabilizer++;
+                }
+            }
         } else {
-            prof->canon_prepare_equal_case_calls_by_depth[depth]++;
-            if (!canon_rebuild_equal_case(st, p, g, pid, &next_fg, &next_fg_val)) {
-                prof->canon_prepare_equal_case_rejects_by_depth[depth]++;
+            if (x < pid) {
+                prof->canon_prepare_order_rejects_by_depth[depth]++;
                 return 0;
             }
-            if (next_fg == new_depth) {
+            if (x == pid) {
+                next_fg = (uint8_t)new_depth;
+                next_fg_val = 0;
                 stabilizer++;
+            } else {
+                next_fg = (uint8_t)depth;
+                next_fg_val = x;
             }
         }
 
         uint16_t new_fg_val = (next_fg < new_depth) ? next_fg_val : 0;
+        active_count++;
         if (next_fg == new_depth) {
             next_equal_perm[next_equal_count++] = (uint16_t)p;
         }
@@ -3143,7 +3062,7 @@ static int canon_state_prepare_push_profiled(const CanonState* st, int partition
     }
     scratch->next_equal_count = next_equal_count;
     scratch->changed_first_greater_count = changed_first_greater_count;
-    prof->canon_prepare_scanned_by_depth[depth] += (long long)equal_count + (long long)scan_count;
+    prof->canon_prepare_scanned_by_depth[depth] += st->limit;
     prof->canon_prepare_active_by_depth[depth] += active_count;
     *next_stabilizer = stabilizer;
     return 1;
@@ -3166,54 +3085,27 @@ void canon_state_commit_push(CanonState* st, int partition_id, const CanonScratc
     int depth = st->depth;
     int new_depth = depth + 1;
     uint16_t* equal_perm = canon_state_equal_perm_row(st, new_depth);
-    uint16_t* non_equal_val_hist = canon_state_non_equal_val_hist_row(st, new_depth);
-    const uint16_t* prev_non_equal_val_hist = canon_state_non_equal_val_hist_row_const(st, depth);
     uint16_t* changed_first_greater_idx = canon_state_changed_first_greater_idx_row(st, depth);
     uint8_t* changed_first_greater_old_idx = canon_state_changed_first_greater_old_idx_row(st, depth);
     uint16_t* changed_first_greater_old_val = canon_state_changed_first_greater_old_val_row(st, depth);
     uint16_t changed_fg_count = scratch->changed_first_greater_count;
     st->stack_vals[depth] = (uint16_t)partition_id;
     st->stack_perm_rows[depth] = perm_table + (size_t)partition_id * (size_t)perm_count;
-    memcpy(non_equal_val_hist, prev_non_equal_val_hist,
-           (size_t)num_partitions * sizeof(*non_equal_val_hist));
 
     for (uint16_t i = 0; i < scratch->next_equal_count; i++) {
         equal_perm[i] = scratch->next_equal_perm[i];
     }
     for (uint16_t i = 0; i < changed_fg_count; i++) {
         uint16_t p = scratch->changed_first_greater_idx[i];
-        uint8_t old_fg = st->first_greater[p];
-        uint16_t old_fg_val = st->first_greater_val[p];
-        uint8_t new_fg = scratch->changed_first_greater_new_idx[i];
-        uint16_t new_fg_val = scratch->changed_first_greater_new_val[i];
         changed_first_greater_idx[i] = p;
-        changed_first_greater_old_idx[i] = old_fg;
-        changed_first_greater_old_val[i] = old_fg_val;
-        st->first_greater[p] = new_fg;
-        st->first_greater_val[p] = new_fg_val;
-        if (old_fg < depth) {
-            non_equal_val_hist[old_fg_val]--;
-        }
-        if (new_fg < new_depth) {
-            non_equal_val_hist[new_fg_val]++;
-        }
-    }
-
-    uint16_t max_non_equal_val = st->max_non_equal_val[depth];
-    for (uint16_t i = 0; i < changed_fg_count; i++) {
-        uint8_t new_fg = scratch->changed_first_greater_new_idx[i];
-        uint16_t new_fg_val = scratch->changed_first_greater_new_val[i];
-        if (new_fg < new_depth && new_fg_val > max_non_equal_val) {
-            max_non_equal_val = new_fg_val;
-        }
-    }
-    while (max_non_equal_val > 0 && non_equal_val_hist[max_non_equal_val] == 0) {
-        max_non_equal_val--;
+        changed_first_greater_old_idx[i] = st->first_greater[p];
+        changed_first_greater_old_val[i] = st->first_greater_val[p];
+        st->first_greater[p] = scratch->changed_first_greater_new_idx[i];
+        st->first_greater_val[p] = scratch->changed_first_greater_new_val[i];
     }
 
     st->equal_count[new_depth] = scratch->next_equal_count;
     st->changed_first_greater_count[depth] = changed_fg_count;
-    st->max_non_equal_val[new_depth] = max_non_equal_val;
     st->stabilizer[new_depth] = next_stabilizer;
     st->depth = new_depth;
 }
