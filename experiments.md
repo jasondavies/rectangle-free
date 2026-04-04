@@ -6397,3 +6397,30 @@
   - the generic `n=9` round-trip proves the packed file format and runtime-selected loader work correctly
   - the count data make the roadmap concrete: `n=10` is the next and likely last practical fully loaded connected-canonical table in this design
 - Outcome: accepted on `main`.
+
+### Experiment 159: Use BMI2 `PEXT` for dense row compaction and add `graph_apply_permutation()`
+- Goal: speed up the graph-side compaction path by extracting dense induced rows directly from a masked sparse graph, while also adding the permutation primitive needed for a more mask-first graph representation.
+- Change:
+  - added a BMI2 `PEXT` fast path to `graph_build_dense_rows()` and `graph_build_dense_rows_from_mask()`
+  - kept a portable fallback for non-BMI2 builds
+  - added `graph_transpose_dense_rows()`
+  - added `graph_apply_permutation()`, implemented as row permutation, dense transpose, then row permutation again
+- Matching 32-thread benchmark command:
+  - `env OMP_NUM_THREADS=32 ./partition_poly_7 6 6 --prefix-depth 2 --adaptive-subdivide --adaptive-work-budget 1000 --adaptive-max-depth 5`
+- Baseline:
+  - current committed `main` tip before this change
+  - `Worker Complete in 27.71 seconds`
+  - `Worker Complete in 27.76 seconds`
+- Experiment:
+  - `Worker Complete in 24.07 seconds`
+  - `Worker Complete in 24.26 seconds`
+- Correctness:
+  - `env OMP_NUM_THREADS=1 ./partition_poly_7 4 4 --task-end 1` succeeded
+  - both benchmark runs printed the same chromatic polynomial and the same values:
+    - `P(4) = 203716633441803914880`
+    - `P(5) = 2852707805646422930409600`
+- Interpretation:
+  - this is a large graph-side constant-factor win on the exact `6x6` benchmark
+  - the induced-row compaction path is hot enough that replacing bit-by-bit remapping with hardware bit extraction pays off materially
+  - adding `graph_apply_permutation()` is useful beyond this immediate speedup, because it gives the solver the primitive needed for a more mask-preserving graph representation later
+- Outcome: accepted on `main`.

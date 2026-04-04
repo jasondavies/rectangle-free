@@ -9,6 +9,9 @@
 #include <time.h>
 #include <stdatomic.h>
 #include <omp.h>
+#if defined(__x86_64__) || defined(__i386__)
+#include <immintrin.h>
+#endif
 #include "progress_util.h"
 
 #ifndef RECT_PROFILE
@@ -3788,16 +3791,8 @@ static inline uint64_t graph_row_mask(int n) {
 }
 
 static uint32_t graph_build_dense_rows(const Graph* g, AdjWord* rows) {
-    int dense_index[MAXN_NAUTY];
-    for (int i = 0; i < MAXN_NAUTY; i++) dense_index[i] = -1;
-
-    uint64_t rem = g->vertex_mask & ADJWORD_MASK;
-    uint32_t n = 0;
-    while (rem) {
-        int v = __builtin_ctzll(rem);
-        dense_index[v] = (int)n++;
-        rem &= rem - 1;
-    }
+    uint64_t active = g->vertex_mask & ADJWORD_MASK;
+    uint32_t n = (uint32_t)__builtin_popcountll(active);
 
     if (n != g->n) {
         fprintf(stderr, "Graph vertex mask/count mismatch: n=%u mask_popcount=%u\n",
@@ -3805,46 +3800,85 @@ static uint32_t graph_build_dense_rows(const Graph* g, AdjWord* rows) {
         exit(1);
     }
 
-    rem = g->vertex_mask & ADJWORD_MASK;
+    uint64_t rem = active;
     while (rem) {
         int v = __builtin_ctzll(rem);
-        uint64_t row_bits = (uint64_t)g->adj[v] & g->vertex_mask;
+        uint32_t dense_v = (uint32_t)__builtin_popcountll(active & ((UINT64_C(1) << v) - 1U));
+#if defined(__BMI2__) && (defined(__x86_64__) || defined(__i386__))
+        rows[dense_v] = (AdjWord)_pext_u64((uint64_t)g->adj[v] & active, active);
+#else
+        uint64_t row_bits = (uint64_t)g->adj[v] & active;
         AdjWord row = 0;
-        while (row_bits) {
-            int u = __builtin_ctzll(row_bits);
-            row |= (AdjWord)(UINT64_C(1) << dense_index[u]);
-            row_bits &= row_bits - 1;
+        uint32_t dense_u = 0;
+        uint64_t bit = active;
+        while (bit) {
+            int u = __builtin_ctzll(bit);
+            if ((row_bits >> u) & 1U) row |= (AdjWord)(UINT64_C(1) << dense_u);
+            dense_u++;
+            bit &= bit - 1;
         }
-        rows[dense_index[v]] = row;
+        rows[dense_v] = row;
+#endif
         rem &= rem - 1;
     }
     return n;
 }
 
-static uint32_t graph_build_dense_rows_from_mask(const Graph* src, uint64_t mask, AdjWord* rows) {
-    int dense_index[MAXN_NAUTY];
-    int verts[MAXN_NAUTY];
-    for (int i = 0; i < MAXN_NAUTY; i++) dense_index[i] = -1;
-
-    uint64_t active = mask & src->vertex_mask & ADJWORD_MASK;
-    uint64_t rem = active;
-    uint32_t n = 0;
-    while (rem) {
-        int v = __builtin_ctzll(rem);
-        dense_index[v] = (int)n;
-        verts[n++] = v;
-        rem &= rem - 1;
+static void graph_transpose_dense_rows(uint32_t n, const AdjWord* src_rows, AdjWord* dst_rows) {
+    uint64_t mask = graph_row_mask((int)n);
+    for (uint32_t i = 0; i < n; i++) dst_rows[i] = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        uint64_t row = (uint64_t)src_rows[i] & mask;
+        while (row) {
+            uint32_t j = (uint32_t)__builtin_ctzll(row);
+            dst_rows[j] |= (AdjWord)(UINT64_C(1) << i);
+            row &= row - 1;
+        }
     }
+}
+
+static void graph_apply_permutation(const Graph* src, const uint8_t* new_index_of_old,
+                                    Graph* dst) {
+    AdjWord dense_rows[MAXN_NAUTY];
+    AdjWord row_permuted[MAXN_NAUTY];
+    AdjWord transposed[MAXN_NAUTY];
+    uint32_t n = graph_build_dense_rows(src, dense_rows);
 
     for (uint32_t i = 0; i < n; i++) {
-        uint64_t row_bits = (uint64_t)src->adj[verts[i]] & active;
+        row_permuted[new_index_of_old[i]] = dense_rows[i];
+    }
+    graph_transpose_dense_rows(n, row_permuted, transposed);
+    for (uint32_t i = 0; i < n; i++) {
+        dst->adj[new_index_of_old[i]] = transposed[i];
+    }
+    dst->n = (uint8_t)n;
+    dst->vertex_mask = graph_row_mask((int)n);
+}
+
+static uint32_t graph_build_dense_rows_from_mask(const Graph* src, uint64_t mask, AdjWord* rows) {
+    uint64_t active = mask & src->vertex_mask & ADJWORD_MASK;
+    uint32_t n = (uint32_t)__builtin_popcountll(active);
+
+    uint64_t rem = active;
+    while (rem) {
+        int v = __builtin_ctzll(rem);
+        uint32_t dense_v = (uint32_t)__builtin_popcountll(active & ((UINT64_C(1) << v) - 1U));
+#if defined(__BMI2__) && (defined(__x86_64__) || defined(__i386__))
+        rows[dense_v] = (AdjWord)_pext_u64((uint64_t)src->adj[v] & active, active);
+#else
+        uint64_t row_bits = (uint64_t)src->adj[v] & active;
         AdjWord row = 0;
-        while (row_bits) {
-            int u = __builtin_ctzll(row_bits);
-            row |= (AdjWord)(UINT64_C(1) << dense_index[u]);
-            row_bits &= row_bits - 1;
+        uint32_t dense_u = 0;
+        uint64_t bit = active;
+        while (bit) {
+            int u = __builtin_ctzll(bit);
+            if ((row_bits >> u) & 1U) row |= (AdjWord)(UINT64_C(1) << dense_u);
+            dense_u++;
+            bit &= bit - 1;
         }
-        rows[i] = row;
+        rows[dense_v] = row;
+#endif
+        rem &= rem - 1;
     }
     return n;
 }
