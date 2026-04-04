@@ -4515,8 +4515,11 @@ static void graph_choose_branch_edge(const Graph* g, int* u_out, int* v_out, int
             uint64_t v_after = v_neighbors & ~(UINT64_C(1) << u);
             int u_clique = graph_neighbors_form_clique(g, u_after);
             int v_clique = graph_neighbors_form_clique(g, v_after);
+            uint64_t merged_neighbors =
+                (u_neighbors | v_neighbors) & ~((UINT64_C(1) << u) | (UINT64_C(1) << v));
+            int merged_clique = graph_neighbors_form_clique(g, merged_neighbors);
             int common = __builtin_popcountll(u_neighbors & v_neighbors);
-            int score = 1000 * (u_clique + v_clique) + 16 * common + u_deg + v_deg;
+            int score = 1000 * (u_clique + v_clique + merged_clique) + 16 * common + u_deg + v_deg;
             if (score > best_score) {
                 best_score = score;
                 best_u = u;

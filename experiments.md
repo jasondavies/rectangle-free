@@ -6575,3 +6575,48 @@
   - a bucketed degree order preserves the same partition while shaving a few seconds from canonicalisation setup over roughly `40M` calls
   - this is a small refinement on top of Experiment 162 rather than a new standalone algorithmic win
 - Outcome: accepted on `main`.
+
+### Experiment 164: Also reward branch edges whose contraction creates a clique-prunable vertex
+- Goal: refine the accepted hard-miss branch heuristic without changing its basic shape.
+- Change:
+  - keep scoring edges by whether deleting the edge makes either endpoint immediately clique-prunable
+  - additionally score whether contracting the edge makes the merged vertex immediately clique-prunable
+  - leave the existing common-neighbour and endpoint-degree tie-breaks unchanged
+- Matching 32-thread benchmark command:
+  - `env OMP_NUM_THREADS=32 ./partition_poly_7 6 6 --prefix-depth 2 --adaptive-subdivide --adaptive-work-budget 1000 --adaptive-max-depth 5`
+- Baseline:
+  - current committed `main` tip before this change (`f9a3b89`)
+  - `Worker Complete in 22.20 seconds`
+  - `Worker Complete in 22.25 seconds`
+- Experiment:
+  - `Worker Complete in 21.99 seconds`
+  - `Worker Complete in 22.05 seconds`
+- Additional single-thread check:
+  - command:
+    - `env OMP_NUM_THREADS=1 ./partition_poly_7 7 6 --prefix-depth 2 --task-end 1`
+  - baseline:
+    - `Worker Complete in 30.27 seconds`
+  - experiment:
+    - `Worker Complete in 30.11 seconds`
+- Profile evidence on the matching `6x6` benchmark:
+  - before this change:
+    - `solve_graph_poly: 1059.693s`
+    - `get_canonical_graph: 124.583s`
+    - `densenauty: 96.505s`
+    - `hard graph nodes: 14343241`
+    - `Canonicalisation calls: 40404309`
+  - with the refined branch score:
+    - `solve_graph_poly: 1042.347s`
+    - `get_canonical_graph: 121.822s`
+    - `densenauty: 94.776s`
+    - `hard graph nodes: 13757233`
+    - `Canonicalisation calls: 38893249`
+- Correctness:
+  - all benchmark runs printed the same chromatic polynomial and the same values:
+    - `6x6`: `P(4) = 203716633441803914880`, `P(5) = 2852707805646422930409600`
+    - `7x6 task 0`: `P(4) = 43715355264000`, `P(5) = 15297058957242888000`
+- Interpretation:
+  - this stays within the same successful heuristic family as Experiment 155: prefer edges that trigger immediate simplification
+  - rewarding contraction-side clique pruning reduces the hard-miss tree further, rather than just shifting work between delete and contract
+  - unlike the earlier triangle/common-neighbour experiments, this change improves the heavy benchmark and stays at least neutral on the one-thread shard
+- Outcome: accepted on `main`.
