@@ -233,7 +233,11 @@ typedef struct {
     double partial_append_time;
     double build_weight_time;
     double solve_graph_time;
+    double get_canonical_graph_time;
+    double get_canonical_graph_dense_rows_time;
+    double get_canonical_graph_build_input_time;
     double nauty_time;
+    double get_canonical_graph_rebuild_time;
     double solve_graph_time_by_n[MAXN_NAUTY + 1];
     double solve_graph_lookup_time_by_n[MAXN_NAUTY + 1];
     double solve_graph_connected_lookup_time_by_n[MAXN_NAUTY + 1];
@@ -488,6 +492,8 @@ static inline uint64_t graph_row_mask(int n);
 static uint32_t graph_build_dense_rows(const Graph* g, AdjWord* rows);
 static void graph_apply_permutation_dense_rows(uint32_t n, const AdjWord* dense_rows,
                                                const uint8_t* new_index_of_old, Graph* dst);
+static void get_canonical_graph_from_dense_rows(int n, const AdjWord* rows, Graph* canon,
+                                                NautyWorkspace* ws, ProfileStats* profile);
 
 static inline ComplexMask* intra_mask_row(int partition_id) {
     return intra_mask + (size_t)partition_id * (size_t)max_complex_per_partition;
@@ -3357,10 +3363,10 @@ void nauty_workspace_free(NautyWorkspace* ws) {
     memset(ws, 0, sizeof(*ws));
 }
 
-void get_canonical_graph(Graph* g, Graph* canon, NautyWorkspace* ws, ProfileStats* profile) {
-    int n = g->n;
-    double t0 = 0.0;
-    AdjWord rows[MAXN_NAUTY];
+static void get_canonical_graph_from_dense_rows(int n, const AdjWord* rows, Graph* canon,
+                                                NautyWorkspace* ws, ProfileStats* profile) {
+    double total_t0 = 0.0;
+    double phase_t0 = 0.0;
     
     if (n == 0) {
         canon->n = 0;
@@ -3384,7 +3390,10 @@ void get_canonical_graph(Graph* g, Graph* canon, NautyWorkspace* ws, ProfileStat
     int* lab = ws->lab;
     int* ptn = ws->ptn;
     int* orbits = ws->orbits;
-    graph_build_dense_rows(g, rows);
+    if (PROFILE_BUILD && profile) {
+        total_t0 = omp_get_wtime();
+        phase_t0 = total_t0;
+    }
     
     if (m == 1) {
         for (int i = 0; i < n; i++) {
@@ -3401,6 +3410,9 @@ void get_canonical_graph(Graph* g, Graph* canon, NautyWorkspace* ws, ProfileStat
             }
         }
     }
+    if (PROFILE_BUILD && profile) {
+        profile->get_canonical_graph_build_input_time += omp_get_wtime() - phase_t0;
+    }
     
     // Set up options for canonical labelling
     DEFAULTOPTIONS_GRAPH(options);
@@ -3410,17 +3422,35 @@ void get_canonical_graph(Graph* g, Graph* canon, NautyWorkspace* ws, ProfileStat
     statsblk stats;
     
     // Compute canonical form
-    if (PROFILE_BUILD && profile) t0 = omp_get_wtime();
+    if (PROFILE_BUILD && profile) phase_t0 = omp_get_wtime();
     densenauty(ng, lab, ptn, orbits, &options, &stats, m, n, cg);
     if (PROFILE_BUILD && profile) {
         profile->nauty_calls++;
-        profile->nauty_time += omp_get_wtime() - t0;
+        profile->nauty_time += omp_get_wtime() - phase_t0;
+        phase_t0 = omp_get_wtime();
     }
 
     // nauty returns lab[i] = original vertex now placed at canonical position i.
     uint8_t new_index_of_old[MAXN_NAUTY];
     for (int i = 0; i < n; i++) new_index_of_old[lab[i]] = (uint8_t)i;
     graph_apply_permutation_dense_rows((uint32_t)n, rows, new_index_of_old, canon);
+    if (PROFILE_BUILD && profile) {
+        profile->get_canonical_graph_rebuild_time += omp_get_wtime() - phase_t0;
+        profile->get_canonical_graph_time += omp_get_wtime() - total_t0;
+    }
+}
+
+void get_canonical_graph(Graph* g, Graph* canon, NautyWorkspace* ws, ProfileStats* profile) {
+    AdjWord rows[MAXN_NAUTY];
+    double phase_t0 = 0.0;
+    if (PROFILE_BUILD && profile) phase_t0 = omp_get_wtime();
+    int n = (int)graph_build_dense_rows(g, rows);
+    if (PROFILE_BUILD && profile) {
+        double dt = omp_get_wtime() - phase_t0;
+        profile->get_canonical_graph_dense_rows_time += dt;
+        profile->get_canonical_graph_time += dt;
+    }
+    get_canonical_graph_from_dense_rows(n, rows, canon, ws, profile);
 }
 
 // --- GRAPH SOLVER ---
@@ -3779,9 +3809,9 @@ static uint32_t graph_build_dense_rows(const Graph* g, AdjWord* rows) {
     }
 
     uint64_t rem = active;
+    uint32_t dense_v = 0;
     while (rem) {
         int v = __builtin_ctzll(rem);
-        uint32_t dense_v = (uint32_t)__builtin_popcountll(active & ((UINT64_C(1) << v) - 1U));
 #if defined(__BMI2__) && (defined(__x86_64__) || defined(__i386__))
         rows[dense_v] = (AdjWord)_pext_u64((uint64_t)g->adj[v] & active, active);
 #else
@@ -3797,6 +3827,7 @@ static uint32_t graph_build_dense_rows(const Graph* g, AdjWord* rows) {
         }
         rows[dense_v] = row;
 #endif
+        dense_v++;
         rem &= rem - 1;
     }
     return n;
@@ -3843,9 +3874,9 @@ static uint32_t graph_build_dense_rows_from_mask(const Graph* src, uint64_t mask
     uint32_t n = (uint32_t)__builtin_popcountll(active);
 
     uint64_t rem = active;
+    uint32_t dense_v = 0;
     while (rem) {
         int v = __builtin_ctzll(rem);
-        uint32_t dense_v = (uint32_t)__builtin_popcountll(active & ((UINT64_C(1) << v) - 1U));
 #if defined(__BMI2__) && (defined(__x86_64__) || defined(__i386__))
         rows[dense_v] = (AdjWord)_pext_u64((uint64_t)src->adj[v] & active, active);
 #else
@@ -3861,6 +3892,7 @@ static uint32_t graph_build_dense_rows_from_mask(const Graph* src, uint64_t mask
         }
         rows[dense_v] = row;
 #endif
+        dense_v++;
         rem &= rem - 1;
     }
     return n;
@@ -4604,7 +4636,11 @@ static void solve_graph_poly(const Graph* input_g, RowGraphCache* cache, RowGrap
         graph_poly_set_count4(total, &res);
     } else {
         Graph canon;
-        get_canonical_graph(&g, &canon, ws, profile);
+        if (g_use_raw_cache) {
+            get_canonical_graph_from_dense_rows((int)g.n, raw_rows, &canon, ws, profile);
+        } else {
+            get_canonical_graph(&g, &canon, ws, profile);
+        }
         (*local_canon_calls)++;
         uint64_t hash = hash_graph(&canon);
 
@@ -4817,7 +4853,11 @@ done:
     } else {
         // Canonicalise only if exact lookup missed and the graph is still connected.
         Graph canon;
-        get_canonical_graph(&g, &canon, ws, profile);
+        if (g_use_raw_cache) {
+            get_canonical_graph_from_dense_rows((int)g.n, raw_rows, &canon, ws, profile);
+        } else {
+            get_canonical_graph(&g, &canon, ws, profile);
+        }
         (*local_canon_calls)++;
         
         uint64_t hash = hash_graph(&canon);
@@ -6747,7 +6787,11 @@ int main(int argc, char** argv) {
         total_profile.partial_append_time += src->partial_append_time;
         total_profile.build_weight_time += src->build_weight_time;
         total_profile.solve_graph_time += src->solve_graph_time;
+        total_profile.get_canonical_graph_time += src->get_canonical_graph_time;
+        total_profile.get_canonical_graph_dense_rows_time += src->get_canonical_graph_dense_rows_time;
+        total_profile.get_canonical_graph_build_input_time += src->get_canonical_graph_build_input_time;
         total_profile.nauty_time += src->nauty_time;
+        total_profile.get_canonical_graph_rebuild_time += src->get_canonical_graph_rebuild_time;
         if (src->hard_graph_max_n > total_profile.hard_graph_max_n) {
             total_profile.hard_graph_max_n = src->hard_graph_max_n;
         }
@@ -6861,8 +6905,16 @@ int main(int argc, char** argv) {
                total_profile.solve_structure_calls, total_profile.build_weight_time);
         printf("  solve_graph_poly: %lld calls, %.3fs\n",
                total_profile.solve_graph_calls, total_profile.solve_graph_time);
-        printf("  get_canonical_graph/densenauty: %lld calls, %.3fs\n",
-               total_profile.nauty_calls, total_profile.nauty_time);
+        printf("  get_canonical_graph: %lld calls, %.3fs\n",
+               total_profile.nauty_calls, total_profile.get_canonical_graph_time);
+        printf("    dense rows: %.3fs\n",
+               total_profile.get_canonical_graph_dense_rows_time);
+        printf("    build nauty input: %.3fs\n",
+               total_profile.get_canonical_graph_build_input_time);
+        printf("    densenauty: %.3fs\n",
+               total_profile.nauty_time);
+        printf("    rebuild canon graph: %.3fs\n",
+               total_profile.get_canonical_graph_rebuild_time);
         printf("  hard graph nodes: %lld, max n %d, max degree %d\n",
                total_profile.hard_graph_nodes,
                total_profile.hard_graph_max_n,

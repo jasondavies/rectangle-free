@@ -6460,3 +6460,44 @@
   - the `6x6` case benefits clearly because it performs about `40M` canonicalisation calls, so a tiny per-call saving shows up in wall time
   - the `7x6 --task-end 1` case only performs about `178k` canonicalisation calls, so the same per-call effect is too small to measure reliably and appears flat within normal run-to-run noise
 - Outcome: accepted on `main`.
+
+### Experiment 161: Reuse raw dense rows for canonicalisation after a raw-cache miss
+- Goal: avoid rebuilding the dense row representation inside `get_canonical_graph()` immediately after computing the same dense rows for the raw cache lookup.
+- Change:
+  - split canonicalisation into a helper that accepts an already-dense row array
+  - after a connected graph misses the raw cache, feed those existing `raw_rows` directly into canonicalisation instead of calling `graph_build_dense_rows()` again
+  - keep the cheap `dense_v++` walk in dense-row builders instead of recomputing each dense index with a prefix popcount
+  - add temporary profiling counters to break `get_canonical_graph()` into dense-row build, nauty-input build, `densenauty()`, and canonical-graph rebuild time
+- Matching 32-thread benchmark command:
+  - `env OMP_NUM_THREADS=32 ./partition_poly_7 6 6 --prefix-depth 2 --adaptive-subdivide --adaptive-work-budget 1000 --adaptive-max-depth 5`
+- Baseline:
+  - current committed `main` tip before this change (`ccbcd72`)
+  - `Worker Complete in 23.90 seconds`
+  - `Worker Complete in 23.88 seconds`
+- Experiment:
+  - `Worker Complete in 22.43 seconds`
+  - `Worker Complete in 22.47 seconds`
+- Additional A/B check:
+  - with the `raw_rows` reuse retained but the `dense_v++` walk reverted:
+    - `Worker Complete in 22.68 seconds`
+    - `Worker Complete in 22.79 seconds`
+  - so the reuse is the dominant win, and the linear dense-index walk is still worth keeping on top
+- Additional single-thread check:
+  - command:
+    - `env OMP_NUM_THREADS=1 ./partition_poly_7 7 6 --prefix-depth 2 --task-end 1`
+  - baseline:
+    - `Worker Complete in 30.26 seconds`
+  - experiment:
+    - `Worker Complete in 30.05 seconds`
+- Profile evidence on the matching `6x6` benchmark:
+  - before this change, `get_canonical_graph()` accounted for about `155.362s` over `40,680,838` calls, including `28.020s` in dense-row construction
+  - after feeding canonicalisation directly from `raw_rows`, `get_canonical_graph()` dropped to about `124.449s` over `40,576,881` calls, with the repeated dense-row phase removed from that path
+- Correctness:
+  - all benchmark runs printed the same chromatic polynomial and the same values:
+    - `6x6`: `P(4) = 203716633441803914880`, `P(5) = 2852707805646422930409600`
+    - `7x6 task 0`: `P(4) = 43715355264000`, `P(5) = 15297058957242888000`
+- Interpretation:
+  - on these workloads, most connected raw-cache misses went straight on to canonicalisation, so rebuilding the dense rows there was pure duplicate work
+  - removing that duplicate materialisation saves about `31s` of profiled `get_canonical_graph()` time on the exact `6x6` benchmark and converts into a roughly `1.4s` wall-time improvement
+  - the extra dense-index simplification is smaller but still measurable once the larger duplicate-work issue is fixed
+- Outcome: accepted on `main`.
