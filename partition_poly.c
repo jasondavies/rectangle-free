@@ -4961,6 +4961,62 @@ static inline void record_hard_graph_node(ProfileStats* profile, int n, int max_
     }
 }
 
+typedef enum {
+    SG_OUTCOME_NONE = 0,
+    SG_OUTCOME_LOOKUP,
+    SG_OUTCOME_CONNECTED_LOOKUP,
+    SG_OUTCOME_RAW_HIT,
+    SG_OUTCOME_CANON_HIT,
+    SG_OUTCOME_COMPONENTS,
+    SG_OUTCOME_HARD_MISS,
+} SolveGraphOutcome;
+
+static inline double begin_solve_graph_profile(ProfileStats* profile) {
+    if (PROFILE_BUILD && profile) {
+        profile->solve_graph_calls++;
+        return omp_get_wtime();
+    }
+    return 0.0;
+}
+
+static inline void finish_solve_graph_profile(ProfileStats* profile, double solve_t0,
+                                              int profile_n, SolveGraphOutcome outcome) {
+    if (!(PROFILE_BUILD && profile)) return;
+
+    double dt = omp_get_wtime() - solve_t0;
+    profile->solve_graph_time += dt;
+    if (profile_n < 0 || profile_n > MAXN_NAUTY) return;
+
+    profile->solve_graph_time_by_n[profile_n] += dt;
+    switch (outcome) {
+        case SG_OUTCOME_LOOKUP:
+            profile->solve_graph_lookup_calls_by_n[profile_n]++;
+            profile->solve_graph_lookup_time_by_n[profile_n] += dt;
+            break;
+        case SG_OUTCOME_CONNECTED_LOOKUP:
+            profile->solve_graph_connected_lookup_calls_by_n[profile_n]++;
+            profile->solve_graph_connected_lookup_time_by_n[profile_n] += dt;
+            break;
+        case SG_OUTCOME_RAW_HIT:
+            profile->solve_graph_raw_hit_time_by_n[profile_n] += dt;
+            break;
+        case SG_OUTCOME_CANON_HIT:
+            profile->solve_graph_canon_hit_time_by_n[profile_n] += dt;
+            break;
+        case SG_OUTCOME_COMPONENTS:
+            profile->solve_graph_component_calls_by_n[profile_n]++;
+            profile->solve_graph_component_time_by_n[profile_n] += dt;
+            break;
+        case SG_OUTCOME_HARD_MISS:
+            profile->solve_graph_hard_misses_by_n[profile_n]++;
+            profile->solve_graph_hard_miss_time_by_n[profile_n] += dt;
+            break;
+        case SG_OUTCOME_NONE:
+        default:
+            break;
+    }
+}
+
 static inline int graph_neighbors_form_clique(const Graph* g, uint64_t neighbors) {
     uint64_t rem = neighbors;
     while (rem) {
@@ -5026,70 +5082,83 @@ static void graph_choose_branch_edge(const Graph* g, int* u_out, int* v_out, int
     *max_deg_out = max_deg;
 }
 
+#if RECT_COUNT_K4
+static int simplify_graph_count4(Graph* g, uint64_t* multiplier,
+                                 SolveGraphOutcome* outcome, GraphPoly* out_result) {
+    int changed = 1;
+    while (changed && g->n > SMALL_GRAPH_LOOKUP_MAX_N) {
+        changed = 0;
+        uint64_t active = g->vertex_mask;
+        while (active) {
+            int i = __builtin_ctzll(active);
+            active &= active - 1;
+            uint64_t neighbors = (uint64_t)g->adj[i] & g->vertex_mask;
+            int degree = __builtin_popcountll(neighbors);
+
+            if (degree == 0) {
+                *multiplier *= 4;
+                remove_vertex(g, i);
+                changed = 1;
+                continue;
+            }
+
+            if (!graph_neighbors_form_clique(g, neighbors)) {
+                continue;
+            }
+            if (degree >= 4) {
+                graph_poly_set_count4(0, out_result);
+                *outcome = SG_OUTCOME_HARD_MISS;
+                return 0;
+            }
+            *multiplier *= (uint64_t)(4 - degree);
+            remove_vertex(g, i);
+            changed = 1;
+        }
+    }
+    return 1;
+}
+#endif
+
+static void simplify_graph_poly_multiplier(Graph* g, GraphPoly* multiplier) {
+    int changed = 1;
+    while (changed && g->n > SMALL_GRAPH_LOOKUP_MAX_N) {
+        changed = 0;
+        uint64_t active = g->vertex_mask;
+        while (active) {
+            int i = __builtin_ctzll(active);
+            active &= active - 1;
+            uint64_t neighbors = (uint64_t)g->adj[i] & g->vertex_mask;
+            int degree = __builtin_popcountll(neighbors);
+
+            if (degree == 0) {
+                graph_poly_mul_linear_ref(multiplier, 0, multiplier);
+                remove_vertex(g, i);
+                changed = 1;
+                continue;
+            }
+
+            if (!graph_neighbors_form_clique(g, neighbors)) {
+                continue;
+            }
+            graph_poly_mul_linear_ref(multiplier, degree, multiplier);
+            remove_vertex(g, i);
+            changed = 1;
+        }
+    }
+}
+
 static void solve_graph_poly(const Graph* input_g, RowGraphCache* cache, RowGraphCache* raw_cache,
                              NautyWorkspace* ws, long long* local_canon_calls,
                              long long* local_cache_hits, long long* local_raw_cache_hits,
                              ProfileStats* profile, GraphPoly* out_result) {
 #if RECT_COUNT_K4
     Graph g = *input_g;
-    double solve_t0 = 0.0;
+    double solve_t0 = begin_solve_graph_profile(profile);
     int profile_n = 0;
-    enum {
-        SG_OUTCOME_NONE = 0,
-        SG_OUTCOME_LOOKUP,
-        SG_OUTCOME_CONNECTED_LOOKUP,
-        SG_OUTCOME_RAW_HIT,
-        SG_OUTCOME_CANON_HIT,
-        SG_OUTCOME_COMPONENTS,
-        SG_OUTCOME_HARD_MISS,
-    } outcome = SG_OUTCOME_NONE;
-    if (PROFILE_BUILD && profile) {
-        profile->solve_graph_calls++;
-        solve_t0 = omp_get_wtime();
-    }
+    SolveGraphOutcome outcome = SG_OUTCOME_NONE;
 
     uint64_t multiplier = 1;
-
-    int changed = 1;
-    while (changed && g.n > SMALL_GRAPH_LOOKUP_MAX_N) {
-        changed = 0;
-        uint64_t active = g.vertex_mask;
-        while (active) {
-            int i = __builtin_ctzll(active);
-            active &= active - 1;
-            uint64_t neighbors = (uint64_t)g.adj[i] & g.vertex_mask;
-            int degree = __builtin_popcountll(neighbors);
-
-            if (degree == 0) {
-                multiplier *= 4;
-                remove_vertex(&g, i);
-                changed = 1;
-                continue;
-            }
-
-            int is_clique = 1;
-            uint64_t rem = neighbors;
-            while (rem) {
-                int u = __builtin_ctzll(rem);
-                if ((neighbors & ~((uint64_t)g.adj[u] & g.vertex_mask)) != (1ULL << u)) {
-                    is_clique = 0;
-                    break;
-                }
-                rem &= rem - 1;
-            }
-
-            if (is_clique) {
-                if (degree >= 4) {
-                    graph_poly_set_count4(0, out_result);
-                    outcome = SG_OUTCOME_HARD_MISS;
-                    goto done;
-                }
-                multiplier *= (uint64_t)(4 - degree);
-                remove_vertex(&g, i);
-                changed = 1;
-            }
-        }
-    }
+    if (!simplify_graph_count4(&g, &multiplier, &outcome, out_result)) goto done;
 
     profile_n = g.n;
     if (PROFILE_BUILD && profile && profile_n >= 0 && profile_n <= MAXN_NAUTY) {
@@ -5215,95 +5284,17 @@ static void solve_graph_poly(const Graph* input_g, RowGraphCache* cache, RowGrap
     }
     graph_poly_set_count4(multiplier * graph_poly_get_count4(&res), out_result);
 done:
-    if (PROFILE_BUILD && profile) {
-        double dt = omp_get_wtime() - solve_t0;
-        profile->solve_graph_time += dt;
-        if (profile_n >= 0 && profile_n <= MAXN_NAUTY) {
-            profile->solve_graph_time_by_n[profile_n] += dt;
-            switch (outcome) {
-                case SG_OUTCOME_LOOKUP:
-                    profile->solve_graph_lookup_calls_by_n[profile_n]++;
-                    profile->solve_graph_lookup_time_by_n[profile_n] += dt;
-                    break;
-                case SG_OUTCOME_CONNECTED_LOOKUP:
-                    profile->solve_graph_connected_lookup_calls_by_n[profile_n]++;
-                    profile->solve_graph_connected_lookup_time_by_n[profile_n] += dt;
-                    break;
-                case SG_OUTCOME_RAW_HIT:
-                    profile->solve_graph_raw_hit_time_by_n[profile_n] += dt;
-                    break;
-                case SG_OUTCOME_CANON_HIT:
-                    profile->solve_graph_canon_hit_time_by_n[profile_n] += dt;
-                    break;
-                case SG_OUTCOME_COMPONENTS:
-                    profile->solve_graph_component_calls_by_n[profile_n]++;
-                    profile->solve_graph_component_time_by_n[profile_n] += dt;
-                    break;
-                case SG_OUTCOME_HARD_MISS:
-                    profile->solve_graph_hard_misses_by_n[profile_n]++;
-                    profile->solve_graph_hard_miss_time_by_n[profile_n] += dt;
-                    break;
-                default:
-                    break;
-            }
-        }
-    }
+    finish_solve_graph_profile(profile, solve_t0, profile_n, outcome);
     return;
 #else
     Graph g = *input_g;
-    double solve_t0 = 0.0;
+    double solve_t0 = begin_solve_graph_profile(profile);
     int profile_n = 0;
-    enum {
-        SG_OUTCOME_NONE = 0,
-        SG_OUTCOME_LOOKUP,
-        SG_OUTCOME_CONNECTED_LOOKUP,
-        SG_OUTCOME_RAW_HIT,
-        SG_OUTCOME_CANON_HIT,
-        SG_OUTCOME_COMPONENTS,
-        SG_OUTCOME_HARD_MISS,
-    } outcome = SG_OUTCOME_NONE;
-    if (PROFILE_BUILD && profile) {
-        profile->solve_graph_calls++;
-        solve_t0 = omp_get_wtime();
-    }
+    SolveGraphOutcome outcome = SG_OUTCOME_NONE;
     GraphPoly multiplier;
     graph_poly_one_ref(&multiplier);
-    
-    int changed = 1;
-    while (changed && g.n > SMALL_GRAPH_LOOKUP_MAX_N) {
-        changed = 0;
-        uint64_t active = g.vertex_mask;
-        while (active) {
-            int i = __builtin_ctzll(active);
-            active &= active - 1;
-            uint64_t neighbors = (uint64_t)g.adj[i] & g.vertex_mask;
-            int degree = __builtin_popcountll(neighbors);
-            
-            if (degree == 0) {
-                graph_poly_mul_linear_ref(&multiplier, 0, &multiplier);
-                remove_vertex(&g, i);
-                changed = 1;
-                continue;
-            }
-            
-            int is_clique = 1;
-            uint64_t rem = neighbors;
-            while (rem) {
-                int u = __builtin_ctzll(rem);
-                if ((neighbors & ~((uint64_t)g.adj[u] & g.vertex_mask)) != (1ULL << u)) {
-                    is_clique = 0;
-                    break;
-                }
-                rem &= rem - 1;
-            }
-            
-            if (is_clique) {
-                graph_poly_mul_linear_ref(&multiplier, degree, &multiplier);
-                remove_vertex(&g, i);
-                changed = 1;
-            }
-        }
-    }
+
+    simplify_graph_poly_multiplier(&g, &multiplier);
 
     profile_n = g.n;
     if (PROFILE_BUILD && profile && profile_n >= 0 && profile_n <= MAXN_NAUTY) {
@@ -5515,39 +5506,7 @@ done:
     }
     graph_poly_mul_ref(&multiplier, &res, out_result);
 done:
-    if (PROFILE_BUILD && profile) {
-        double dt = omp_get_wtime() - solve_t0;
-        profile->solve_graph_time += dt;
-        if (profile_n >= 0 && profile_n <= MAXN_NAUTY) {
-            profile->solve_graph_time_by_n[profile_n] += dt;
-            switch (outcome) {
-                case SG_OUTCOME_LOOKUP:
-                    profile->solve_graph_lookup_calls_by_n[profile_n]++;
-                    profile->solve_graph_lookup_time_by_n[profile_n] += dt;
-                    break;
-                case SG_OUTCOME_RAW_HIT:
-                    profile->solve_graph_raw_hit_time_by_n[profile_n] += dt;
-                    break;
-                case SG_OUTCOME_CONNECTED_LOOKUP:
-                    profile->solve_graph_connected_lookup_calls_by_n[profile_n]++;
-                    profile->solve_graph_connected_lookup_time_by_n[profile_n] += dt;
-                    break;
-                case SG_OUTCOME_CANON_HIT:
-                    profile->solve_graph_canon_hit_time_by_n[profile_n] += dt;
-                    break;
-                case SG_OUTCOME_COMPONENTS:
-                    profile->solve_graph_component_calls_by_n[profile_n]++;
-                    profile->solve_graph_component_time_by_n[profile_n] += dt;
-                    break;
-                case SG_OUTCOME_HARD_MISS:
-                    profile->solve_graph_hard_misses_by_n[profile_n]++;
-                    profile->solve_graph_hard_miss_time_by_n[profile_n] += dt;
-                    break;
-                default:
-                    break;
-            }
-        }
-    }
+    finish_solve_graph_profile(profile, solve_t0, profile_n, outcome);
 #endif
 }
 
