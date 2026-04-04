@@ -6501,3 +6501,40 @@
   - removing that duplicate materialisation saves about `31s` of profiled `get_canonical_graph()` time on the exact `6x6` benchmark and converts into a roughly `1.4s` wall-time improvement
   - the extra dense-index simplification is smaller but still measurable once the larger duplicate-work issue is fixed
 - Outcome: accepted on `main`.
+
+### Experiment 162: Seed nauty with an initial partition by degree
+- Goal: reduce `densenauty()` work by giving it a cheap initial partition, instead of always starting from a single undifferentiated cell.
+- Change:
+  - in `get_canonical_graph_from_dense_rows()`, compute each dense vertex degree from the existing row representation
+  - sort the initial `lab[]` order by `(degree, vertex id)`
+  - set `ptn[]` so equal-degree vertices share a cell and unequal-degree vertices start a new cell
+  - switch nauty from `options.defaultptn = TRUE` to `FALSE` so it uses that explicit degree partition
+- Matching 32-thread benchmark command:
+  - `env OMP_NUM_THREADS=32 ./partition_poly_7 6 6 --prefix-depth 2 --adaptive-subdivide --adaptive-work-budget 1000 --adaptive-max-depth 5`
+- Baseline:
+  - current committed `main` tip before this change (`dcedefe`)
+  - `Worker Complete in 22.43 seconds`
+  - `Worker Complete in 22.47 seconds`
+- Experiment:
+  - `Worker Complete in 22.26 seconds`
+  - `Worker Complete in 22.23 seconds`
+- Additional single-thread check:
+  - command:
+    - `env OMP_NUM_THREADS=1 ./partition_poly_7 7 6 --prefix-depth 2 --task-end 1`
+  - baseline:
+    - `Worker Complete in 30.05 seconds`
+  - experiment:
+    - `Worker Complete in 30.23 seconds`
+- Profile evidence on the matching `6x6` benchmark:
+  - before this change, `get_canonical_graph()` accounted for about `124.029s` over `40,352,944` calls, including `100.867s` in `densenauty()`
+  - with the degree partition, `get_canonical_graph()` accounted for about `128.273s` over `40,426,758` calls, but `densenauty()` itself dropped to `96.533s`
+  - the overall profiled run still improved (`26.89s` to `26.63s`) because the expensive nauty core shrank enough to outweigh the small extra setup work
+- Correctness:
+  - all benchmark runs printed the same chromatic polynomial and the same values:
+    - `6x6`: `P(4) = 203716633441803914880`, `P(5) = 2852707805646422930409600`
+    - `7x6 task 0`: `P(4) = 43715355264000`, `P(5) = 15297058957242888000`
+- Interpretation:
+  - degree is a very cheap invariant to compute from the dense rows we already have
+  - on the hot `6x6` workload, handing nauty that partition trims a few nanoseconds from each canonicalisation, and that compounds over roughly `40M` calls into a measurable wall-time win
+  - the one-thread `7x6` task is effectively flat, so this should be treated as a targeted improvement for the nauty-heavy benchmark rather than a universal speedup
+- Outcome: accepted on `main`.
