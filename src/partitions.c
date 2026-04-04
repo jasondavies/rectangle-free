@@ -11,7 +11,7 @@ static int bell_number_upper_bound(int rows) {
     return bell_numbers[rows];
 }
 
-static void init_row_dependent_tables(void) {
+void init_row_dependent_tables(void) {
     max_partition_capacity = bell_number_upper_bound(g_rows);
     perm_count = (int)factorial[g_rows];
     max_complex_per_partition = g_rows / 2;
@@ -20,7 +20,7 @@ static void init_row_dependent_tables(void) {
     perms = checked_calloc((size_t)perm_count, sizeof(*perms), "perms");
 }
 
-static void init_partition_lookup_tables(void) {
+void init_partition_lookup_tables(void) {
     size_t partition_count = (size_t)num_partitions;
     partition_id_lookup_size = 1u << (3 * g_rows);
 
@@ -49,7 +49,7 @@ static void init_partition_lookup_tables(void) {
 #endif
 }
 
-static void free_row_dependent_tables(void) {
+void free_row_dependent_tables(void) {
     free(partitions);
     free(perms);
     free(perm_table);
@@ -158,7 +158,7 @@ static int compare_partition_hardness(const void* lhs, const void* rhs) {
     return memcmp(a->mapping, b->mapping, (size_t)g_rows);
 }
 
-static void reorder_partitions_by_hardness(void) {
+void reorder_partitions_by_hardness(void) {
     qsort(partitions, (size_t)num_partitions, sizeof(partitions[0]), compare_partition_hardness);
 }
 
@@ -219,7 +219,7 @@ int get_partition_id(uint8_t* map) {
     return (val == UINT16_MAX) ? -1 : (int)val;
 }
 
-static void build_partition_id_lookup(void) {
+void build_partition_id_lookup(void) {
     for (int id = 0; id < num_partitions; id++) {
         uint32_t key = 0;
         for (int i = 0; i < g_rows; i++) {
@@ -248,7 +248,7 @@ void build_perm_table() {
     }
 }
 
-static void build_terminal_perm_order_tables(void) {
+void build_terminal_perm_order_tables(void) {
     uint16_t* counts =
         checked_calloc((size_t)num_partitions, sizeof(*counts), "terminal_perm_order_counts");
     uint16_t* offsets =
@@ -314,7 +314,7 @@ void build_overlap_table() {
 }
 
 #if RECT_COUNT_K4_FEASIBILITY
-static void init_pair_index(void) {
+void init_pair_index(void) {
     memset(pair_index, -1, sizeof(pair_index));
     num_row_pairs = 0;
     for (int i = 0; i < g_rows; i++) {
@@ -326,7 +326,7 @@ static void init_pair_index(void) {
     }
 }
 
-static void build_partition_shadow_table(void) {
+void build_partition_shadow_table(void) {
     min_partition_pairs = MAX_ROW_PAIRS;
     memset(pair_shadow_mask, 0, (size_t)num_partitions * sizeof(*pair_shadow_mask));
     memset(pair_shadow_pairs, 0, (size_t)num_partitions * sizeof(*pair_shadow_pairs));
@@ -364,7 +364,7 @@ static void build_partition_shadow_table(void) {
 }
 #endif
 
-static void build_partition_weight_table(void) {
+void build_partition_weight_table(void) {
     for (int pid = 0; pid < num_partitions; pid++) {
         Poly weight;
         poly_one_ref(&weight);
@@ -384,7 +384,7 @@ static inline uint8_t falling4_weight(int c, int s) {
     return w;
 }
 
-static void build_partition_weight4_table(void) {
+void build_partition_weight4_table(void) {
     for (int pid = 0; pid < num_partitions; pid++) {
         partition_weight4[pid] =
             falling4_weight(partitions[pid].num_complex, partitions[pid].num_singletons);
@@ -392,20 +392,20 @@ static void build_partition_weight4_table(void) {
 }
 
 #if RECT_COUNT_K4
-static inline void weight_accum_one(WeightAccum* out) {
+void weight_accum_one(WeightAccum* out) {
     *out = 1;
 }
 
-static inline void weight_accum_from_partition(int pid, WeightAccum* out) {
+void weight_accum_from_partition(int pid, WeightAccum* out) {
     *out = (WeightAccum)partition_weight4[pid];
 }
 
-static inline void weight_accum_mul_partition(const WeightAccum* src, int pid, WeightAccum* out) {
+void weight_accum_mul_partition(const WeightAccum* src, int pid, WeightAccum* out) {
     *out = (*src) * (WeightAccum)partition_weight4[pid];
 }
 
-static inline void weight_accum_scale_to_poly(const WeightAccum* weight_prod, long long mult_coeff,
-                                              long long row_orbit, uint64_t graph_count4, Poly* out) {
+void weight_accum_scale_to_poly(const WeightAccum* weight_prod, long long mult_coeff,
+                                long long row_orbit, uint64_t graph_count4, Poly* out) {
     WeightAccum total = *weight_prod;
     total *= (WeightAccum)mult_coeff;
     total *= (WeightAccum)row_orbit;
@@ -414,15 +414,15 @@ static inline void weight_accum_scale_to_poly(const WeightAccum* weight_prod, lo
     out->coeffs[0] = (PolyCoeff)total;
 }
 #else
-static inline void weight_accum_one(WeightAccum* out) {
+void weight_accum_one(WeightAccum* out) {
     poly_one_ref(out);
 }
 
-static inline void weight_accum_from_partition(int pid, WeightAccum* out) {
+void weight_accum_from_partition(int pid, WeightAccum* out) {
     *out = partition_weight_poly[pid];
 }
 
-static inline void weight_accum_mul_partition(const WeightAccum* src, int pid, WeightAccum* out) {
+void weight_accum_mul_partition(const WeightAccum* src, int pid, WeightAccum* out) {
     poly_mul_ref(src, &partition_weight_poly[pid], out);
 }
 #endif

@@ -22,6 +22,7 @@ LDFLAGS ?= $(NAUTY_BUILD_DIR)/nautyT.a -lm $(OPENMP_LDFLAGS)
 PARTITION_POLY_7_NAUTY_CFLAGS ?= -DWORDSIZE=64 -DMAXN=WORDSIZE
 PARTITION_POLY_7_CACHE_CFLAGS ?= -DRAW_CACHE_BITS=15 -DRAW_CACHE_PROBE=12
 PARTITION_POLY_7_LDFLAGS ?= $(NAUTY_BUILD_DIR)/nautyTL1.a -lm $(OPENMP_LDFLAGS)
+PARTITION_SHARED_SRCS := partition_poly.c src/runtime.c src/partitions.c
 
 NVCC ?= nvcc
 NVCCFLAGS ?= -O3 -arch=sm_89 -std=c++17 -I./inspiration/cpads/include
@@ -56,26 +57,26 @@ $(NAUTY_BUILD_DIR)/nautyTL1.a: $(NAUTY_BUILD_DIR)/.configured-tls
 5xn_count4: 5xn_count4.c
 	$(CC) $(CFLAGS_5XN) -o $@ $<
 
-partition_count4: partition_poly.c $(NAUTY_BUILD_DIR)/nautyT.a
-	$(CC) $(PARTITION_CFLAGS) -DRECT_COUNT_K4=1 -DRECT_COUNT_K4_FEASIBILITY=1 -o $@ $< $(LDFLAGS)
+partition_count4: $(PARTITION_SHARED_SRCS) $(NAUTY_BUILD_DIR)/nautyT.a
+	$(CC) $(PARTITION_CFLAGS) -DRECT_COUNT_K4=1 -DRECT_COUNT_K4_FEASIBILITY=1 -o $@ $(PARTITION_SHARED_SRCS) $(LDFLAGS)
 
-partition_poly: partition_poly.c $(NAUTY_BUILD_DIR)/nautyT.a
-	$(CC) $(PARTITION_CFLAGS) -o $@ $< $(LDFLAGS)
+partition_poly: $(PARTITION_SHARED_SRCS) $(NAUTY_BUILD_DIR)/nautyT.a
+	$(CC) $(PARTITION_CFLAGS) -o $@ $(PARTITION_SHARED_SRCS) $(LDFLAGS)
 
-partition_poly_profile: partition_poly.c $(NAUTY_BUILD_DIR)/nautyT.a
-	$(CC) $(PARTITION_CFLAGS) $(PARTITION_PROFILE_CFLAGS) -o $@ $< $(LDFLAGS)
+partition_poly_profile: $(PARTITION_SHARED_SRCS) $(NAUTY_BUILD_DIR)/nautyT.a
+	$(CC) $(PARTITION_CFLAGS) $(PARTITION_PROFILE_CFLAGS) -o $@ $(PARTITION_SHARED_SRCS) $(LDFLAGS)
 
-partition_poly_7: partition_poly.c $(NAUTY_BUILD_DIR)/nautyTL1.a
-	$(CC) $(PARTITION_CFLAGS) $(PARTITION_POLY_7_NAUTY_CFLAGS) $(PARTITION_POLY_7_CACHE_CFLAGS) -DMAX_COLS=7 -DDEFAULT_ROWS=7 -DDEFAULT_COLS=7 -DCACHE_BITS=17 -o $@ $< $(PARTITION_POLY_7_LDFLAGS)
+partition_poly_7: $(PARTITION_SHARED_SRCS) $(NAUTY_BUILD_DIR)/nautyTL1.a
+	$(CC) $(PARTITION_CFLAGS) $(PARTITION_POLY_7_NAUTY_CFLAGS) $(PARTITION_POLY_7_CACHE_CFLAGS) -DMAX_COLS=7 -DDEFAULT_ROWS=7 -DDEFAULT_COLS=7 -DCACHE_BITS=17 -o $@ $(PARTITION_SHARED_SRCS) $(PARTITION_POLY_7_LDFLAGS)
 
-partition_poly_7_profile: partition_poly.c $(NAUTY_BUILD_DIR)/nautyTL1.a
-	$(CC) $(PARTITION_CFLAGS) $(PARTITION_PROFILE_CFLAGS) $(PARTITION_POLY_7_NAUTY_CFLAGS) $(PARTITION_POLY_7_CACHE_CFLAGS) -DMAX_COLS=7 -DDEFAULT_ROWS=7 -DDEFAULT_COLS=7 -DCACHE_BITS=17 -o $@ $< $(PARTITION_POLY_7_LDFLAGS)
+partition_poly_7_profile: $(PARTITION_SHARED_SRCS) $(NAUTY_BUILD_DIR)/nautyTL1.a
+	$(CC) $(PARTITION_CFLAGS) $(PARTITION_PROFILE_CFLAGS) $(PARTITION_POLY_7_NAUTY_CFLAGS) $(PARTITION_POLY_7_CACHE_CFLAGS) -DMAX_COLS=7 -DDEFAULT_ROWS=7 -DDEFAULT_COLS=7 -DCACHE_BITS=17 -o $@ $(PARTITION_SHARED_SRCS) $(PARTITION_POLY_7_LDFLAGS)
 
 small_graph_lookup_gen: small_graph_lookup_gen.c
 	$(CC) $(CFLAGS_5XN) -o $@ $<
 
-connected_canon_lookup_gen: connected_canon_lookup_gen.c partition_poly.c $(NAUTY_BUILD_DIR)/nautyTL1.a
-	$(CC) $(PARTITION_CFLAGS) $(PARTITION_POLY_7_NAUTY_CFLAGS) $(PARTITION_POLY_7_CACHE_CFLAGS) -DMAX_COLS=7 -DDEFAULT_ROWS=7 -DDEFAULT_COLS=7 -DCACHE_BITS=17 -o $@ $< $(PARTITION_POLY_7_LDFLAGS)
+connected_canon_lookup_gen: connected_canon_lookup_gen.c src/runtime.c src/partitions.c $(NAUTY_BUILD_DIR)/nautyTL1.a
+	$(CC) $(PARTITION_CFLAGS) $(PARTITION_POLY_7_NAUTY_CFLAGS) $(PARTITION_POLY_7_CACHE_CFLAGS) -DMAX_COLS=7 -DDEFAULT_ROWS=7 -DDEFAULT_COLS=7 -DCACHE_BITS=17 -o $@ connected_canon_lookup_gen.c src/runtime.c src/partitions.c $(PARTITION_POLY_7_LDFLAGS)
 
 clean:
 	rm -f 5xn_count4 partition_count4 partition_poly partition_poly_7 partition_poly_profile partition_poly_7_profile small_graph_lookup_gen connected_canon_lookup_gen

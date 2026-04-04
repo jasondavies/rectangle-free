@@ -1,6 +1,6 @@
 #include "partition_poly.h"
 
-static void task_timing_insert_topk(TaskTimingStats* stats, long long task_index, double elapsed) {
+void task_timing_insert_topk(TaskTimingStats* stats, long long task_index, double elapsed) {
     for (int i = 0; i < TASK_PROFILE_TOPK; i++) {
         if (elapsed > stats->top_times[i]) {
             for (int j = TASK_PROFILE_TOPK - 1; j > i; j--) {
@@ -46,10 +46,10 @@ static void queue_subtask_insert_topk(QueueSubtaskTimingStats* stats, const Loca
     }
 }
 
-static void queue_subtask_record(QueueSubtaskTimingStats* stats, const LocalTask* task,
-                                 double elapsed, long long solve_graph_calls,
-                                 long long nauty_calls, long long hard_graph_nodes,
-                                 int max_hard_graph_n, int max_hard_graph_degree) {
+void queue_subtask_record(QueueSubtaskTimingStats* stats, const LocalTask* task,
+                          double elapsed, long long solve_graph_calls,
+                          long long nauty_calls, long long hard_graph_nodes,
+                          int max_hard_graph_n, int max_hard_graph_degree) {
     stats->task_count++;
     stats->task_time_sum += elapsed;
     if (elapsed > stats->task_time_max) stats->task_time_max = elapsed;
@@ -62,7 +62,7 @@ static void queue_subtask_record(QueueSubtaskTimingStats* stats, const LocalTask
                               hard_graph_nodes, max_hard_graph_n, max_hard_graph_degree);
 }
 
-static void queue_subtask_merge(QueueSubtaskTimingStats* dst, const QueueSubtaskTimingStats* src) {
+void queue_subtask_merge(QueueSubtaskTimingStats* dst, const QueueSubtaskTimingStats* src) {
     dst->task_count += src->task_count;
     dst->task_time_sum += src->task_time_sum;
     if (src->task_time_max > dst->task_time_max) dst->task_time_max = src->task_time_max;
@@ -102,7 +102,7 @@ static void record_task_time_value(long long task_index, double elapsed) {
     g_task_times_values[slot] = elapsed;
 }
 
-static int decode_task_prefix(long long task_index, int* i, int* j, int* k, int* l) {
+int decode_task_prefix(long long task_index, int* i, int* j, int* k, int* l) {
     *i = -1;
     *j = -1;
     *k = -1;
@@ -180,7 +180,7 @@ static int decode_task_prefix(long long task_index, int* i, int* j, int* k, int*
     return 0;
 }
 
-static void write_task_times_file(const char* path) {
+void write_task_times_file(const char* path) {
     if (!path || !g_task_times_values || g_task_times_count <= 0) return;
     FILE* f = fopen(path, "w");
     if (!f) {
@@ -207,7 +207,6 @@ static void write_task_times_file(const char* path) {
     fclose(f);
 }
 
-#define DEFAULT_PROGRESS_UPDATES 2000
 #define PROGRESS_FLUSH_BATCH 64
 
 static inline void maybe_report_progress(long long done, long long total_tasks, long long report_step,
@@ -221,8 +220,8 @@ static inline void maybe_report_progress(long long done, long long total_tasks, 
     }
 }
 
-static inline void flush_completed_tasks(long long total_tasks, long long report_step,
-                                         double start_time, long long* pending_completed) {
+void flush_completed_tasks(long long total_tasks, long long report_step,
+                           double start_time, long long* pending_completed) {
     if (*pending_completed == 0) return;
     long long done = 0;
     #pragma omp atomic capture
@@ -243,10 +242,10 @@ static inline void complete_task_and_report(long long total_tasks, long long rep
     }
 }
 
-static inline void complete_task_report_and_time(long long total_tasks, long long report_step,
-                                                 double start_time, long long* pending_completed,
-                                                 TaskTimingStats* task_timing, long long task_index,
-                                                 double task_t0) {
+void complete_task_report_and_time(long long total_tasks, long long report_step,
+                                   double start_time, long long* pending_completed,
+                                   TaskTimingStats* task_timing, long long task_index,
+                                   double task_t0) {
     complete_task_and_report(total_tasks, report_step, start_time, pending_completed);
     if (PROFILE_BUILD && task_timing) {
         double elapsed = omp_get_wtime() - task_t0;
@@ -273,8 +272,8 @@ static inline void local_queue_note_idle_locked(LocalTaskQueue* queue, int new_i
     queue->occupancy_idle_threads = new_idle_threads;
 }
 
-static void local_queue_init(LocalTaskQueue* queue, int capacity,
-                             long long root_count, int total_threads) {
+void local_queue_init(LocalTaskQueue* queue, int capacity,
+                      long long root_count, int total_threads) {
     memset(queue, 0, sizeof(*queue));
     pthread_mutex_init(&queue->mutex, NULL);
     pthread_cond_init(&queue->cond, NULL);
@@ -299,7 +298,7 @@ static void local_queue_init(LocalTaskQueue* queue, int capacity,
     }
 }
 
-static void local_queue_free(LocalTaskQueue* queue) {
+void local_queue_free(LocalTaskQueue* queue) {
     free(queue->tasks);
     free(queue->roots);
     pthread_cond_destroy(&queue->cond);
@@ -307,13 +306,13 @@ static void local_queue_free(LocalTaskQueue* queue) {
     memset(queue, 0, sizeof(*queue));
 }
 
-static inline void local_task_from_stack(LocalTask* task, long long root_id, int depth, const int* stack) {
+void local_task_from_stack(LocalTask* task, long long root_id, int depth, const int* stack) {
     task->depth = (uint8_t)depth;
     task->root_id = root_id;
     for (int i = 0; i < depth; i++) task->prefix[i] = (PrefixId)stack[i];
 }
 
-static int local_queue_try_push(LocalTaskQueue* queue, const LocalTask* task) {
+int local_queue_try_push(LocalTaskQueue* queue, const LocalTask* task) {
     int pushed = 0;
     int outstanding = 0;
     pthread_mutex_lock(&queue->mutex);
@@ -331,14 +330,14 @@ static int local_queue_try_push(LocalTaskQueue* queue, const LocalTask* task) {
     return pushed;
 }
 
-static void local_queue_seed_push(LocalTaskQueue* queue, const LocalTask* task) {
+void local_queue_seed_push(LocalTaskQueue* queue, const LocalTask* task) {
     if (!local_queue_try_push(queue, task)) {
         fprintf(stderr, "Failed to seed local task queue\n");
         exit(1);
     }
 }
 
-static int local_queue_pop(LocalTaskQueue* queue, LocalTask* task) {
+int local_queue_pop(LocalTaskQueue* queue, LocalTask* task) {
     pthread_mutex_lock(&queue->mutex);
     int marked_idle = 0;
     for (;;) {
@@ -376,10 +375,10 @@ static int local_queue_pop(LocalTaskQueue* queue, LocalTask* task) {
     }
 }
 
-static void local_queue_finish_item(LocalTaskQueue* queue, long long root_id,
-                                    long long total_tasks, long long report_step,
-                                    double start_time, long long* pending_completed,
-                                    TaskTimingStats* task_timing) {
+void local_queue_finish_item(LocalTaskQueue* queue, long long root_id,
+                             long long total_tasks, long long report_step,
+                             double start_time, long long* pending_completed,
+                             TaskTimingStats* task_timing) {
     long long remaining =
         __atomic_sub_fetch(&queue->roots[root_id].pending, 1, __ATOMIC_ACQ_REL);
     atomic_fetch_sub_explicit(&queue->outstanding_tasks, 1, memory_order_relaxed);
@@ -403,10 +402,10 @@ static void local_queue_finish_item(LocalTaskQueue* queue, long long root_id,
     pthread_mutex_unlock(&queue->mutex);
 }
 
-static void local_queue_record_profile(LocalTaskQueue* queue, const LocalTask* task,
-                                       double elapsed, long long solve_graph_calls,
-                                       long long nauty_calls, long long hard_graph_nodes,
-                                       int max_hard_graph_n, int max_hard_graph_degree) {
+void local_queue_record_profile(LocalTaskQueue* queue, const LocalTask* task,
+                                double elapsed, long long solve_graph_calls,
+                                long long nauty_calls, long long hard_graph_nodes,
+                                int max_hard_graph_n, int max_hard_graph_degree) {
     if (g_queue_profile_report_step <= 0.0 || task->depth > MAX_COLS) return;
 
     pthread_mutex_lock(&queue->mutex);
@@ -449,7 +448,7 @@ static void local_queue_record_profile(LocalTaskQueue* queue, const LocalTask* t
     pthread_mutex_unlock(&queue->mutex);
 }
 
-static void local_queue_print_occupancy_summary(LocalTaskQueue* queue) {
+void local_queue_print_occupancy_summary(LocalTaskQueue* queue) {
     pthread_mutex_lock(&queue->mutex);
     double now = omp_get_wtime();
     double idle_thread_seconds =
@@ -471,7 +470,7 @@ static void local_queue_print_occupancy_summary(LocalTaskQueue* queue) {
     }
 }
 
-static void* checked_aligned_alloc(size_t alignment, size_t size, const char* label) {
+void* checked_aligned_alloc(size_t alignment, size_t size, const char* label) {
     void* ptr = NULL;
     if (posix_memalign(&ptr, alignment, size) != 0) {
         fprintf(stderr, "Failed to allocate %s (%zu bytes)\n", label, size);
@@ -480,7 +479,7 @@ static void* checked_aligned_alloc(size_t alignment, size_t size, const char* la
     return ptr;
 }
 
-static void* checked_calloc(size_t count, size_t size, const char* label) {
+void* checked_calloc(size_t count, size_t size, const char* label) {
     if (count == 0 || size == 0) {
         count = 1;
         size = 1;
@@ -493,7 +492,7 @@ static void* checked_calloc(size_t count, size_t size, const char* label) {
     return ptr;
 }
 
-static void prefix_task_buffer_init(PrefixTaskBuffer* buf, long long initial_capacity) {
+void prefix_task_buffer_init(PrefixTaskBuffer* buf, long long initial_capacity) {
     memset(buf, 0, sizeof(*buf));
     if (initial_capacity < 16) initial_capacity = 16;
     buf->capacity = initial_capacity;
@@ -522,14 +521,14 @@ static void prefix_task_buffer_reserve(PrefixTaskBuffer* buf, long long needed) 
     buf->capacity = new_capacity;
 }
 
-static void prefix_task_buffer_push2(PrefixTaskBuffer* buf, int i, int j) {
+void prefix_task_buffer_push2(PrefixTaskBuffer* buf, int i, int j) {
     prefix_task_buffer_reserve(buf, buf->count + 1);
     buf->i[buf->count] = (PrefixId)i;
     buf->j[buf->count] = (PrefixId)j;
     buf->count++;
 }
 
-static inline long long repeated_combo_count(int values, int slots) {
+long long repeated_combo_count(int values, int slots) {
     switch (slots) {
         case 0:
             return 1;
@@ -559,7 +558,7 @@ static void unrank_prefix2(long long rank, int* i, int* j) {
     exit(1);
 }
 
-static void get_prefix2_task(long long task_index, int* i, int* j) {
+void get_prefix2_task(long long task_index, int* i, int* j) {
     if (g_live_prefix2_i && task_index >= 0 && task_index < g_live_prefix2_count) {
         *i = (int)g_live_prefix2_i[task_index];
         *j = (int)g_live_prefix2_j[task_index];
@@ -568,11 +567,11 @@ static void get_prefix2_task(long long task_index, int* i, int* j) {
     unrank_prefix2(task_index, i, j);
 }
 
-static void build_fixed_prefix2_batches(const PrefixId* live_i, const PrefixId* live_j,
-                                        long long task_start,
-                                        long long total_tasks, Prefix2Batch** batches_out,
-                                        long long* batch_count_out, PrefixId** js_out,
-                                        long long** ps_out) {
+void build_fixed_prefix2_batches(const PrefixId* live_i, const PrefixId* live_j,
+                                 long long task_start,
+                                 long long total_tasks, Prefix2Batch** batches_out,
+                                 long long* batch_count_out, PrefixId** js_out,
+                                 long long** ps_out) {
     int* counts = checked_calloc((size_t)num_partitions, sizeof(*counts), "prefix2_batch_counts");
     int* offsets = checked_calloc((size_t)num_partitions, sizeof(*offsets), "prefix2_batch_offsets");
     int* cursor = checked_calloc((size_t)num_partitions, sizeof(*cursor), "prefix2_batch_cursor");
@@ -629,7 +628,7 @@ static void build_fixed_prefix2_batches(const PrefixId* live_i, const PrefixId* 
     *ps_out = ps;
 }
 
-static void unrank_prefix3(long long rank, int* i, int* j, int* k) {
+void unrank_prefix3(long long rank, int* i, int* j, int* k) {
     for (int a = 0; a < num_partitions; a++) {
         long long count_a = repeated_combo_count(num_partitions - a, 2);
         if (rank < count_a) {
@@ -650,7 +649,7 @@ static void unrank_prefix3(long long rank, int* i, int* j, int* k) {
     exit(1);
 }
 
-static void unrank_prefix4(long long rank, int* i, int* j, int* k, int* l) {
+void unrank_prefix4(long long rank, int* i, int* j, int* k, int* l) {
     for (int a = 0; a < num_partitions; a++) {
         long long count_a = repeated_combo_count(num_partitions - a, 3);
         if (rank < count_a) {

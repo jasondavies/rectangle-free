@@ -70,9 +70,6 @@ int g_connected_canon_lookup_loaded = 0;
 int g_connected_canon_lookup_n = 0;
 double g_connected_canon_lookup_load_time = 0.0;
 
-static void* checked_calloc(size_t count, size_t size, const char* label);
-static void* checked_aligned_alloc(size_t alignment, size_t size, const char* label);
-static void shared_graph_cache_flush_exports(void);
 static inline void graph_cache_load_poly(const GraphCache* cache, int slot, GraphPoly* value);
 static inline uint32_t graph_cache_next_stamp(GraphCache* cache);
 static inline void graph_cache_touch_slot(GraphCache* cache, int slot);
@@ -107,11 +104,6 @@ static void graph_apply_permutation_dense_rows(uint32_t n, const AdjWord* dense_
 static void get_canonical_graph_from_dense_rows(int n, const AdjWord* rows, Graph* canon,
                                                 NautyWorkspace* ws, ProfileStats* profile);
 
-static void unrank_prefix2(long long rank, int* i, int* j);
-static void unrank_prefix3(long long rank, int* i, int* j, int* k);
-static void unrank_prefix4(long long rank, int* i, int* j, int* k, int* l);
-static inline long long repeated_combo_count(int values, int slots);
-
 static void usage(const char* prog) {
     fprintf(stderr,
             "Usage:\n"
@@ -133,10 +125,6 @@ static void usage(const char* prog) {
 
 // Polynomial arithmetic and polynomial-format I/O live separately.
 #include "src/poly.c"
-// Runtime support, queueing, and prefix-index helpers live separately.
-#include "src/runtime.c"
-// Partition generation, table building, and weight initialisation live separately.
-#include "src/partitions.c"
 // Canonical-state, DFS, and runtime-prefix replay logic live separately.
 #include "src/canon.c"
 // Graph solving and canonical cache logic live separately.

@@ -12,7 +12,7 @@ void poly_zero(Poly* p) {
     memset(p->coeffs, 0, sizeof(p->coeffs));
 }
 
-static inline void poly_one_ref(Poly* p) {
+void poly_one_ref(Poly* p) {
     poly_zero(p);
     p->coeffs[0] = 1;
 }
@@ -109,7 +109,7 @@ Poly poly_sub(Poly a, Poly b) {
     return r;
 }
 
-static inline void poly_mul_ref(const Poly* a, const Poly* b, Poly* out) {
+void poly_mul_ref(const Poly* a, const Poly* b, Poly* out) {
     if ((a->deg == 0 && a->coeffs[0] == 0) ||
         (b->deg == 0 && b->coeffs[0] == 0)) {
         poly_zero(out);
@@ -182,7 +182,7 @@ Poly poly_mul_linear(Poly a, int c) {
     return r;
 }
 
-static inline void poly_mul_falling_ref(const Poly* p, int start, int count, Poly* out) {
+void poly_mul_falling_ref(const Poly* p, int start, int count, Poly* out) {
     if (out != p) *out = *p;
     for (int i = 0; i < count; i++) {
         poly_mul_linear_ref(out, start + i, out);

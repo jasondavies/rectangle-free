@@ -1829,7 +1829,7 @@ static int shared_graph_cache_lookup_poly(SharedGraphCache* shared, uint64_t key
     return found;
 }
 
-static void shared_graph_cache_flush_exports(void) {
+void shared_graph_cache_flush_exports(void) {
     SharedGraphCacheExporter* exporter = tls_shared_cache_exporter;
     SharedGraphCache* shared = g_shared_graph_cache;
     if (!shared || !shared->enabled || !exporter || exporter->count <= 0) return;

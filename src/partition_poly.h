@@ -510,6 +510,8 @@ extern int g_connected_canon_lookup_loaded;
 extern int g_connected_canon_lookup_n;
 extern double g_connected_canon_lookup_load_time;
 
+#define DEFAULT_PROGRESS_UPDATES 2000
+
 static inline ComplexMask* intra_mask_row(int partition_id) {
     return intra_mask + (size_t)partition_id * (size_t)max_complex_per_partition;
 }
@@ -527,5 +529,81 @@ static inline ComplexMask* overlap_mask_row(int lhs_partition_id, int rhs_partit
 static inline ComplexMask overlap_mask_get(int lhs_partition_id, int rhs_partition_id, int complex_idx) {
     return overlap_mask_row(lhs_partition_id, rhs_partition_id)[complex_idx];
 }
+
+void* checked_calloc(size_t count, size_t size, const char* label);
+void* checked_aligned_alloc(size_t alignment, size_t size, const char* label);
+void shared_graph_cache_flush_exports(void);
+void task_timing_insert_topk(TaskTimingStats* stats, long long task_index, double elapsed);
+void queue_subtask_record(QueueSubtaskTimingStats* stats, const LocalTask* task,
+                          double elapsed, long long solve_graph_calls,
+                          long long nauty_calls, long long hard_graph_nodes,
+                          int max_hard_graph_n, int max_hard_graph_degree);
+void flush_completed_tasks(long long total_tasks, long long report_step,
+                           double start_time, long long* pending_completed);
+void complete_task_report_and_time(long long total_tasks, long long report_step,
+                                   double start_time, long long* pending_completed,
+                                   TaskTimingStats* task_timing, long long task_index,
+                                   double task_t0);
+void prefix_task_buffer_init(PrefixTaskBuffer* buf, long long initial_capacity);
+void prefix_task_buffer_push2(PrefixTaskBuffer* buf, int i, int j);
+void local_task_from_stack(LocalTask* task, long long root_id, int depth, const int* stack);
+void local_queue_init(LocalTaskQueue* queue, int capacity,
+                      long long root_count, int total_threads);
+void local_queue_free(LocalTaskQueue* queue);
+int local_queue_try_push(LocalTaskQueue* queue, const LocalTask* task);
+void local_queue_seed_push(LocalTaskQueue* queue, const LocalTask* task);
+int local_queue_pop(LocalTaskQueue* queue, LocalTask* task);
+void local_queue_finish_item(LocalTaskQueue* queue, long long root_id,
+                             long long total_tasks, long long report_step,
+                             double start_time, long long* pending_completed,
+                             TaskTimingStats* task_timing);
+void local_queue_record_profile(LocalTaskQueue* queue, const LocalTask* task,
+                                double elapsed, long long solve_graph_calls,
+                                long long nauty_calls, long long hard_graph_nodes,
+                                int max_hard_graph_n, int max_hard_graph_degree);
+void local_queue_print_occupancy_summary(LocalTaskQueue* queue);
+long long repeated_combo_count(int values, int slots);
+void get_prefix2_task(long long task_index, int* i, int* j);
+void build_fixed_prefix2_batches(const PrefixId* live_i, const PrefixId* live_j,
+                                 long long task_start,
+                                 long long total_tasks, Prefix2Batch** batches_out,
+                                 long long* batch_count_out, PrefixId** js_out,
+                                 long long** ps_out);
+void unrank_prefix3(long long rank, int* i, int* j, int* k);
+void unrank_prefix4(long long rank, int* i, int* j, int* k, int* l);
+void queue_subtask_merge(QueueSubtaskTimingStats* dst, const QueueSubtaskTimingStats* src);
+int decode_task_prefix(long long task_index, int* i, int* j, int* k, int* l);
+void write_task_times_file(const char* path);
+
+void init_row_dependent_tables(void);
+void init_partition_lookup_tables(void);
+void free_row_dependent_tables(void);
+void generate_permutations(void);
+void generate_partitions_recursive(int idx, uint8_t* current, int max_val);
+void reorder_partitions_by_hardness(void);
+void build_partition_id_lookup(void);
+void build_perm_table(void);
+void build_terminal_perm_order_tables(void);
+void build_overlap_table(void);
+#if RECT_COUNT_K4_FEASIBILITY
+void init_pair_index(void);
+void build_partition_shadow_table(void);
+#endif
+#if RECT_COUNT_K4
+void build_partition_weight4_table(void);
+#else
+void build_partition_weight_table(void);
+#endif
+void weight_accum_one(WeightAccum* out);
+void weight_accum_from_partition(int pid, WeightAccum* out);
+void weight_accum_mul_partition(const WeightAccum* src, int pid, WeightAccum* out);
+#if RECT_COUNT_K4
+void weight_accum_scale_to_poly(const WeightAccum* weight_prod, long long mult_coeff,
+                                long long row_orbit, uint64_t graph_count4, Poly* out);
+#endif
+
+void poly_one_ref(Poly* p);
+void poly_mul_ref(const Poly* a, const Poly* b, Poly* out);
+void poly_mul_falling_ref(const Poly* p, int start, int count, Poly* out);
 
 #endif
