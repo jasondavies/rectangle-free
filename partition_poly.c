@@ -486,6 +486,8 @@ static uint64_t graph_pack_upper_mask64(const Graph* g);
 static int connected_canon_lookup_entry_cmp(const void* lhs, const void* rhs);
 static inline uint64_t graph_row_mask(int n);
 static uint32_t graph_build_dense_rows(const Graph* g, AdjWord* rows);
+static void graph_apply_permutation_dense_rows(uint32_t n, const AdjWord* dense_rows,
+                                               const uint8_t* new_index_of_old, Graph* dst);
 
 static inline ComplexMask* intra_mask_row(int partition_id) {
     return intra_mask + (size_t)partition_id * (size_t)max_complex_per_partition;
@@ -3328,14 +3330,6 @@ static inline setword pack_row_to_nauty1(uint64_t row_bits, int n) {
     return row;
 }
 
-static inline uint64_t unpack_row_from_nauty1(setword row, int n) {
-    uint64_t out = 0;
-    for (int j = 0; j < n; j++) {
-        if (row & bit[j]) out |= 1ULL << j;
-    }
-    return out;
-}
-
 // Convert our graph to nauty format and compute canonical form
 void nauty_workspace_init(NautyWorkspace* ws, int n) {
     int m = SETWORDSNEEDED(n);
@@ -3422,27 +3416,11 @@ void get_canonical_graph(Graph* g, Graph* canon, NautyWorkspace* ws, ProfileStat
         profile->nauty_calls++;
         profile->nauty_time += omp_get_wtime() - t0;
     }
-    
-    // Convert canonical graph back to our format
-    canon->n = (uint8_t)n;
-    canon->vertex_mask = graph_row_mask(n);
-    memset(canon->adj, 0, (size_t)n * sizeof(canon->adj[0]));
 
-    if (m == 1) {
-        for (int i = 0; i < n; i++) {
-            canon->adj[i] = (AdjWord)unpack_row_from_nauty1(GRAPHROW(cg, i, 1)[0], n);
-        }
-    } else {
-        for (int i = 0; i < n; i++) {
-            set *row = GRAPHROW(cg, i, m);
-            for (int j = i + 1; j < n; j++) {
-                if (ISELEMENT(row, j)) {
-                    canon->adj[i] |= (1ULL << j);
-                    canon->adj[j] |= (1ULL << i);
-                }
-            }
-        }
-    }
+    // nauty returns lab[i] = original vertex now placed at canonical position i.
+    uint8_t new_index_of_old[MAXN_NAUTY];
+    for (int i = 0; i < n; i++) new_index_of_old[lab[i]] = (uint8_t)i;
+    graph_apply_permutation_dense_rows((uint32_t)n, rows, new_index_of_old, canon);
 }
 
 // --- GRAPH SOLVER ---
@@ -3837,12 +3815,10 @@ static void graph_transpose_dense_rows(uint32_t n, const AdjWord* src_rows, AdjW
     }
 }
 
-static void graph_apply_permutation(const Graph* src, const uint8_t* new_index_of_old,
-                                    Graph* dst) {
-    AdjWord dense_rows[MAXN_NAUTY];
+static void graph_apply_permutation_dense_rows(uint32_t n, const AdjWord* dense_rows,
+                                               const uint8_t* new_index_of_old, Graph* dst) {
     AdjWord row_permuted[MAXN_NAUTY];
     AdjWord transposed[MAXN_NAUTY];
-    uint32_t n = graph_build_dense_rows(src, dense_rows);
 
     for (uint32_t i = 0; i < n; i++) {
         row_permuted[new_index_of_old[i]] = dense_rows[i];
@@ -3853,6 +3829,13 @@ static void graph_apply_permutation(const Graph* src, const uint8_t* new_index_o
     }
     dst->n = (uint8_t)n;
     dst->vertex_mask = graph_row_mask((int)n);
+}
+
+static void graph_apply_permutation(const Graph* src, const uint8_t* new_index_of_old,
+                                    Graph* dst) {
+    AdjWord dense_rows[MAXN_NAUTY];
+    uint32_t n = graph_build_dense_rows(src, dense_rows);
+    graph_apply_permutation_dense_rows(n, dense_rows, new_index_of_old, dst);
 }
 
 static uint32_t graph_build_dense_rows_from_mask(const Graph* src, uint64_t mask, AdjWord* rows) {

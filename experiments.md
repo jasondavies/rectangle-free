@@ -6424,3 +6424,39 @@
   - the induced-row compaction path is hot enough that replacing bit-by-bit remapping with hardware bit extraction pays off materially
   - adding `graph_apply_permutation()` is useful beyond this immediate speedup, because it gives the solver the primitive needed for a more mask-preserving graph representation later
 - Outcome: accepted on `main`.
+
+### Experiment 160: Rebuild canonical graphs by permuting dense rows after nauty
+- Goal: avoid rebuilding the canonical graph from `cg` edge-by-edge after `densenauty()`, and instead use nauty's returned labelling to permute the already-dense row representation directly.
+- Change:
+  - keep the existing dense-row construction before nauty in `get_canonical_graph()`
+  - interpret nauty's `lab[i]` as "original vertex now placed at canonical position `i`"
+  - build `new_index_of_old[old] = new`
+  - replace the old `cg` unpack/rebuild path with `graph_apply_permutation_dense_rows()`
+  - remove the now-unused `unpack_row_from_nauty1()` helper
+- Matching 32-thread benchmark command:
+  - `env OMP_NUM_THREADS=32 ./partition_poly_7 6 6 --prefix-depth 2 --adaptive-subdivide --adaptive-work-budget 1000 --adaptive-max-depth 5`
+- Baseline:
+  - current committed `main` tip before this change
+  - `Worker Complete in 24.07 seconds`
+  - `Worker Complete in 24.26 seconds`
+- Experiment:
+  - `Worker Complete in 23.90 seconds`
+  - `Worker Complete in 23.88 seconds`
+- Additional single-thread check:
+  - command:
+    - `env OMP_NUM_THREADS=1 ./partition_poly_7 7 6 --prefix-depth 2 --task-end 1`
+  - baseline:
+    - `Worker Complete in 30.26 seconds`
+  - experiment:
+    - `Worker Complete in 30.56 seconds`
+    - `Worker Complete in 30.29 seconds`
+- Correctness:
+  - `env OMP_NUM_THREADS=1 ./partition_poly_7 4 4 --task-end 1` succeeded
+  - all benchmark runs printed the same chromatic polynomial and the same values:
+    - `6x6`: `P(4) = 203716633441803914880`, `P(5) = 2852707805646422930409600`
+    - `7x6 task 0`: `P(4) = 43715355264000`, `P(5) = 15297058957242888000`
+- Interpretation:
+  - this change is a real win when canonicalisation is extremely hot, because it removes the post-nauty edge-by-edge canonical graph rebuild
+  - the `6x6` case benefits clearly because it performs about `40M` canonicalisation calls, so a tiny per-call saving shows up in wall time
+  - the `7x6 --task-end 1` case only performs about `178k` canonicalisation calls, so the same per-call effect is too small to measure reliably and appears flat within normal run-to-run noise
+- Outcome: accepted on `main`.
