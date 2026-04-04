@@ -1,4 +1,4 @@
-#include "partition_poly.h"
+#include "partition_poly_internal.h"
 
 static void usage(const char* prog) {
     fprintf(stderr,

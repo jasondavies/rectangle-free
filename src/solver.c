@@ -1,4 +1,4 @@
-#include "partition_poly.h"
+#include "partition_poly_internal.h"
 
 void remove_vertex(Graph* g, int i) {
     uint64_t bit = UINT64_C(1) << i;
