@@ -69,6 +69,3 @@ int g_connected_canon_lookup_ready = 0;
 int g_connected_canon_lookup_loaded = 0;
 int g_connected_canon_lookup_n = 0;
 double g_connected_canon_lookup_load_time = 0.0;
-
-// Canonical-state, DFS, and runtime-prefix replay logic live separately.
-#include "src/canon.c"
