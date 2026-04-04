@@ -426,6 +426,12 @@ typedef struct {
     long long total_raw_cache_hits;
 } ExecutionState;
 
+typedef struct {
+    ProfileStats profile;
+    TaskTimingStats task_timing;
+    QueueSubtaskTimingStats queue_subtask_timing[MAX_COLS + 1];
+} ExecutionSummary;
+
 // --- GLOBALS ---
 static int num_partitions = 0;
 static int perm_count = 0;
@@ -6913,9 +6919,379 @@ static void execute_run_tasks(const RunConfig* run, double start_time, Execution
     exec->total_raw_cache_hits = total_raw_cache_hits;
 }
 
+static void accumulate_execution_poly(const ExecutionState* exec, Poly* total_poly) {
+    for (int i = 0; i < exec->num_threads; i++) {
+        poly_accumulate_checked(total_poly, &exec->thread_polys[i]);
+    }
+}
+
+static void aggregate_execution_summary(const ExecutionState* exec, ExecutionSummary* summary) {
+    memset(summary, 0, sizeof(*summary));
+    for (int i = 0; i < exec->num_threads; i++) {
+        ProfileStats* src = &exec->thread_profiles[i];
+        summary->profile.canon_prepare_calls += src->canon_prepare_calls;
+        summary->profile.canon_prepare_accepts += src->canon_prepare_accepts;
+        summary->profile.canon_commit_calls += src->canon_commit_calls;
+        summary->profile.partial_append_calls += src->partial_append_calls;
+        summary->profile.solve_structure_calls += src->solve_structure_calls;
+        summary->profile.solve_graph_calls += src->solve_graph_calls;
+        summary->profile.nauty_calls += src->nauty_calls;
+        summary->profile.hard_graph_nodes += src->hard_graph_nodes;
+        summary->profile.canon_prepare_time += src->canon_prepare_time;
+        summary->profile.canon_commit_time += src->canon_commit_time;
+        summary->profile.partial_append_time += src->partial_append_time;
+        summary->profile.build_weight_time += src->build_weight_time;
+        summary->profile.solve_graph_time += src->solve_graph_time;
+        summary->profile.get_canonical_graph_time += src->get_canonical_graph_time;
+        summary->profile.get_canonical_graph_dense_rows_time += src->get_canonical_graph_dense_rows_time;
+        summary->profile.get_canonical_graph_build_input_time += src->get_canonical_graph_build_input_time;
+        summary->profile.nauty_time += src->nauty_time;
+        summary->profile.get_canonical_graph_rebuild_time += src->get_canonical_graph_rebuild_time;
+        if (src->hard_graph_max_n > summary->profile.hard_graph_max_n) {
+            summary->profile.hard_graph_max_n = src->hard_graph_max_n;
+        }
+        if (src->hard_graph_max_degree > summary->profile.hard_graph_max_degree) {
+            summary->profile.hard_graph_max_degree = src->hard_graph_max_degree;
+        }
+        for (int d = 0; d <= MAX_COLS; d++) {
+            summary->profile.canon_prepare_calls_by_depth[d] += src->canon_prepare_calls_by_depth[d];
+            summary->profile.canon_prepare_accepts_by_depth[d] += src->canon_prepare_accepts_by_depth[d];
+            summary->profile.stabilizer_sum_by_depth[d] += src->stabilizer_sum_by_depth[d];
+            summary->profile.canon_prepare_scanned_by_depth[d] += src->canon_prepare_scanned_by_depth[d];
+            summary->profile.canon_prepare_active_by_depth[d] += src->canon_prepare_active_by_depth[d];
+            summary->profile.canon_prepare_terminal_calls_by_depth[d] +=
+                src->canon_prepare_terminal_calls_by_depth[d];
+            summary->profile.canon_prepare_fast_continue_by_depth[d] +=
+                src->canon_prepare_fast_continue_by_depth[d];
+            summary->profile.canon_prepare_terminal_continue_by_depth[d] +=
+                src->canon_prepare_terminal_continue_by_depth[d];
+            summary->profile.canon_prepare_equal_case_calls_by_depth[d] +=
+                src->canon_prepare_equal_case_calls_by_depth[d];
+            summary->profile.canon_prepare_equal_case_rejects_by_depth[d] +=
+                src->canon_prepare_equal_case_rejects_by_depth[d];
+            summary->profile.canon_prepare_order_rejects_by_depth[d] +=
+                src->canon_prepare_order_rejects_by_depth[d];
+        }
+        for (int n = 0; n <= MAXN_NAUTY; n++) {
+            summary->profile.solve_graph_calls_by_n[n] += src->solve_graph_calls_by_n[n];
+            summary->profile.solve_graph_raw_hits_by_n[n] += src->solve_graph_raw_hits_by_n[n];
+            summary->profile.solve_graph_canon_hits_by_n[n] += src->solve_graph_canon_hits_by_n[n];
+            summary->profile.hard_graph_nodes_by_n[n] += src->hard_graph_nodes_by_n[n];
+            summary->profile.solve_graph_lookup_calls_by_n[n] += src->solve_graph_lookup_calls_by_n[n];
+            summary->profile.solve_graph_connected_lookup_calls_by_n[n] +=
+                src->solve_graph_connected_lookup_calls_by_n[n];
+            summary->profile.solve_graph_component_calls_by_n[n] += src->solve_graph_component_calls_by_n[n];
+            summary->profile.solve_graph_hard_misses_by_n[n] += src->solve_graph_hard_misses_by_n[n];
+            summary->profile.hard_graph_articulation_by_n[n] += src->hard_graph_articulation_by_n[n];
+            summary->profile.hard_graph_k2_separator_by_n[n] += src->hard_graph_k2_separator_by_n[n];
+            summary->profile.solve_graph_time_by_n[n] += src->solve_graph_time_by_n[n];
+            summary->profile.solve_graph_lookup_time_by_n[n] += src->solve_graph_lookup_time_by_n[n];
+            summary->profile.solve_graph_connected_lookup_time_by_n[n] +=
+                src->solve_graph_connected_lookup_time_by_n[n];
+            summary->profile.solve_graph_raw_hit_time_by_n[n] += src->solve_graph_raw_hit_time_by_n[n];
+            summary->profile.solve_graph_canon_hit_time_by_n[n] += src->solve_graph_canon_hit_time_by_n[n];
+            summary->profile.solve_graph_component_time_by_n[n] += src->solve_graph_component_time_by_n[n];
+            summary->profile.solve_graph_hard_miss_time_by_n[n] += src->solve_graph_hard_miss_time_by_n[n];
+            summary->profile.solve_graph_hard_miss_separator_time_by_n[n] +=
+                src->solve_graph_hard_miss_separator_time_by_n[n];
+            summary->profile.solve_graph_hard_miss_pick_time_by_n[n] +=
+                src->solve_graph_hard_miss_pick_time_by_n[n];
+            summary->profile.solve_graph_hard_miss_delete_time_by_n[n] +=
+                src->solve_graph_hard_miss_delete_time_by_n[n];
+            summary->profile.solve_graph_hard_miss_contract_build_time_by_n[n] +=
+                src->solve_graph_hard_miss_contract_build_time_by_n[n];
+            summary->profile.solve_graph_hard_miss_contract_solve_time_by_n[n] +=
+                src->solve_graph_hard_miss_contract_solve_time_by_n[n];
+            summary->profile.solve_graph_hard_miss_store_time_by_n[n] +=
+                src->solve_graph_hard_miss_store_time_by_n[n];
+            for (int d = 0; d <= MAXN_NAUTY; d++) {
+                summary->profile.hard_graph_nodes_by_n_degree[n][d] +=
+                    src->hard_graph_nodes_by_n_degree[n][d];
+            }
+        }
+
+        summary->task_timing.task_count += exec->thread_task_timing[i].task_count;
+        summary->task_timing.task_time_sum += exec->thread_task_timing[i].task_time_sum;
+        if (exec->thread_task_timing[i].task_time_max > summary->task_timing.task_time_max) {
+            summary->task_timing.task_time_max = exec->thread_task_timing[i].task_time_max;
+            summary->task_timing.task_max_index = exec->thread_task_timing[i].task_max_index;
+        }
+        for (int k = 0; k < TASK_PROFILE_TOPK; k++) {
+            task_timing_insert_topk(&summary->task_timing,
+                                    exec->thread_task_timing[i].top_indices[k],
+                                    exec->thread_task_timing[i].top_times[k]);
+        }
+        if (exec->thread_queue_subtask_timing) {
+            QueueSubtaskTimingStats* src_sub =
+                exec->thread_queue_subtask_timing + (size_t)i * (size_t)(MAX_COLS + 1);
+            for (int d = 0; d <= MAX_COLS; d++) {
+                queue_subtask_merge(&summary->queue_subtask_timing[d], &src_sub[d]);
+            }
+        }
+    }
+}
+
+static void print_execution_report(const RunConfig* run, const ExecutionState* exec,
+                                   const ExecutionSummary* summary, double worker_time) {
+    double total_elapsed = worker_time + run->prefix_generation_time;
+    const ProfileStats* total_profile = &summary->profile;
+    const TaskTimingStats* total_task_timing = &summary->task_timing;
+
+    printf("\nWorker Complete in %.2f seconds.\n", worker_time);
+    if (run->prefix_depth > 0) {
+        printf("Total elapsed including prefix generation: %.2f seconds.\n", total_elapsed);
+    }
+    printf("Canonicalisation calls: %lld\n", exec->total_canon_calls);
+    printf("Canonical cache hits: %lld (%.1f%%)\n", exec->total_cache_hits,
+           exec->total_canon_calls > 0 ? 100.0 * exec->total_cache_hits / exec->total_canon_calls : 0.0);
+    printf("Raw cache hits: %lld\n", exec->total_raw_cache_hits);
+    if (PROFILE_BUILD) {
+        printf("Profile:\n");
+        printf("  canon_state_prepare_push: %lld calls, %.3fs\n",
+               total_profile->canon_prepare_calls, total_profile->canon_prepare_time);
+        printf("  canon_state_commit_push: %lld calls, %.3fs\n",
+               total_profile->canon_commit_calls, total_profile->canon_commit_time);
+        printf("  partial_graph_append: %lld calls, %.3fs\n",
+               total_profile->partial_append_calls, total_profile->partial_append_time);
+        printf("  build_structure_weight: %lld calls, %.3fs\n",
+               total_profile->solve_structure_calls, total_profile->build_weight_time);
+        printf("  solve_graph_poly: %lld calls, %.3fs\n",
+               total_profile->solve_graph_calls, total_profile->solve_graph_time);
+        printf("  get_canonical_graph: %lld calls, %.3fs\n",
+               total_profile->nauty_calls, total_profile->get_canonical_graph_time);
+        printf("    dense rows: %.3fs\n",
+               total_profile->get_canonical_graph_dense_rows_time);
+        printf("    build nauty input: %.3fs\n",
+               total_profile->get_canonical_graph_build_input_time);
+        printf("    densenauty: %.3fs\n",
+               total_profile->nauty_time);
+        printf("    rebuild canon graph: %.3fs\n",
+               total_profile->get_canonical_graph_rebuild_time);
+        printf("  hard graph nodes: %lld, max n %d, max degree %d\n",
+               total_profile->hard_graph_nodes,
+               total_profile->hard_graph_max_n,
+               total_profile->hard_graph_max_degree);
+        printf("  Graph solver by simplified n (inclusive time):\n");
+        for (int n = 0; n <= MAXN_NAUTY; n++) {
+            long long calls = total_profile->solve_graph_calls_by_n[n];
+            long long raw_hits = total_profile->solve_graph_raw_hits_by_n[n];
+            long long canon_hits = total_profile->solve_graph_canon_hits_by_n[n];
+            long long hard = total_profile->hard_graph_nodes_by_n[n];
+            double time_s = total_profile->solve_graph_time_by_n[n];
+            if (calls == 0 && raw_hits == 0 && canon_hits == 0 && hard == 0) continue;
+            printf("    n=%d: calls %lld, time %.3fs, raw hits %lld, canon hits %lld, hard nodes %lld\n",
+                   n, calls, time_s, raw_hits, canon_hits, hard);
+        }
+        printf("  Graph solver outcomes by simplified n:\n");
+        for (int n = 0; n <= MAXN_NAUTY; n++) {
+            long long lookup_calls = total_profile->solve_graph_lookup_calls_by_n[n];
+            long long connected_lookup_calls = total_profile->solve_graph_connected_lookup_calls_by_n[n];
+            long long raw_hits = total_profile->solve_graph_raw_hits_by_n[n];
+            long long canon_hits = total_profile->solve_graph_canon_hits_by_n[n];
+            long long component_calls = total_profile->solve_graph_component_calls_by_n[n];
+            long long hard_misses = total_profile->solve_graph_hard_misses_by_n[n];
+            if (lookup_calls == 0 && connected_lookup_calls == 0 &&
+                raw_hits == 0 && canon_hits == 0 &&
+                component_calls == 0 && hard_misses == 0) {
+                continue;
+            }
+            printf("    n=%d: lookup %lld/%.3fs, connected-lookup %lld/%.3fs, raw-hit %lld/%.3fs, canon-hit %lld/%.3fs, components %lld/%.3fs, hard-miss %lld/%.3fs\n",
+                   n,
+                   lookup_calls, total_profile->solve_graph_lookup_time_by_n[n],
+                   connected_lookup_calls, total_profile->solve_graph_connected_lookup_time_by_n[n],
+                   raw_hits, total_profile->solve_graph_raw_hit_time_by_n[n],
+                   canon_hits, total_profile->solve_graph_canon_hit_time_by_n[n],
+                   component_calls, total_profile->solve_graph_component_time_by_n[n],
+                   hard_misses, total_profile->solve_graph_hard_miss_time_by_n[n]);
+        }
+        printf("  Hard-miss subphases by simplified n:\n");
+        for (int n = 0; n <= MAXN_NAUTY; n++) {
+            long long hard_misses = total_profile->solve_graph_hard_misses_by_n[n];
+            if (hard_misses == 0) continue;
+            printf("    n=%d: separator %.3fs, pick %.3fs, delete %.3fs, contract-build %.3fs, contract-solve %.3fs, store %.3fs\n",
+                   n,
+                   total_profile->solve_graph_hard_miss_separator_time_by_n[n],
+                   total_profile->solve_graph_hard_miss_pick_time_by_n[n],
+                   total_profile->solve_graph_hard_miss_delete_time_by_n[n],
+                   total_profile->solve_graph_hard_miss_contract_build_time_by_n[n],
+                   total_profile->solve_graph_hard_miss_contract_solve_time_by_n[n],
+                   total_profile->solve_graph_hard_miss_store_time_by_n[n]);
+        }
+        if (g_profile_separators) {
+            printf("  Hard-miss separator detection by simplified n:\n");
+            for (int n = 0; n <= MAXN_NAUTY; n++) {
+                long long hard_misses = total_profile->solve_graph_hard_misses_by_n[n];
+                long long articulation = total_profile->hard_graph_articulation_by_n[n];
+                long long k2 = total_profile->hard_graph_k2_separator_by_n[n];
+                if (hard_misses == 0 && articulation == 0 && k2 == 0) continue;
+                printf("    n=%d: hard-miss %lld, articulation %lld, k2-separator %lld\n",
+                       n, hard_misses, articulation, k2);
+            }
+        } else {
+            printf("  Hard-miss separator detection: disabled"
+                   " (set RECT_PROFILE_SEPARATORS=1 to enable)\n");
+        }
+        printf("  Hard graph nodes by simplified n and max degree:\n");
+        for (int n = 10; n <= MAXN_NAUTY; n++) {
+            long long total_n = total_profile->hard_graph_nodes_by_n[n];
+            if (total_n == 0) continue;
+            printf("    n=%d:", n);
+            for (int d = 0; d <= MAXN_NAUTY; d++) {
+                long long count = total_profile->hard_graph_nodes_by_n_degree[n][d];
+                if (count == 0) continue;
+                printf(" deg%d=%lld", d, count);
+            }
+            printf("\n");
+        }
+        printf("  CanonState by depth:\n");
+        for (int d = 0; d <= g_cols && d <= MAX_COLS; d++) {
+            long long calls = total_profile->canon_prepare_calls_by_depth[d];
+            long long accepts = total_profile->canon_prepare_accepts_by_depth[d];
+            if (calls == 0) continue;
+            double accept_rate = 100.0 * (double)accepts / (double)calls;
+            double avg_stabilizer =
+                accepts > 0 ? (double)total_profile->stabilizer_sum_by_depth[d] / (double)accepts : 0.0;
+            double avg_scanned =
+                calls > 0 ? (double)total_profile->canon_prepare_scanned_by_depth[d] / (double)calls : 0.0;
+            double avg_active =
+                calls > 0 ? (double)total_profile->canon_prepare_active_by_depth[d] / (double)calls : 0.0;
+            double active_rate =
+                total_profile->canon_prepare_scanned_by_depth[d] > 0
+                    ? 100.0 * (double)total_profile->canon_prepare_active_by_depth[d] /
+                          (double)total_profile->canon_prepare_scanned_by_depth[d]
+                    : 0.0;
+            printf("    depth %d: prepare %lld, accept %lld (%.1f%%), avg stabiliser %.1f, avg active %.1f/%.0f (%.1f%%)\n",
+                   d, calls, accepts, accept_rate, avg_stabilizer, avg_active, avg_scanned, active_rate);
+        }
+        printf("  CanonState prepare branch mix by depth:\n");
+        for (int d = 0; d <= g_cols && d <= MAX_COLS; d++) {
+            long long calls = total_profile->canon_prepare_calls_by_depth[d];
+            long long terminal_calls = total_profile->canon_prepare_terminal_calls_by_depth[d];
+            long long fast_continue = total_profile->canon_prepare_fast_continue_by_depth[d];
+            long long terminal_continue = total_profile->canon_prepare_terminal_continue_by_depth[d];
+            long long equal_case = total_profile->canon_prepare_equal_case_calls_by_depth[d];
+            long long equal_reject = total_profile->canon_prepare_equal_case_rejects_by_depth[d];
+            long long order_reject = total_profile->canon_prepare_order_rejects_by_depth[d];
+            if (calls == 0 && equal_case == 0 && order_reject == 0) continue;
+            printf("    depth %d: terminal %lld, fast-continue %lld, terminal-continue %lld, equal-case %lld, equal-reject %lld, order-reject %lld\n",
+                   d, terminal_calls, fast_continue, terminal_continue, equal_case,
+                   equal_reject, order_reject);
+        }
+        if (total_task_timing->task_count > 0) {
+            printf("  Task timings: %lld tasks, avg %.6fs, max %.6fs (task %lld)\n",
+                   total_task_timing->task_count,
+                   total_task_timing->task_time_sum / (double)total_task_timing->task_count,
+                   total_task_timing->task_time_max,
+                   total_task_timing->task_max_index);
+            printf("  Slowest tasks:\n");
+            for (int i = 0; i < TASK_PROFILE_TOPK; i++) {
+                if (total_task_timing->top_times[i] <= 0.0) break;
+                int pi, pj, pk, pl;
+                if (decode_task_prefix(total_task_timing->top_indices[i], &pi, &pj, &pk, &pl)) {
+                    if (pk >= 0 && pl >= 0) {
+                        printf("    task %lld (%d,%d,%d,%d): %.6fs\n",
+                               total_task_timing->top_indices[i], pi, pj, pk, pl,
+                               total_task_timing->top_times[i]);
+                    } else if (pk >= 0) {
+                        printf("    task %lld (%d,%d,%d): %.6fs\n",
+                               total_task_timing->top_indices[i], pi, pj, pk,
+                               total_task_timing->top_times[i]);
+                    } else if (pj >= 0) {
+                        printf("    task %lld (%d,%d): %.6fs\n",
+                               total_task_timing->top_indices[i], pi, pj,
+                               total_task_timing->top_times[i]);
+                    } else {
+                        printf("    task %lld (%d): %.6fs\n",
+                               total_task_timing->top_indices[i], pi,
+                               total_task_timing->top_times[i]);
+                    }
+                } else {
+                    printf("    task %lld: %.6fs\n",
+                           total_task_timing->top_indices[i],
+                           total_task_timing->top_times[i]);
+                }
+            }
+        }
+        if (run->use_runtime_split_queue) {
+            printf("  Queue subtasks by depth:\n");
+            for (int d = 0; d <= g_cols && d <= MAX_COLS; d++) {
+                const QueueSubtaskTimingStats* qs = &summary->queue_subtask_timing[d];
+                if (qs->task_count == 0) continue;
+                printf("    depth %d: %lld subtasks, avg %.6fs, max %.6fs, avg solve_graph %.1f, avg nauty %.1f, avg hard nodes %.1f, max hard n %d, max hard deg %d\n",
+                       d, qs->task_count, qs->task_time_sum / (double)qs->task_count, qs->task_time_max,
+                       (double)qs->solve_graph_call_sum / (double)qs->task_count,
+                       (double)qs->nauty_call_sum / (double)qs->task_count,
+                       (double)qs->hard_graph_node_sum / (double)qs->task_count,
+                       qs->max_hard_graph_n, qs->max_hard_graph_degree);
+                for (int i = 0; i < TASK_PROFILE_TOPK; i++) {
+                    const QueueSubtaskTopEntry* e = &qs->top[i];
+                    if (e->elapsed <= 0.0) break;
+                    printf("      (");
+                    for (int p = 0; p < e->depth; p++) {
+                        if (p > 0) printf(",");
+                        printf("%u", (unsigned)e->prefix[p]);
+                    }
+                    printf("): %.6fs, solve_graph %lld, nauty %lld, hard_nodes %lld, max_hard_n %u, max_hard_deg %u\n",
+                           e->elapsed, e->solve_graph_calls, e->nauty_calls,
+                           e->hard_graph_nodes,
+                           (unsigned)e->max_hard_graph_n,
+                           (unsigned)e->max_hard_graph_degree);
+                }
+            }
+        }
+    }
+}
+
+static void write_task_times_report(void) {
+    if (g_task_times_out_path) {
+        write_task_times_file(g_task_times_out_path);
+        printf("Task timing CSV: %s\n", g_task_times_out_path);
+    }
+}
+
+static void print_final_output(const MainOptions* opts, const RunConfig* run, const Poly* poly) {
+#if RECT_COUNT_K4
+    printf("\nRectangle-free 4-colourings:\n");
+    print_u128(poly->coeffs[0]);
+    printf("\n");
+#else
+    printf("\nChromatic Polynomial P(x):\n");
+    print_poly(*poly);
+
+    printf("\nValues:\n");
+    long long k_test = 4;
+    printf("P(%lld) = ", k_test);
+    print_u128(poly_eval(*poly, k_test));
+    printf("\n");
+
+    k_test = 5;
+    printf("P(%lld) = ", k_test);
+    print_u128(poly_eval(*poly, k_test));
+    printf("\n");
+#endif
+
+    if (opts->poly_out_path) {
+        PolyFileMeta meta = {
+            .rows = g_rows,
+            .cols = g_cols,
+            .task_start = run->active_task_start,
+            .task_end = run->active_task_end,
+            .full_tasks = run->full_tasks,
+        };
+        write_poly_file(opts->poly_out_path, poly, &meta);
+#if RECT_COUNT_K4
+        printf("\nWrote fixed-4 shard to %s\n", opts->poly_out_path);
+#else
+        printf("\nWrote polynomial shard to %s\n", opts->poly_out_path);
+#endif
+    }
+}
+
 int main(int argc, char** argv) {
     MainOptions opts;
     RunConfig run;
+    ExecutionState exec;
+    ExecutionSummary summary;
 
     if (!parse_main_options(argc, argv, &opts)) return 1;
     if (!init_problem_and_run_config(&opts, &run)) {
@@ -6926,23 +7302,6 @@ int main(int argc, char** argv) {
         cleanup_run_config(&run);
         return 1;
     }
-
-    const int prefix_depth = run.prefix_depth;
-    const int graph_poly_len = run.graph_poly_len;
-    const Prefix2Batch* prefix2_batches = run.prefix2_batches;
-    const PrefixId* prefix2_batch_js = run.prefix2_batch_js;
-    const long long* prefix2_batch_ps = run.prefix2_batch_ps;
-    const long long prefix2_batch_count = run.prefix2_batch_count;
-    const double prefix_generation_time = run.prefix_generation_time;
-    const int use_runtime_split_queue = run.use_runtime_split_queue;
-    const long long full_tasks = run.full_tasks;
-    const long long active_task_start = run.active_task_start;
-    const long long active_task_end = run.active_task_end;
-    const long long total_tasks = run.total_tasks;
-    const long long first_task = run.first_task;
-    const long long progress_report_step = run.progress_report_step;
-    const char* poly_out_path = opts.poly_out_path;
-    ExecutionState exec;
 
     double start_time = omp_get_wtime();
     if (run.total_tasks > 0) {
@@ -6968,369 +7327,17 @@ int main(int argc, char** argv) {
     if (exec.local_queue_active) {
         local_queue_print_occupancy_summary(&exec.local_queue);
     }
-    
-    for (int i = 0; i < exec.num_threads; i++) {
-        poly_accumulate_checked(&global_poly, &exec.thread_polys[i]);
-    }
-
-    ProfileStats total_profile = {0};
-    TaskTimingStats total_task_timing = {0};
-    QueueSubtaskTimingStats total_queue_subtask_timing[MAX_COLS + 1];
-    memset(total_queue_subtask_timing, 0, sizeof(total_queue_subtask_timing));
-    for (int i = 0; i < exec.num_threads; i++) {
-        ProfileStats* src = &exec.thread_profiles[i];
-        total_profile.canon_prepare_calls += src->canon_prepare_calls;
-        total_profile.canon_prepare_accepts += src->canon_prepare_accepts;
-        total_profile.canon_commit_calls += src->canon_commit_calls;
-        total_profile.partial_append_calls += src->partial_append_calls;
-        total_profile.solve_structure_calls += src->solve_structure_calls;
-        total_profile.solve_graph_calls += src->solve_graph_calls;
-        total_profile.nauty_calls += src->nauty_calls;
-        total_profile.hard_graph_nodes += src->hard_graph_nodes;
-        total_profile.canon_prepare_time += src->canon_prepare_time;
-        total_profile.canon_commit_time += src->canon_commit_time;
-        total_profile.partial_append_time += src->partial_append_time;
-        total_profile.build_weight_time += src->build_weight_time;
-        total_profile.solve_graph_time += src->solve_graph_time;
-        total_profile.get_canonical_graph_time += src->get_canonical_graph_time;
-        total_profile.get_canonical_graph_dense_rows_time += src->get_canonical_graph_dense_rows_time;
-        total_profile.get_canonical_graph_build_input_time += src->get_canonical_graph_build_input_time;
-        total_profile.nauty_time += src->nauty_time;
-        total_profile.get_canonical_graph_rebuild_time += src->get_canonical_graph_rebuild_time;
-        if (src->hard_graph_max_n > total_profile.hard_graph_max_n) {
-            total_profile.hard_graph_max_n = src->hard_graph_max_n;
-        }
-        if (src->hard_graph_max_degree > total_profile.hard_graph_max_degree) {
-            total_profile.hard_graph_max_degree = src->hard_graph_max_degree;
-        }
-        for (int d = 0; d <= MAX_COLS; d++) {
-            total_profile.canon_prepare_calls_by_depth[d] += src->canon_prepare_calls_by_depth[d];
-            total_profile.canon_prepare_accepts_by_depth[d] += src->canon_prepare_accepts_by_depth[d];
-            total_profile.stabilizer_sum_by_depth[d] += src->stabilizer_sum_by_depth[d];
-            total_profile.canon_prepare_scanned_by_depth[d] += src->canon_prepare_scanned_by_depth[d];
-            total_profile.canon_prepare_active_by_depth[d] += src->canon_prepare_active_by_depth[d];
-            total_profile.canon_prepare_terminal_calls_by_depth[d] +=
-                src->canon_prepare_terminal_calls_by_depth[d];
-            total_profile.canon_prepare_fast_continue_by_depth[d] +=
-                src->canon_prepare_fast_continue_by_depth[d];
-            total_profile.canon_prepare_terminal_continue_by_depth[d] +=
-                src->canon_prepare_terminal_continue_by_depth[d];
-            total_profile.canon_prepare_equal_case_calls_by_depth[d] +=
-                src->canon_prepare_equal_case_calls_by_depth[d];
-            total_profile.canon_prepare_equal_case_rejects_by_depth[d] +=
-                src->canon_prepare_equal_case_rejects_by_depth[d];
-            total_profile.canon_prepare_order_rejects_by_depth[d] +=
-                src->canon_prepare_order_rejects_by_depth[d];
-        }
-        for (int n = 0; n <= MAXN_NAUTY; n++) {
-            total_profile.solve_graph_calls_by_n[n] += src->solve_graph_calls_by_n[n];
-            total_profile.solve_graph_raw_hits_by_n[n] += src->solve_graph_raw_hits_by_n[n];
-            total_profile.solve_graph_canon_hits_by_n[n] += src->solve_graph_canon_hits_by_n[n];
-            total_profile.hard_graph_nodes_by_n[n] += src->hard_graph_nodes_by_n[n];
-            total_profile.solve_graph_lookup_calls_by_n[n] += src->solve_graph_lookup_calls_by_n[n];
-            total_profile.solve_graph_connected_lookup_calls_by_n[n] +=
-                src->solve_graph_connected_lookup_calls_by_n[n];
-            total_profile.solve_graph_component_calls_by_n[n] += src->solve_graph_component_calls_by_n[n];
-            total_profile.solve_graph_hard_misses_by_n[n] += src->solve_graph_hard_misses_by_n[n];
-            total_profile.hard_graph_articulation_by_n[n] += src->hard_graph_articulation_by_n[n];
-            total_profile.hard_graph_k2_separator_by_n[n] += src->hard_graph_k2_separator_by_n[n];
-            total_profile.solve_graph_time_by_n[n] += src->solve_graph_time_by_n[n];
-            total_profile.solve_graph_lookup_time_by_n[n] += src->solve_graph_lookup_time_by_n[n];
-            total_profile.solve_graph_connected_lookup_time_by_n[n] +=
-                src->solve_graph_connected_lookup_time_by_n[n];
-            total_profile.solve_graph_raw_hit_time_by_n[n] += src->solve_graph_raw_hit_time_by_n[n];
-            total_profile.solve_graph_canon_hit_time_by_n[n] += src->solve_graph_canon_hit_time_by_n[n];
-            total_profile.solve_graph_component_time_by_n[n] += src->solve_graph_component_time_by_n[n];
-            total_profile.solve_graph_hard_miss_time_by_n[n] += src->solve_graph_hard_miss_time_by_n[n];
-            total_profile.solve_graph_hard_miss_separator_time_by_n[n] +=
-                src->solve_graph_hard_miss_separator_time_by_n[n];
-            total_profile.solve_graph_hard_miss_pick_time_by_n[n] +=
-                src->solve_graph_hard_miss_pick_time_by_n[n];
-            total_profile.solve_graph_hard_miss_delete_time_by_n[n] +=
-                src->solve_graph_hard_miss_delete_time_by_n[n];
-            total_profile.solve_graph_hard_miss_contract_build_time_by_n[n] +=
-                src->solve_graph_hard_miss_contract_build_time_by_n[n];
-            total_profile.solve_graph_hard_miss_contract_solve_time_by_n[n] +=
-                src->solve_graph_hard_miss_contract_solve_time_by_n[n];
-            total_profile.solve_graph_hard_miss_store_time_by_n[n] +=
-                src->solve_graph_hard_miss_store_time_by_n[n];
-            for (int d = 0; d <= MAXN_NAUTY; d++) {
-                total_profile.hard_graph_nodes_by_n_degree[n][d] +=
-                    src->hard_graph_nodes_by_n_degree[n][d];
-            }
-        }
-
-        total_task_timing.task_count += exec.thread_task_timing[i].task_count;
-        total_task_timing.task_time_sum += exec.thread_task_timing[i].task_time_sum;
-        if (exec.thread_task_timing[i].task_time_max > total_task_timing.task_time_max) {
-            total_task_timing.task_time_max = exec.thread_task_timing[i].task_time_max;
-            total_task_timing.task_max_index = exec.thread_task_timing[i].task_max_index;
-        }
-        for (int k = 0; k < TASK_PROFILE_TOPK; k++) {
-            task_timing_insert_topk(&total_task_timing,
-                                    exec.thread_task_timing[i].top_indices[k],
-                                    exec.thread_task_timing[i].top_times[k]);
-        }
-        if (exec.thread_queue_subtask_timing) {
-            QueueSubtaskTimingStats* src_sub =
-                exec.thread_queue_subtask_timing + (size_t)i * (size_t)(MAX_COLS + 1);
-            for (int d = 0; d <= MAX_COLS; d++) {
-                queue_subtask_merge(&total_queue_subtask_timing[d], &src_sub[d]);
-            }
-        }
-    }
+    accumulate_execution_poly(&exec, &global_poly);
+    aggregate_execution_summary(&exec, &summary);
 
     cleanup_execution_state(&exec);
     progress_reporter_finish(&progress_reporter);
 
     double end_time = omp_get_wtime();
     double worker_time = end_time - start_time;
-    double total_elapsed = worker_time + prefix_generation_time;
-    
-    printf("\nWorker Complete in %.2f seconds.\n", worker_time);
-    if (prefix_depth > 0) {
-        printf("Total elapsed including prefix generation: %.2f seconds.\n", total_elapsed);
-    }
-    printf("Canonicalisation calls: %lld\n", exec.total_canon_calls);
-    printf("Canonical cache hits: %lld (%.1f%%)\n", exec.total_cache_hits,
-           exec.total_canon_calls > 0 ? 100.0 * exec.total_cache_hits / exec.total_canon_calls : 0.0);
-    printf("Raw cache hits: %lld\n", exec.total_raw_cache_hits);
-    if (PROFILE_BUILD) {
-        printf("Profile:\n");
-        printf("  canon_state_prepare_push: %lld calls, %.3fs\n",
-               total_profile.canon_prepare_calls, total_profile.canon_prepare_time);
-        printf("  canon_state_commit_push: %lld calls, %.3fs\n",
-               total_profile.canon_commit_calls, total_profile.canon_commit_time);
-        printf("  partial_graph_append: %lld calls, %.3fs\n",
-               total_profile.partial_append_calls, total_profile.partial_append_time);
-        printf("  build_structure_weight: %lld calls, %.3fs\n",
-               total_profile.solve_structure_calls, total_profile.build_weight_time);
-        printf("  solve_graph_poly: %lld calls, %.3fs\n",
-               total_profile.solve_graph_calls, total_profile.solve_graph_time);
-        printf("  get_canonical_graph: %lld calls, %.3fs\n",
-               total_profile.nauty_calls, total_profile.get_canonical_graph_time);
-        printf("    dense rows: %.3fs\n",
-               total_profile.get_canonical_graph_dense_rows_time);
-        printf("    build nauty input: %.3fs\n",
-               total_profile.get_canonical_graph_build_input_time);
-        printf("    densenauty: %.3fs\n",
-               total_profile.nauty_time);
-        printf("    rebuild canon graph: %.3fs\n",
-               total_profile.get_canonical_graph_rebuild_time);
-        printf("  hard graph nodes: %lld, max n %d, max degree %d\n",
-               total_profile.hard_graph_nodes,
-               total_profile.hard_graph_max_n,
-               total_profile.hard_graph_max_degree);
-        printf("  Graph solver by simplified n (inclusive time):\n");
-        for (int n = 0; n <= MAXN_NAUTY; n++) {
-            long long calls = total_profile.solve_graph_calls_by_n[n];
-            long long raw_hits = total_profile.solve_graph_raw_hits_by_n[n];
-            long long canon_hits = total_profile.solve_graph_canon_hits_by_n[n];
-            long long hard = total_profile.hard_graph_nodes_by_n[n];
-            double time_s = total_profile.solve_graph_time_by_n[n];
-            if (calls == 0 && raw_hits == 0 && canon_hits == 0 && hard == 0) continue;
-            printf("    n=%d: calls %lld, time %.3fs, raw hits %lld, canon hits %lld, hard nodes %lld\n",
-                   n, calls, time_s, raw_hits, canon_hits, hard);
-        }
-        printf("  Graph solver outcomes by simplified n:\n");
-        for (int n = 0; n <= MAXN_NAUTY; n++) {
-            long long lookup_calls = total_profile.solve_graph_lookup_calls_by_n[n];
-            long long connected_lookup_calls = total_profile.solve_graph_connected_lookup_calls_by_n[n];
-            long long raw_hits = total_profile.solve_graph_raw_hits_by_n[n];
-            long long canon_hits = total_profile.solve_graph_canon_hits_by_n[n];
-            long long component_calls = total_profile.solve_graph_component_calls_by_n[n];
-            long long hard_misses = total_profile.solve_graph_hard_misses_by_n[n];
-            if (lookup_calls == 0 && connected_lookup_calls == 0 &&
-                raw_hits == 0 && canon_hits == 0 &&
-                component_calls == 0 && hard_misses == 0) {
-                continue;
-            }
-            printf("    n=%d: lookup %lld/%.3fs, connected-lookup %lld/%.3fs, raw-hit %lld/%.3fs, canon-hit %lld/%.3fs, components %lld/%.3fs, hard-miss %lld/%.3fs\n",
-                   n,
-                   lookup_calls, total_profile.solve_graph_lookup_time_by_n[n],
-                   connected_lookup_calls, total_profile.solve_graph_connected_lookup_time_by_n[n],
-                   raw_hits, total_profile.solve_graph_raw_hit_time_by_n[n],
-                   canon_hits, total_profile.solve_graph_canon_hit_time_by_n[n],
-                   component_calls, total_profile.solve_graph_component_time_by_n[n],
-                   hard_misses, total_profile.solve_graph_hard_miss_time_by_n[n]);
-        }
-        printf("  Hard-miss subphases by simplified n:\n");
-        for (int n = 0; n <= MAXN_NAUTY; n++) {
-            long long hard_misses = total_profile.solve_graph_hard_misses_by_n[n];
-            if (hard_misses == 0) continue;
-            printf("    n=%d: separator %.3fs, pick %.3fs, delete %.3fs, contract-build %.3fs, contract-solve %.3fs, store %.3fs\n",
-                   n,
-                   total_profile.solve_graph_hard_miss_separator_time_by_n[n],
-                   total_profile.solve_graph_hard_miss_pick_time_by_n[n],
-                   total_profile.solve_graph_hard_miss_delete_time_by_n[n],
-                   total_profile.solve_graph_hard_miss_contract_build_time_by_n[n],
-                   total_profile.solve_graph_hard_miss_contract_solve_time_by_n[n],
-                   total_profile.solve_graph_hard_miss_store_time_by_n[n]);
-        }
-        if (g_profile_separators) {
-            printf("  Hard-miss separator detection by simplified n:\n");
-            for (int n = 0; n <= MAXN_NAUTY; n++) {
-                long long hard_misses = total_profile.solve_graph_hard_misses_by_n[n];
-                long long articulation = total_profile.hard_graph_articulation_by_n[n];
-                long long k2 = total_profile.hard_graph_k2_separator_by_n[n];
-                if (hard_misses == 0 && articulation == 0 && k2 == 0) continue;
-                printf("    n=%d: hard-miss %lld, articulation %lld, k2-separator %lld\n",
-                       n, hard_misses, articulation, k2);
-            }
-        } else {
-            printf("  Hard-miss separator detection: disabled"
-                   " (set RECT_PROFILE_SEPARATORS=1 to enable)\n");
-        }
-        printf("  Hard graph nodes by simplified n and max degree:\n");
-        for (int n = 10; n <= MAXN_NAUTY; n++) {
-            long long total_n = total_profile.hard_graph_nodes_by_n[n];
-            if (total_n == 0) continue;
-            printf("    n=%d:", n);
-            for (int d = 0; d <= MAXN_NAUTY; d++) {
-                long long count = total_profile.hard_graph_nodes_by_n_degree[n][d];
-                if (count == 0) continue;
-                printf(" deg%d=%lld", d, count);
-            }
-            printf("\n");
-        }
-        printf("  CanonState by depth:\n");
-        for (int d = 0; d <= g_cols && d <= MAX_COLS; d++) {
-            long long calls = total_profile.canon_prepare_calls_by_depth[d];
-            long long accepts = total_profile.canon_prepare_accepts_by_depth[d];
-            if (calls == 0) continue;
-            double accept_rate = 100.0 * (double)accepts / (double)calls;
-            double avg_stabilizer =
-                accepts > 0 ? (double)total_profile.stabilizer_sum_by_depth[d] / (double)accepts : 0.0;
-            double avg_scanned =
-                calls > 0 ? (double)total_profile.canon_prepare_scanned_by_depth[d] / (double)calls : 0.0;
-            double avg_active =
-                calls > 0 ? (double)total_profile.canon_prepare_active_by_depth[d] / (double)calls : 0.0;
-            double active_rate =
-                total_profile.canon_prepare_scanned_by_depth[d] > 0
-                    ? 100.0 * (double)total_profile.canon_prepare_active_by_depth[d] /
-                          (double)total_profile.canon_prepare_scanned_by_depth[d]
-                    : 0.0;
-            printf("    depth %d: prepare %lld, accept %lld (%.1f%%), avg stabiliser %.1f, avg active %.1f/%.0f (%.1f%%)\n",
-                   d, calls, accepts, accept_rate, avg_stabilizer, avg_active, avg_scanned, active_rate);
-        }
-        printf("  CanonState prepare branch mix by depth:\n");
-        for (int d = 0; d <= g_cols && d <= MAX_COLS; d++) {
-            long long calls = total_profile.canon_prepare_calls_by_depth[d];
-            long long terminal_calls = total_profile.canon_prepare_terminal_calls_by_depth[d];
-            long long fast_continue = total_profile.canon_prepare_fast_continue_by_depth[d];
-            long long terminal_continue = total_profile.canon_prepare_terminal_continue_by_depth[d];
-            long long equal_case = total_profile.canon_prepare_equal_case_calls_by_depth[d];
-            long long equal_reject = total_profile.canon_prepare_equal_case_rejects_by_depth[d];
-            long long order_reject = total_profile.canon_prepare_order_rejects_by_depth[d];
-            if (calls == 0 && equal_case == 0 && order_reject == 0) continue;
-            printf("    depth %d: terminal %lld, fast-continue %lld, terminal-continue %lld, equal-case %lld, equal-reject %lld, order-reject %lld\n",
-                   d, terminal_calls, fast_continue, terminal_continue, equal_case,
-                   equal_reject, order_reject);
-        }
-        if (total_task_timing.task_count > 0) {
-            printf("  Task timings: %lld tasks, avg %.6fs, max %.6fs (task %lld)\n",
-                   total_task_timing.task_count,
-                   total_task_timing.task_time_sum / (double)total_task_timing.task_count,
-                   total_task_timing.task_time_max,
-                   total_task_timing.task_max_index);
-            printf("  Slowest tasks:\n");
-            for (int i = 0; i < TASK_PROFILE_TOPK; i++) {
-                if (total_task_timing.top_times[i] <= 0.0) break;
-                int pi, pj, pk, pl;
-                if (decode_task_prefix(total_task_timing.top_indices[i], &pi, &pj, &pk, &pl)) {
-                    if (pk >= 0 && pl >= 0) {
-                        printf("    task %lld (%d,%d,%d,%d): %.6fs\n",
-                               total_task_timing.top_indices[i], pi, pj, pk, pl,
-                               total_task_timing.top_times[i]);
-                    } else if (pk >= 0) {
-                        printf("    task %lld (%d,%d,%d): %.6fs\n",
-                               total_task_timing.top_indices[i], pi, pj, pk,
-                               total_task_timing.top_times[i]);
-                    } else if (pj >= 0) {
-                        printf("    task %lld (%d,%d): %.6fs\n",
-                               total_task_timing.top_indices[i], pi, pj,
-                               total_task_timing.top_times[i]);
-                    } else {
-                        printf("    task %lld (%d): %.6fs\n",
-                               total_task_timing.top_indices[i], pi,
-                               total_task_timing.top_times[i]);
-                    }
-                } else {
-                    printf("    task %lld: %.6fs\n",
-                           total_task_timing.top_indices[i],
-                           total_task_timing.top_times[i]);
-                }
-            }
-        }
-        if (use_runtime_split_queue) {
-            printf("  Queue subtasks by depth:\n");
-            for (int d = 0; d <= g_cols && d <= MAX_COLS; d++) {
-                QueueSubtaskTimingStats* qs = &total_queue_subtask_timing[d];
-                if (qs->task_count == 0) continue;
-                printf("    depth %d: %lld subtasks, avg %.6fs, max %.6fs, avg solve_graph %.1f, avg nauty %.1f, avg hard nodes %.1f, max hard n %d, max hard deg %d\n",
-                       d, qs->task_count, qs->task_time_sum / (double)qs->task_count, qs->task_time_max,
-                       (double)qs->solve_graph_call_sum / (double)qs->task_count,
-                       (double)qs->nauty_call_sum / (double)qs->task_count,
-                       (double)qs->hard_graph_node_sum / (double)qs->task_count,
-                       qs->max_hard_graph_n, qs->max_hard_graph_degree);
-                for (int i = 0; i < TASK_PROFILE_TOPK; i++) {
-                    QueueSubtaskTopEntry* e = &qs->top[i];
-                    if (e->elapsed <= 0.0) break;
-                    printf("      (");
-                    for (int p = 0; p < e->depth; p++) {
-                        if (p > 0) printf(",");
-                        printf("%u", (unsigned)e->prefix[p]);
-                    }
-                    printf("): %.6fs, solve_graph %lld, nauty %lld, hard_nodes %lld, max_hard_n %u, max_hard_deg %u\n",
-                           e->elapsed, e->solve_graph_calls, e->nauty_calls,
-                           e->hard_graph_nodes,
-                           (unsigned)e->max_hard_graph_n,
-                           (unsigned)e->max_hard_graph_degree);
-                }
-            }
-        }
-    }
-
-    if (g_task_times_out_path) {
-        write_task_times_file(g_task_times_out_path);
-        printf("Task timing CSV: %s\n", g_task_times_out_path);
-    }
-    
-#if RECT_COUNT_K4
-    printf("\nRectangle-free 4-colourings:\n");
-    print_u128(global_poly.coeffs[0]);
-    printf("\n");
-#else
-    printf("\nChromatic Polynomial P(x):\n");
-    print_poly(global_poly);
-
-    printf("\nValues:\n");
-    long long k_test = 4;
-    printf("P(%lld) = ", k_test);
-    print_u128(poly_eval(global_poly, k_test));
-    printf("\n");
-
-    k_test = 5;
-    printf("P(%lld) = ", k_test);
-    print_u128(poly_eval(global_poly, k_test));
-    printf("\n");
-#endif
-
-    if (poly_out_path) {
-        PolyFileMeta meta = {
-            .rows = g_rows,
-            .cols = g_cols,
-            .task_start = active_task_start,
-            .task_end = active_task_end,
-            .full_tasks = full_tasks,
-        };
-        write_poly_file(poly_out_path, &global_poly, &meta);
-#if RECT_COUNT_K4
-        printf("\nWrote fixed-4 shard to %s\n", poly_out_path);
-#else
-        printf("\nWrote polynomial shard to %s\n", poly_out_path);
-#endif
-    }
+    print_execution_report(&run, &exec, &summary, worker_time);
+    write_task_times_report();
+    print_final_output(&opts, &run, &global_poly);
 
     cleanup_run_config(&run);
 
