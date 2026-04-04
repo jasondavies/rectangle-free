@@ -6168,3 +6168,56 @@
   - the split representation simplifies the code and also reduces hot-loop work in both prepare paths enough to give a real speedup
   - the `solve_graph_poly` reduction appears to come from lower surrounding symmetry overhead rather than graph-side search changes
 - Outcome: accepted on `main`.
+
+### Experiment 154: Bound non-terminal `CanonState` scans by max non-equal threshold
+- Goal: cut the remaining depth-3/4 `canon_state_prepare_push()` cost by splitting work into:
+  - the current `equal_perm` set
+  - a sorted-value prefix of non-equal permutations with `x < max(first_greater_val)`
+- Branch / commit:
+  - `main` after merging latest `tt/mask2`, baseline at `cf2cb19`
+- Change:
+  - add per-depth histograms of non-equal `first_greater_val` values and track the current maximum
+  - in non-terminal `canon_state_prepare_push()`, process equal permutations directly and scan only the sorted permutation prefix that can possibly satisfy `x < r`
+  - update the histogram incrementally in `canon_state_commit_push()` and rely on depth snapshots for `pop`
+- Build:
+  - `make partition_poly_7`
+  - `make partition_poly_7_profile`
+- Unprofiled `7x6 --task-end 1`:
+  - baseline:
+    - `real 38.28`
+  - experiment:
+    - `real 11.36`
+    - `real 11.00`
+- Unprofiled `7x5 --task-end 4`:
+  - experiment:
+    - `real 2.54`
+- Profiled `7x6 --task-end 1`:
+  - baseline:
+    - `Worker Complete in 41.80 seconds`
+    - `Canonicalisation calls: 414470`
+    - `Canonical cache hits: 243501`
+    - `Raw cache hits: 1991130`
+    - `canon_state_prepare_push: 9458098 calls, 32.573s`
+    - `solve_graph_poly: 6229933 calls, 15.560s`
+  - experiment:
+    - `Worker Complete in 11.35 seconds`
+    - `Canonicalisation calls: 414470`
+    - `Canonical cache hits: 243501`
+    - `Raw cache hits: 1991130`
+    - `canon_state_prepare_push: 9458098 calls, 8.695s`
+    - `solve_graph_poly: 6229933 calls, 5.101s`
+- Profiled `7x5 --task-end 4`:
+  - experiment:
+    - `Worker Complete in 2.57 seconds`
+    - `Canonicalisation calls: 70144`
+    - `Canonical cache hits: 42990`
+    - `Raw cache hits: 261474`
+    - `canon_state_prepare_push: 2188134 calls, 1.916s`
+    - `solve_graph_poly: 1442988 calls, 0.480s`
+- Correctness:
+  - both shards produced the same polynomial and evaluation values as the baseline
+- Interpretation:
+  - recursion shape is unchanged: canonicalisation calls, canonical cache hits, raw cache hits, and `solve_graph_poly` calls all match exactly
+  - the win comes from removing most of the wasted depth-3/4 full scans in non-terminal `prepare_push()`
+  - the per-depth histogram bookkeeping in commit/pop is tiny compared with the scan reduction
+- Outcome: accepted on `main`.
