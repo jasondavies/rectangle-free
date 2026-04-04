@@ -238,6 +238,12 @@ typedef struct {
     double solve_graph_canon_hit_time_by_n[MAXN_NAUTY + 1];
     double solve_graph_component_time_by_n[MAXN_NAUTY + 1];
     double solve_graph_hard_miss_time_by_n[MAXN_NAUTY + 1];
+    double solve_graph_hard_miss_separator_time_by_n[MAXN_NAUTY + 1];
+    double solve_graph_hard_miss_pick_time_by_n[MAXN_NAUTY + 1];
+    double solve_graph_hard_miss_delete_time_by_n[MAXN_NAUTY + 1];
+    double solve_graph_hard_miss_contract_build_time_by_n[MAXN_NAUTY + 1];
+    double solve_graph_hard_miss_contract_solve_time_by_n[MAXN_NAUTY + 1];
+    double solve_graph_hard_miss_store_time_by_n[MAXN_NAUTY + 1];
 } ProfileStats;
 
 #define TASK_PROFILE_TOPK 8
@@ -4197,6 +4203,68 @@ static inline void record_hard_graph_node(ProfileStats* profile, int n, int max_
     }
 }
 
+static inline int graph_neighbors_form_clique(const Graph* g, uint64_t neighbors) {
+    uint64_t rem = neighbors;
+    while (rem) {
+        int u = __builtin_ctzll(rem);
+        if ((neighbors & ~((uint64_t)g->adj[u] & g->vertex_mask)) != (UINT64_C(1) << u)) {
+            return 0;
+        }
+        rem &= rem - 1;
+    }
+    return 1;
+}
+
+static void graph_choose_branch_edge(const Graph* g, int* u_out, int* v_out, int* max_deg_out) {
+    uint64_t active = g->vertex_mask;
+    int max_deg = -1;
+    int fallback_u = -1;
+    int fallback_v = -1;
+    int best_u = -1;
+    int best_v = -1;
+    int best_score = INT_MIN;
+
+    while (active) {
+        int u = __builtin_ctzll(active);
+        uint64_t u_neighbors = (uint64_t)g->adj[u] & g->vertex_mask;
+        int u_deg = __builtin_popcountll(u_neighbors);
+        if (u_deg > max_deg) max_deg = u_deg;
+        uint64_t rem = u_neighbors & ~((UINT64_C(1) << (u + 1)) - 1);
+        while (rem) {
+            int v = __builtin_ctzll(rem);
+            uint64_t v_neighbors = (uint64_t)g->adj[v] & g->vertex_mask;
+            int v_deg = __builtin_popcountll(v_neighbors);
+            if (fallback_u < 0 || u_deg > __builtin_popcountll((uint64_t)g->adj[fallback_u] & g->vertex_mask)) {
+                fallback_u = u;
+                fallback_v = v;
+            }
+
+            uint64_t u_after = u_neighbors & ~(UINT64_C(1) << v);
+            uint64_t v_after = v_neighbors & ~(UINT64_C(1) << u);
+            int u_clique = graph_neighbors_form_clique(g, u_after);
+            int v_clique = graph_neighbors_form_clique(g, v_after);
+            int common = __builtin_popcountll(u_neighbors & v_neighbors);
+            int score = 1000 * (u_clique + v_clique) + 16 * common + u_deg + v_deg;
+            if (score > best_score) {
+                best_score = score;
+                best_u = u;
+                best_v = v;
+            }
+            rem &= rem - 1;
+        }
+        active &= active - 1;
+    }
+
+    if (best_u >= 0) {
+        *u_out = best_u;
+        *v_out = best_v;
+    } else {
+        *u_out = fallback_u;
+        *v_out = fallback_v;
+    }
+    *max_deg_out = max_deg;
+}
+
 static void solve_graph_poly(const Graph* input_g, RowGraphCache* cache, RowGraphCache* raw_cache,
                              NautyWorkspace* ws, long long* local_canon_calls,
                              long long* local_cache_hits, long long* local_raw_cache_hits,
@@ -4576,28 +4644,34 @@ done:
         }
 
         // Deletion-contraction on canonical graph
+        double hard_sep_t = 0.0;
+        double hard_pick_t = 0.0;
+        double hard_del_t = 0.0;
+        double hard_cont_build_t = 0.0;
+        double hard_cont_solve_t = 0.0;
+        double hard_store_t = 0.0;
         const Graph* branch_g = &canon;
-        int max_deg = -1, u = -1;
-        for (int i = 0; i < branch_g->n; i++) {
-            int d = __builtin_popcountll((uint64_t)branch_g->adj[i] & branch_g->vertex_mask);
-            if (d > max_deg) { max_deg = d; u = i; }
+        double phase_t0 = 0.0;
+        if (PROFILE_BUILD && profile && branch_g->n >= 0 && branch_g->n <= MAXN_NAUTY) {
+            phase_t0 = omp_get_wtime();
+        }
+        int max_deg = -1, u = -1, v = -1;
+        graph_choose_branch_edge(branch_g, &u, &v, &max_deg);
+        if (PROFILE_BUILD && profile && branch_g->n >= 0 && branch_g->n <= MAXN_NAUTY) {
+            hard_pick_t += omp_get_wtime() - phase_t0;
         }
         if (u != -1 && max_deg > 0) record_hard_graph_node(profile, branch_g->n, max_deg);
         outcome = SG_OUTCOME_HARD_MISS;
         if (PROFILE_BUILD && g_profile_separators && profile &&
             branch_g->n >= 10 && branch_g->n <= MAXN_NAUTY) {
+            phase_t0 = omp_get_wtime();
             if (graph_has_articulation_point(branch_g)) {
                 profile->hard_graph_articulation_by_n[branch_g->n]++;
             }
             if (graph_has_k2_separator(branch_g)) {
                 profile->hard_graph_k2_separator_by_n[branch_g->n]++;
             }
-        }
-
-        int v = -1;
-        if (u != -1) {
-            uint64_t nbrs = (uint64_t)branch_g->adj[u] & branch_g->vertex_mask;
-            if (nbrs) v = __builtin_ctzll(nbrs);
+            hard_sep_t += omp_get_wtime() - phase_t0;
         }
 
         if (u != -1 && v != -1) {
@@ -4606,12 +4680,21 @@ done:
             g_del.adj[u] &= ~(1ULL << v);
             g_del.adj[v] &= ~(1ULL << u);
             GraphPoly p_del;
+            if (PROFILE_BUILD && profile && branch_g->n >= 0 && branch_g->n <= MAXN_NAUTY) {
+                phase_t0 = omp_get_wtime();
+            }
             solve_graph_poly(&g_del, cache, raw_cache, ws,
                              local_canon_calls, local_cache_hits, local_raw_cache_hits,
                              profile, &p_del);
+            if (PROFILE_BUILD && profile && branch_g->n >= 0 && branch_g->n <= MAXN_NAUTY) {
+                hard_del_t += omp_get_wtime() - phase_t0;
+            }
 
             // Contraction: merge v into u
             Graph g_cont = *branch_g;
+            if (PROFILE_BUILD && profile && branch_g->n >= 0 && branch_g->n <= MAXN_NAUTY) {
+                phase_t0 = omp_get_wtime();
+            }
             uint64_t merged_nbrs =
                 ((uint64_t)g_cont.adj[u] | (uint64_t)g_cont.adj[v]) &
                 g_cont.vertex_mask & ~((UINT64_C(1) << u) | (UINT64_C(1) << v));
@@ -4623,10 +4706,17 @@ done:
                 nbrs &= nbrs - 1;
             }
             remove_vertex(&g_cont, v);
+            if (PROFILE_BUILD && profile && branch_g->n >= 0 && branch_g->n <= MAXN_NAUTY) {
+                hard_cont_build_t += omp_get_wtime() - phase_t0;
+                phase_t0 = omp_get_wtime();
+            }
             GraphPoly p_cont;
             solve_graph_poly(&g_cont, cache, raw_cache, ws,
                              local_canon_calls, local_cache_hits, local_raw_cache_hits,
                              profile, &p_cont);
+            if (PROFILE_BUILD && profile && branch_g->n >= 0 && branch_g->n <= MAXN_NAUTY) {
+                hard_cont_solve_t += omp_get_wtime() - phase_t0;
+            }
 
             graph_poly_sub_ref(&p_del, &p_cont, &res);
         } else {
@@ -4634,9 +4724,21 @@ done:
             for (int k = 0; k < branch_g->n; k++) graph_poly_mul_linear_ref(&res, 0, &res);
         }
 
+        if (PROFILE_BUILD && profile && branch_g->n >= 0 && branch_g->n <= MAXN_NAUTY) {
+            phase_t0 = omp_get_wtime();
+        }
         store_row_graph_cache_entry(cache, hash, (uint32_t)canon.n, &canon,
                                     (AdjWord)ADJWORD_MASK, &res);
         shared_graph_cache_export(hash, (uint32_t)canon.n, &canon, ADJWORD_MASK, &res);
+        if (PROFILE_BUILD && profile && branch_g->n >= 0 && branch_g->n <= MAXN_NAUTY) {
+            hard_store_t += omp_get_wtime() - phase_t0;
+            profile->solve_graph_hard_miss_separator_time_by_n[branch_g->n] += hard_sep_t;
+            profile->solve_graph_hard_miss_pick_time_by_n[branch_g->n] += hard_pick_t;
+            profile->solve_graph_hard_miss_delete_time_by_n[branch_g->n] += hard_del_t;
+            profile->solve_graph_hard_miss_contract_build_time_by_n[branch_g->n] += hard_cont_build_t;
+            profile->solve_graph_hard_miss_contract_solve_time_by_n[branch_g->n] += hard_cont_solve_t;
+            profile->solve_graph_hard_miss_store_time_by_n[branch_g->n] += hard_store_t;
+        }
     }
 
     if (g_use_raw_cache) {
@@ -6470,6 +6572,18 @@ int main(int argc, char** argv) {
             total_profile.solve_graph_canon_hit_time_by_n[n] += src->solve_graph_canon_hit_time_by_n[n];
             total_profile.solve_graph_component_time_by_n[n] += src->solve_graph_component_time_by_n[n];
             total_profile.solve_graph_hard_miss_time_by_n[n] += src->solve_graph_hard_miss_time_by_n[n];
+            total_profile.solve_graph_hard_miss_separator_time_by_n[n] +=
+                src->solve_graph_hard_miss_separator_time_by_n[n];
+            total_profile.solve_graph_hard_miss_pick_time_by_n[n] +=
+                src->solve_graph_hard_miss_pick_time_by_n[n];
+            total_profile.solve_graph_hard_miss_delete_time_by_n[n] +=
+                src->solve_graph_hard_miss_delete_time_by_n[n];
+            total_profile.solve_graph_hard_miss_contract_build_time_by_n[n] +=
+                src->solve_graph_hard_miss_contract_build_time_by_n[n];
+            total_profile.solve_graph_hard_miss_contract_solve_time_by_n[n] +=
+                src->solve_graph_hard_miss_contract_solve_time_by_n[n];
+            total_profile.solve_graph_hard_miss_store_time_by_n[n] +=
+                src->solve_graph_hard_miss_store_time_by_n[n];
             for (int d = 0; d <= MAXN_NAUTY; d++) {
                 total_profile.hard_graph_nodes_by_n_degree[n][d] +=
                     src->hard_graph_nodes_by_n_degree[n][d];
@@ -6564,6 +6678,19 @@ int main(int argc, char** argv) {
                    canon_hits, total_profile.solve_graph_canon_hit_time_by_n[n],
                    component_calls, total_profile.solve_graph_component_time_by_n[n],
                    hard_misses, total_profile.solve_graph_hard_miss_time_by_n[n]);
+        }
+        printf("  Hard-miss subphases by simplified n:\n");
+        for (int n = 0; n <= MAXN_NAUTY; n++) {
+            long long hard_misses = total_profile.solve_graph_hard_misses_by_n[n];
+            if (hard_misses == 0) continue;
+            printf("    n=%d: separator %.3fs, pick %.3fs, delete %.3fs, contract-build %.3fs, contract-solve %.3fs, store %.3fs\n",
+                   n,
+                   total_profile.solve_graph_hard_miss_separator_time_by_n[n],
+                   total_profile.solve_graph_hard_miss_pick_time_by_n[n],
+                   total_profile.solve_graph_hard_miss_delete_time_by_n[n],
+                   total_profile.solve_graph_hard_miss_contract_build_time_by_n[n],
+                   total_profile.solve_graph_hard_miss_contract_solve_time_by_n[n],
+                   total_profile.solve_graph_hard_miss_store_time_by_n[n]);
         }
         if (g_profile_separators) {
             printf("  Hard-miss separator detection by simplified n:\n");

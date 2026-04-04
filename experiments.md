@@ -6168,3 +6168,79 @@
   - the split representation simplifies the code and also reduces hot-loop work in both prepare paths enough to give a real speedup
   - the `solve_graph_poly` reduction appears to come from lower surrounding symmetry overhead rather than graph-side search changes
 - Outcome: accepted on `main`.
+
+### Experiment 155: Branch on edges whose deletion triggers clique pruning
+- Goal: reduce hard graph work in `solve_graph_poly()` by choosing deletion-contraction edges more carefully.
+- Branch / commit:
+  - baseline parent `7702fd5`
+- Change:
+  - replace “first neighbor of max-degree vertex” with a scored edge choice over all edges
+  - prefer edges where deleting the edge makes one or both endpoints immediately clique-prunable
+  - break ties by common-neighbor count and endpoint degrees
+  - add profiling-only hard-miss subphase timing to explain where graph-solver time moves
+- Build:
+  - `make partition_poly_7`
+  - `make partition_poly_7_profile`
+- Unprofiled `7x6 --task-end 1`:
+  - baseline (`7702fd5`):
+    - `real 11.28`
+    - `Canonicalisation calls: 414470`
+    - `Canonical cache hits: 243501`
+    - `Raw cache hits: 1991130`
+  - experiment:
+    - `real 10.86`
+    - `real 10.96`
+    - `Canonicalisation calls: 177708`
+    - `Canonical cache hits: 130730`
+    - `Raw cache hits: 1991443`
+- Unprofiled `7x5 --task-end 4`:
+  - baseline (`7702fd5`):
+    - `real 2.64`
+    - `Canonicalisation calls: 70144`
+    - `Canonical cache hits: 42990`
+    - `Raw cache hits: 261474`
+  - experiment:
+    - `real 2.49`
+    - `Canonicalisation calls: 32772`
+    - `Canonical cache hits: 26498`
+    - `Raw cache hits: 262718`
+- Profiled `7x6 --task-end 1`:
+  - baseline (`7702fd5`):
+    - `Worker Complete in 11.50 seconds`
+    - `Canonicalisation calls: 414470`
+    - `Canonical cache hits: 243501`
+    - `Raw cache hits: 1991130`
+    - `canon_state_prepare_push: 9458098 calls, 8.805s`
+    - `solve_graph_poly: 6229933 calls, 5.418s`
+    - `hard graph nodes: 170969`
+  - experiment:
+    - `Worker Complete in 11.25 seconds`
+    - `Canonicalisation calls: 177708`
+    - `Canonical cache hits: 130730`
+    - `Raw cache hits: 1991443`
+    - `canon_state_prepare_push: 9458098 calls, 8.834s`
+    - `solve_graph_poly: 5981877 calls, 2.927s`
+    - `hard graph nodes: 46978`
+- Profiled `7x5 --task-end 4`:
+  - baseline (`7702fd5`):
+    - `Worker Complete in 2.46 seconds`
+    - `Canonicalisation calls: 70144`
+    - `Canonical cache hits: 42990`
+    - `Raw cache hits: 261474`
+    - `solve_graph_poly: 1442988 calls, 0.440s`
+    - `hard graph nodes: 27154`
+  - experiment:
+    - `Worker Complete in 2.50 seconds`
+    - `Canonicalisation calls: 32772`
+    - `Canonical cache hits: 26498`
+    - `Raw cache hits: 262718`
+    - `solve_graph_poly: 1401226 calls, 0.244s`
+    - `hard graph nodes: 6274`
+- Correctness:
+  - both shards produced the same polynomial and evaluation values as the baseline
+- Interpretation:
+  - this is a real search-shape change, not a constant-factor tweak
+  - the new branching rule cuts canonicalisations and hard misses substantially, especially on the heavy shard
+  - the heavy-shard wall-time win is moderate because `canon_state_prepare_push()` is still the largest single bucket, but graph work drops sharply
+  - profiling-only hard-miss subphase timers show the delete branch remains the dominant hard-miss cost, just on a much smaller set of nodes
+- Outcome: accepted on `main`.
