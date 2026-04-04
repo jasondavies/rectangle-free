@@ -413,6 +413,19 @@ typedef struct {
     long long progress_report_step;
 } RunConfig;
 
+typedef struct {
+    int num_threads;
+    LocalTaskQueue local_queue;
+    int local_queue_active;
+    Poly* thread_polys;
+    ProfileStats* thread_profiles;
+    TaskTimingStats* thread_task_timing;
+    QueueSubtaskTimingStats* thread_queue_subtask_timing;
+    long long total_canon_calls;
+    long long total_cache_hits;
+    long long total_raw_cache_hits;
+} ExecutionState;
+
 // --- GLOBALS ---
 static int num_partitions = 0;
 static int perm_count = 0;
@@ -6340,67 +6353,21 @@ static void execute_local_runtime_task(const LocalTask* task, WorkerCtx* ctx, Po
                             pending_completed, task_timing);
 }
 
-int main(int argc, char** argv) {
-    MainOptions opts;
-    RunConfig run;
+static int init_execution_state(const RunConfig* run, ExecutionState* exec) {
+    memset(exec, 0, sizeof(*exec));
+    exec->num_threads = omp_get_max_threads();
 
-    if (!parse_main_options(argc, argv, &opts)) return 1;
-    if (!init_problem_and_run_config(&opts, &run)) {
-        cleanup_run_config(&run);
-        return 1;
-    }
-    if (!prepare_run_config(&opts, &run)) {
-        cleanup_run_config(&run);
-        return 1;
-    }
-
-    const int prefix_depth = run.prefix_depth;
-    const int graph_poly_len = run.graph_poly_len;
-    const Prefix2Batch* prefix2_batches = run.prefix2_batches;
-    const PrefixId* prefix2_batch_js = run.prefix2_batch_js;
-    const long long* prefix2_batch_ps = run.prefix2_batch_ps;
-    const long long prefix2_batch_count = run.prefix2_batch_count;
-    const double prefix_generation_time = run.prefix_generation_time;
-    const int use_runtime_split_queue = run.use_runtime_split_queue;
-    const long long full_tasks = run.full_tasks;
-    const long long active_task_start = run.active_task_start;
-    const long long active_task_end = run.active_task_end;
-    const long long total_tasks = run.total_tasks;
-    const long long first_task = run.first_task;
-    const long long progress_report_step = run.progress_report_step;
-    const char* poly_out_path = opts.poly_out_path;
-
-    double start_time = omp_get_wtime();
-    if (run.total_tasks > 0) {
-        small_graph_lookup_init();
-        connected_canon_lookup_init();
-        if (PROFILE_BUILD) {
-            printf("Small-graph lookup %s: %.2f seconds\n",
-                   g_small_graph_lookup_loaded_from_file ? "load" : "initialisation",
-                   g_small_graph_lookup_init_time);
-            if (g_connected_canon_lookup_loaded) {
-                printf("Connected canonical lookup n=%d load: %.2f seconds\n",
-                       g_connected_canon_lookup_n, g_connected_canon_lookup_load_time);
-            }
-        }
-    }
-    
-    int num_threads = omp_get_max_threads();
-    LocalTaskQueue local_queue;
-    int local_queue_active = 0;
-    if (run.use_runtime_split_queue) {
-        int queue_capacity_slack = 4 * num_threads;
-
-        long long queue_cap_ll = run.total_tasks + queue_capacity_slack + 64;
+    if (run->use_runtime_split_queue) {
+        int queue_capacity_slack = 4 * exec->num_threads;
+        long long queue_cap_ll = run->total_tasks + queue_capacity_slack + 64;
         if (queue_cap_ll > INT_MAX) {
             fprintf(stderr, "Local task queue too large\n");
-            cleanup_run_config(&run);
-            return 1;
+            return 0;
         }
 
-        local_queue_init(&local_queue, (int)queue_cap_ll, run.total_tasks, num_threads);
-        for (long long t = 0; t < run.total_tasks; t++) {
-            long long p = run.first_task + t;
+        local_queue_init(&exec->local_queue, (int)queue_cap_ll, run->total_tasks, exec->num_threads);
+        for (long long t = 0; t < run->total_tasks; t++) {
+            long long p = run->first_task + t;
             int i = 0;
             int j = 0;
             LocalTask task;
@@ -6412,11 +6379,11 @@ int main(int argc, char** argv) {
             task.prefix[1] = (PrefixId)j;
             task.lo = (PrefixId)j;
             task.hi = (PrefixId)num_partitions;
-            local_queue.roots[t].pending = 0;
-            local_queue.roots[t].task_index = p;
-            local_queue_seed_push(&local_queue, &task);
+            exec->local_queue.roots[t].pending = 0;
+            exec->local_queue.roots[t].task_index = p;
+            local_queue_seed_push(&exec->local_queue, &task);
         }
-        local_queue_active = 1;
+        exec->local_queue_active = 1;
         printf("Runtime queue: capacity=%d, split-max-depth=%d",
                (int)queue_cap_ll, g_adaptive_max_depth);
         if (g_adaptive_work_budget > 0) {
@@ -6425,23 +6392,54 @@ int main(int argc, char** argv) {
         printf("\n");
     }
 
-    Poly* thread_polys = checked_aligned_alloc(64, (size_t)num_threads * sizeof(Poly), "thread_polys");
-    ProfileStats* thread_profiles =
-        checked_aligned_alloc(64, (size_t)num_threads * sizeof(ProfileStats), "thread_profiles");
-    TaskTimingStats* thread_task_timing =
-        checked_aligned_alloc(64, (size_t)num_threads * sizeof(TaskTimingStats), "thread_task_timing");
-    QueueSubtaskTimingStats* thread_queue_subtask_timing = NULL;
-    for (int i = 0; i < num_threads; i++) poly_zero(&thread_polys[i]);
-    memset(thread_profiles, 0, (size_t)num_threads * sizeof(ProfileStats));
-    memset(thread_task_timing, 0, (size_t)num_threads * sizeof(TaskTimingStats));
-    if (run.use_runtime_split_queue && PROFILE_BUILD) {
-        thread_queue_subtask_timing = checked_aligned_alloc(
-            64, (size_t)num_threads * (size_t)(MAX_COLS + 1) * sizeof(QueueSubtaskTimingStats),
+    exec->thread_polys =
+        checked_aligned_alloc(64, (size_t)exec->num_threads * sizeof(Poly), "thread_polys");
+    exec->thread_profiles = checked_aligned_alloc(
+        64, (size_t)exec->num_threads * sizeof(ProfileStats), "thread_profiles");
+    exec->thread_task_timing = checked_aligned_alloc(
+        64, (size_t)exec->num_threads * sizeof(TaskTimingStats), "thread_task_timing");
+    for (int i = 0; i < exec->num_threads; i++) poly_zero(&exec->thread_polys[i]);
+    memset(exec->thread_profiles, 0, (size_t)exec->num_threads * sizeof(ProfileStats));
+    memset(exec->thread_task_timing, 0, (size_t)exec->num_threads * sizeof(TaskTimingStats));
+    if (run->use_runtime_split_queue && PROFILE_BUILD) {
+        exec->thread_queue_subtask_timing = checked_aligned_alloc(
+            64, (size_t)exec->num_threads * (size_t)(MAX_COLS + 1) * sizeof(QueueSubtaskTimingStats),
             "thread_queue_subtask_timing");
-        memset(thread_queue_subtask_timing, 0,
-               (size_t)num_threads * (size_t)(MAX_COLS + 1) * sizeof(QueueSubtaskTimingStats));
+        memset(exec->thread_queue_subtask_timing, 0,
+               (size_t)exec->num_threads * (size_t)(MAX_COLS + 1) *
+                   sizeof(QueueSubtaskTimingStats));
     }
 
+    return 1;
+}
+
+static void cleanup_execution_state(ExecutionState* exec) {
+    if (exec->local_queue_active) {
+        local_queue_free(&exec->local_queue);
+        exec->local_queue_active = 0;
+    }
+    free(exec->thread_polys);
+    free(exec->thread_profiles);
+    free(exec->thread_task_timing);
+    free(exec->thread_queue_subtask_timing);
+    exec->thread_polys = NULL;
+    exec->thread_profiles = NULL;
+    exec->thread_task_timing = NULL;
+    exec->thread_queue_subtask_timing = NULL;
+}
+
+static void execute_run_tasks(const RunConfig* run, double start_time, ExecutionState* exec) {
+    const int prefix_depth = run->prefix_depth;
+    const int graph_poly_len = run->graph_poly_len;
+    const Prefix2Batch* prefix2_batches = run->prefix2_batches;
+    const PrefixId* prefix2_batch_js = run->prefix2_batch_js;
+    const long long* prefix2_batch_ps = run->prefix2_batch_ps;
+    const long long prefix2_batch_count = run->prefix2_batch_count;
+    const int use_runtime_split_queue = run->use_runtime_split_queue;
+    const long long active_task_end = run->active_task_end;
+    const long long total_tasks = run->total_tasks;
+    const long long first_task = run->first_task;
+    const long long progress_report_step = run->progress_report_step;
     long long total_canon_calls = 0;
     long long total_cache_hits = 0;
     long long total_raw_cache_hits = 0;
@@ -6492,17 +6490,17 @@ int main(int argc, char** argv) {
         long long local_canon_calls = 0;
         long long local_cache_hits = 0;
         long long local_raw_cache_hits = 0;
-        ProfileStats* profile = &thread_profiles[tid];
-        TaskTimingStats* task_timing = &thread_task_timing[tid];
-        QueueSubtaskTimingStats* queue_subtask_timing =
-            thread_queue_subtask_timing ? thread_queue_subtask_timing + (size_t)tid * (size_t)(MAX_COLS + 1) : NULL;
+        ProfileStats* profile = &exec->thread_profiles[tid];
+        TaskTimingStats* task_timing = &exec->thread_task_timing[tid];
+        QueueSubtaskTimingStats* queue_subtask_timing = exec->thread_queue_subtask_timing
+            ? exec->thread_queue_subtask_timing + (size_t)tid * (size_t)(MAX_COLS + 1)
+            : NULL;
         SharedGraphCacheExporter shared_cache_exporter = {0};
         long long pending_completed = 0;
         tls_profile = profile;
         tls_shared_cache_exporter = g_shared_cache_merge ? &shared_cache_exporter : NULL;
-        
+
         if (g_cols == 1) {
-            // Original 1-column parallelism (nothing to prefix)
             #pragma omp for schedule(runtime)
             for (long long i = first_task; i < active_task_end; i++) {
                 double task_t0 = PROFILE_BUILD ? omp_get_wtime() : 0.0;
@@ -6542,8 +6540,8 @@ int main(int argc, char** argv) {
                     WeightAccum initial_weight;
                     weight_accum_from_partition((int)i, &initial_weight);
                     dfs(1, (int)i, stack, &canon_state, &partial_graph, &cache, &raw_cache, &ws,
-                        &thread_polys[tid], &local_canon_calls, &local_cache_hits, &local_raw_cache_hits,
-                        &initial_weight, 1, 1, profile, &canon_scratch);
+                        &exec->thread_polys[tid], &local_canon_calls, &local_cache_hits,
+                        &local_raw_cache_hits, &initial_weight, 1, 1, profile, &canon_scratch);
                 }
                 complete_task_report_and_time(total_tasks, progress_report_step, start_time,
                                               &pending_completed, task_timing, i, task_t0);
@@ -6558,9 +6556,9 @@ int main(int argc, char** argv) {
                                                 prefix2_batch_ps + batch.start,
                                                 batch.count,
                                                 &cache, &raw_cache, &ws, &canon_state,
-                                                &canon_scratch, &partial_graph, stack, &thread_polys[tid],
-                                                &local_canon_calls, &local_cache_hits,
-                                                &local_raw_cache_hits, profile,
+                                                &canon_scratch, &partial_graph, stack,
+                                                &exec->thread_polys[tid], &local_canon_calls,
+                                                &local_cache_hits, &local_raw_cache_hits, profile,
                                                 total_tasks, progress_report_step, start_time,
                                                 &pending_completed, task_timing);
                 }
@@ -6578,8 +6576,8 @@ int main(int argc, char** argv) {
 
                 for (;;) {
                     LocalTask task;
-                    if (!local_queue_pop(&local_queue, &task)) break;
-                    execute_local_runtime_task(&task, &ctx, &thread_polys[tid], &local_queue,
+                    if (!local_queue_pop(&exec->local_queue, &task)) break;
+                    execute_local_runtime_task(&task, &ctx, &exec->thread_polys[tid], &exec->local_queue,
                                                profile, total_tasks, progress_report_step,
                                                start_time, &pending_completed, task_timing,
                                                queue_subtask_timing);
@@ -6676,8 +6674,9 @@ int main(int argc, char** argv) {
                         long long prefix_mult = (i == j) ? 1 : 2;
                         int prefix_run = (i == j) ? 2 : 1;
                         dfs(2, j, stack, &canon_state, &prefix_graph, &cache, &raw_cache, &ws,
-                            &thread_polys[tid], &local_canon_calls, &local_cache_hits, &local_raw_cache_hits,
-                            &prefix_weight, prefix_mult, prefix_run, profile, &canon_scratch);
+                            &exec->thread_polys[tid], &local_canon_calls, &local_cache_hits,
+                            &local_raw_cache_hits, &prefix_weight, prefix_mult, prefix_run,
+                            profile, &canon_scratch);
                     }
 
                     canon_state_pop(&canon_state);
@@ -6758,8 +6757,9 @@ int main(int argc, char** argv) {
                         prefix_run = 1;
                     }
                     dfs(3, k, stack, &canon_state, &prefix_graph2, &cache, &raw_cache, &ws,
-                        &thread_polys[tid], &local_canon_calls, &local_cache_hits, &local_raw_cache_hits,
-                        &prefix_weight, prefix_mult, prefix_run, profile, &canon_scratch);
+                        &exec->thread_polys[tid], &local_canon_calls, &local_cache_hits,
+                        &local_raw_cache_hits, &prefix_weight, prefix_mult, prefix_run,
+                        profile, &canon_scratch);
                 }
 
                 canon_state_pop(&canon_state);
@@ -6869,8 +6869,9 @@ int main(int argc, char** argv) {
                         prefix_run = 1;
                     }
                     dfs(4, l, stack, &canon_state, &prefix_graph3, &cache, &raw_cache, &ws,
-                        &thread_polys[tid], &local_canon_calls, &local_cache_hits, &local_raw_cache_hits,
-                        &prefix_weight, prefix_mult, prefix_run, profile, &canon_scratch);
+                        &exec->thread_polys[tid], &local_canon_calls, &local_cache_hits,
+                        &local_raw_cache_hits, &prefix_weight, prefix_mult, prefix_run,
+                        profile, &canon_scratch);
                 }
 
                 canon_state_pop(&canon_state);
@@ -6891,7 +6892,7 @@ int main(int argc, char** argv) {
         total_canon_calls += local_canon_calls;
         total_cache_hits += local_cache_hits;
         total_raw_cache_hits += local_raw_cache_hits;
-        
+
         canon_state_free(&canon_state);
         canon_scratch_free(&canon_scratch);
         nauty_workspace_free(&ws);
@@ -6907,21 +6908,77 @@ int main(int argc, char** argv) {
         free(raw_cache.coeffs);
     }
 
-    if (local_queue_active) {
-        local_queue_print_occupancy_summary(&local_queue);
-        local_queue_free(&local_queue);
+    exec->total_canon_calls = total_canon_calls;
+    exec->total_cache_hits = total_cache_hits;
+    exec->total_raw_cache_hits = total_raw_cache_hits;
+}
+
+int main(int argc, char** argv) {
+    MainOptions opts;
+    RunConfig run;
+
+    if (!parse_main_options(argc, argv, &opts)) return 1;
+    if (!init_problem_and_run_config(&opts, &run)) {
+        cleanup_run_config(&run);
+        return 1;
+    }
+    if (!prepare_run_config(&opts, &run)) {
+        cleanup_run_config(&run);
+        return 1;
+    }
+
+    const int prefix_depth = run.prefix_depth;
+    const int graph_poly_len = run.graph_poly_len;
+    const Prefix2Batch* prefix2_batches = run.prefix2_batches;
+    const PrefixId* prefix2_batch_js = run.prefix2_batch_js;
+    const long long* prefix2_batch_ps = run.prefix2_batch_ps;
+    const long long prefix2_batch_count = run.prefix2_batch_count;
+    const double prefix_generation_time = run.prefix_generation_time;
+    const int use_runtime_split_queue = run.use_runtime_split_queue;
+    const long long full_tasks = run.full_tasks;
+    const long long active_task_start = run.active_task_start;
+    const long long active_task_end = run.active_task_end;
+    const long long total_tasks = run.total_tasks;
+    const long long first_task = run.first_task;
+    const long long progress_report_step = run.progress_report_step;
+    const char* poly_out_path = opts.poly_out_path;
+    ExecutionState exec;
+
+    double start_time = omp_get_wtime();
+    if (run.total_tasks > 0) {
+        small_graph_lookup_init();
+        connected_canon_lookup_init();
+        if (PROFILE_BUILD) {
+            printf("Small-graph lookup %s: %.2f seconds\n",
+                   g_small_graph_lookup_loaded_from_file ? "load" : "initialisation",
+                   g_small_graph_lookup_init_time);
+            if (g_connected_canon_lookup_loaded) {
+                printf("Connected canonical lookup n=%d load: %.2f seconds\n",
+                       g_connected_canon_lookup_n, g_connected_canon_lookup_load_time);
+            }
+        }
+    }
+    if (!init_execution_state(&run, &exec)) {
+        cleanup_run_config(&run);
+        return 1;
+    }
+
+    execute_run_tasks(&run, start_time, &exec);
+
+    if (exec.local_queue_active) {
+        local_queue_print_occupancy_summary(&exec.local_queue);
     }
     
-    for(int i=0; i<num_threads; i++) {
-        poly_accumulate_checked(&global_poly, &thread_polys[i]);
+    for (int i = 0; i < exec.num_threads; i++) {
+        poly_accumulate_checked(&global_poly, &exec.thread_polys[i]);
     }
 
     ProfileStats total_profile = {0};
     TaskTimingStats total_task_timing = {0};
     QueueSubtaskTimingStats total_queue_subtask_timing[MAX_COLS + 1];
     memset(total_queue_subtask_timing, 0, sizeof(total_queue_subtask_timing));
-    for (int i = 0; i < num_threads; i++) {
-        ProfileStats* src = &thread_profiles[i];
+    for (int i = 0; i < exec.num_threads; i++) {
+        ProfileStats* src = &exec.thread_profiles[i];
         total_profile.canon_prepare_calls += src->canon_prepare_calls;
         total_profile.canon_prepare_accepts += src->canon_prepare_accepts;
         total_profile.canon_commit_calls += src->canon_commit_calls;
@@ -7003,30 +7060,27 @@ int main(int argc, char** argv) {
             }
         }
 
-        total_task_timing.task_count += thread_task_timing[i].task_count;
-        total_task_timing.task_time_sum += thread_task_timing[i].task_time_sum;
-        if (thread_task_timing[i].task_time_max > total_task_timing.task_time_max) {
-            total_task_timing.task_time_max = thread_task_timing[i].task_time_max;
-            total_task_timing.task_max_index = thread_task_timing[i].task_max_index;
+        total_task_timing.task_count += exec.thread_task_timing[i].task_count;
+        total_task_timing.task_time_sum += exec.thread_task_timing[i].task_time_sum;
+        if (exec.thread_task_timing[i].task_time_max > total_task_timing.task_time_max) {
+            total_task_timing.task_time_max = exec.thread_task_timing[i].task_time_max;
+            total_task_timing.task_max_index = exec.thread_task_timing[i].task_max_index;
         }
         for (int k = 0; k < TASK_PROFILE_TOPK; k++) {
             task_timing_insert_topk(&total_task_timing,
-                                    thread_task_timing[i].top_indices[k],
-                                    thread_task_timing[i].top_times[k]);
+                                    exec.thread_task_timing[i].top_indices[k],
+                                    exec.thread_task_timing[i].top_times[k]);
         }
-        if (thread_queue_subtask_timing) {
+        if (exec.thread_queue_subtask_timing) {
             QueueSubtaskTimingStats* src_sub =
-                thread_queue_subtask_timing + (size_t)i * (size_t)(MAX_COLS + 1);
+                exec.thread_queue_subtask_timing + (size_t)i * (size_t)(MAX_COLS + 1);
             for (int d = 0; d <= MAX_COLS; d++) {
                 queue_subtask_merge(&total_queue_subtask_timing[d], &src_sub[d]);
             }
         }
     }
 
-    free(thread_polys);
-    free(thread_profiles);
-    free(thread_task_timing);
-    free(thread_queue_subtask_timing);
+    cleanup_execution_state(&exec);
     progress_reporter_finish(&progress_reporter);
 
     double end_time = omp_get_wtime();
@@ -7037,10 +7091,10 @@ int main(int argc, char** argv) {
     if (prefix_depth > 0) {
         printf("Total elapsed including prefix generation: %.2f seconds.\n", total_elapsed);
     }
-    printf("Canonicalisation calls: %lld\n", total_canon_calls);
-    printf("Canonical cache hits: %lld (%.1f%%)\n", total_cache_hits,
-           total_canon_calls > 0 ? 100.0 * total_cache_hits / total_canon_calls : 0.0);
-    printf("Raw cache hits: %lld\n", total_raw_cache_hits);
+    printf("Canonicalisation calls: %lld\n", exec.total_canon_calls);
+    printf("Canonical cache hits: %lld (%.1f%%)\n", exec.total_cache_hits,
+           exec.total_canon_calls > 0 ? 100.0 * exec.total_cache_hits / exec.total_canon_calls : 0.0);
+    printf("Raw cache hits: %lld\n", exec.total_raw_cache_hits);
     if (PROFILE_BUILD) {
         printf("Profile:\n");
         printf("  canon_state_prepare_push: %lld calls, %.3fs\n",
