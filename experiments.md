@@ -6357,3 +6357,43 @@
   - most of the remaining equal-case traffic is concentrated in a handful of fixed small rebuild shapes, so specializing those shapes pays better than broader prepare-loop rewrites
   - single-thread unprofiled runs were a clearer acceptance signal than profiled runs or multi-thread timings for this class of micro-optimization
 - Outcome: accepted on `main`.
+
+### Experiment 158: Generalize connected canonical lookup infrastructure to `n <= 10`
+- Goal: remove the hardwired `n=9` assumptions from the offline connected-canonical lookup path so the next practical table size, `n=10`, can be supported without another solver refactor.
+- Change:
+  - replace the `n=9`-specific in-memory lookup entry type and globals with a single runtime-loaded table carrying its `n` in the file header
+  - add a generic solver path that accepts any loaded connected-canonical table with `n <= 10`
+  - switch the file format to an explicit packed payload size of `8 + 4 * (n + 1)` bytes per entry, rather than `sizeof(struct)`, so existing `n=9` tables still load and `n=10` tables avoid padding waste
+  - update `connected_canon_lookup_gen` to take `n` at runtime instead of relying on a compile-time constant
+  - default loader search:
+    - `RECT_CONNECTED_CANON_LOOKUP` if set
+    - otherwise try `connected_canon_lookup_n10.bin`, then `connected_canon_lookup_n9.bin`
+- Practical sizing check using `geng -u -c`:
+  - `n=9`: `261080` connected unlabeled graphs
+  - `n=10`: `11716571` connected unlabeled graphs
+  - with the packed payload, an `n=10` table would be about `11716571 * 52 = 609261692` bytes, about `0.57 GiB`
+  - `n=11` counting was already materially slower than `n=10`, so it is beyond the practical range for this style of eager startup table
+- Validation:
+  - build:
+    - `make partition_poly_7 partition_poly_7_profile connected_canon_lookup_gen`
+  - default no-table solver still runs normally:
+    - `./partition_poly_7 7 6 --task-end 1`
+    - `Worker Complete in 10.34 seconds`
+  - generic generator end-to-end on `n=9`:
+    - `./third_party/nauty-build/geng -q -c 9 | ./connected_canon_lookup_gen /tmp/connected_canon_lookup_n9.bin 9`
+    - `Wrote /tmp/connected_canon_lookup_n9.bin with 261080 connected canonical graphs on n=9 in 0.46 seconds`
+    - `Entry payload bytes: 48`
+  - generic loader/solver path with that generated table:
+    - `env RECT_CONNECTED_CANON_LOOKUP=/tmp/connected_canon_lookup_n9.bin OMP_NUM_THREADS=1 ./partition_poly_7_profile 7 6 --task-end 1`
+    - startup prints `Connected canonical lookup n=9 load: 0.01 seconds`
+    - `n=9 connected-lookup: 7277 calls`
+    - `n=9 hard-miss: 0`
+  - unprofiled single-thread run with the generated `n=9` table:
+    - `env RECT_CONNECTED_CANON_LOOKUP=/tmp/connected_canon_lookup_n9.bin OMP_NUM_THREADS=1 ./partition_poly_7 7 6 --task-end 1`
+    - `Worker Complete in 10.37 seconds`
+    - `Canonicalisation calls: 163180`
+- Interpretation:
+  - this is primarily infrastructure, not a new algorithmic optimization
+  - the generic `n=9` round-trip proves the packed file format and runtime-selected loader work correctly
+  - the count data make the roadmap concrete: `n=10` is the next and likely last practical fully loaded connected-canonical table in this design
+- Outcome: accepted on `main`.

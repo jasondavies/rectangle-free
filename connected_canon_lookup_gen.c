@@ -6,7 +6,7 @@
 
 typedef struct {
     uint64_t mask;
-    int32_t coeffs[CONNECTED_CANON_LOOKUP_N + 1];
+    int32_t coeffs[CONNECTED_CANON_LOOKUP_MAX_N + 1];
 } GeneratorEntry;
 
 static void* checked_realloc(void* ptr, size_t size, const char* label) {
@@ -27,6 +27,7 @@ static int parse_graph6_line(const char* line, Graph* out) {
     if (n <= 0 || n > MAXN_NAUTY) return 0;
 
     out->n = (uint8_t)n;
+    out->vertex_mask = graph_row_mask(n);
     memset(out->adj, 0, sizeof(out->adj));
 
     int payload_idx = 1;
@@ -61,10 +62,12 @@ static int generator_entry_cmp(const void* lhs, const void* rhs) {
 }
 
 int main(int argc, char** argv) {
-    const char* out_path = (argc >= 2) ? argv[1] : "connected_canon_lookup_n9.bin";
+    int target_n = (argc >= 3) ? atoi(argv[2]) : 9;
+    const char* out_path = (argc >= 2) ? argv[1] :
+        (target_n == 10 ? "connected_canon_lookup_n10.bin" : "connected_canon_lookup_n9.bin");
 
-    if (CONNECTED_CANON_LOOKUP_N > MAXN_NAUTY) {
-        fprintf(stderr, "CONNECTED_CANON_LOOKUP_N exceeds MAXN_NAUTY\n");
+    if (target_n <= 0 || target_n > CONNECTED_CANON_LOOKUP_MAX_N) {
+        fprintf(stderr, "target n must be in [1, %d]\n", CONNECTED_CANON_LOOKUP_MAX_N);
         return 1;
     }
 
@@ -77,7 +80,7 @@ int main(int argc, char** argv) {
     RowGraphCache raw_cache = {0};
     cache.mask = CACHE_MASK;
     cache.probe = CACHE_PROBE;
-    cache.poly_len = CONNECTED_CANON_LOOKUP_N + 1;
+    cache.poly_len = target_n + 1;
     cache.keys = checked_aligned_alloc(64, sizeof(CacheKey) * CACHE_SIZE, "cache_keys");
     cache.stamps = checked_aligned_alloc(64, sizeof(uint32_t) * CACHE_SIZE, "cache_stamps");
     cache.rows = checked_aligned_alloc(64, sizeof(AdjWord) * CACHE_SIZE * MAXN_NAUTY, "cache_rows");
@@ -89,7 +92,7 @@ int main(int argc, char** argv) {
 
     raw_cache.mask = RAW_CACHE_MASK;
     raw_cache.probe = RAW_CACHE_PROBE;
-    raw_cache.poly_len = CONNECTED_CANON_LOOKUP_N + 1;
+    raw_cache.poly_len = target_n + 1;
     raw_cache.keys = checked_aligned_alloc(64, sizeof(CacheKey) * RAW_CACHE_SIZE, "raw_cache_keys");
     raw_cache.stamps = checked_aligned_alloc(64, sizeof(uint32_t) * RAW_CACHE_SIZE, "raw_cache_stamps");
     raw_cache.rows =
@@ -101,7 +104,7 @@ int main(int argc, char** argv) {
     memset(raw_cache.stamps, 0, sizeof(uint32_t) * RAW_CACHE_SIZE);
 
     NautyWorkspace ws = {0};
-    nauty_workspace_init(&ws, CONNECTED_CANON_LOOKUP_N);
+    nauty_workspace_init(&ws, target_n);
 
     size_t capacity = 300000;
     size_t count = 0;
@@ -116,7 +119,7 @@ int main(int argc, char** argv) {
     while (fgets(line, sizeof(line), stdin)) {
         Graph g;
         if (!parse_graph6_line(line, &g)) continue;
-        if (g.n != CONNECTED_CANON_LOOKUP_N) continue;
+        if (g.n != target_n) continue;
 
         GraphPoly poly;
         solve_graph_poly(&g, &cache, &raw_cache, &ws,
@@ -131,7 +134,7 @@ int main(int argc, char** argv) {
         }
 
         entries[count].mask = graph_pack_upper_mask64(&canon);
-        for (int i = 0; i <= CONNECTED_CANON_LOOKUP_N; i++) {
+        for (int i = 0; i <= target_n; i++) {
             PolyCoeff coeff = (i <= poly.deg) ? poly.coeffs[i] : 0;
             if (coeff < INT32_MIN || coeff > INT32_MAX) {
                 fprintf(stderr, "Coefficient out of int32 range for mask %llu\n",
@@ -162,20 +165,29 @@ int main(int argc, char** argv) {
     ConnectedCanonLookupHeader header = {
         .magic = CONNECTED_CANON_LOOKUP_MAGIC,
         .version = CONNECTED_CANON_LOOKUP_VERSION,
-        .n = CONNECTED_CANON_LOOKUP_N,
+        .n = (uint32_t)target_n,
         .count = (uint32_t)count,
     };
-    if (fwrite(&header, sizeof(header), 1, out) != 1 ||
-        fwrite(entries, sizeof(*entries), count, out) != count) {
+    if (fwrite(&header, sizeof(header), 1, out) != 1) {
         perror("fwrite connected canonical lookup");
         fclose(out);
         return 1;
+    }
+    for (size_t i = 0; i < count; i++) {
+        if (fwrite(&entries[i].mask, sizeof(entries[i].mask), 1, out) != 1 ||
+            fwrite(entries[i].coeffs, sizeof(entries[i].coeffs[0]), (size_t)target_n + 1, out) !=
+                (size_t)target_n + 1) {
+            perror("fwrite connected canonical lookup");
+            fclose(out);
+            return 1;
+        }
     }
     fclose(out);
 
     double elapsed = omp_get_wtime() - start;
     printf("Wrote %s with %zu connected canonical graphs on n=%d in %.2f seconds\n",
-           out_path, count, CONNECTED_CANON_LOOKUP_N, elapsed);
+           out_path, count, target_n, elapsed);
+    printf("Entry payload bytes: %zu\n", connected_canon_lookup_entry_file_size(target_n));
     printf("Generator stats: canon_calls=%lld cache_hits=%lld raw_hits=%lld max_abs_coeff=%lld\n",
            local_canon_calls, local_cache_hits, local_raw_cache_hits, max_abs_coeff);
 
