@@ -2,6 +2,31 @@
 
 // --- INITIALISATION ---
 
+int num_partitions = 0;
+int perm_count = 0;
+int max_partition_capacity = 0;
+int max_complex_per_partition = 0;
+Partition* partitions = NULL;
+int (*perms)[MAX_ROWS] = NULL;
+uint16_t* perm_table = NULL;
+uint16_t* perm_order_by_value = NULL;
+uint16_t* perm_value_prefix_end = NULL;
+uint16_t* partition_id_lookup = NULL;
+uint32_t partition_id_lookup_size = 0;
+uint64_t factorial[20];
+ComplexMask* overlap_mask = NULL;
+ComplexMask* intra_mask = NULL;
+Poly* partition_weight_poly = NULL;
+uint8_t* partition_weight4 = NULL;
+#if RECT_COUNT_K4_FEASIBILITY
+uint32_t* pair_shadow_mask = NULL;
+uint8_t* pair_shadow_pairs = NULL;
+uint8_t* suffix_min_pairs = NULL;
+int pair_index[MAX_ROWS][MAX_ROWS];
+int num_row_pairs = 0;
+int min_partition_pairs = 0;
+#endif
+
 static int bell_number_upper_bound(int rows) {
     static const int bell_numbers[] = {0, 1, 2, 5, 15, 52, 203, 877};
     if (rows < 0 || rows >= (int)(sizeof(bell_numbers) / sizeof(bell_numbers[0]))) {

@@ -22,7 +22,7 @@ LDFLAGS ?= $(NAUTY_BUILD_DIR)/nautyT.a -lm $(OPENMP_LDFLAGS)
 PARTITION_POLY_7_NAUTY_CFLAGS ?= -DWORDSIZE=64 -DMAXN=WORDSIZE
 PARTITION_POLY_7_CACHE_CFLAGS ?= -DRAW_CACHE_BITS=15 -DRAW_CACHE_PROBE=12
 PARTITION_POLY_7_LDFLAGS ?= $(NAUTY_BUILD_DIR)/nautyTL1.a -lm $(OPENMP_LDFLAGS)
-PARTITION_SHARED_SRCS := partition_poly.c src/runtime.c src/partitions.c src/poly.c src/graph.c src/cache.c src/main.c src/solver.c src/canon.c
+PARTITION_SHARED_SRCS := src/runtime.c src/partitions.c src/poly.c src/graph.c src/cache.c src/main.c src/solver.c src/canon.c
 
 NVCC ?= nvcc
 NVCCFLAGS ?= -O3 -arch=sm_89 -std=c++17 -I./inspiration/cpads/include

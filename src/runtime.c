@@ -1,5 +1,35 @@
 #include "partition_poly.h"
 
+PrefixId* g_live_prefix2_i = NULL;
+PrefixId* g_live_prefix2_j = NULL;
+long long g_live_prefix2_count = 0;
+
+long long completed_tasks = 0;
+Poly global_poly = {0};
+
+int g_rows = DEFAULT_ROWS;
+int g_cols = DEFAULT_COLS;
+ProgressReporter progress_reporter;
+int g_use_raw_cache = 1;
+long long progress_last_reported = 0;
+int g_adaptive_subdivide = 0;
+int g_adaptive_max_depth = 3;
+long long g_adaptive_work_budget = 0;
+__thread ProfileStats* tls_profile = NULL;
+__thread GraphHardStats* tls_hard_graph_stats = NULL;
+__thread long long* tls_adaptive_work_counter = NULL;
+__thread SharedGraphCacheExporter* tls_shared_cache_exporter = NULL;
+const char* g_task_times_out_path = NULL;
+long long g_task_times_first_task = 0;
+long long g_task_times_count = 0;
+double* g_task_times_values = NULL;
+int g_effective_prefix_depth = 0;
+double g_queue_profile_report_step = 0.0;
+int g_shared_cache_merge = 0;
+int g_shared_cache_bits = 16;
+int g_profile_separators = 0;
+SharedGraphCache* g_shared_graph_cache = NULL;
+
 void task_timing_insert_topk(TaskTimingStats* stats, long long task_index, double elapsed) {
     for (int i = 0; i < TASK_PROFILE_TOPK; i++) {
         if (elapsed > stats->top_times[i]) {

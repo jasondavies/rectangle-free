@@ -2,6 +2,21 @@
 
 // --- GRAPH CANONICALISATION AND LOOKUPS ---
 
+int g_small_graph_lookup_ready = 0;
+double g_small_graph_lookup_init_time = 0.0;
+int g_small_graph_lookup_loaded_from_file = 0;
+int32_t* g_small_graph_lookup_coeffs[SMALL_GRAPH_LOOKUP_MAX_N + 1] = {0};
+uint8_t g_small_graph_edge_u[SMALL_GRAPH_LOOKUP_MAX_N + 1][21];
+uint8_t g_small_graph_edge_v[SMALL_GRAPH_LOOKUP_MAX_N + 1][21];
+uint32_t g_small_graph_graph_count[SMALL_GRAPH_LOOKUP_MAX_N + 1] = {0};
+uint8_t g_small_graph_edge_count[SMALL_GRAPH_LOOKUP_MAX_N + 1] = {0};
+ConnectedCanonLookupEntry* g_connected_canon_lookup = NULL;
+uint32_t g_connected_canon_lookup_count = 0;
+int g_connected_canon_lookup_ready = 0;
+int g_connected_canon_lookup_loaded = 0;
+int g_connected_canon_lookup_n = 0;
+double g_connected_canon_lookup_load_time = 0.0;
+
 static inline setword pack_row_to_nauty1(uint64_t row_bits, int n) {
     if (n < 64) row_bits &= (1ULL << n) - 1ULL;
     setword row = 0;
