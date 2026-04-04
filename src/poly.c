@@ -25,7 +25,7 @@ Poly poly_one() {
 
 PolyCoeff poly_eval(Poly p, long long x);
 
-static long long parse_ll_or_die(const char* text, const char* label) {
+long long parse_ll_or_die(const char* text, const char* label) {
     char* end = NULL;
     errno = 0;
     long long value = strtoll(text, &end, 10);
@@ -67,7 +67,7 @@ static inline void poly_add_ref_checked(const Poly* a, const Poly* b, Poly* out)
     if (r != out) *out = *r;
 }
 
-static inline void poly_accumulate_checked(Poly* acc, const Poly* add) {
+void poly_accumulate_checked(Poly* acc, const Poly* add) {
     int old_deg = acc->deg;
     if (add->deg > old_deg) {
         memset(acc->coeffs + old_deg + 1, 0,
@@ -140,7 +140,7 @@ Poly poly_mul(Poly a, Poly b) {
     return r;
 }
 
-static inline void poly_scale_ref(const Poly* a, long long s, Poly* out) {
+void poly_scale_ref(const Poly* a, long long s, Poly* out) {
     if (s == 0) {
         poly_zero(out);
         return;
@@ -205,7 +205,7 @@ static inline void graph_poly_zero(GraphPoly* p) {
     memset(p->coeffs, 0, sizeof(p->coeffs));
 }
 
-static inline void graph_poly_one_ref(GraphPoly* p) {
+void graph_poly_one_ref(GraphPoly* p) {
     graph_poly_zero(p);
     p->coeffs[0] = 1;
 }
@@ -221,7 +221,7 @@ static inline void graph_poly_to_poly(const GraphPoly* src, Poly* dst) {
     memcpy(dst->coeffs, src->coeffs, (size_t)(src->deg + 1) * sizeof(src->coeffs[0]));
 }
 
-static inline void poly_mul_graph_ref(const Poly* a, const GraphPoly* b, Poly* out) {
+void poly_mul_graph_ref(const Poly* a, const GraphPoly* b, Poly* out) {
     if ((a->deg == 0 && a->coeffs[0] == 0) || (b->deg == 0 && b->coeffs[0] == 0)) {
         poly_zero(out);
         return;
@@ -243,7 +243,7 @@ static inline void poly_mul_graph_ref(const Poly* a, const GraphPoly* b, Poly* o
     if (r != out) *out = *r;
 }
 
-static inline void graph_poly_mul_ref(const GraphPoly* a, const GraphPoly* b, GraphPoly* out) {
+void graph_poly_mul_ref(const GraphPoly* a, const GraphPoly* b, GraphPoly* out) {
     if ((a->deg == 0 && a->coeffs[0] == 0) || (b->deg == 0 && b->coeffs[0] == 0)) {
         graph_poly_zero(out);
         return;
@@ -265,7 +265,7 @@ static inline void graph_poly_mul_ref(const GraphPoly* a, const GraphPoly* b, Gr
     if (r != out) *out = *r;
 }
 
-static inline void graph_poly_sub_ref(const GraphPoly* a, const GraphPoly* b, GraphPoly* out) {
+void graph_poly_sub_ref(const GraphPoly* a, const GraphPoly* b, GraphPoly* out) {
     GraphPoly tmp;
     GraphPoly* r = out;
     if (out == a || out == b) r = &tmp;
@@ -279,7 +279,7 @@ static inline void graph_poly_sub_ref(const GraphPoly* a, const GraphPoly* b, Gr
     if (r != out) *out = *r;
 }
 
-static inline void graph_poly_mul_linear_ref(const GraphPoly* a, int c, GraphPoly* out) {
+void graph_poly_mul_linear_ref(const GraphPoly* a, int c, GraphPoly* out) {
     if (a->deg == 0 && a->coeffs[0] == 0) {
         graph_poly_zero(out);
         return;
@@ -301,12 +301,12 @@ static inline void graph_poly_mul_linear_ref(const GraphPoly* a, int c, GraphPol
 }
 
 #if RECT_COUNT_K4
-static inline void graph_poly_set_count4(uint64_t count, GraphPoly* out) {
+void graph_poly_set_count4(uint64_t count, GraphPoly* out) {
     out->deg = 0;
     out->coeffs[0] = (PolyCoeff)count;
 }
 
-static inline uint64_t graph_poly_get_count4(const GraphPoly* p) {
+uint64_t graph_poly_get_count4(const GraphPoly* p) {
     return (uint64_t)p->coeffs[0];
 }
 
@@ -325,11 +325,11 @@ static uint64_t eval_int32_poly_at_4(const int32_t* coeffs, int deg) {
     return (uint64_t)acc;
 }
 
-static uint64_t small_graph_lookup_load_count4(int n, uint32_t mask) {
+uint64_t small_graph_lookup_load_count4(int n, uint32_t mask) {
     return eval_int32_poly_at_4(small_graph_poly_slot(n, mask), n);
 }
 
-static uint64_t connected_canon_lookup_load_count4(const Graph* g) {
+uint64_t connected_canon_lookup_load_count4(const Graph* g) {
     if (!g_connected_canon_lookup_ready || g->n != g_connected_canon_lookup_n) return UINT64_MAX;
 
     uint64_t mask = graph_pack_upper_mask64(g);
@@ -420,7 +420,7 @@ static uint64_t count_graph_4_rec(const Graph* g, AdjWord uncoloured,
     return total;
 }
 
-static uint64_t count_graph_4_dsat(const Graph* g) {
+uint64_t count_graph_4_dsat(const Graph* g) {
     uint8_t forbid[MAXN_NAUTY] = {0};
     return count_graph_4_rec(g, (AdjWord)g->vertex_mask, forbid, 0);
 }
@@ -785,7 +785,7 @@ static void write_poly_file_stream(FILE* f, const Poly* poly, const PolyFileMeta
     fprintf(f, "end\n");
 }
 
-static void write_poly_file(const char* path, const Poly* poly, const PolyFileMeta* meta) {
+void write_poly_file(const char* path, const Poly* poly, const PolyFileMeta* meta) {
     FILE* f = fopen(path, "w");
     if (!f) {
         fprintf(stderr, "Failed to open %s for writing\n", path);

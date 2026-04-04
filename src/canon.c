@@ -1037,7 +1037,7 @@ static inline uint32_t small_graph_edge_total(int n) {
     return (uint32_t)(n * (n - 1) / 2);
 }
 
-static inline int32_t* small_graph_poly_slot(int n, uint32_t mask) {
+int32_t* small_graph_poly_slot(int n, uint32_t mask) {
     return g_small_graph_lookup_coeffs[n] + (size_t)mask * (size_t)small_graph_stride(n);
 }
 
@@ -1094,7 +1094,7 @@ static uint32_t small_graph_pack_mask(const Graph* g) {
     return mask;
 }
 
-static uint64_t graph_pack_upper_mask64(const Graph* g) {
+uint64_t graph_pack_upper_mask64(const Graph* g) {
     int edge_total = g->n * (g->n - 1) / 2;
     if (edge_total > 64) {
         fprintf(stderr, "graph_pack_upper_mask64 only supports graphs with at most 64 edge bits\n");
@@ -1269,7 +1269,7 @@ static const char* connected_canon_lookup_default_path(void) {
     return NULL;
 }
 
-static int connected_canon_lookup_entry_cmp(const void* lhs, const void* rhs) {
+int connected_canon_lookup_entry_cmp(const void* lhs, const void* rhs) {
     const ConnectedCanonLookupEntry* a = lhs;
     const ConnectedCanonLookupEntry* b = rhs;
     if (a->mask < b->mask) return -1;
@@ -1366,7 +1366,7 @@ static int connected_canon_lookup_load_graph_poly(const Graph* g, GraphPoly* out
     return 1;
 }
 
-static inline uint64_t graph_row_mask(int n) {
+uint64_t graph_row_mask(int n) {
     if (n >= 64) return ~0ULL;
     if (n <= 0) return 0ULL;
     return (1ULL << n) - 1ULL;

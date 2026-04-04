@@ -93,11 +93,7 @@ static void small_graph_lookup_init(void);
 static void small_graph_lookup_free(void);
 static void connected_canon_lookup_init(void);
 static void connected_canon_lookup_free(void);
-static inline int32_t* small_graph_poly_slot(int n, uint32_t mask);
 static uint32_t small_graph_pack_mask(const Graph* g);
-static uint64_t graph_pack_upper_mask64(const Graph* g);
-static int connected_canon_lookup_entry_cmp(const void* lhs, const void* rhs);
-static inline uint64_t graph_row_mask(int n);
 static uint32_t graph_build_dense_rows(const Graph* g, AdjWord* rows);
 static void graph_apply_permutation_dense_rows(uint32_t n, const AdjWord* dense_rows,
                                                const uint8_t* new_index_of_old, Graph* dst);
@@ -123,8 +119,6 @@ static void usage(const char* prog) {
             prog);
 }
 
-// Polynomial arithmetic and polynomial-format I/O live separately.
-#include "src/poly.c"
 // Canonical-state, DFS, and runtime-prefix replay logic live separately.
 #include "src/canon.c"
 // Graph solving and canonical cache logic live separately.

@@ -602,8 +602,33 @@ void weight_accum_scale_to_poly(const WeightAccum* weight_prod, long long mult_c
                                 long long row_orbit, uint64_t graph_count4, Poly* out);
 #endif
 
+long long parse_ll_or_die(const char* text, const char* label);
+void poly_zero(Poly* p);
 void poly_one_ref(Poly* p);
+void poly_accumulate_checked(Poly* acc, const Poly* add);
 void poly_mul_ref(const Poly* a, const Poly* b, Poly* out);
+void poly_scale_ref(const Poly* a, long long s, Poly* out);
 void poly_mul_falling_ref(const Poly* p, int start, int count, Poly* out);
+void poly_mul_graph_ref(const Poly* a, const GraphPoly* b, Poly* out);
+void graph_poly_one_ref(GraphPoly* p);
+void graph_poly_mul_ref(const GraphPoly* a, const GraphPoly* b, GraphPoly* out);
+void graph_poly_sub_ref(const GraphPoly* a, const GraphPoly* b, GraphPoly* out);
+void graph_poly_mul_linear_ref(const GraphPoly* a, int c, GraphPoly* out);
+#if RECT_COUNT_K4
+void graph_poly_set_count4(uint64_t count, GraphPoly* out);
+uint64_t graph_poly_get_count4(const GraphPoly* p);
+uint64_t small_graph_lookup_load_count4(int n, uint32_t mask);
+uint64_t connected_canon_lookup_load_count4(const Graph* g);
+uint64_t count_graph_4_dsat(const Graph* g);
+#endif
+PolyCoeff poly_eval(Poly p, long long x);
+void print_u128(PolyCoeff n);
+void print_poly(Poly p);
+void write_poly_file(const char* path, const Poly* poly, const PolyFileMeta* meta);
+
+int32_t* small_graph_poly_slot(int n, uint32_t mask);
+uint64_t graph_pack_upper_mask64(const Graph* g);
+int connected_canon_lookup_entry_cmp(const void* lhs, const void* rhs);
+uint64_t graph_row_mask(int n);
 
 #endif
