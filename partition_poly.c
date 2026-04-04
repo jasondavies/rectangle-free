@@ -70,33 +70,5 @@ int g_connected_canon_lookup_loaded = 0;
 int g_connected_canon_lookup_n = 0;
 double g_connected_canon_lookup_load_time = 0.0;
 
-static inline void graph_cache_load_poly(const GraphCache* cache, int slot, GraphPoly* value);
-static inline uint32_t graph_cache_next_stamp(GraphCache* cache);
-static inline void graph_cache_touch_slot(GraphCache* cache, int slot);
-static inline int graph_cache_slot_matches_sig(const GraphCache* cache, int slot, uint64_t key_hash,
-                                               uint32_t key_n, const uint64_t* sig);
-void store_graph_cache_entry(GraphCache* cache, uint64_t key_hash, uint32_t key_n, const Graph* g,
-                             uint64_t row_mask, const GraphPoly* value);
-static inline void row_graph_cache_load_poly(const RowGraphCache* cache, int slot, GraphPoly* value);
-static inline uint32_t row_graph_cache_next_stamp(RowGraphCache* cache);
-static inline void row_graph_cache_touch_slot(RowGraphCache* cache, int slot);
-static inline int row_graph_cache_slot_matches_graph(const RowGraphCache* cache, int slot,
-                                                     uint64_t key_hash, uint32_t key_n,
-                                                     const Graph* g, AdjWord row_mask);
-static int row_graph_cache_lookup_poly(RowGraphCache* cache, uint64_t key_hash, uint32_t key_n,
-                                       const Graph* g, AdjWord row_mask, GraphPoly* value,
-                                       int touch);
-static void store_row_graph_cache_entry(RowGraphCache* cache, uint64_t key_hash, uint32_t key_n,
-                                        const Graph* g, AdjWord row_mask,
-                                        const GraphPoly* value);
-static uint32_t small_graph_pack_mask(const Graph* g);
-static uint32_t graph_build_dense_rows(const Graph* g, AdjWord* rows);
-static void graph_apply_permutation_dense_rows(uint32_t n, const AdjWord* dense_rows,
-                                               const uint8_t* new_index_of_old, Graph* dst);
-static void get_canonical_graph_from_dense_rows(int n, const AdjWord* rows, Graph* canon,
-                                                NautyWorkspace* ws, ProfileStats* profile);
-
 // Canonical-state, DFS, and runtime-prefix replay logic live separately.
 #include "src/canon.c"
-// Graph solving and canonical cache logic live separately.
-#include "src/solver.c"

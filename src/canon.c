@@ -24,6 +24,13 @@ static inline const uint16_t* canon_state_equal_perm_row_const(const CanonState*
     return st->equal_perm + (size_t)depth * (size_t)st->limit;
 }
 
+static void graph_apply_permutation_dense_rows(uint32_t n, const AdjWord* dense_rows,
+                                               const uint8_t* new_index_of_old, Graph* dst);
+static inline void graph_cache_load_poly(const GraphCache* cache, int slot, GraphPoly* value);
+static inline void row_graph_cache_load_poly(const RowGraphCache* cache, int slot, GraphPoly* value);
+void store_graph_cache_entry(GraphCache* cache, uint64_t key_hash, uint32_t key_n, const Graph* g,
+                             uint64_t row_mask, const GraphPoly* value);
+
 static void solve_structure_with_row_orbit(const Graph* partial_graph, long long row_orbit,
                                            RowGraphCache* cache, RowGraphCache* raw_cache,
                                            NautyWorkspace* ws, long long* local_canon_calls,
@@ -31,11 +38,6 @@ static void solve_structure_with_row_orbit(const Graph* partial_graph, long long
                                            long long* local_raw_cache_hits,
                                            const WeightAccum* weight_prod, long long mult_coeff,
                                            ProfileStats* profile, Poly* out_result);
-static void solve_graph_poly(const Graph* input_g, RowGraphCache* cache, RowGraphCache* raw_cache,
-                             NautyWorkspace* ws, long long* local_canon_calls,
-                             long long* local_cache_hits, long long* local_raw_cache_hits,
-                             ProfileStats* profile, GraphPoly* out);
-
 static inline int row_insert_sorted(uint16_t* row, int len, uint16_t val) {
     switch (len) {
         case 0:
@@ -879,8 +881,8 @@ void nauty_workspace_free(NautyWorkspace* ws) {
     memset(ws, 0, sizeof(*ws));
 }
 
-static void get_canonical_graph_from_dense_rows(int n, const AdjWord* rows, Graph* canon,
-                                                NautyWorkspace* ws, ProfileStats* profile) {
+void get_canonical_graph_from_dense_rows(int n, const AdjWord* rows, Graph* canon,
+                                         NautyWorkspace* ws, ProfileStats* profile) {
     double total_t0 = 0.0;
     double phase_t0 = 0.0;
     
@@ -1042,7 +1044,7 @@ static uint32_t small_graph_pack_mask_from_rows(const uint8_t* rows, int n) {
     return mask;
 }
 
-static uint32_t small_graph_pack_mask(const Graph* g) {
+uint32_t small_graph_pack_mask(const Graph* g) {
     AdjWord rows[MAXN_NAUTY];
     uint32_t n = graph_build_dense_rows(g, rows);
     uint32_t mask = 0;
@@ -1218,7 +1220,7 @@ static void small_graph_lookup_load_poly(int n, uint32_t mask, Poly* out) {
     for (int i = 0; i <= n; i++) out->coeffs[i] = coeffs[i];
 }
 
-static void small_graph_lookup_load_graph_poly(int n, uint32_t mask, GraphPoly* out) {
+void small_graph_lookup_load_graph_poly(int n, uint32_t mask, GraphPoly* out) {
     const int32_t* coeffs = small_graph_poly_slot(n, mask);
     out->deg = (uint8_t)n;
     for (int i = 0; i <= n; i++) out->coeffs[i] = coeffs[i];
@@ -1311,7 +1313,7 @@ void connected_canon_lookup_free(void) {
     g_connected_canon_lookup_load_time = 0.0;
 }
 
-static int connected_canon_lookup_load_graph_poly(const Graph* g, GraphPoly* out) {
+int connected_canon_lookup_load_graph_poly(const Graph* g, GraphPoly* out) {
     if (!g_connected_canon_lookup_ready || g->n != g_connected_canon_lookup_n) return 0;
 
     uint64_t mask = graph_pack_upper_mask64(g);
@@ -1333,7 +1335,7 @@ uint64_t graph_row_mask(int n) {
     return (1ULL << n) - 1ULL;
 }
 
-static uint32_t graph_build_dense_rows(const Graph* g, AdjWord* rows) {
+uint32_t graph_build_dense_rows(const Graph* g, AdjWord* rows) {
     uint64_t active = g->vertex_mask & ADJWORD_MASK;
     uint32_t n = (uint32_t)__builtin_popcountll(active);
 
@@ -1433,13 +1435,13 @@ static uint32_t graph_build_dense_rows_from_mask(const Graph* src, uint64_t mask
     return n;
 }
 
-static void induced_subgraph_from_mask(const Graph* src, uint64_t mask, Graph* dst) {
+void induced_subgraph_from_mask(const Graph* src, uint64_t mask, Graph* dst) {
     uint32_t n = graph_build_dense_rows_from_mask(src, mask, dst->adj);
     dst->n = (uint8_t)n;
     dst->vertex_mask = graph_row_mask((int)n);
 }
 
-static int graph_collect_components(const Graph* g, uint64_t* component_masks) {
+int graph_collect_components(const Graph* g, uint64_t* component_masks) {
     uint64_t remaining = g->vertex_mask;
     int count = 0;
     while (remaining) {
@@ -1463,7 +1465,7 @@ static int graph_collect_components(const Graph* g, uint64_t* component_masks) {
     return count;
 }
 
-static int graph_has_articulation_point(const Graph* g) {
+int graph_has_articulation_point(const Graph* g) {
     if (g->n <= 2) return 0;
     uint64_t full = g->vertex_mask;
     uint64_t rem_vertices = full;
@@ -1491,7 +1493,7 @@ static int graph_has_articulation_point(const Graph* g) {
     return 0;
 }
 
-static int graph_has_k2_separator(const Graph* g) {
+int graph_has_k2_separator(const Graph* g) {
     if (g->n <= 3) return 0;
     uint64_t full = g->vertex_mask;
     uint64_t rem_u = full;
@@ -1599,7 +1601,7 @@ static inline uint64_t hash_dense_rows(uint32_t n, const AdjWord* rows) {
     return h;
 }
 
-static inline uint64_t graph_fill_dense_key_rows(const Graph* g, AdjWord row_mask, AdjWord* rows) {
+uint64_t graph_fill_dense_key_rows(const Graph* g, AdjWord row_mask, AdjWord* rows) {
     if (g->vertex_mask == graph_row_mask(g->n)) {
         uint64_t h = 14695981039346656037ULL;
         for (uint32_t i = 0; i < g->n; i++) {
@@ -1707,9 +1709,9 @@ static int graph_cache_lookup_poly(GraphCache* cache, uint64_t key_hash, uint32_
     return 0;
 }
 
-static int row_graph_cache_lookup_poly(RowGraphCache* cache, uint64_t key_hash, uint32_t key_n,
-                                       const Graph* g, AdjWord row_mask, GraphPoly* value,
-                                       int touch) {
+int row_graph_cache_lookup_poly(RowGraphCache* cache, uint64_t key_hash, uint32_t key_n,
+                                const Graph* g, AdjWord row_mask, GraphPoly* value,
+                                int touch) {
     int cache_idx = (int)(key_hash & (uint64_t)cache->mask);
     for (int k = 0; k < cache->probe; k++) {
         int p = (cache_idx + k) & cache->mask;
@@ -1722,8 +1724,8 @@ static int row_graph_cache_lookup_poly(RowGraphCache* cache, uint64_t key_hash, 
     return 0;
 }
 
-static int row_graph_cache_lookup_rows(RowGraphCache* cache, uint64_t key_hash, uint32_t key_n,
-                                       const AdjWord* rows, GraphPoly* value, int touch) {
+int row_graph_cache_lookup_rows(RowGraphCache* cache, uint64_t key_hash, uint32_t key_n,
+                                const AdjWord* rows, GraphPoly* value, int touch) {
     int cache_idx = (int)(key_hash & (uint64_t)cache->mask);
     for (int k = 0; k < cache->probe; k++) {
         int p = (cache_idx + k) & cache->mask;
@@ -1780,8 +1782,8 @@ void shared_graph_cache_free(SharedGraphCache* shared) {
     memset(shared, 0, sizeof(*shared));
 }
 
-static int shared_graph_cache_lookup_poly(SharedGraphCache* shared, uint64_t key_hash, uint32_t key_n,
-                                          const Graph* g, uint64_t row_mask, GraphPoly* value) {
+int shared_graph_cache_lookup_poly(SharedGraphCache* shared, uint64_t key_hash, uint32_t key_n,
+                                   const Graph* g, uint64_t row_mask, GraphPoly* value) {
     if (!shared || !shared->enabled) return 0;
     int found = 0;
     pthread_rwlock_rdlock(&shared->lock);
@@ -1803,8 +1805,8 @@ void shared_graph_cache_flush_exports(void) {
     exporter->count = 0;
 }
 
-static void shared_graph_cache_export(uint64_t key_hash, uint32_t key_n, const Graph* g,
-                                      uint64_t row_mask, const GraphPoly* value) {
+void shared_graph_cache_export(uint64_t key_hash, uint32_t key_n, const Graph* g,
+                               uint64_t row_mask, const GraphPoly* value) {
     SharedGraphCacheExporter* exporter = tls_shared_cache_exporter;
     SharedGraphCache* shared = g_shared_graph_cache;
     if (!shared || !shared->enabled || !exporter) return;
@@ -1867,9 +1869,9 @@ void store_graph_cache_entry(GraphCache* cache, uint64_t key_hash, uint32_t key_
     graph_cache_touch_slot(cache, best_slot);
 }
 
-static void store_row_graph_cache_entry(RowGraphCache* cache, uint64_t key_hash, uint32_t key_n,
-                                        const Graph* g, AdjWord row_mask,
-                                        const GraphPoly* value) {
+void store_row_graph_cache_entry(RowGraphCache* cache, uint64_t key_hash, uint32_t key_n,
+                                 const Graph* g, AdjWord row_mask,
+                                 const GraphPoly* value) {
     int cache_idx = (int)(key_hash & (uint64_t)cache->mask);
     int empty_slot = -1;
     int oldest_same_n_slot = -1;
@@ -1916,8 +1918,8 @@ static void store_row_graph_cache_entry(RowGraphCache* cache, uint64_t key_hash,
     row_graph_cache_touch_slot(cache, best_slot);
 }
 
-static void store_row_graph_cache_entry_rows(RowGraphCache* cache, uint64_t key_hash, uint32_t key_n,
-                                             const AdjWord* rows, const GraphPoly* value) {
+void store_row_graph_cache_entry_rows(RowGraphCache* cache, uint64_t key_hash, uint32_t key_n,
+                                      const AdjWord* rows, const GraphPoly* value) {
     int cache_idx = (int)(key_hash & (uint64_t)cache->mask);
     int empty_slot = -1;
     int oldest_same_n_slot = -1;

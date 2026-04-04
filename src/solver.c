@@ -259,10 +259,10 @@ static void simplify_graph_poly_multiplier(Graph* g, GraphPoly* multiplier) {
     }
 }
 
-static void solve_graph_poly(const Graph* input_g, RowGraphCache* cache, RowGraphCache* raw_cache,
-                             NautyWorkspace* ws, long long* local_canon_calls,
-                             long long* local_cache_hits, long long* local_raw_cache_hits,
-                             ProfileStats* profile, GraphPoly* out_result) {
+void solve_graph_poly(const Graph* input_g, RowGraphCache* cache, RowGraphCache* raw_cache,
+                      NautyWorkspace* ws, long long* local_canon_calls,
+                      long long* local_cache_hits, long long* local_raw_cache_hits,
+                      ProfileStats* profile, GraphPoly* out_result) {
 #if RECT_COUNT_K4
     Graph g = *input_g;
     double solve_t0 = begin_solve_graph_profile(profile);
