@@ -43,35 +43,6 @@ typedef struct {
     long long local_raw_cache_hits;
 } WorkerCtx;
 
-int32_t* small_graph_poly_slot(int n, uint32_t mask);
-uint64_t graph_pack_upper_mask64(const Graph* g);
-int connected_canon_lookup_entry_cmp(const void* lhs, const void* rhs);
-uint64_t graph_row_mask(int n);
-void get_canonical_graph(Graph* g, Graph* canon, NautyWorkspace* ws, ProfileStats* profile);
-void get_canonical_graph_from_dense_rows(int n, const AdjWord* rows, Graph* canon,
-                                         NautyWorkspace* ws, ProfileStats* profile);
-uint32_t small_graph_pack_mask(const Graph* g);
-void small_graph_lookup_load_graph_poly(int n, uint32_t mask, GraphPoly* out);
-uint32_t graph_build_dense_rows(const Graph* g, AdjWord* rows);
-uint64_t graph_fill_dense_key_rows(const Graph* g, AdjWord row_mask, AdjWord* rows);
-int row_graph_cache_lookup_poly(RowGraphCache* cache, uint64_t key_hash, uint32_t key_n,
-                                const Graph* g, AdjWord row_mask, GraphPoly* value, int touch);
-int row_graph_cache_lookup_rows(RowGraphCache* cache, uint64_t key_hash, uint32_t key_n,
-                                const AdjWord* rows, GraphPoly* value, int touch);
-int shared_graph_cache_lookup_poly(SharedGraphCache* shared, uint64_t key_hash, uint32_t key_n,
-                                   const Graph* g, uint64_t row_mask, GraphPoly* value);
-void shared_graph_cache_export(uint64_t key_hash, uint32_t key_n, const Graph* g,
-                               uint64_t row_mask, const GraphPoly* value);
-void store_row_graph_cache_entry(RowGraphCache* cache, uint64_t key_hash, uint32_t key_n,
-                                 const Graph* g, AdjWord row_mask, const GraphPoly* value);
-void store_row_graph_cache_entry_rows(RowGraphCache* cache, uint64_t key_hash, uint32_t key_n,
-                                      const AdjWord* rows, const GraphPoly* value);
-int connected_canon_lookup_load_graph_poly(const Graph* g, GraphPoly* out);
-void induced_subgraph_from_mask(const Graph* src, uint64_t mask, Graph* dst);
-int graph_collect_components(const Graph* g, uint64_t* component_masks);
-int graph_has_articulation_point(const Graph* g);
-int graph_has_k2_separator(const Graph* g);
-uint64_t hash_graph(const Graph* g);
 void canon_state_init(CanonState* st, int limit);
 void canon_state_free(CanonState* st);
 void canon_scratch_init(CanonScratch* scratch, int limit);
@@ -82,14 +53,6 @@ int canon_state_prepare_push(const CanonState* st, int partition_id, CanonScratc
 void canon_state_commit_push(CanonState* st, int partition_id, const CanonScratch* scratch,
                              int next_stabilizer);
 void canon_state_pop(CanonState* st);
-void nauty_workspace_init(NautyWorkspace* ws, int n);
-void nauty_workspace_free(NautyWorkspace* ws);
-void small_graph_lookup_init(void);
-void small_graph_lookup_free(void);
-void connected_canon_lookup_init(void);
-void connected_canon_lookup_free(void);
-void shared_graph_cache_init(SharedGraphCache* shared, int bits, int poly_len);
-void shared_graph_cache_free(SharedGraphCache* shared);
 void partial_graph_reset(PartialGraphState* st);
 int partial_graph_append_checked(PartialGraphState* st, int depth, int pid,
                                  const int* stack, int cols_left);
