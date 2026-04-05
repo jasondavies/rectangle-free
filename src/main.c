@@ -455,7 +455,8 @@ static int init_execution_state(const RunConfig* run, ExecutionState* exec) {
             return 0;
         }
 
-        local_queue_init(&exec->local_queue, (int)queue_cap_ll, run->total_tasks, exec->num_threads);
+        runtime_task_system_init(&exec->runtime_tasks, (int)queue_cap_ll,
+                                 run->total_tasks, exec->num_threads);
         for (long long t = 0; t < run->total_tasks; t++) {
             long long p = run->first_task + t;
             int i = 0;
@@ -469,11 +470,11 @@ static int init_execution_state(const RunConfig* run, ExecutionState* exec) {
             task.prefix[1] = (PrefixId)j;
             task.lo = (PrefixId)j;
             task.hi = (PrefixId)num_partitions;
-            exec->local_queue.roots[t].pending = 0;
-            exec->local_queue.roots[t].task_index = p;
-            local_queue_seed_push(&exec->local_queue, &task);
+            exec->runtime_tasks.shared_queue.roots[t].pending = 0;
+            exec->runtime_tasks.shared_queue.roots[t].task_index = p;
+            runtime_task_system_seed_task(&exec->runtime_tasks, &task);
         }
-        exec->local_queue_active = 1;
+        exec->runtime_tasks_active = 1;
         printf("Runtime queue: capacity=%d, split-max-depth=%d",
                (int)queue_cap_ll, g_adaptive_max_depth);
         if (g_adaptive_work_budget > 0) {
@@ -504,9 +505,9 @@ static int init_execution_state(const RunConfig* run, ExecutionState* exec) {
 }
 
 static void cleanup_execution_state(ExecutionState* exec) {
-    if (exec->local_queue_active) {
-        local_queue_free(&exec->local_queue);
-        exec->local_queue_active = 0;
+    if (exec->runtime_tasks_active) {
+        runtime_task_system_free(&exec->runtime_tasks);
+        exec->runtime_tasks_active = 0;
     }
     free(exec->thread_polys);
     free(exec->thread_profiles);
@@ -672,8 +673,8 @@ static void execute_run_tasks(const RunConfig* run, double start_time, Execution
 
                 for (;;) {
                     LocalTask task;
-                    if (!local_queue_pop(&exec->local_queue, &task)) break;
-                    execute_local_runtime_task(&task, &ctx, &exec->thread_polys[tid], &exec->local_queue,
+                    if (!runtime_task_system_pop_task(&exec->runtime_tasks, &task)) break;
+                    execute_local_runtime_task(&task, &ctx, &exec->thread_polys[tid], &exec->runtime_tasks,
                                                profile, total_tasks, progress_report_step,
                                                start_time, &pending_completed, task_timing,
                                                queue_subtask_timing);
@@ -1420,8 +1421,8 @@ int main(int argc, char** argv) {
 
     execute_run_tasks(&run, start_time, &exec);
 
-    if (exec.local_queue_active) {
-        local_queue_print_occupancy_summary(&exec.local_queue);
+    if (exec.runtime_tasks_active) {
+        runtime_task_system_print_summary(&exec.runtime_tasks);
     }
     accumulate_execution_poly(&exec, &global_poly);
     aggregate_execution_summary(&exec, &summary);

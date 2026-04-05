@@ -1822,7 +1822,7 @@ static int replay_local_task_prefix(const LocalTask* task, WorkerCtx* ctx,
 static void dfs_runtime_split_local(int depth, int start_pid, int end_pid, long long root_id, WorkerCtx* ctx,
                                     Poly* local_total, const WeightAccum* weight_prod,
                                     long long mult_coeff, int run_len, ProfileStats* profile,
-                                    LocalTaskQueue* queue) {
+                                    RuntimeTaskSystem* runtime_tasks) {
     if (depth == g_cols) {
         Poly res;
         solve_structure(&ctx->partial_graph.g, &ctx->canon_state,
@@ -1850,27 +1850,27 @@ static void dfs_runtime_split_local(int depth, int start_pid, int end_pid, long 
             *tls_adaptive_work_counter >= g_adaptive_work_budget &&
             depth < g_adaptive_max_depth &&
             (local_end - pid) >= 2 &&
-            atomic_load_explicit(&queue->idle_threads, memory_order_relaxed) > 0) {
+            runtime_task_system_has_idle_workers(runtime_tasks)) {
             LocalTask continuation = {0};
             local_task_from_stack(&continuation, root_id, depth, ctx->stack);
             continuation.lo = (PrefixId)pid;
             continuation.hi = (PrefixId)local_end;
-            if (local_queue_try_push(queue, &continuation)) {
-                atomic_fetch_add_explicit(&queue->work_budget_continuations, 1, memory_order_relaxed);
+            if (runtime_task_system_push_local(runtime_tasks, &continuation)) {
+                runtime_task_system_note_work_budget_split(runtime_tasks);
                 return;
             }
         }
 
         if ((depth + 1) <= g_adaptive_max_depth && depth >= 3 && depth <= 5 &&
             (local_end - pid) >= 16 &&
-            atomic_load_explicit(&queue->idle_threads, memory_order_relaxed) > 0) {
+            runtime_task_system_has_idle_workers(runtime_tasks)) {
             int mid = pid + (local_end - pid) / 2;
             LocalTask range_task = {0};
             local_task_from_stack(&range_task, root_id, depth, ctx->stack);
             range_task.lo = (PrefixId)mid;
             range_task.hi = (PrefixId)local_end;
-            if (local_queue_try_push(queue, &range_task)) {
-                atomic_fetch_add_explicit(&queue->donated_tasks, 1, memory_order_relaxed);
+            if (runtime_task_system_push_balance(runtime_tasks, &range_task)) {
+                runtime_task_system_note_balance_push(runtime_tasks);
                 local_end = mid;
             }
         }
@@ -1947,7 +1947,7 @@ static void dfs_runtime_split_local(int depth, int start_pid, int end_pid, long 
             } else {
                 dfs_runtime_split_local(depth + 1, pid, num_partitions, root_id, ctx, local_total,
                                         &next_weight_prod, next_mult_coeff, next_run_len,
-                                        profile, queue);
+                                        profile, runtime_tasks);
             }
         } else if (PROFILE_BUILD) {
             tls_profile->partial_append_time += omp_get_wtime() - t0;
@@ -1961,7 +1961,7 @@ static void dfs_runtime_split_local(int depth, int start_pid, int end_pid, long 
 }
 
 void execute_local_runtime_task(const LocalTask* task, WorkerCtx* ctx, Poly* thread_total,
-                                LocalTaskQueue* queue, ProfileStats* profile,
+                                RuntimeTaskSystem* runtime_tasks, ProfileStats* profile,
                                 long long total_tasks, long long report_step,
                                 double start_time, long long* pending_completed,
                                 TaskTimingStats* task_timing,
@@ -1994,7 +1994,7 @@ void execute_local_runtime_task(const LocalTask* task, WorkerCtx* ctx, Poly* thr
             if (start_pid < min_idx) start_pid = min_idx;
             if (end_pid > num_partitions) end_pid = num_partitions;
             dfs_runtime_split_local(task->depth, start_pid, end_pid, task->root_id, ctx, thread_total,
-                                    &weight_prod, mult_coeff, run_len, profile, queue);
+                                    &weight_prod, mult_coeff, run_len, profile, runtime_tasks);
         }
 
         for (int depth = (int)task->depth - 1; depth >= 0; depth--) {
@@ -2012,13 +2012,14 @@ void execute_local_runtime_task(const LocalTask* task, WorkerCtx* ctx, Poly* thr
                              solve_graph_delta, nauty_delta,
                              subtask_hard.hard_graph_nodes, subtask_hard.max_n,
                              subtask_hard.max_degree);
-        if (queue) {
-            local_queue_record_profile(queue, task, elapsed, solve_graph_delta, nauty_delta,
-                                       subtask_hard.hard_graph_nodes, subtask_hard.max_n,
-                                       subtask_hard.max_degree);
+        if (runtime_tasks) {
+            runtime_task_system_record_profile(runtime_tasks, task, elapsed,
+                                               solve_graph_delta, nauty_delta,
+                                               subtask_hard.hard_graph_nodes, subtask_hard.max_n,
+                                               subtask_hard.max_degree);
         }
     }
 
-    local_queue_finish_item(queue, task->root_id, total_tasks, report_step, start_time,
-                            pending_completed, task_timing);
+    runtime_task_system_finish_task(runtime_tasks, task->root_id, total_tasks, report_step,
+                                    start_time, pending_completed, task_timing);
 }

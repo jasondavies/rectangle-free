@@ -370,6 +370,10 @@ typedef struct {
     double next_profile_report_at;
 } LocalTaskQueue;
 
+typedef struct {
+    LocalTaskQueue shared_queue;
+} RuntimeTaskSystem;
+
 #define CONNECTED_CANON_LOOKUP_MAX_N 10
 #define CONNECTED_CANON_LOOKUP_MAGIC UINT64_C(0x43434c394741424c)
 #define CONNECTED_CANON_LOOKUP_VERSION 1U
@@ -418,8 +422,8 @@ typedef struct {
 
 typedef struct {
     int num_threads;
-    LocalTaskQueue local_queue;
-    int local_queue_active;
+    RuntimeTaskSystem runtime_tasks;
+    int runtime_tasks_active;
     Poly* thread_polys;
     ProfileStats* thread_profiles;
     TaskTimingStats* thread_task_timing;
@@ -554,21 +558,25 @@ void complete_task_report_and_time(long long total_tasks, long long report_step,
 void prefix_task_buffer_init(PrefixTaskBuffer* buf, long long initial_capacity);
 void prefix_task_buffer_push2(PrefixTaskBuffer* buf, int i, int j);
 void local_task_from_stack(LocalTask* task, long long root_id, int depth, const int* stack);
-void local_queue_init(LocalTaskQueue* queue, int capacity,
-                      long long root_count, int total_threads);
-void local_queue_free(LocalTaskQueue* queue);
-int local_queue_try_push(LocalTaskQueue* queue, const LocalTask* task);
-void local_queue_seed_push(LocalTaskQueue* queue, const LocalTask* task);
-int local_queue_pop(LocalTaskQueue* queue, LocalTask* task);
-void local_queue_finish_item(LocalTaskQueue* queue, long long root_id,
-                             long long total_tasks, long long report_step,
-                             double start_time, long long* pending_completed,
-                             TaskTimingStats* task_timing);
-void local_queue_record_profile(LocalTaskQueue* queue, const LocalTask* task,
-                                double elapsed, long long solve_graph_calls,
-                                long long nauty_calls, long long hard_graph_nodes,
-                                int max_hard_graph_n, int max_hard_graph_degree);
-void local_queue_print_occupancy_summary(LocalTaskQueue* queue);
+void runtime_task_system_init(RuntimeTaskSystem* system, int capacity,
+                              long long root_count, int total_threads);
+void runtime_task_system_free(RuntimeTaskSystem* system);
+void runtime_task_system_seed_task(RuntimeTaskSystem* system, const LocalTask* task);
+int runtime_task_system_pop_task(RuntimeTaskSystem* system, LocalTask* task);
+int runtime_task_system_push_local(RuntimeTaskSystem* system, const LocalTask* task);
+int runtime_task_system_push_balance(RuntimeTaskSystem* system, const LocalTask* task);
+int runtime_task_system_has_idle_workers(const RuntimeTaskSystem* system);
+void runtime_task_system_note_balance_push(RuntimeTaskSystem* system);
+void runtime_task_system_note_work_budget_split(RuntimeTaskSystem* system);
+void runtime_task_system_finish_task(RuntimeTaskSystem* system, long long root_id,
+                                     long long total_tasks, long long report_step,
+                                     double start_time, long long* pending_completed,
+                                     TaskTimingStats* task_timing);
+void runtime_task_system_record_profile(RuntimeTaskSystem* system, const LocalTask* task,
+                                        double elapsed, long long solve_graph_calls,
+                                        long long nauty_calls, long long hard_graph_nodes,
+                                        int max_hard_graph_n, int max_hard_graph_degree);
+void runtime_task_system_print_summary(RuntimeTaskSystem* system);
 long long repeated_combo_count(int values, int slots);
 void get_prefix2_task(long long task_index, int* i, int* j);
 void build_fixed_prefix2_batches(const PrefixId* live_i, const PrefixId* live_j,

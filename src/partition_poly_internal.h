@@ -79,7 +79,7 @@ void execute_prefix2_fixed_batch(PrefixId i, const PrefixId* js, const long long
                                  double start_time, long long* pending_completed,
                                  TaskTimingStats* task_timing);
 void execute_local_runtime_task(const LocalTask* task, WorkerCtx* ctx, Poly* thread_total,
-                                LocalTaskQueue* queue, ProfileStats* profile,
+                                RuntimeTaskSystem* runtime_tasks, ProfileStats* profile,
                                 long long total_tasks, long long progress_report_step,
                                 double start_time, long long* pending_completed,
                                 TaskTimingStats* task_timing,

@@ -500,6 +500,65 @@ void local_queue_print_occupancy_summary(LocalTaskQueue* queue) {
     }
 }
 
+void runtime_task_system_init(RuntimeTaskSystem* system, int capacity,
+                              long long root_count, int total_threads) {
+    local_queue_init(&system->shared_queue, capacity, root_count, total_threads);
+}
+
+void runtime_task_system_free(RuntimeTaskSystem* system) {
+    local_queue_free(&system->shared_queue);
+}
+
+void runtime_task_system_seed_task(RuntimeTaskSystem* system, const LocalTask* task) {
+    local_queue_seed_push(&system->shared_queue, task);
+}
+
+int runtime_task_system_pop_task(RuntimeTaskSystem* system, LocalTask* task) {
+    return local_queue_pop(&system->shared_queue, task);
+}
+
+int runtime_task_system_push_local(RuntimeTaskSystem* system, const LocalTask* task) {
+    return local_queue_try_push(&system->shared_queue, task);
+}
+
+int runtime_task_system_push_balance(RuntimeTaskSystem* system, const LocalTask* task) {
+    return local_queue_try_push(&system->shared_queue, task);
+}
+
+int runtime_task_system_has_idle_workers(const RuntimeTaskSystem* system) {
+    return atomic_load_explicit(&system->shared_queue.idle_threads, memory_order_relaxed) > 0;
+}
+
+void runtime_task_system_note_balance_push(RuntimeTaskSystem* system) {
+    atomic_fetch_add_explicit(&system->shared_queue.donated_tasks, 1, memory_order_relaxed);
+}
+
+void runtime_task_system_note_work_budget_split(RuntimeTaskSystem* system) {
+    atomic_fetch_add_explicit(&system->shared_queue.work_budget_continuations, 1,
+                              memory_order_relaxed);
+}
+
+void runtime_task_system_finish_task(RuntimeTaskSystem* system, long long root_id,
+                                     long long total_tasks, long long report_step,
+                                     double start_time, long long* pending_completed,
+                                     TaskTimingStats* task_timing) {
+    local_queue_finish_item(&system->shared_queue, root_id, total_tasks, report_step,
+                            start_time, pending_completed, task_timing);
+}
+
+void runtime_task_system_record_profile(RuntimeTaskSystem* system, const LocalTask* task,
+                                        double elapsed, long long solve_graph_calls,
+                                        long long nauty_calls, long long hard_graph_nodes,
+                                        int max_hard_graph_n, int max_hard_graph_degree) {
+    local_queue_record_profile(&system->shared_queue, task, elapsed, solve_graph_calls,
+                               nauty_calls, hard_graph_nodes,
+                               max_hard_graph_n, max_hard_graph_degree);
+}
+
+void runtime_task_system_print_summary(RuntimeTaskSystem* system) {
+    local_queue_print_occupancy_summary(&system->shared_queue);
+}
+
 void* checked_aligned_alloc(size_t alignment, size_t size, const char* label) {
     void* ptr = NULL;
     if (posix_memalign(&ptr, alignment, size) != 0) {
