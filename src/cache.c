@@ -57,10 +57,7 @@ static inline int graph_cache_slot_matches_sig(const GraphCache* cache, int slot
         return 0;
     }
     const uint64_t* slot_sig = graph_cache_sig_slot(cache, slot);
-    for (int i = 0; i < GRAPH_SIG_WORDS; i++) {
-        if (slot_sig[i] != sig[i]) return 0;
-    }
-    return 1;
+    return memcmp(slot_sig, sig, sizeof(uint64_t) * GRAPH_SIG_WORDS) == 0;
 }
 
 static inline int row_graph_cache_slot_matches_graph(const RowGraphCache* cache, int slot,
@@ -71,6 +68,9 @@ static inline int row_graph_cache_slot_matches_graph(const RowGraphCache* cache,
         return 0;
     }
     const AdjWord* slot_rows = row_graph_cache_row_slot(cache, slot);
+    if (row_mask == (AdjWord)ADJWORD_MASK) {
+        return memcmp(slot_rows, g->adj, (size_t)key_n * sizeof(AdjWord)) == 0;
+    }
     for (uint32_t i = 0; i < key_n; i++) {
         if (slot_rows[i] != (g->adj[i] & row_mask)) return 0;
     }
@@ -85,26 +85,39 @@ static inline int row_graph_cache_slot_matches_rows(const RowGraphCache* cache, 
         return 0;
     }
     const AdjWord* slot_rows = row_graph_cache_row_slot(cache, slot);
-    for (uint32_t i = 0; i < key_n; i++) {
-        if (slot_rows[i] != rows[i]) return 0;
-    }
-    return 1;
+    return memcmp(slot_rows, rows, (size_t)key_n * sizeof(AdjWord)) == 0;
 }
 
 static inline void graph_cache_load_poly(const GraphCache* cache, int slot, GraphPoly* value) {
+#if RECT_COUNT_K4
     value->x_pow = cache->x_pows[slot];
     int deg = cache->degs[slot];
     value->deg = (uint8_t)deg;
     memcpy(value->coeffs, graph_cache_coeff_slot(cache, slot),
            (size_t)(deg + 1) * sizeof(value->coeffs[0]));
+#else
+    uint32_t key_n = cache->keys[slot].key_n;
+    value->x_pow = key_n == 0 ? 0 : 1;
+    value->deg = key_n == 0 ? 0 : (uint8_t)(key_n - 1);
+    memcpy(value->coeffs, graph_cache_coeff_slot(cache, slot),
+           (size_t)(key_n == 0 ? 1 : key_n) * sizeof(value->coeffs[0]));
+#endif
 }
 
 static inline void row_graph_cache_load_poly(const RowGraphCache* cache, int slot, GraphPoly* value) {
+#if RECT_COUNT_K4
     value->x_pow = cache->x_pows[slot];
     int deg = cache->degs[slot];
     value->deg = (uint8_t)deg;
     memcpy(value->coeffs, row_graph_cache_coeff_slot(cache, slot),
            (size_t)(deg + 1) * sizeof(value->coeffs[0]));
+#else
+    uint32_t key_n = cache->keys[slot].key_n;
+    value->x_pow = key_n == 0 ? 0 : 1;
+    value->deg = key_n == 0 ? 0 : (uint8_t)(key_n - 1);
+    memcpy(value->coeffs, row_graph_cache_coeff_slot(cache, slot),
+           (size_t)(key_n == 0 ? 1 : key_n) * sizeof(value->coeffs[0]));
+#endif
 }
 
 static int graph_cache_lookup_poly(GraphCache* cache, uint64_t key_hash, uint32_t key_n,
@@ -163,8 +176,10 @@ void shared_graph_cache_init(SharedGraphCache* shared, int bits, int poly_len) {
     shared->cache.keys = checked_aligned_alloc(64, sizeof(CacheKey) * size, "shared_cache_keys");
     shared->cache.stamps = checked_aligned_alloc(64, sizeof(uint32_t) * size, "shared_cache_stamps");
     shared->cache.sigs = checked_aligned_alloc(64, sizeof(uint64_t) * size * GRAPH_SIG_WORDS, "shared_cache_sigs");
+#if RECT_COUNT_K4
     shared->cache.x_pows = checked_aligned_alloc(64, sizeof(uint8_t) * size, "shared_cache_x_pows");
     shared->cache.degs = checked_aligned_alloc(64, sizeof(uint8_t) * size, "shared_cache_degs");
+#endif
     shared->cache.coeffs =
         checked_aligned_alloc(64, sizeof(PolyCoeff) * size * (size_t)poly_len, "shared_cache_coeffs");
     memset(shared->cache.keys, 0, sizeof(CacheKey) * size);
@@ -178,8 +193,10 @@ void shared_graph_cache_free(SharedGraphCache* shared) {
     free(shared->cache.keys);
     free(shared->cache.stamps);
     free(shared->cache.sigs);
+#if RECT_COUNT_K4
     free(shared->cache.x_pows);
     free(shared->cache.degs);
+#endif
     free(shared->cache.coeffs);
     pthread_rwlock_destroy(&shared->lock);
     memset(shared, 0, sizeof(*shared));
@@ -236,10 +253,18 @@ static void store_graph_cache_entry(GraphCache* cache, uint64_t key_hash, uint32
     cache->keys[best_slot].key_hash = key_hash;
     cache->keys[best_slot].key_n = key_n;
     memcpy(graph_cache_sig_slot(cache, best_slot), sig, sizeof(sig));
+#if RECT_COUNT_K4
     cache->x_pows[best_slot] = value->x_pow;
     cache->degs[best_slot] = (uint8_t)value->deg;
+#endif
     memcpy(graph_cache_coeff_slot(cache, best_slot), value->coeffs,
-           (size_t)(value->deg + 1) * sizeof(value->coeffs[0]));
+           (size_t)(
+#if RECT_COUNT_K4
+               value->deg + 1
+#else
+               key_n == 0 ? 1 : key_n
+#endif
+               ) * sizeof(value->coeffs[0]));
     cache->keys[best_slot].used = 1;
     graph_cache_touch_slot(cache, best_slot);
 }
@@ -312,13 +337,25 @@ void store_row_graph_cache_entry(RowGraphCache* cache, uint64_t key_hash, uint32
     cache->keys[best_slot].key_hash = key_hash;
     cache->keys[best_slot].key_n = key_n;
     AdjWord* slot_rows = row_graph_cache_row_slot(cache, best_slot);
-    for (uint32_t i = 0; i < key_n; i++) {
-        slot_rows[i] = g->adj[i] & row_mask;
+    if (row_mask == (AdjWord)ADJWORD_MASK) {
+        memcpy(slot_rows, g->adj, (size_t)key_n * sizeof(AdjWord));
+    } else {
+        for (uint32_t i = 0; i < key_n; i++) {
+            slot_rows[i] = g->adj[i] & row_mask;
+        }
     }
+#if RECT_COUNT_K4
     cache->x_pows[best_slot] = value->x_pow;
     cache->degs[best_slot] = (uint8_t)value->deg;
+#endif
     memcpy(row_graph_cache_coeff_slot(cache, best_slot), value->coeffs,
-           (size_t)(value->deg + 1) * sizeof(value->coeffs[0]));
+           (size_t)(
+#if RECT_COUNT_K4
+               value->deg + 1
+#else
+               key_n == 0 ? 1 : key_n
+#endif
+               ) * sizeof(value->coeffs[0]));
     cache->keys[best_slot].used = 1;
     row_graph_cache_touch_slot(cache, best_slot);
 }
@@ -361,13 +398,21 @@ void store_row_graph_cache_entry_rows(RowGraphCache* cache, uint64_t key_hash, u
     cache->keys[best_slot].key_hash = key_hash;
     cache->keys[best_slot].key_n = key_n;
     AdjWord* slot_rows = row_graph_cache_row_slot(cache, best_slot);
-    for (uint32_t i = 0; i < key_n; i++) {
-        slot_rows[i] = rows[i];
-    }
+#if RECT_COUNT_K4
+    memcpy(slot_rows, rows, (size_t)key_n * sizeof(AdjWord));
     cache->x_pows[best_slot] = value->x_pow;
     cache->degs[best_slot] = (uint8_t)value->deg;
+#else
+    memcpy(slot_rows, rows, (size_t)key_n * sizeof(AdjWord));
+#endif
     memcpy(row_graph_cache_coeff_slot(cache, best_slot), value->coeffs,
-           (size_t)(value->deg + 1) * sizeof(value->coeffs[0]));
+           (size_t)(
+#if RECT_COUNT_K4
+               value->deg + 1
+#else
+               key_n == 0 ? 1 : key_n
+#endif
+               ) * sizeof(value->coeffs[0]));
     cache->keys[best_slot].used = 1;
     row_graph_cache_touch_slot(cache, best_slot);
 }

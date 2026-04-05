@@ -547,8 +547,10 @@ static void execute_run_tasks(const RunConfig* run, double start_time, Execution
         cache.keys = checked_aligned_alloc(64, sizeof(CacheKey) * CACHE_SIZE, "cache_keys");
         cache.stamps = checked_aligned_alloc(64, sizeof(uint32_t) * CACHE_SIZE, "cache_stamps");
         cache.rows = checked_aligned_alloc(64, sizeof(AdjWord) * CACHE_SIZE * MAXN_NAUTY, "cache_rows");
+#if RECT_COUNT_K4
         cache.x_pows = checked_aligned_alloc(64, sizeof(uint8_t) * CACHE_SIZE, "cache_x_pows");
         cache.degs = checked_aligned_alloc(64, sizeof(uint8_t) * CACHE_SIZE, "cache_degs");
+#endif
         cache.coeffs =
             checked_aligned_alloc(64, sizeof(PolyCoeff) * CACHE_SIZE * (size_t)graph_poly_len, "cache_coeffs");
         cache.next_stamp = 0;
@@ -560,8 +562,10 @@ static void execute_run_tasks(const RunConfig* run, double start_time, Execution
         raw_cache.stamps = checked_aligned_alloc(64, sizeof(uint32_t) * RAW_CACHE_SIZE, "raw_cache_stamps");
         raw_cache.rows =
             checked_aligned_alloc(64, sizeof(AdjWord) * RAW_CACHE_SIZE * MAXN_NAUTY, "raw_cache_rows");
+#if RECT_COUNT_K4
         raw_cache.x_pows = checked_aligned_alloc(64, sizeof(uint8_t) * RAW_CACHE_SIZE, "raw_cache_x_pows");
         raw_cache.degs = checked_aligned_alloc(64, sizeof(uint8_t) * RAW_CACHE_SIZE, "raw_cache_degs");
+#endif
         raw_cache.coeffs = checked_aligned_alloc(64, sizeof(PolyCoeff) * RAW_CACHE_SIZE * (size_t)graph_poly_len,
                                                  "raw_cache_coeffs");
         raw_cache.next_stamp = 0;
@@ -991,14 +995,18 @@ static void execute_run_tasks(const RunConfig* run, double start_time, Execution
         free(cache.keys);
         free(cache.stamps);
         free(cache.rows);
+#if RECT_COUNT_K4
         free(cache.x_pows);
         free(cache.degs);
+#endif
         free(cache.coeffs);
         free(raw_cache.keys);
         free(raw_cache.stamps);
         free(raw_cache.rows);
+#if RECT_COUNT_K4
         free(raw_cache.x_pows);
         free(raw_cache.degs);
+#endif
         free(raw_cache.coeffs);
     }
 

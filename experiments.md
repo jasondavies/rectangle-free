@@ -6659,3 +6659,32 @@
   - edges with fewer common neighbours and more exclusive neighbourhood are a cheap proxy for “deletion may expose structure”
   - using that proxy only in polynomial mode reduces canonicalisation calls materially on the target benchmark without disturbing the `count4` path
 - Outcome: accepted on `main`.
+
+### Experiment 166: Connected-residual cache layout for factored graph polynomials
+- Goal: exploit the stronger invariant introduced by the factored `GraphPoly` work: after connected-component and articulation splitting, every graph that reaches the row caches in polynomial mode is connected, so its chromatic polynomial always has the form `x * q(x)`.
+- Change:
+  - in polynomial mode, stop storing `x_pow` and `deg` alongside cached graph polynomials
+  - reconstruct cached values as `x_pow = 1`, `deg = key_n - 1` on load, using `key_n == 0` only for the degenerate zero-vertex case
+  - keep the old metadata-bearing cache layout for `RECT_COUNT_K4`
+  - replace row/signature equality loops in the cache hot path with `memcmp`
+  - skip allocating the unused `x_pows` / `degs` arrays for the per-thread canonical and raw caches in polynomial mode
+  - at the same time, revert the earlier equal-`x_pow` subtraction micro-optimization, which had benchmarked slightly worse
+- Reference benchmark command:
+  - `OMP_NUM_THREADS=1 ./partition_poly_profile 7 5 --task-end 20`
+- Baseline:
+  - current committed tree before this change (`ed417bb`)
+  - `Worker Complete in 52.53 seconds`
+  - `solve_graph_poly: 4.885s`
+- Experiment:
+  - `Worker Complete in 52.42 seconds`
+  - `solve_graph_poly: 4.816s`
+- Additional checks:
+  - `./partition_poly_profile 3 3 --task-end 1`
+  - `OMP_NUM_THREADS=1 ./partition_count4 3 3 --task-end 1`
+  - `OMP_NUM_THREADS=1 ./partition_poly_profile 7 5 --task-end 5`
+  - all produced the expected outputs, and the `count4` build continued to compile and run with the metadata-preserving cache path
+- Interpretation:
+  - the improvement is modest, but it is a real hot-path win rather than noise
+  - the key idea is that the cache no longer pays to move representation metadata that is already implied by the connected residual graph size
+  - the `memcmp` cleanup likely contributes a little as well, but the main structural benefit is shrinking the polynomial-mode cache payload and its surrounding traffic
+- Outcome: accepted on `main`.
