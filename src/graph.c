@@ -23,7 +23,6 @@ double g_connected_canon_lookup_load_time = 0.0;
 static const uint8_t* g_connected_canon_lookup_map = NULL;
 static size_t g_connected_canon_lookup_map_len = 0;
 static const uint8_t* g_connected_canon_lookup_entries = NULL;
-static uint32_t g_connected_canon_lookup_version = 0;
 static size_t g_connected_canon_lookup_entry_size = 0;
 
 static inline setword pack_row_to_nauty1(uint64_t row_bits, int n) {
@@ -504,10 +503,8 @@ static const char* connected_canon_lookup_default_path(void) {
     return NULL;
 }
 
-static size_t connected_canon_lookup_entry_file_size(uint32_t version, int n) {
-    size_t coeff_count = (version == CONNECTED_CANON_LOOKUP_VERSION_RESIDUAL) ? (size_t)n
-                                                                               : (size_t)(n + 1);
-    return sizeof(uint64_t) + coeff_count * sizeof(int32_t);
+static size_t connected_canon_lookup_entry_file_size(int n) {
+    return sizeof(uint64_t) + (size_t)n * sizeof(int32_t);
 }
 
 static const uint8_t* connected_canon_lookup_find_entry(uint64_t mask) {
@@ -553,16 +550,14 @@ static int connected_canon_lookup_try_load_file(const char* path) {
     {
         const ConnectedCanonLookupHeader* header = (const ConnectedCanonLookupHeader*)map;
         if (header->magic != CONNECTED_CANON_LOOKUP_MAGIC ||
-            (header->version != CONNECTED_CANON_LOOKUP_VERSION_DENSE &&
-             header->version != CONNECTED_CANON_LOOKUP_VERSION_RESIDUAL) ||
+            header->version != CONNECTED_CANON_LOOKUP_VERSION ||
             header->n == 0 || header->n > CONNECTED_CANON_LOOKUP_MAX_N) {
             munmap(map, (size_t)st.st_size);
             return 0;
         }
 
         {
-            size_t entry_size =
-                connected_canon_lookup_entry_file_size(header->version, (int)header->n);
+            size_t entry_size = connected_canon_lookup_entry_file_size((int)header->n);
             size_t expected_size = sizeof(*header) + (size_t)header->count * entry_size;
             if ((size_t)st.st_size != expected_size) {
                 munmap(map, (size_t)st.st_size);
@@ -572,7 +567,6 @@ static int connected_canon_lookup_try_load_file(const char* path) {
             g_connected_canon_lookup_map = map;
             g_connected_canon_lookup_map_len = (size_t)st.st_size;
             g_connected_canon_lookup_entries = (const uint8_t*)map + sizeof(*header);
-            g_connected_canon_lookup_version = header->version;
             g_connected_canon_lookup_entry_size = entry_size;
             g_connected_canon_lookup_count = header->count;
             g_connected_canon_lookup_n = (int)header->n;
@@ -616,7 +610,6 @@ void connected_canon_lookup_free(void) {
     g_connected_canon_lookup_ready = 0;
     g_connected_canon_lookup_loaded = 0;
     g_connected_canon_lookup_n = 0;
-    g_connected_canon_lookup_version = 0;
     g_connected_canon_lookup_entry_size = 0;
     g_connected_canon_lookup_load_time = 0.0;
 }
@@ -631,7 +624,6 @@ const int32_t* connected_canon_lookup_find_coeffs(uint64_t mask) {
     if (!entry) return NULL;
 
     coeffs = (const int32_t*)(entry + sizeof(uint64_t));
-    if (g_connected_canon_lookup_version == CONNECTED_CANON_LOOKUP_VERSION_DENSE) coeffs++;
     return coeffs;
 }
 
