@@ -173,7 +173,12 @@ static void graph_choose_branch_edge(const Graph* g, int* u_out, int* v_out, int
                 (u_neighbors | v_neighbors) & ~((UINT64_C(1) << u) | (UINT64_C(1) << v));
             int merged_clique = graph_neighbors_form_clique(g, merged_neighbors);
             int common = __builtin_popcountll(u_neighbors & v_neighbors);
+#if RECT_COUNT_K4
             int score = 1000 * (u_clique + v_clique + merged_clique) + 16 * common + u_deg + v_deg;
+#else
+            int exclusive = (u_deg - 1 - common) + (v_deg - 1 - common);
+            int score = 1000 * (u_clique + v_clique + merged_clique) + 16 * exclusive + u_deg + v_deg;
+#endif
             if (score > best_score) {
                 best_score = score;
                 best_u = u;
