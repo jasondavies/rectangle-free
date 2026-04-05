@@ -6620,3 +6620,42 @@
   - rewarding contraction-side clique pruning reduces the hard-miss tree further, rather than just shifting work between delete and contract
   - unlike the earlier triangle/common-neighbour experiments, this change improves the heavy benchmark and stays at least neutral on the one-thread shard
 - Outcome: accepted on `main`.
+
+### Experiment 165: Prefer sparse delete edges in polynomial mode
+- Goal: bias hard-miss branch selection toward edges whose deletion is more likely to expose useful structure in chromatic-polynomial mode.
+- Background:
+  - a fresh profile-guided pass showed that the delete branch dominates hard misses on the `6x6` target benchmark
+  - immediate post-delete instrumentation also showed that `G - e` very often creates articulation or `k2`-separator structure without fully disconnecting
+  - several heavier attempts to exploit that structure directly lost due to overhead, so this experiment tests a cheaper proxy in the scorer
+- Change:
+  - keep the existing clique-prunable endpoint and contraction-side scoring terms
+  - in `partition_poly_7`, replace the `+ 16 * common_neighbours` tie-break with `+ 16 * exclusive_neighbours`, where
+    - `exclusive_neighbours = (deg(u) - 1 - common) + (deg(v) - 1 - common)`
+  - leave `RECT_COUNT_K4` on the old scorer, since the first shared version helped polynomial mode but slightly hurt `count4`
+- Matching 32-thread polynomial benchmark command:
+  - `env OMP_NUM_THREADS=32 ./partition_poly_7 6 6 --prefix-depth 2 --adaptive-subdivide --adaptive-work-budget 1000 --adaptive-max-depth 5`
+- Baseline:
+  - current committed `main` tip before this change
+  - recent repeated runs were around `22.2s`
+- Experiment:
+  - `Worker Complete in 21.77 seconds`
+  - `Worker Complete in 21.76 seconds`
+- Matching 32-thread `count4` check:
+  - command:
+    - `./partition_count4 6 6 --reorder --prefix-depth 2 --adaptive-subdivide --adaptive-work-budget 1000 --adaptive-max-depth 5`
+  - because the scorer is now mode-gated, `count4` keeps the previous heuristic
+  - observed runs after the split:
+    - `Worker Complete in 13.79 seconds`
+    - `Worker Complete in 13.74 seconds`
+    - `Worker Complete in 13.78 seconds`
+- Correctness:
+  - all polynomial runs printed the same chromatic polynomial and the same values:
+    - `P(4) = 203716633441803914880`
+    - `P(5) = 2852707805646422930409600`
+  - all `count4` runs printed the same count:
+    - `203716633441803914880`
+- Interpretation:
+  - the heavy delete-side recurrence experiments were too expensive, but the profile signal still mattered
+  - edges with fewer common neighbours and more exclusive neighbourhood are a cheap proxy for “deletion may expose structure”
+  - using that proxy only in polynomial mode reduces canonicalisation calls materially on the target benchmark without disturbing the `count4` path
+- Outcome: accepted on `main`.
