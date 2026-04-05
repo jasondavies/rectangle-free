@@ -311,15 +311,11 @@ uint64_t small_graph_lookup_load_count4(int n, uint32_t mask) {
 uint64_t connected_canon_lookup_load_count4(const Graph* g) {
     if (!g_connected_canon_lookup_ready || g->n != g_connected_canon_lookup_n) return UINT64_MAX;
 
-    uint64_t mask = graph_pack_upper_mask64(g);
-    ConnectedCanonLookupEntry key = {.mask = mask};
-    ConnectedCanonLookupEntry* entry = bsearch(&key, g_connected_canon_lookup,
-                                               g_connected_canon_lookup_count,
-                                               sizeof(*g_connected_canon_lookup),
-                                               connected_canon_lookup_entry_cmp);
-    if (!entry) return UINT64_MAX;
-    return eval_int32_poly_at_4(entry->coeffs, g_connected_canon_lookup_n - entry->x_pow)
-           << (2 * entry->x_pow);
+    {
+        const int32_t* coeffs = connected_canon_lookup_find_coeffs(graph_pack_upper_mask64(g));
+        if (!coeffs) return UINT64_MAX;
+        return eval_int32_poly_at_4(coeffs, g_connected_canon_lookup_n - 1) << 2;
+    }
 }
 
 static const uint64_t g_fall4[5] = {1, 4, 12, 24, 24};

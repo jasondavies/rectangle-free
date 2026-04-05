@@ -6769,3 +6769,59 @@
   - however, a slightly stricter split condition helps by avoiding some premature continuation creation when the global queue is still deep enough
   - this is a runtime policy improvement, not a scheduler rewrite
 - Outcome: accepted on `main`.
+
+### Experiment 169: mmap-backed residual `n=10` connected canonical lookup
+- Goal: make the generated `n=10` connected canonical lookup table a real end-to-end win instead of a solver-side win hidden by startup overhead.
+- Change:
+  - replace the old generator with a buildable current-tree tool and switch its on-disk format from dense connected chromatic polynomials to residual-only entries:
+    - store `mask` plus the `n` coefficients of `q(x)` where `P_G(x) = x * q(x)`
+    - bump the file format version and keep loader support for the old dense format for compatibility
+  - rewrite connected canonical lookup loading to `mmap()` the table instead of `calloc` + `fread` + factorisation
+  - binary-search the mapped byte array directly and reconstruct hits as `x_pow = 1`, `deg = n - 1`
+  - use the same mapped residual coefficients for both full polynomial loads and `count4` evaluation
+- Validation:
+  - one-entry `n=9` smoke table now writes version `2` with residual coefficients only:
+    - `entry 68451041280 (1, -8, 28, -56, 70, -56, 28, -8, 1)`
+  - regenerated `n=9` table:
+    - `RECT_CONNECTED_CANON_LOOKUP=/tmp/connected_canon_lookup_n9_v2.bin OMP_NUM_THREADS=1 ./partition_poly_profile 7 5 --task-end 1`
+    - produced the same polynomial and values as the no-table baseline
+- Generator stats for `n=10`:
+  - command:
+    - `/usr/bin/time -f 'elapsed=%e maxrss=%MKB' bash -lc 'rm -f /tmp/connected_canon_lookup_n10_v2.bin && ./third_party/nauty-build/geng -q -c 10 | ./connected_canon_lookup_gen /tmp/connected_canon_lookup_n10_v2.bin 10'`
+  - result:
+    - `Wrote /tmp/connected_canon_lookup_n10_v2.bin with 11716571 connected canonical graphs on n=10 in 63.18 seconds`
+    - `Entry payload bytes: 48`
+    - `elapsed=63.56 maxrss=847724KB`
+  - compared with the previous dense table:
+    - payload shrank from `52` to `48` bytes per entry
+    - generator peak RSS dropped from about `939MB` to about `848MB`
+- Reference benchmark command:
+  - `OMP_NUM_THREADS=1 ./partition_poly_profile 7 5 --task-end 20`
+- Baseline:
+  - current tree with no connected canonical table loaded
+  - `Worker Complete in 26.21 seconds`
+  - `solve_graph_poly: 4.959s`
+- Old dense-table path:
+  - `RECT_CONNECTED_CANON_LOOKUP=/tmp/connected_canon_lookup_n10.bin ...`
+  - `Connected canonical lookup n=10 load: 0.81 seconds`
+  - `Worker Complete in 26.44 seconds`
+  - `solve_graph_poly: 4.673s`
+  - removed all `n=10` hard misses, but lost overall to startup cost
+- Experiment:
+  - `RECT_CONNECTED_CANON_LOOKUP=/tmp/connected_canon_lookup_n10_v2.bin ...`
+  - `Connected canonical lookup n=10 load: 0.00 seconds`
+  - `Worker Complete in 25.74 seconds`
+  - `solve_graph_poly: 4.753s`
+  - `n=10` outcomes: `connected-lookup 23861`, `hard-miss 0`
+- Unprofiled benchmark:
+  - no table:
+    - `OMP_NUM_THREADS=1 ./partition_poly 7 5 --task-end 20`
+    - `Worker Complete in 19.93 seconds`
+  - residual mmap table:
+    - `RECT_CONNECTED_CANON_LOOKUP=/tmp/connected_canon_lookup_n10_v2.bin OMP_NUM_THREADS=1 ./partition_poly 7 5 --task-end 20`
+    - `Worker Complete in 19.65 seconds`
+- Interpretation:
+  - the `n=10` table was already a real solver-side win, but the eager dense loader hid it behind `~0.8s` of startup work on this sample
+  - exploiting the connected-graph invariant twice, first in the file format and then in the loader, removes that fixed cost and turns the table into a small end-to-end improvement
+  - the remaining tradeoff is table size and generation time rather than runtime lookup overhead
+- Outcome: accepted on `main`.

@@ -376,13 +376,9 @@ typedef struct {
 
 #define CONNECTED_CANON_LOOKUP_MAX_N 10
 #define CONNECTED_CANON_LOOKUP_MAGIC UINT64_C(0x43434c394741424c)
-#define CONNECTED_CANON_LOOKUP_VERSION 1U
-
-typedef struct {
-    uint64_t mask;
-    uint8_t x_pow;
-    int32_t coeffs[CONNECTED_CANON_LOOKUP_MAX_N + 1];
-} ConnectedCanonLookupEntry;
+#define CONNECTED_CANON_LOOKUP_VERSION_DENSE 1U
+#define CONNECTED_CANON_LOOKUP_VERSION_RESIDUAL 2U
+#define CONNECTED_CANON_LOOKUP_VERSION CONNECTED_CANON_LOOKUP_VERSION_RESIDUAL
 
 typedef struct {
     uint64_t magic;
@@ -514,7 +510,6 @@ extern uint8_t g_small_graph_edge_u[SMALL_GRAPH_LOOKUP_MAX_N + 1][21];
 extern uint8_t g_small_graph_edge_v[SMALL_GRAPH_LOOKUP_MAX_N + 1][21];
 extern uint32_t g_small_graph_graph_count[SMALL_GRAPH_LOOKUP_MAX_N + 1];
 extern uint8_t g_small_graph_edge_count[SMALL_GRAPH_LOOKUP_MAX_N + 1];
-extern ConnectedCanonLookupEntry* g_connected_canon_lookup;
 extern uint32_t g_connected_canon_lookup_count;
 extern int g_connected_canon_lookup_ready;
 extern int g_connected_canon_lookup_loaded;
@@ -634,7 +629,6 @@ void graph_poly_mul_linear_ref(const GraphPoly* a, int c, GraphPoly* out);
 void graph_poly_div_x_ref(const GraphPoly* a, GraphPoly* out);
 int32_t* small_graph_poly_slot(int n, uint32_t mask);
 uint64_t graph_pack_upper_mask64(const Graph* g);
-int connected_canon_lookup_entry_cmp(const void* lhs, const void* rhs);
 uint64_t graph_row_mask(int n);
 void get_canonical_graph(Graph* g, Graph* canon, NautyWorkspace* ws, ProfileStats* profile);
 void get_canonical_graph_from_dense_rows(int n, const AdjWord* rows, Graph* canon,
@@ -655,6 +649,7 @@ void store_row_graph_cache_entry(RowGraphCache* cache, uint64_t key_hash, uint32
                                  const Graph* g, AdjWord row_mask, const GraphPoly* value);
 void store_row_graph_cache_entry_rows(RowGraphCache* cache, uint64_t key_hash, uint32_t key_n,
                                       const AdjWord* rows, const GraphPoly* value);
+const int32_t* connected_canon_lookup_find_coeffs(uint64_t mask);
 int connected_canon_lookup_load_graph_poly(const Graph* g, GraphPoly* out);
 void induced_subgraph_from_mask(const Graph* src, uint64_t mask, Graph* dst);
 int graph_collect_components(const Graph* g, uint64_t* component_masks);

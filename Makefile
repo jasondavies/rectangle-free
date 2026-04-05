@@ -75,8 +75,8 @@ partition_poly_7_profile: $(PARTITION_SHARED_SRCS) $(NAUTY_BUILD_DIR)/nautyTL1.a
 small_graph_lookup_gen: small_graph_lookup_gen.c
 	$(CC) $(CFLAGS_5XN) -o $@ $<
 
-connected_canon_lookup_gen: connected_canon_lookup_gen.c src/runtime.c src/partitions.c $(NAUTY_BUILD_DIR)/nautyTL1.a
-	$(CC) $(PARTITION_CFLAGS) $(PARTITION_POLY_7_NAUTY_CFLAGS) $(PARTITION_POLY_7_CACHE_CFLAGS) -DMAX_COLS=7 -DDEFAULT_ROWS=7 -DDEFAULT_COLS=7 -DCACHE_BITS=17 -o $@ connected_canon_lookup_gen.c src/runtime.c src/partitions.c $(PARTITION_POLY_7_LDFLAGS)
+connected_canon_lookup_gen: connected_canon_lookup_gen.c src/runtime.c src/partitions.c src/poly.c src/graph.c src/cache.c src/solver.c $(NAUTY_BUILD_DIR)/nautyTL1.a
+	$(CC) $(PARTITION_CFLAGS) $(PARTITION_POLY_7_NAUTY_CFLAGS) $(PARTITION_POLY_7_CACHE_CFLAGS) -DMAX_COLS=7 -DDEFAULT_ROWS=7 -DDEFAULT_COLS=7 -DCACHE_BITS=17 -o $@ connected_canon_lookup_gen.c src/runtime.c src/partitions.c src/poly.c src/graph.c src/cache.c src/solver.c $(PARTITION_POLY_7_LDFLAGS)
 
 clean:
 	rm -f 5xn_count4 partition_count4 partition_poly partition_poly_7 partition_poly_profile partition_poly_7_profile small_graph_lookup_gen connected_canon_lookup_gen
