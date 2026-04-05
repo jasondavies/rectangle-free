@@ -519,6 +519,75 @@ static void cleanup_execution_state(ExecutionState* exec) {
     exec->thread_queue_subtask_timing = NULL;
 }
 
+static int replay_task_prefix(const int* prefix, int prefix_depth, CanonState* canon_state,
+                              CanonScratch* canon_scratch, PartialGraphState* partial_graph,
+                              int* stack, ProfileStats* profile, WeightAccum* prefix_weight,
+                              long long* prefix_mult, int* prefix_run) {
+    int next_stabilizer = 0;
+    int prev_pid = -1;
+    double t0 = 0.0;
+    int pushed = 0;
+
+    weight_accum_one(prefix_weight);
+    *prefix_mult = 1;
+    *prefix_run = 0;
+
+    for (int depth = 0; depth < prefix_depth; depth++) {
+        int pid = prefix[depth];
+        stack[depth] = pid;
+
+        if (PROFILE_BUILD) {
+            profile->canon_prepare_calls++;
+            profile->canon_prepare_calls_by_depth[depth]++;
+            t0 = omp_get_wtime();
+        }
+        if (!canon_state_prepare_push(canon_state, pid, canon_scratch, &next_stabilizer)) {
+            if (PROFILE_BUILD) profile->canon_prepare_time += omp_get_wtime() - t0;
+            goto fail;
+        }
+        if (PROFILE_BUILD) {
+            profile->canon_prepare_time += omp_get_wtime() - t0;
+            profile->canon_prepare_accepts++;
+            profile->canon_prepare_accepts_by_depth[depth]++;
+            profile->stabilizer_sum_by_depth[depth] += next_stabilizer;
+            profile->canon_commit_calls++;
+            t0 = omp_get_wtime();
+        }
+        canon_state_commit_push(canon_state, pid, canon_scratch, next_stabilizer);
+        pushed++;
+        if (PROFILE_BUILD) profile->canon_commit_time += omp_get_wtime() - t0;
+
+        if (PROFILE_BUILD) {
+            profile->partial_append_calls++;
+            t0 = omp_get_wtime();
+        }
+        if (!partial_graph_append_checked(partial_graph, depth, pid, stack, g_cols - depth - 1)) {
+            if (PROFILE_BUILD) profile->partial_append_time += omp_get_wtime() - t0;
+            goto fail;
+        }
+        if (PROFILE_BUILD) profile->partial_append_time += omp_get_wtime() - t0;
+
+        weight_accum_mul_partition(prefix_weight, pid, prefix_weight);
+        {
+            long long next_mult = (*prefix_mult) * (depth + 1);
+            int next_run = 1;
+            if (depth > 0 && pid == prev_pid) {
+                next_run = *prefix_run + 1;
+                next_mult /= next_run;
+            }
+            *prefix_mult = next_mult;
+            *prefix_run = next_run;
+        }
+        prev_pid = pid;
+    }
+
+    return 1;
+
+fail:
+    while (pushed-- > 0) canon_state_pop(canon_state);
+    return 0;
+}
+
 static void execute_run_tasks(const RunConfig* run, double start_time, ExecutionState* exec) {
     const int prefix_depth = run->prefix_depth;
     const int graph_poly_len = run->graph_poly_len;
@@ -689,95 +758,27 @@ static void execute_run_tasks(const RunConfig* run, double start_time, Execution
                 #pragma omp for schedule(runtime)
                 for (long long t = 0; t < total_tasks; t++) {
                     double task_t0 = PROFILE_BUILD ? omp_get_wtime() : 0.0;
-                    double t0 = 0.0;
                     long long p = first_task + t;
-                    int i = 0;
-                    int j = 0;
-                    get_prefix2_task(p, &i, &j);
-                    int next_stabilizer = 0;
+                    int prefix[2] = {0};
+                    WeightAccum prefix_weight;
+                    long long prefix_mult = 0;
+                    int prefix_run = 0;
+
+                    get_prefix2_task(p, &prefix[0], &prefix[1]);
 
                     canon_state_reset(&canon_state, perm_count);
                     partial_graph_reset(&partial_graph);
 
-                    stack[0] = i;
-                    if (PROFILE_BUILD) {
-                        profile->canon_prepare_calls++;
-                        profile->canon_prepare_calls_by_depth[0]++;
-                        t0 = omp_get_wtime();
-                    }
-                    if (!canon_state_prepare_push(&canon_state, i, &canon_scratch, &next_stabilizer)) {
-                        if (PROFILE_BUILD) profile->canon_prepare_time += omp_get_wtime() - t0;
-                        complete_task_report_and_time(total_tasks, progress_report_step, start_time,
-                                                      &pending_completed, task_timing, p, task_t0);
-                        continue;
-                    }
-                    if (PROFILE_BUILD) {
-                        profile->canon_prepare_time += omp_get_wtime() - t0;
-                        profile->canon_prepare_accepts++;
-                        profile->canon_prepare_accepts_by_depth[0]++;
-                        profile->stabilizer_sum_by_depth[0] += next_stabilizer;
-                        profile->canon_commit_calls++;
-                        t0 = omp_get_wtime();
-                    }
-                    canon_state_commit_push(&canon_state, i, &canon_scratch, next_stabilizer);
-                    if (PROFILE_BUILD) profile->canon_commit_time += omp_get_wtime() - t0;
-                    if (PROFILE_BUILD) {
-                        profile->partial_append_calls++;
-                        t0 = omp_get_wtime();
-                    }
-                    int ok = partial_graph_append_checked(&partial_graph, 0, i, stack, g_cols - 1);
-                    if (PROFILE_BUILD) profile->partial_append_time += omp_get_wtime() - t0;
-                    if (!ok) {
-                        canon_state_pop(&canon_state);
-                        complete_task_report_and_time(total_tasks, progress_report_step, start_time,
-                                                      &pending_completed, task_timing, p, task_t0);
-                        continue;
-                    }
-
-                    stack[1] = j;
-                    if (PROFILE_BUILD) {
-                        profile->canon_prepare_calls++;
-                        profile->canon_prepare_calls_by_depth[1]++;
-                        t0 = omp_get_wtime();
-                    }
-                    if (!canon_state_prepare_push(&canon_state, j, &canon_scratch, &next_stabilizer)) {
-                        if (PROFILE_BUILD) profile->canon_prepare_time += omp_get_wtime() - t0;
-                        canon_state_pop(&canon_state);
-                        complete_task_report_and_time(total_tasks, progress_report_step, start_time,
-                                                      &pending_completed, task_timing, p, task_t0);
-                        continue;
-                    }
-                    if (PROFILE_BUILD) {
-                        profile->canon_prepare_time += omp_get_wtime() - t0;
-                        profile->canon_prepare_accepts++;
-                        profile->canon_prepare_accepts_by_depth[1]++;
-                        profile->stabilizer_sum_by_depth[1] += next_stabilizer;
-                        profile->canon_commit_calls++;
-                        t0 = omp_get_wtime();
-                    }
-                    canon_state_commit_push(&canon_state, j, &canon_scratch, next_stabilizer);
-                    if (PROFILE_BUILD) profile->canon_commit_time += omp_get_wtime() - t0;
-                    PartialGraphState prefix_graph = partial_graph;
-                    if (PROFILE_BUILD) {
-                        profile->partial_append_calls++;
-                        t0 = omp_get_wtime();
-                    }
-                    ok = partial_graph_append_checked(&prefix_graph, 1, j, stack, g_cols - 2);
-                    if (PROFILE_BUILD) profile->partial_append_time += omp_get_wtime() - t0;
-                    if (ok) {
-                        WeightAccum prefix_weight;
-                        weight_accum_from_partition(i, &prefix_weight);
-                        weight_accum_mul_partition(&prefix_weight, j, &prefix_weight);
-                        long long prefix_mult = (i == j) ? 1 : 2;
-                        int prefix_run = (i == j) ? 2 : 1;
-                        dfs(2, j, stack, &canon_state, &prefix_graph, &cache, &raw_cache, &ws,
+                    if (replay_task_prefix(prefix, 2, &canon_state, &canon_scratch,
+                                           &partial_graph, stack, profile, &prefix_weight,
+                                           &prefix_mult, &prefix_run)) {
+                        dfs(2, prefix[1], stack, &canon_state, &partial_graph, &cache, &raw_cache, &ws,
                             &exec->thread_polys[tid], &local_canon_calls, &local_cache_hits,
                             &local_raw_cache_hits, &prefix_weight, prefix_mult, prefix_run,
                             profile, &canon_scratch);
+                        canon_state_pop(&canon_state);
+                        canon_state_pop(&canon_state);
                     }
-
-                    canon_state_pop(&canon_state);
-                    canon_state_pop(&canon_state);
 
                     complete_task_report_and_time(total_tasks, progress_report_step, start_time,
                                                   &pending_completed, task_timing, p, task_t0);
@@ -788,80 +789,27 @@ static void execute_run_tasks(const RunConfig* run, double start_time, Execution
             for (long long t = 0; t < total_tasks; t++) {
                 double task_t0 = PROFILE_BUILD ? omp_get_wtime() : 0.0;
                 long long p = first_task + t;
-                int i = 0;
-                int j = 0;
-                int k = 0;
-                unrank_prefix3(p, &i, &j, &k);
-                int next_stabilizer = 0;
+                int prefix[3] = {0};
+                WeightAccum prefix_weight;
+                long long prefix_mult = 0;
+                int prefix_run = 0;
+
+                unrank_prefix3(p, &prefix[0], &prefix[1], &prefix[2]);
 
                 canon_state_reset(&canon_state, perm_count);
                 partial_graph_reset(&partial_graph);
 
-                stack[0] = i;
-                if (!canon_state_prepare_push(&canon_state, i, &canon_scratch, &next_stabilizer)) {
-                    complete_task_report_and_time(total_tasks, progress_report_step, start_time,
-                                                  &pending_completed, task_timing, p, task_t0);
-                    continue;
-                }
-                canon_state_commit_push(&canon_state, i, &canon_scratch, next_stabilizer);
-                if (!partial_graph_append_checked(&partial_graph, 0, i, stack, g_cols - 1)) {
-                    canon_state_pop(&canon_state);
-                    complete_task_report_and_time(total_tasks, progress_report_step, start_time,
-                                                  &pending_completed, task_timing, p, task_t0);
-                    continue;
-                }
-
-                stack[1] = j;
-                if (!canon_state_prepare_push(&canon_state, j, &canon_scratch, &next_stabilizer)) {
-                    canon_state_pop(&canon_state);
-                    complete_task_report_and_time(total_tasks, progress_report_step, start_time,
-                                                  &pending_completed, task_timing, p, task_t0);
-                    continue;
-                }
-                canon_state_commit_push(&canon_state, j, &canon_scratch, next_stabilizer);
-                PartialGraphState prefix_graph = partial_graph;
-                if (!partial_graph_append_checked(&prefix_graph, 1, j, stack, g_cols - 2)) {
-                    canon_state_pop(&canon_state);
-                    canon_state_pop(&canon_state);
-                    complete_task_report_and_time(total_tasks, progress_report_step, start_time,
-                                                  &pending_completed, task_timing, p, task_t0);
-                    continue;
-                }
-
-                stack[2] = k;
-                if (!canon_state_prepare_push(&canon_state, k, &canon_scratch, &next_stabilizer)) {
-                    canon_state_pop(&canon_state);
-                    canon_state_pop(&canon_state);
-                    complete_task_report_and_time(total_tasks, progress_report_step, start_time,
-                                                  &pending_completed, task_timing, p, task_t0);
-                    continue;
-                }
-                canon_state_commit_push(&canon_state, k, &canon_scratch, next_stabilizer);
-                PartialGraphState prefix_graph2 = prefix_graph;
-                int ok = partial_graph_append_checked(&prefix_graph2, 2, k, stack, g_cols - 3);
-                if (ok) {
-                    WeightAccum prefix_weight;
-                    weight_accum_from_partition(i, &prefix_weight);
-                    weight_accum_mul_partition(&prefix_weight, j, &prefix_weight);
-                    weight_accum_mul_partition(&prefix_weight, k, &prefix_weight);
-                    long long prefix_mult = (i == j) ? 1 : 2;
-                    int prefix_run = (i == j) ? 2 : 1;
-                    if (k == j) {
-                        prefix_mult = prefix_mult * 3 / (prefix_run + 1);
-                        prefix_run += 1;
-                    } else {
-                        prefix_mult *= 3;
-                        prefix_run = 1;
-                    }
-                    dfs(3, k, stack, &canon_state, &prefix_graph2, &cache, &raw_cache, &ws,
+                if (replay_task_prefix(prefix, 3, &canon_state, &canon_scratch,
+                                       &partial_graph, stack, profile, &prefix_weight,
+                                       &prefix_mult, &prefix_run)) {
+                    dfs(3, prefix[2], stack, &canon_state, &partial_graph, &cache, &raw_cache, &ws,
                         &exec->thread_polys[tid], &local_canon_calls, &local_cache_hits,
                         &local_raw_cache_hits, &prefix_weight, prefix_mult, prefix_run,
                         profile, &canon_scratch);
+                    canon_state_pop(&canon_state);
+                    canon_state_pop(&canon_state);
+                    canon_state_pop(&canon_state);
                 }
-
-                canon_state_pop(&canon_state);
-                canon_state_pop(&canon_state);
-                canon_state_pop(&canon_state);
 
                 complete_task_report_and_time(total_tasks, progress_report_step, start_time,
                                               &pending_completed, task_timing, p, task_t0);
@@ -871,110 +819,28 @@ static void execute_run_tasks(const RunConfig* run, double start_time, Execution
             for (long long t = 0; t < total_tasks; t++) {
                 double task_t0 = PROFILE_BUILD ? omp_get_wtime() : 0.0;
                 long long p = first_task + t;
-                int i = 0;
-                int j = 0;
-                int k = 0;
-                int l = 0;
-                unrank_prefix4(p, &i, &j, &k, &l);
-                int next_stabilizer = 0;
+                int prefix[4] = {0};
+                WeightAccum prefix_weight;
+                long long prefix_mult = 0;
+                int prefix_run = 0;
+
+                unrank_prefix4(p, &prefix[0], &prefix[1], &prefix[2], &prefix[3]);
 
                 canon_state_reset(&canon_state, perm_count);
                 partial_graph_reset(&partial_graph);
 
-                stack[0] = i;
-                if (!canon_state_prepare_push(&canon_state, i, &canon_scratch, &next_stabilizer)) {
-                    complete_task_report_and_time(total_tasks, progress_report_step, start_time,
-                                                  &pending_completed, task_timing, p, task_t0);
-                    continue;
-                }
-                canon_state_commit_push(&canon_state, i, &canon_scratch, next_stabilizer);
-                if (!partial_graph_append_checked(&partial_graph, 0, i, stack, g_cols - 1)) {
-                    canon_state_pop(&canon_state);
-                    complete_task_report_and_time(total_tasks, progress_report_step, start_time,
-                                                  &pending_completed, task_timing, p, task_t0);
-                    continue;
-                }
-
-                stack[1] = j;
-                if (!canon_state_prepare_push(&canon_state, j, &canon_scratch, &next_stabilizer)) {
-                    canon_state_pop(&canon_state);
-                    complete_task_report_and_time(total_tasks, progress_report_step, start_time,
-                                                  &pending_completed, task_timing, p, task_t0);
-                    continue;
-                }
-                canon_state_commit_push(&canon_state, j, &canon_scratch, next_stabilizer);
-                PartialGraphState prefix_graph = partial_graph;
-                if (!partial_graph_append_checked(&prefix_graph, 1, j, stack, g_cols - 2)) {
-                    canon_state_pop(&canon_state);
-                    canon_state_pop(&canon_state);
-                    complete_task_report_and_time(total_tasks, progress_report_step, start_time,
-                                                  &pending_completed, task_timing, p, task_t0);
-                    continue;
-                }
-
-                stack[2] = k;
-                if (!canon_state_prepare_push(&canon_state, k, &canon_scratch, &next_stabilizer)) {
-                    canon_state_pop(&canon_state);
-                    canon_state_pop(&canon_state);
-                    complete_task_report_and_time(total_tasks, progress_report_step, start_time,
-                                                  &pending_completed, task_timing, p, task_t0);
-                    continue;
-                }
-                canon_state_commit_push(&canon_state, k, &canon_scratch, next_stabilizer);
-                PartialGraphState prefix_graph2 = prefix_graph;
-                if (!partial_graph_append_checked(&prefix_graph2, 2, k, stack, g_cols - 3)) {
-                    canon_state_pop(&canon_state);
-                    canon_state_pop(&canon_state);
-                    canon_state_pop(&canon_state);
-                    complete_task_report_and_time(total_tasks, progress_report_step, start_time,
-                                                  &pending_completed, task_timing, p, task_t0);
-                    continue;
-                }
-
-                stack[3] = l;
-                if (!canon_state_prepare_push(&canon_state, l, &canon_scratch, &next_stabilizer)) {
-                    canon_state_pop(&canon_state);
-                    canon_state_pop(&canon_state);
-                    canon_state_pop(&canon_state);
-                    complete_task_report_and_time(total_tasks, progress_report_step, start_time,
-                                                  &pending_completed, task_timing, p, task_t0);
-                    continue;
-                }
-                canon_state_commit_push(&canon_state, l, &canon_scratch, next_stabilizer);
-                PartialGraphState prefix_graph3 = prefix_graph2;
-                int ok = partial_graph_append_checked(&prefix_graph3, 3, l, stack, g_cols - 4);
-                if (ok) {
-                    WeightAccum prefix_weight;
-                    weight_accum_from_partition(i, &prefix_weight);
-                    weight_accum_mul_partition(&prefix_weight, j, &prefix_weight);
-                    weight_accum_mul_partition(&prefix_weight, k, &prefix_weight);
-                    weight_accum_mul_partition(&prefix_weight, l, &prefix_weight);
-                    long long prefix_mult = (i == j) ? 1 : 2;
-                    int prefix_run = (i == j) ? 2 : 1;
-                    if (k == j) {
-                        prefix_mult = prefix_mult * 3 / (prefix_run + 1);
-                        prefix_run += 1;
-                    } else {
-                        prefix_mult *= 3;
-                        prefix_run = 1;
-                    }
-                    if (l == k) {
-                        prefix_mult = prefix_mult * 4 / (prefix_run + 1);
-                        prefix_run += 1;
-                    } else {
-                        prefix_mult *= 4;
-                        prefix_run = 1;
-                    }
-                    dfs(4, l, stack, &canon_state, &prefix_graph3, &cache, &raw_cache, &ws,
+                if (replay_task_prefix(prefix, 4, &canon_state, &canon_scratch,
+                                       &partial_graph, stack, profile, &prefix_weight,
+                                       &prefix_mult, &prefix_run)) {
+                    dfs(4, prefix[3], stack, &canon_state, &partial_graph, &cache, &raw_cache, &ws,
                         &exec->thread_polys[tid], &local_canon_calls, &local_cache_hits,
                         &local_raw_cache_hits, &prefix_weight, prefix_mult, prefix_run,
                         profile, &canon_scratch);
+                    canon_state_pop(&canon_state);
+                    canon_state_pop(&canon_state);
+                    canon_state_pop(&canon_state);
+                    canon_state_pop(&canon_state);
                 }
-
-                canon_state_pop(&canon_state);
-                canon_state_pop(&canon_state);
-                canon_state_pop(&canon_state);
-                canon_state_pop(&canon_state);
 
                 complete_task_report_and_time(total_tasks, progress_report_step, start_time,
                                               &pending_completed, task_timing, p, task_t0);
