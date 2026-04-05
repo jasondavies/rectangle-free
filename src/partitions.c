@@ -11,6 +11,7 @@ int (*perms)[MAX_ROWS] = NULL;
 uint16_t* perm_table = NULL;
 uint16_t* perm_order_by_value = NULL;
 uint16_t* perm_value_prefix_end = NULL;
+uint64_t* perm_value_prefix_bits = NULL;
 uint16_t* partition_id_lookup = NULL;
 uint32_t partition_id_lookup_size = 0;
 uint64_t factorial[20];
@@ -56,6 +57,9 @@ void init_partition_lookup_tables(void) {
     perm_value_prefix_end =
         checked_calloc(partition_count * partition_count, sizeof(*perm_value_prefix_end),
                        "perm_value_prefix_end");
+    perm_value_prefix_bits =
+        checked_calloc(partition_count * partition_count * (size_t)PERM_BITSET_WORDS,
+                       sizeof(*perm_value_prefix_bits), "perm_value_prefix_bits");
     partition_id_lookup =
         checked_aligned_alloc(64, (size_t)partition_id_lookup_size * sizeof(*partition_id_lookup),
                               "partition_id_lookup");
@@ -80,6 +84,7 @@ void free_row_dependent_tables(void) {
     free(perm_table);
     free(perm_order_by_value);
     free(perm_value_prefix_end);
+    free(perm_value_prefix_bits);
     free(partition_id_lookup);
     free(overlap_mask);
     free(intra_mask);
@@ -96,6 +101,7 @@ void free_row_dependent_tables(void) {
     perm_table = NULL;
     perm_order_by_value = NULL;
     perm_value_prefix_end = NULL;
+    perm_value_prefix_bits = NULL;
     partition_id_lookup = NULL;
     partition_id_lookup_size = 0;
     overlap_mask = NULL;
@@ -282,6 +288,9 @@ void build_terminal_perm_order_tables(void) {
     for (int id = 0; id < num_partitions; id++) {
         uint16_t* sorted_row = perm_order_by_value + (size_t)id * (size_t)perm_count;
         uint16_t* prefix_row = perm_value_prefix_end + (size_t)id * (size_t)num_partitions;
+        uint64_t* prefix_bits_row =
+            perm_value_prefix_bits +
+            ((size_t)id * (size_t)num_partitions * (size_t)PERM_BITSET_WORDS);
         const uint16_t* perm_row = perm_table + (size_t)id * (size_t)perm_count;
 
         memset(counts, 0, (size_t)num_partitions * sizeof(*counts));
@@ -299,6 +308,27 @@ void build_terminal_perm_order_tables(void) {
         for (int p = 0; p < perm_count; p++) {
             uint16_t value = perm_row[p];
             sorted_row[offsets[value]++] = (uint16_t)p;
+        }
+
+        memset(prefix_bits_row, 0,
+               (size_t)num_partitions * (size_t)PERM_BITSET_WORDS * sizeof(*prefix_bits_row));
+
+        uint16_t prev_end = 0;
+        for (int value = 0; value < num_partitions; value++) {
+            uint16_t end = prefix_row[value];
+            uint64_t* bits =
+                prefix_bits_row + (size_t)value * (size_t)PERM_BITSET_WORDS;
+
+            if (value > 0) {
+                const uint64_t* prev_bits = bits - PERM_BITSET_WORDS;
+                memcpy(bits, prev_bits, (size_t)PERM_BITSET_WORDS * sizeof(*bits));
+            }
+
+            for (uint16_t idx = prev_end; idx < end; idx++) {
+                uint16_t p = sorted_row[idx];
+                bits[(unsigned)p >> 6] |= UINT64_C(1) << ((unsigned)p & 63u);
+            }
+            prev_end = end;
         }
     }
 

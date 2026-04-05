@@ -4,6 +4,28 @@
 
 #define REP_ORBIT_MARK_WORDS ((CANON_PARTITION_ID_LIMIT + 63u) / 64u)
 
+static inline int canon_perm_word_count(int limit) {
+    return (limit + 63) >> 6;
+}
+
+static inline uint64_t* perm_prefix_bits_row(int partition_id, int value) {
+    return perm_value_prefix_bits +
+           ((((size_t)partition_id * (size_t)num_partitions) + (size_t)value) *
+            (size_t)PERM_BITSET_WORDS);
+}
+
+static inline const uint64_t* canon_state_bucket_bits_const(const CanonState* st, int fg) {
+    return st->first_greater_bucket_bits[fg];
+}
+
+static inline void canon_state_bucket_bit_set(CanonState* st, int fg, int p) {
+    st->first_greater_bucket_bits[fg][(unsigned)p >> 6] |= UINT64_C(1) << ((unsigned)p & 63u);
+}
+
+static inline void canon_state_bucket_bit_clear(CanonState* st, int fg, int p) {
+    st->first_greater_bucket_bits[fg][(unsigned)p >> 6] &= ~(UINT64_C(1) << ((unsigned)p & 63u));
+}
+
 static inline uint16_t* canon_state_changed_first_greater_idx_row(CanonState* st, int depth) {
     return st->changed_first_greater_idx + (size_t)depth * (size_t)st->limit;
 }
@@ -353,51 +375,54 @@ static inline int canon_state_prepare_terminal_fast(const CanonState* st, int pa
     int depth = st->depth;
     int new_depth = depth + 1;
     int stabilizer = 0;
+    int word_count = canon_perm_word_count(st->limit);
     uint16_t pid = (uint16_t)partition_id;
-    uint16_t max_threshold = pid;
-    const uint16_t* partition_perm_row =
-        perm_table + (size_t)partition_id * (size_t)perm_count;
-    const uint16_t* perm_order_row =
-        perm_order_by_value + (size_t)partition_id * (size_t)perm_count;
-    const uint16_t* prefix_end_row =
-        perm_value_prefix_end + (size_t)partition_id * (size_t)num_partitions;
-    const uint8_t* first_greater = st->first_greater;
     const uint16_t* stack_vals = st->stack_vals;
 
     for (int g = 0; g < depth; g++) {
-        if (stack_vals[g] > max_threshold) max_threshold = stack_vals[g];
-    }
+        uint16_t c = stack_vals[g];
+        const uint64_t* bucket_bits = canon_state_bucket_bits_const(st, g);
+        const uint64_t* le_bits = perm_prefix_bits_row(partition_id, c);
+        const uint64_t* lt_bits = (c > 0) ? perm_prefix_bits_row(partition_id, c - 1) : NULL;
 
-    uint16_t scan_count = prefix_end_row[max_threshold];
+        if (lt_bits != NULL) {
+            for (int w = 0; w < word_count; w++) {
+                if (bucket_bits[w] & lt_bits[w]) return 0;
+            }
+        }
 
-    for (uint16_t i = 0; i < scan_count; i++) {
-        uint16_t p = perm_order_row[i];
-        uint16_t x = partition_perm_row[p];
-        uint8_t g = first_greater[p];
-
-        if (__builtin_expect(g != (uint8_t)depth, 1)) {
-            uint16_t c = stack_vals[g];
-            if (__builtin_expect(x > c, 1)) {
-                continue;
-            } else if (x < c) {
-                return 0;
-            } else {
+        for (int w = 0; w < word_count; w++) {
+            uint64_t eq = bucket_bits[w] & le_bits[w];
+            if (lt_bits != NULL) eq &= ~lt_bits[w];
+            while (eq) {
+                int bit = __builtin_ctzll(eq);
+                int p = (w << 6) + bit;
                 uint8_t next_fg;
                 uint16_t next_fg_val;
                 if (!canon_rebuild_equal_case(st, p, g, pid, &next_fg, &next_fg_val)) {
                     return 0;
                 }
-                if (next_fg == new_depth) {
-                    stabilizer++;
-                }
+                if (next_fg == new_depth) stabilizer++;
+                eq &= eq - 1;
             }
-        } else {
-            if (x < pid) {
-                return 0;
+        }
+    }
+
+    {
+        const uint64_t* bucket_bits = canon_state_bucket_bits_const(st, depth);
+        const uint64_t* le_bits = perm_prefix_bits_row(partition_id, pid);
+        const uint64_t* lt_bits = (pid > 0) ? perm_prefix_bits_row(partition_id, pid - 1) : NULL;
+
+        if (lt_bits != NULL) {
+            for (int w = 0; w < word_count; w++) {
+                if (bucket_bits[w] & lt_bits[w]) return 0;
             }
-            if (x == pid) {
-                stabilizer++;
-            }
+        }
+
+        for (int w = 0; w < word_count; w++) {
+            uint64_t eq = bucket_bits[w] & le_bits[w];
+            if (lt_bits != NULL) eq &= ~lt_bits[w];
+            stabilizer += __builtin_popcountll(eq);
         }
     }
 
@@ -410,41 +435,44 @@ static int canon_state_prepare_terminal_profiled(const CanonState* st, int parti
     int depth = st->depth;
     int new_depth = depth + 1;
     int stabilizer = 0;
+    int word_count = canon_perm_word_count(st->limit);
     uint16_t pid = (uint16_t)partition_id;
-    uint16_t max_threshold = pid;
-    const uint16_t* partition_perm_row =
-        perm_table + (size_t)partition_id * (size_t)perm_count;
-    const uint16_t* perm_order_row =
-        perm_order_by_value + (size_t)partition_id * (size_t)perm_count;
-    const uint16_t* prefix_end_row =
-        perm_value_prefix_end + (size_t)partition_id * (size_t)num_partitions;
-    const uint8_t* first_greater = st->first_greater;
     const uint16_t* stack_vals = st->stack_vals;
     ProfileStats* prof = tls_profile;
 
     prof->canon_prepare_terminal_calls_by_depth[depth]++;
 
     for (int g = 0; g < depth; g++) {
-        if (stack_vals[g] > max_threshold) max_threshold = stack_vals[g];
-    }
+        uint16_t c = stack_vals[g];
+        const uint64_t* bucket_bits = canon_state_bucket_bits_const(st, g);
+        const uint64_t* le_bits = perm_prefix_bits_row(partition_id, c);
+        const uint64_t* lt_bits = (c > 0) ? perm_prefix_bits_row(partition_id, c - 1) : NULL;
+        int lt_count = 0;
+        int le_count = 0;
 
-    uint16_t scan_count = prefix_end_row[max_threshold];
-    prof->canon_prepare_terminal_continue_by_depth[depth] += (long long)st->limit - scan_count;
+        for (int w = 0; w < word_count; w++) {
+            uint64_t le = bucket_bits[w] & le_bits[w];
+            le_count += __builtin_popcountll(le);
+            if (lt_bits != NULL) {
+                uint64_t lt = bucket_bits[w] & lt_bits[w];
+                lt_count += __builtin_popcountll(lt);
+            }
+        }
 
-    for (uint16_t i = 0; i < scan_count; i++) {
-        uint16_t p = perm_order_row[i];
-        uint16_t x = partition_perm_row[p];
-        uint8_t g = first_greater[p];
+        prof->canon_prepare_terminal_continue_by_depth[depth] +=
+            (long long)st->first_greater_bucket_count[g] - (long long)le_count;
 
-        if (__builtin_expect(g != (uint8_t)depth, 1)) {
-            uint16_t c = stack_vals[g];
-            if (__builtin_expect(x > c, 1)) {
-                prof->canon_prepare_terminal_continue_by_depth[depth]++;
-                continue;
-            } else if (x < c) {
-                prof->canon_prepare_order_rejects_by_depth[depth]++;
-                return 0;
-            } else {
+        if (lt_count > 0) {
+            prof->canon_prepare_order_rejects_by_depth[depth]++;
+            return 0;
+        }
+
+        for (int w = 0; w < word_count; w++) {
+            uint64_t eq = bucket_bits[w] & le_bits[w];
+            if (lt_bits != NULL) eq &= ~lt_bits[w];
+            while (eq) {
+                int bit = __builtin_ctzll(eq);
+                int p = (w << 6) + bit;
                 uint8_t next_fg;
                 uint16_t next_fg_val;
                 prof->canon_prepare_equal_case_calls_by_depth[depth]++;
@@ -452,19 +480,37 @@ static int canon_state_prepare_terminal_profiled(const CanonState* st, int parti
                     prof->canon_prepare_equal_case_rejects_by_depth[depth]++;
                     return 0;
                 }
-                if (next_fg == new_depth) {
-                    stabilizer++;
-                }
-            }
-        } else {
-            if (x < pid) {
-                prof->canon_prepare_order_rejects_by_depth[depth]++;
-                return 0;
-            }
-            if (x == pid) {
-                stabilizer++;
+                if (next_fg == new_depth) stabilizer++;
+                eq &= eq - 1;
             }
         }
+    }
+
+    {
+        const uint64_t* bucket_bits = canon_state_bucket_bits_const(st, depth);
+        const uint64_t* le_bits = perm_prefix_bits_row(partition_id, pid);
+        const uint64_t* lt_bits = (pid > 0) ? perm_prefix_bits_row(partition_id, pid - 1) : NULL;
+        int lt_count = 0;
+        int le_count = 0;
+
+        for (int w = 0; w < word_count; w++) {
+            uint64_t le = bucket_bits[w] & le_bits[w];
+            le_count += __builtin_popcountll(le);
+            if (lt_bits != NULL) {
+                uint64_t lt = bucket_bits[w] & lt_bits[w];
+                lt_count += __builtin_popcountll(lt);
+            }
+        }
+
+        prof->canon_prepare_terminal_continue_by_depth[depth] +=
+            (long long)st->first_greater_bucket_count[depth] - (long long)le_count;
+
+        if (lt_count > 0) {
+            prof->canon_prepare_order_rejects_by_depth[depth]++;
+            return 0;
+        }
+
+        stabilizer += le_count;
     }
 
     *next_stabilizer = stabilizer;
@@ -602,16 +648,29 @@ void canon_state_reset(CanonState* st, int limit) {
         abort();
     }
     size_t count = (size_t)limit;
+    int word_count = canon_perm_word_count(limit);
     st->limit = limit;
     st->depth = 0;
     st->stabilizer[0] = limit;
     st->equal_count[0] = (uint16_t)limit;
+    st->first_greater_bucket_count[0] = (uint16_t)limit;
+    for (int fg = 1; fg <= g_cols; fg++) {
+        st->first_greater_bucket_count[fg] = 0;
+    }
     uint16_t* equal_perm0 = canon_state_equal_perm_row(st, 0);
     for (int p = 0; p < limit; p++) {
         equal_perm0[p] = (uint16_t)p;
     }
     memset(st->first_greater, 0, count * sizeof(*st->first_greater));
     memset(st->first_greater_val, 0, count * sizeof(*st->first_greater_val));
+    memset(st->first_greater_bucket_bits, 0, sizeof(st->first_greater_bucket_bits));
+    for (int w = 0; w < word_count; w++) {
+        st->first_greater_bucket_bits[0][w] = ~UINT64_C(0);
+    }
+    if (limit & 63) {
+        st->first_greater_bucket_bits[0][word_count - 1] &=
+            (UINT64_C(1) << (limit & 63)) - 1U;
+    }
 }
 
 static inline int canon_state_prepare_push_fast(const CanonState* st, int partition_id,
@@ -809,11 +868,19 @@ void canon_state_commit_push(CanonState* st, int partition_id, const CanonScratc
     }
     for (uint16_t i = 0; i < changed_fg_count; i++) {
         uint16_t p = scratch->changed_first_greater_idx[i];
+        uint8_t old_fg = st->first_greater[p];
+        uint8_t new_fg = scratch->changed_first_greater_new_idx[i];
         changed_first_greater_idx[i] = p;
-        changed_first_greater_old_idx[i] = st->first_greater[p];
+        changed_first_greater_old_idx[i] = old_fg;
         changed_first_greater_old_val[i] = st->first_greater_val[p];
-        st->first_greater[p] = scratch->changed_first_greater_new_idx[i];
+        st->first_greater[p] = new_fg;
         st->first_greater_val[p] = scratch->changed_first_greater_new_val[i];
+        if (old_fg != new_fg) {
+            canon_state_bucket_bit_clear(st, old_fg, p);
+            canon_state_bucket_bit_set(st, new_fg, p);
+            st->first_greater_bucket_count[old_fg]--;
+            st->first_greater_bucket_count[new_fg]++;
+        }
     }
 
     st->equal_count[new_depth] = scratch->next_equal_count;
@@ -829,8 +896,16 @@ void canon_state_pop(CanonState* st) {
     uint16_t* changed_first_greater_old_val = canon_state_changed_first_greater_old_val_row(st, depth);
     for (uint16_t i = 0; i < st->changed_first_greater_count[depth]; i++) {
         uint16_t p = changed_first_greater_idx[i];
-        st->first_greater[p] = changed_first_greater_old_idx[i];
+        uint8_t old_fg = changed_first_greater_old_idx[i];
+        uint8_t cur_fg = st->first_greater[p];
+        st->first_greater[p] = old_fg;
         st->first_greater_val[p] = changed_first_greater_old_val[i];
+        if (cur_fg != old_fg) {
+            canon_state_bucket_bit_clear(st, cur_fg, p);
+            canon_state_bucket_bit_set(st, old_fg, p);
+            st->first_greater_bucket_count[cur_fg]--;
+            st->first_greater_bucket_count[old_fg]++;
+        }
     }
     st->depth = depth;
 }

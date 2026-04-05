@@ -63,6 +63,7 @@ typedef uint64_t AdjWord;
 #endif
 
 #define MAX_PERMUTATIONS 5040
+#define PERM_BITSET_WORDS ((MAX_PERMUTATIONS + 63) / 64)
 #define MAX_DEGREE ((MAX_ROWS * MAX_COLS) + 1)
 #define CANON_PARTITION_ID_LIMIT (1u << 11)
 
@@ -455,6 +456,7 @@ extern int (*perms)[MAX_ROWS];
 extern uint16_t* perm_table;
 extern uint16_t* perm_order_by_value;
 extern uint16_t* perm_value_prefix_end;
+extern uint64_t* perm_value_prefix_bits;
 extern uint16_t* partition_id_lookup;
 extern uint32_t partition_id_lookup_size;
 extern uint64_t factorial[20];

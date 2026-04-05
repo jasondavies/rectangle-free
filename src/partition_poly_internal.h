@@ -15,8 +15,10 @@ typedef struct {
     uint16_t* changed_first_greater_old_val;
     uint16_t equal_count[MAX_COLS + 1];
     uint16_t changed_first_greater_count[MAX_COLS];
+    uint16_t first_greater_bucket_count[MAX_COLS + 1];
     uint16_t stack_vals[MAX_COLS];
     const uint16_t* stack_perm_rows[MAX_COLS];
+    uint64_t first_greater_bucket_bits[MAX_COLS + 1][PERM_BITSET_WORDS];
     int stabilizer[MAX_COLS + 1];
 } CanonState;
 

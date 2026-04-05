@@ -6688,3 +6688,38 @@
   - the key idea is that the cache no longer pays to move representation metadata that is already implied by the connected residual graph size
   - the `memcmp` cleanup likely contributes a little as well, but the main structural benefit is shrinking the polynomial-mode cache payload and its surrounding traffic
 - Outcome: accepted on `main`.
+
+### Experiment 167: Terminal canon by `first_greater` bucket bitsets
+- Goal: attack the remaining dominant hotspot in `canon_state_prepare_terminal()` by avoiding the near-full permutation scan on every terminal candidate.
+- Change:
+  - add dynamic `CanonState` bucket bitsets/counts keyed by the current `first_greater` value, updated incrementally in `canon_state_commit_push()` / `canon_state_pop()`
+  - extend partition precomputation with `perm_value_prefix_bits[pid][t]`, a bitset of permutations `p` such that `perm_table[pid][p] <= t`
+  - rewrite terminal prepare to work bucket-by-bucket:
+    - reject immediately if bucket `g` intersects the `< stack_vals[g]` prefix
+    - enumerate only the `== stack_vals[g]` intersection for equal-case rebuilds
+    - count stabilizer contributions from the terminal equality bucket by popcount instead of scanning sorted permutations
+  - keep the non-terminal prepare path unchanged
+- Reference benchmark command:
+  - `OMP_NUM_THREADS=1 ./partition_poly_profile 7 5 --task-end 20`
+- Baseline:
+  - current committed `main` tip before this change (`6a80a0c`)
+  - `Worker Complete in 52.67 seconds`
+  - `canon_state_prepare_push: 41.408s`
+- Experiment:
+  - `Worker Complete in 25.82 seconds`
+  - `canon_state_prepare_push: 14.422s`
+- Shape check:
+  - canonicalisation calls unchanged at `539623`
+  - canonical cache hits unchanged at `487212`
+  - raw cache hits unchanged at `2453519`
+  - `solve_graph_poly` stayed essentially flat (`4.814s` baseline, `4.869s` experiment)
+- Additional verification:
+  - `./partition_poly_profile 3 3 --task-end 1`
+  - `OMP_NUM_THREADS=1 ./partition_count4 3 3 --task-end 1`
+  - `OMP_NUM_THREADS=1 ./partition_poly_profile 7 5 --task-end 1`
+  - `OMP_NUM_THREADS=1 ./partition_count4 7 5 --task-end 1`
+- Interpretation:
+  - this is a pure symmetry-side structural win: the search tree and graph solver work are unchanged, but terminal canon no longer pays to walk almost every permutation in the value-sorted prefix
+  - the dynamic `first_greater` buckets expose exactly the state that the old terminal prefix scan was implicitly recomputing expensively
+  - the price is memory: the precomputed prefix-bitset table is substantially larger than the old `perm_value_prefix_end` counts, but on this workload the runtime reduction is large enough to justify it
+- Outcome: accepted on `main`.
