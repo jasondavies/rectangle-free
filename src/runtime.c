@@ -529,6 +529,14 @@ int runtime_task_system_has_idle_workers(const RuntimeTaskSystem* system) {
     return atomic_load_explicit(&system->shared_queue.idle_threads, memory_order_relaxed) > 0;
 }
 
+int runtime_task_system_needs_balance(const RuntimeTaskSystem* system) {
+    int idle_workers = atomic_load_explicit(&system->shared_queue.idle_threads, memory_order_relaxed);
+    if (idle_workers <= 0) return 0;
+    int min_global = system->shared_queue.total_threads;
+    if (min_global < 4) min_global = 4;
+    return system->shared_queue.count < min_global;
+}
+
 void runtime_task_system_note_balance_push(RuntimeTaskSystem* system) {
     atomic_fetch_add_explicit(&system->shared_queue.donated_tasks, 1, memory_order_relaxed);
 }

@@ -1850,7 +1850,7 @@ static void dfs_runtime_split_local(int depth, int start_pid, int end_pid, long 
             *tls_adaptive_work_counter >= g_adaptive_work_budget &&
             depth < g_adaptive_max_depth &&
             (local_end - pid) >= 2 &&
-            runtime_task_system_has_idle_workers(runtime_tasks)) {
+            runtime_task_system_needs_balance(runtime_tasks)) {
             LocalTask continuation = {0};
             local_task_from_stack(&continuation, root_id, depth, ctx->stack);
             continuation.lo = (PrefixId)pid;
@@ -1863,7 +1863,7 @@ static void dfs_runtime_split_local(int depth, int start_pid, int end_pid, long 
 
         if ((depth + 1) <= g_adaptive_max_depth && depth >= 3 && depth <= 5 &&
             (local_end - pid) >= 16 &&
-            runtime_task_system_has_idle_workers(runtime_tasks)) {
+            runtime_task_system_needs_balance(runtime_tasks)) {
             int mid = pid + (local_end - pid) / 2;
             LocalTask range_task = {0};
             local_task_from_stack(&range_task, root_id, depth, ctx->stack);

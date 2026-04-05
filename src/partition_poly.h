@@ -566,6 +566,7 @@ int runtime_task_system_pop_task(RuntimeTaskSystem* system, LocalTask* task);
 int runtime_task_system_push_local(RuntimeTaskSystem* system, const LocalTask* task);
 int runtime_task_system_push_balance(RuntimeTaskSystem* system, const LocalTask* task);
 int runtime_task_system_has_idle_workers(const RuntimeTaskSystem* system);
+int runtime_task_system_needs_balance(const RuntimeTaskSystem* system);
 void runtime_task_system_note_balance_push(RuntimeTaskSystem* system);
 void runtime_task_system_note_work_budget_split(RuntimeTaskSystem* system);
 void runtime_task_system_finish_task(RuntimeTaskSystem* system, long long root_id,

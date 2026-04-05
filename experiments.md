@@ -6723,3 +6723,49 @@
   - the dynamic `first_greater` buckets expose exactly the state that the old terminal prefix scan was implicitly recomputing expensively
   - the price is memory: the precomputed prefix-bitset table is substantially larger than the old `perm_value_prefix_end` counts, but on this workload the runtime reduction is large enough to justify it
 - Outcome: accepted on `main`.
+
+### Experiment 168: Only split runtime work when the global queue is genuinely shallow
+- Goal: reduce unnecessary adaptive continuation churn in the shared-queue runtime without changing the queue topology.
+- Background:
+  - exploratory scheduler work showed that the main regression mechanism was not queue contention but too many work-budget continuations
+  - the original split trigger used `idle_threads > 0`, which is a coarse signal
+  - if a worker becomes briefly idle while the shared queue is still healthy, splitting early just adds replay overhead
+- Change:
+  - keep the original single shared runtime queue
+  - add `runtime_task_system_needs_balance()`
+  - only create work-budget continuations or depth-3..5 donated range splits when:
+    - there is at least one idle worker, and
+    - the shared queue count is below `num_threads` (minimum threshold `4`)
+- Matching pinned 32-thread polynomial benchmark command:
+  - `env OMP_NUM_THREADS=32 <binary> 6 6 --prefix-depth 2 --adaptive-subdivide --adaptive-work-budget 1000 --adaptive-max-depth 5`
+- Pinned baseline:
+  - shared-queue baseline binary built from `HEAD` scheduler files
+  - `Worker Complete in 21.98 seconds`
+  - `Worker Complete in 21.94 seconds`
+  - work-budget continuations:
+    - `1890`
+    - `1792`
+- Pinned experiment:
+  - same source tree, with only the split-policy change applied
+  - `Worker Complete in 21.75 seconds`
+  - `Worker Complete in 21.77 seconds`
+  - work-budget continuations:
+    - `1962`
+    - `2007`
+- Additional `count4` spot-check:
+  - command:
+    - `./partition_count4 6 6 --reorder --prefix-depth 2 --adaptive-subdivide --adaptive-work-budget 1000 --adaptive-max-depth 5`
+  - experiment:
+    - `Worker Complete in 13.49 seconds`
+  - correct count:
+    - `203716633441803914880`
+- Correctness:
+  - all polynomial runs printed the same polynomial and the same values:
+    - `P(4) = 203716633441803914880`
+    - `P(5) = 2852707805646422930409600`
+- Interpretation:
+  - the win is modest, but the pinned comparison is consistent
+  - the shared queue remains the best scheduler topology on this CPU workload
+  - however, a slightly stricter split condition helps by avoiding some premature continuation creation when the global queue is still deep enough
+  - this is a runtime policy improvement, not a scheduler rewrite
+- Outcome: accepted on `main`.
