@@ -120,8 +120,8 @@ static inline void row_graph_cache_load_poly(const RowGraphCache* cache, int slo
 #endif
 }
 
-static int graph_cache_lookup_poly(GraphCache* cache, uint64_t key_hash, uint32_t key_n,
-                                   const Graph* g, uint64_t row_mask, GraphPoly* value, int touch) {
+static int graph_cache_find_slot(const GraphCache* cache, uint64_t key_hash, uint32_t key_n,
+                                 const Graph* g, uint64_t row_mask) {
     (void)row_mask;
     uint64_t sig[GRAPH_SIG_WORDS];
     graph_pack_signature(g, key_n, sig);
@@ -129,12 +129,19 @@ static int graph_cache_lookup_poly(GraphCache* cache, uint64_t key_hash, uint32_
     for (int k = 0; k < cache->probe; k++) {
         int p = (cache_idx + k) & cache->mask;
         if (graph_cache_slot_matches_sig(cache, p, key_hash, key_n, sig)) {
-            graph_cache_load_poly(cache, p, value);
-            if (touch) graph_cache_touch_slot(cache, p);
-            return 1;
+            return p;
         }
     }
-    return 0;
+    return -1;
+}
+
+static int graph_cache_lookup_poly(GraphCache* cache, uint64_t key_hash, uint32_t key_n,
+                                   const Graph* g, uint64_t row_mask, GraphPoly* value, int touch) {
+    int slot = graph_cache_find_slot(cache, key_hash, key_n, g, row_mask);
+    if (slot < 0) return 0;
+    graph_cache_load_poly(cache, slot, value);
+    if (touch) graph_cache_touch_slot(cache, slot);
+    return 1;
 }
 
 int row_graph_cache_lookup_poly(RowGraphCache* cache, uint64_t key_hash, uint32_t key_n,
@@ -207,7 +214,12 @@ int shared_graph_cache_lookup_poly(SharedGraphCache* shared, uint64_t key_hash, 
     if (!shared || !shared->enabled) return 0;
     int found = 0;
     pthread_rwlock_rdlock(&shared->lock);
-    found = graph_cache_lookup_poly(&shared->cache, key_hash, key_n, g, row_mask, value, 0);
+    found = (graph_cache_find_slot(&shared->cache, key_hash, key_n, g, row_mask) >= 0);
+    pthread_rwlock_unlock(&shared->lock);
+    if (!found) return 0;
+
+    pthread_rwlock_wrlock(&shared->lock);
+    found = graph_cache_lookup_poly(&shared->cache, key_hash, key_n, g, row_mask, value, 1);
     pthread_rwlock_unlock(&shared->lock);
     return found;
 }
