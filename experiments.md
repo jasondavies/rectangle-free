@@ -6825,3 +6825,38 @@
   - exploiting the connected-graph invariant twice, first in the file format and then in the loader, removes that fixed cost and turns the table into a small end-to-end improvement
   - the remaining tradeoff is table size and generation time rather than runtime lookup overhead
 - Outcome: accepted on `main`.
+
+### Experiment 170: Add a contraction-aware merged-degree penalty to branch scoring
+- Goal: reduce hard-miss solve cost in polynomial mode by choosing edges whose contraction branch is less expensive.
+- Background:
+  - a fresh profile on current `HEAD` showed that hard misses still dominate overall time
+  - at the hot simplified sizes, contraction-side solve is now at least as expensive as delete:
+    - `n=10`: delete `23.192s`, contract-solve `24.866s`
+    - `n=11`: delete `33.693s`, contract-solve `43.178s`
+    - `n=12`: delete `27.586s`, contract-solve `41.336s`
+    - `n=13`: delete `12.664s`, contract-solve `20.522s`
+  - the existing polynomial scorer already preferred sparse delete edges, but it still indirectly rewarded large merged neighbourhoods
+- Change:
+  - in polynomial mode only, keep the large bonus for immediate clique-prunable outcomes
+  - keep the existing `exclusive`-neighbourhood bias
+  - additionally subtract `8 * merged_deg`, where `merged_deg` is the degree of the contracted vertex candidate
+  - leave `RECT_COUNT_K4` unchanged
+- Matching 32-thread benchmark command:
+  - `env OMP_NUM_THREADS=32 ./partition_poly_7 6 6 --prefix-depth 2 --adaptive-subdivide --adaptive-work-budget 1000 --adaptive-max-depth 5`
+- Baseline:
+  - current committed tip before this change (`a2c5651`)
+  - pinned binary on the same host regime:
+    - `Worker Complete in 21.74 seconds`
+- Experiment:
+  - same source tree with only this scorer change applied:
+    - `Worker Complete in 19.95 seconds`
+    - `Worker Complete in 19.99 seconds`
+- Correctness:
+  - all runs printed the same chromatic polynomial and the same values:
+    - `P(4) = 203716633441803914880`
+    - `P(5) = 2852707805646422930409600`
+- Interpretation:
+  - this stays in the successful “cheap branch-score refinement” family
+  - unlike the earlier delete-heavy tuning, this change explicitly discourages edges whose contraction would leave a large merged neighbourhood
+  - the score remains cheap to compute and appears to reduce both hard-miss cost and canonicalisation volume on the target benchmark
+- Outcome: accepted on `main`.

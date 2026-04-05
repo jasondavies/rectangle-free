@@ -307,7 +307,10 @@ static void graph_choose_branch_edge(const Graph* g, int* u_out, int* v_out, int
             int score = 1000 * (u_clique + v_clique + merged_clique) + 16 * common + u_deg + v_deg;
 #else
             int exclusive = (u_deg - 1 - common) + (v_deg - 1 - common);
-            int score = 1000 * (u_clique + v_clique + merged_clique) + 16 * exclusive + u_deg + v_deg;
+            int merged_deg = __builtin_popcountll(merged_neighbors);
+            int score =
+                1000 * (u_clique + v_clique + merged_clique) +
+                16 * exclusive - 8 * merged_deg + u_deg + v_deg;
 #endif
             if (score > best_score) {
                 best_score = score;
