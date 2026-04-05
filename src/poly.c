@@ -111,18 +111,48 @@ static inline void graph_poly_degree_overflow(int deg) {
     exit(1);
 }
 
+static inline int graph_poly_is_zero(const GraphPoly* p) {
+    return p->deg == 0 && p->coeffs[0] == 0;
+}
+
 static inline void graph_poly_zero(GraphPoly* p) {
+    p->x_pow = 0;
     p->deg = 0;
-    memset(p->coeffs, 0, sizeof(p->coeffs));
+    p->coeffs[0] = 0;
+}
+
+void graph_poly_normalize_ref(GraphPoly* p) {
+    if (graph_poly_is_zero(p)) {
+        graph_poly_zero(p);
+        return;
+    }
+
+    int shift = 0;
+    while (shift <= p->deg && p->coeffs[shift] == 0) shift++;
+    if (shift > p->deg) {
+        graph_poly_zero(p);
+        return;
+    }
+
+    if (shift > 0) {
+        if ((int)p->x_pow + shift > MAXN_NAUTY) graph_poly_degree_overflow((int)p->x_pow + shift);
+        for (int i = 0; i <= p->deg - shift; i++) p->coeffs[i] = p->coeffs[i + shift];
+        for (int i = p->deg - shift + 1; i <= p->deg; i++) p->coeffs[i] = 0;
+        p->x_pow = (uint8_t)(p->x_pow + shift);
+        p->deg = (uint8_t)(p->deg - shift);
+    }
+
+    while (p->deg > 0 && p->coeffs[p->deg] == 0) p->deg--;
 }
 
 void graph_poly_one_ref(GraphPoly* p) {
-    graph_poly_zero(p);
+    p->x_pow = 0;
+    p->deg = 0;
     p->coeffs[0] = 1;
 }
 
 void poly_mul_graph_ref(const Poly* a, const GraphPoly* b, Poly* out) {
-    if ((a->deg == 0 && a->coeffs[0] == 0) || (b->deg == 0 && b->coeffs[0] == 0)) {
+    if ((a->deg == 0 && a->coeffs[0] == 0) || graph_poly_is_zero(b)) {
         poly_zero(out);
         return;
     }
@@ -130,13 +160,13 @@ void poly_mul_graph_ref(const Poly* a, const GraphPoly* b, Poly* out) {
     Poly tmp;
     Poly* r = out;
     if (out == a) r = &tmp;
-    r->deg = a->deg + b->deg;
+    r->deg = a->deg + b->x_pow + b->deg;
     if (r->deg >= MAX_DEGREE) degree_overflow(r->deg);
     memset(r->coeffs, 0, (size_t)(r->deg + 1) * sizeof(r->coeffs[0]));
     for (int i = 0; i <= a->deg; i++) {
         if (a->coeffs[i] == 0) continue;
         for (int j = 0; j <= b->deg; j++) {
-            r->coeffs[i + j] += a->coeffs[i] * b->coeffs[j];
+            r->coeffs[i + j + b->x_pow] += a->coeffs[i] * b->coeffs[j];
         }
     }
     while (r->deg > 0 && r->coeffs[r->deg] == 0) r->deg--;
@@ -144,7 +174,7 @@ void poly_mul_graph_ref(const Poly* a, const GraphPoly* b, Poly* out) {
 }
 
 void graph_poly_mul_ref(const GraphPoly* a, const GraphPoly* b, GraphPoly* out) {
-    if ((a->deg == 0 && a->coeffs[0] == 0) || (b->deg == 0 && b->coeffs[0] == 0)) {
+    if (graph_poly_is_zero(a) || graph_poly_is_zero(b)) {
         graph_poly_zero(out);
         return;
     }
@@ -152,8 +182,11 @@ void graph_poly_mul_ref(const GraphPoly* a, const GraphPoly* b, GraphPoly* out) 
     GraphPoly tmp;
     GraphPoly* r = out;
     if (out == a || out == b) r = &tmp;
+    r->x_pow = (uint8_t)(a->x_pow + b->x_pow);
     r->deg = (uint8_t)(a->deg + b->deg);
-    if (r->deg > MAXN_NAUTY) graph_poly_degree_overflow(r->deg);
+    if ((int)r->x_pow + (int)r->deg > MAXN_NAUTY) {
+        graph_poly_degree_overflow((int)r->x_pow + (int)r->deg);
+    }
     memset(r->coeffs, 0, (size_t)(r->deg + 1) * sizeof(r->coeffs[0]));
     for (int i = 0; i <= a->deg; i++) {
         if (a->coeffs[i] == 0) continue;
@@ -169,18 +202,36 @@ void graph_poly_sub_ref(const GraphPoly* a, const GraphPoly* b, GraphPoly* out) 
     GraphPoly tmp;
     GraphPoly* r = out;
     if (out == a || out == b) r = &tmp;
-    r->deg = (a->deg > b->deg) ? a->deg : b->deg;
+    if (graph_poly_is_zero(a)) {
+        *r = *b;
+        for (int i = 0; i <= r->deg; i++) r->coeffs[i] = -r->coeffs[i];
+        if (r != out) *out = *r;
+        return;
+    }
+    if (graph_poly_is_zero(b)) {
+        *r = *a;
+        if (r != out) *out = *r;
+        return;
+    }
+
+    int base_x_pow = (a->x_pow < b->x_pow) ? a->x_pow : b->x_pow;
+    int shift_a = (int)a->x_pow - base_x_pow;
+    int shift_b = (int)b->x_pow - base_x_pow;
+    r->x_pow = (uint8_t)base_x_pow;
+    r->deg = (uint8_t)((a->deg + shift_a > b->deg + shift_b) ? (a->deg + shift_a)
+                                                              : (b->deg + shift_b));
     for (int i = 0; i <= r->deg; i++) {
-        PolyCoeff av = (i <= a->deg) ? a->coeffs[i] : 0;
-        PolyCoeff bv = (i <= b->deg) ? b->coeffs[i] : 0;
+        PolyCoeff av = (i >= shift_a && i - shift_a <= a->deg) ? a->coeffs[i - shift_a] : 0;
+        PolyCoeff bv = (i >= shift_b && i - shift_b <= b->deg) ? b->coeffs[i - shift_b] : 0;
         r->coeffs[i] = av - bv;
     }
     while (r->deg > 0 && r->coeffs[r->deg] == 0) r->deg--;
+    if (r->coeffs[0] == 0) graph_poly_normalize_ref(r);
     if (r != out) *out = *r;
 }
 
 void graph_poly_mul_linear_ref(const GraphPoly* a, int c, GraphPoly* out) {
-    if (a->deg == 0 && a->coeffs[0] == 0) {
+    if (graph_poly_is_zero(a)) {
         graph_poly_zero(out);
         return;
     }
@@ -188,20 +239,46 @@ void graph_poly_mul_linear_ref(const GraphPoly* a, int c, GraphPoly* out) {
     GraphPoly tmp;
     GraphPoly* r = out;
     if (out == a) r = &tmp;
-    r->deg = (uint8_t)(a->deg + 1);
-    if (r->deg > MAXN_NAUTY) graph_poly_degree_overflow(r->deg);
-    memset(r->coeffs, 0, (size_t)(r->deg + 1) * sizeof(r->coeffs[0]));
+    if (c == 0) {
+        *r = *a;
+        if ((int)r->x_pow + 1 > MAXN_NAUTY) graph_poly_degree_overflow((int)r->x_pow + 1);
+        r->x_pow++;
+    } else {
+        r->x_pow = a->x_pow;
+        r->deg = (uint8_t)(a->deg + 1);
+        if ((int)r->x_pow + (int)r->deg > MAXN_NAUTY) {
+            graph_poly_degree_overflow((int)r->x_pow + (int)r->deg);
+        }
+        memset(r->coeffs, 0, (size_t)(r->deg + 1) * sizeof(r->coeffs[0]));
 
-    for (int i = 0; i <= a->deg; i++) r->coeffs[i + 1] += a->coeffs[i];
-    if (c != 0) {
+        for (int i = 0; i <= a->deg; i++) r->coeffs[i + 1] += a->coeffs[i];
         for (int i = 0; i <= a->deg; i++) r->coeffs[i] -= a->coeffs[i] * (PolyCoeff)c;
+        while (r->deg > 0 && r->coeffs[r->deg] == 0) r->deg--;
     }
-    while (r->deg > 0 && r->coeffs[r->deg] == 0) r->deg--;
+    if (r != out) *out = *r;
+}
+
+void graph_poly_div_x_ref(const GraphPoly* a, GraphPoly* out) {
+    if (graph_poly_is_zero(a)) {
+        graph_poly_zero(out);
+        return;
+    }
+    if (a->x_pow == 0) {
+        fprintf(stderr, "graph_poly_div_x_ref requires divisibility by x\n");
+        exit(1);
+    }
+
+    GraphPoly tmp;
+    GraphPoly* r = out;
+    if (out == a) r = &tmp;
+    *r = *a;
+    r->x_pow--;
     if (r != out) *out = *r;
 }
 
 #if RECT_COUNT_K4
 void graph_poly_set_count4(uint64_t count, GraphPoly* out) {
+    out->x_pow = 0;
     out->deg = 0;
     out->coeffs[0] = (PolyCoeff)count;
 }
@@ -226,7 +303,9 @@ static uint64_t eval_int32_poly_at_4(const int32_t* coeffs, int deg) {
 }
 
 uint64_t small_graph_lookup_load_count4(int n, uint32_t mask) {
-    return eval_int32_poly_at_4(small_graph_poly_slot(n, mask), n);
+    int x_pow = g_small_graph_lookup_x_pows[n][mask];
+    uint64_t value = eval_int32_poly_at_4(small_graph_poly_slot(n, mask), n - x_pow);
+    return value << (2 * x_pow);
 }
 
 uint64_t connected_canon_lookup_load_count4(const Graph* g) {
@@ -239,7 +318,8 @@ uint64_t connected_canon_lookup_load_count4(const Graph* g) {
                                                sizeof(*g_connected_canon_lookup),
                                                connected_canon_lookup_entry_cmp);
     if (!entry) return UINT64_MAX;
-    return eval_int32_poly_at_4(entry->coeffs, g_connected_canon_lookup_n);
+    return eval_int32_poly_at_4(entry->coeffs, g_connected_canon_lookup_n - entry->x_pow)
+           << (2 * entry->x_pow);
 }
 
 static const uint64_t g_fall4[5] = {1, 4, 12, 24, 24};

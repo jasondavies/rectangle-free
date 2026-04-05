@@ -129,6 +129,136 @@ static void solve_graph_store_raw_cache(const Graph* g, RowGraphCache* raw_cache
                                      prep->raw_rows, value);
 }
 
+static int graph_order_biconnected_blocks(int block_count, const uint64_t* block_masks,
+                                          uint64_t articulation_mask, int* order_out) {
+    if (block_count <= 0) return 0;
+
+    uint64_t covered_blocks = 1;
+    uint64_t covered_vertices = block_masks[0];
+    order_out[0] = 0;
+
+    for (int next_idx = 1; next_idx < block_count; next_idx++) {
+        int found = -1;
+        for (int i = 1; i < block_count; i++) {
+            if ((covered_blocks >> i) & 1U) continue;
+            uint64_t shared = block_masks[i] & covered_vertices;
+            if (__builtin_popcountll(shared & articulation_mask) == 1 &&
+                (shared & ~articulation_mask) == 0) {
+                found = i;
+                break;
+            }
+        }
+        if (found < 0) return 0;
+        order_out[next_idx] = found;
+        covered_blocks |= UINT64_C(1) << found;
+        covered_vertices |= block_masks[found];
+    }
+
+    return 1;
+}
+
+#if RECT_COUNT_K4
+static uint64_t count4_mul_div_x(uint64_t lhs, uint64_t rhs) {
+    unsigned __int128 combined = (unsigned __int128)lhs * (unsigned __int128)rhs;
+    if ((combined & 3U) != 0) {
+        fprintf(stderr, "4-colouring articulation combine not divisible by 4\n");
+        exit(1);
+    }
+    combined /= 4;
+    if (combined > UINT64_MAX) {
+        fprintf(stderr, "4-colouring articulation combine overflow\n");
+        exit(1);
+    }
+    return (uint64_t)combined;
+}
+
+static int solve_graph_try_biconnected_count4(const Graph* g, RowGraphCache* cache,
+                                              RowGraphCache* raw_cache, NautyWorkspace* ws,
+                                              long long* local_canon_calls,
+                                              long long* local_cache_hits,
+                                              long long* local_raw_cache_hits,
+                                              ProfileStats* profile,
+                                              SolveGraphOutcome* outcome,
+                                              GraphPoly* out_result) {
+    uint64_t block_masks[MAXN_NAUTY];
+    uint64_t articulation_mask = 0;
+    int block_count = graph_collect_biconnected_components(g, block_masks, &articulation_mask);
+    if (block_count <= 1) return 0;
+
+    int order[MAXN_NAUTY];
+    if (!graph_order_biconnected_blocks(block_count, block_masks, articulation_mask, order)) {
+        fprintf(stderr, "Failed to order biconnected components\n");
+        exit(1);
+    }
+
+    Graph subgraph;
+    GraphPoly part;
+    induced_subgraph_from_mask(g, block_masks[order[0]], &subgraph);
+    solve_graph_poly(&subgraph, cache, raw_cache, ws,
+                     local_canon_calls, local_cache_hits, local_raw_cache_hits,
+                     profile, &part);
+    uint64_t total = graph_poly_get_count4(&part);
+
+    for (int i = 1; i < block_count; i++) {
+        induced_subgraph_from_mask(g, block_masks[order[i]], &subgraph);
+        solve_graph_poly(&subgraph, cache, raw_cache, ws,
+                         local_canon_calls, local_cache_hits, local_raw_cache_hits,
+                         profile, &part);
+        total = count4_mul_div_x(total, graph_poly_get_count4(&part));
+    }
+
+    graph_poly_set_count4(total, out_result);
+    *outcome = SG_OUTCOME_COMPONENTS;
+    return 1;
+}
+#else
+static int solve_graph_try_biconnected_poly(const Graph* g, RowGraphCache* cache,
+                                            RowGraphCache* raw_cache, NautyWorkspace* ws,
+                                            long long* local_canon_calls,
+                                            long long* local_cache_hits,
+                                            long long* local_raw_cache_hits,
+                                            ProfileStats* profile,
+                                            SolveGraphOutcome* outcome, GraphPoly* out_result) {
+    uint64_t block_masks[MAXN_NAUTY];
+    uint64_t articulation_mask = 0;
+    int block_count = graph_collect_biconnected_components(g, block_masks, &articulation_mask);
+    if (block_count <= 1) return 0;
+
+    int order[MAXN_NAUTY];
+    if (!graph_order_biconnected_blocks(block_count, block_masks, articulation_mask, order)) {
+        fprintf(stderr, "Failed to order biconnected components\n");
+        exit(1);
+    }
+
+    Graph subgraph;
+    GraphPoly acc;
+    GraphPoly part;
+    GraphPoly combined;
+    induced_subgraph_from_mask(g, block_masks[order[0]], &subgraph);
+    solve_graph_poly(&subgraph, cache, raw_cache, ws,
+                     local_canon_calls, local_cache_hits, local_raw_cache_hits,
+                     profile, &acc);
+
+    for (int i = 1; i < block_count; i++) {
+        induced_subgraph_from_mask(g, block_masks[order[i]], &subgraph);
+        solve_graph_poly(&subgraph, cache, raw_cache, ws,
+                         local_canon_calls, local_cache_hits, local_raw_cache_hits,
+                         profile, &part);
+        graph_poly_mul_ref(&acc, &part, &combined);
+        if (combined.x_pow == 0) {
+            fprintf(stderr, "Biconnected combine requires at least one x factor\n");
+            exit(1);
+        }
+        combined.x_pow--;
+        acc = combined;
+    }
+
+    *out_result = acc;
+    *outcome = SG_OUTCOME_COMPONENTS;
+    return 1;
+}
+#endif
+
 static inline int graph_neighbors_form_clique(const Graph* g, uint64_t neighbors) {
     uint64_t rem = neighbors;
     while (rem) {
@@ -294,15 +424,6 @@ void solve_graph_poly(const Graph* input_g, RowGraphCache* cache, RowGraphCache*
         goto done;
     }
 
-    SolveGraphKeyRows key_rows;
-    GraphPoly raw_cached;
-    if (solve_graph_prepare_raw_cache(&g, raw_cache, profile, local_raw_cache_hits,
-                                      &key_rows, &raw_cached)) {
-        graph_poly_set_count4(multiplier * graph_poly_get_count4(&raw_cached), out_result);
-        outcome = SG_OUTCOME_RAW_HIT;
-        goto done;
-    }
-
     GraphPoly res;
     uint64_t component_masks[MAXN_NAUTY];
     int component_count = graph_collect_components(&g, component_masks);
@@ -320,6 +441,23 @@ void solve_graph_poly(const Graph* input_g, RowGraphCache* cache, RowGraphCache*
         }
         graph_poly_set_count4(total, &res);
     } else {
+        if (solve_graph_try_biconnected_count4(&g, cache, raw_cache, ws,
+                                               local_canon_calls, local_cache_hits,
+                                               local_raw_cache_hits, profile,
+                                               &outcome, &res)) {
+            graph_poly_set_count4(multiplier * graph_poly_get_count4(&res), out_result);
+            goto done;
+        }
+
+        SolveGraphKeyRows key_rows;
+        GraphPoly raw_cached;
+        if (solve_graph_prepare_raw_cache(&g, raw_cache, profile, local_raw_cache_hits,
+                                          &key_rows, &raw_cached)) {
+            graph_poly_set_count4(multiplier * graph_poly_get_count4(&raw_cached), out_result);
+            outcome = SG_OUTCOME_RAW_HIT;
+            goto done;
+        }
+
         Graph canon;
         solve_graph_build_canon(&g, &key_rows, ws, profile, local_canon_calls, &canon);
         uint64_t hash = hash_graph(&canon);
@@ -374,9 +512,10 @@ void solve_graph_poly(const Graph* input_g, RowGraphCache* cache, RowGraphCache*
         store_row_graph_cache_entry(cache, hash, (uint32_t)canon.n, &canon,
                                     (AdjWord)ADJWORD_MASK, &res);
         shared_graph_cache_export(hash, (uint32_t)canon.n, &canon, ADJWORD_MASK, &res);
+
+        solve_graph_store_raw_cache(&g, raw_cache, &key_rows, &res);
     }
 
-    solve_graph_store_raw_cache(&g, raw_cache, &key_rows, &res);
     graph_poly_set_count4(multiplier * graph_poly_get_count4(&res), out_result);
 done:
     finish_solve_graph_profile(profile, solve_t0, profile_n, outcome);
@@ -409,16 +548,6 @@ done:
         goto done;
     }
 
-    SolveGraphKeyRows key_rows;
-    GraphPoly raw_cached;
-
-    if (solve_graph_prepare_raw_cache(&g, raw_cache, profile, local_raw_cache_hits,
-                                      &key_rows, &raw_cached)) {
-        graph_poly_mul_ref(&multiplier, &raw_cached, out_result);
-        outcome = SG_OUTCOME_RAW_HIT;
-        goto done;
-    }
-
     GraphPoly res;
     uint64_t component_masks[MAXN_NAUTY];
     int component_count = graph_collect_components(&g, component_masks);
@@ -435,6 +564,24 @@ done:
             graph_poly_mul_ref(&res, &part, &res);
         }
     } else {
+        if (solve_graph_try_biconnected_poly(&g, cache, raw_cache, ws,
+                                             local_canon_calls, local_cache_hits,
+                                             local_raw_cache_hits, profile,
+                                             &outcome, &res)) {
+            graph_poly_mul_ref(&multiplier, &res, out_result);
+            goto done;
+        }
+
+        SolveGraphKeyRows key_rows;
+        GraphPoly raw_cached;
+
+        if (solve_graph_prepare_raw_cache(&g, raw_cache, profile, local_raw_cache_hits,
+                                          &key_rows, &raw_cached)) {
+            graph_poly_mul_ref(&multiplier, &raw_cached, out_result);
+            outcome = SG_OUTCOME_RAW_HIT;
+            goto done;
+        }
+
         Graph canon;
         solve_graph_build_canon(&g, &key_rows, ws, profile, local_canon_calls, &canon);
         
@@ -562,6 +709,7 @@ done:
         store_row_graph_cache_entry(cache, hash, (uint32_t)canon.n, &canon,
                                     (AdjWord)ADJWORD_MASK, &res);
         shared_graph_cache_export(hash, (uint32_t)canon.n, &canon, ADJWORD_MASK, &res);
+        solve_graph_store_raw_cache(&g, raw_cache, &key_rows, &res);
         if (PROFILE_BUILD && profile && branch_g->n >= 0 && branch_g->n <= MAXN_NAUTY) {
             hard_store_t += omp_get_wtime() - phase_t0;
             profile->solve_graph_hard_miss_separator_time_by_n[branch_g->n] += hard_sep_t;
@@ -573,7 +721,6 @@ done:
         }
     }
 
-    solve_graph_store_raw_cache(&g, raw_cache, &key_rows, &res);
     graph_poly_mul_ref(&multiplier, &res, out_result);
 done:
     finish_solve_graph_profile(profile, solve_t0, profile_n, outcome);

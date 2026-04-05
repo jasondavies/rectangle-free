@@ -92,6 +92,7 @@ static inline int row_graph_cache_slot_matches_rows(const RowGraphCache* cache, 
 }
 
 static inline void graph_cache_load_poly(const GraphCache* cache, int slot, GraphPoly* value) {
+    value->x_pow = cache->x_pows[slot];
     int deg = cache->degs[slot];
     value->deg = (uint8_t)deg;
     memcpy(value->coeffs, graph_cache_coeff_slot(cache, slot),
@@ -99,6 +100,7 @@ static inline void graph_cache_load_poly(const GraphCache* cache, int slot, Grap
 }
 
 static inline void row_graph_cache_load_poly(const RowGraphCache* cache, int slot, GraphPoly* value) {
+    value->x_pow = cache->x_pows[slot];
     int deg = cache->degs[slot];
     value->deg = (uint8_t)deg;
     memcpy(value->coeffs, row_graph_cache_coeff_slot(cache, slot),
@@ -161,6 +163,7 @@ void shared_graph_cache_init(SharedGraphCache* shared, int bits, int poly_len) {
     shared->cache.keys = checked_aligned_alloc(64, sizeof(CacheKey) * size, "shared_cache_keys");
     shared->cache.stamps = checked_aligned_alloc(64, sizeof(uint32_t) * size, "shared_cache_stamps");
     shared->cache.sigs = checked_aligned_alloc(64, sizeof(uint64_t) * size * GRAPH_SIG_WORDS, "shared_cache_sigs");
+    shared->cache.x_pows = checked_aligned_alloc(64, sizeof(uint8_t) * size, "shared_cache_x_pows");
     shared->cache.degs = checked_aligned_alloc(64, sizeof(uint8_t) * size, "shared_cache_degs");
     shared->cache.coeffs =
         checked_aligned_alloc(64, sizeof(PolyCoeff) * size * (size_t)poly_len, "shared_cache_coeffs");
@@ -175,6 +178,7 @@ void shared_graph_cache_free(SharedGraphCache* shared) {
     free(shared->cache.keys);
     free(shared->cache.stamps);
     free(shared->cache.sigs);
+    free(shared->cache.x_pows);
     free(shared->cache.degs);
     free(shared->cache.coeffs);
     pthread_rwlock_destroy(&shared->lock);
@@ -232,6 +236,7 @@ static void store_graph_cache_entry(GraphCache* cache, uint64_t key_hash, uint32
     cache->keys[best_slot].key_hash = key_hash;
     cache->keys[best_slot].key_n = key_n;
     memcpy(graph_cache_sig_slot(cache, best_slot), sig, sizeof(sig));
+    cache->x_pows[best_slot] = value->x_pow;
     cache->degs[best_slot] = (uint8_t)value->deg;
     memcpy(graph_cache_coeff_slot(cache, best_slot), value->coeffs,
            (size_t)(value->deg + 1) * sizeof(value->coeffs[0]));
@@ -310,6 +315,7 @@ void store_row_graph_cache_entry(RowGraphCache* cache, uint64_t key_hash, uint32
     for (uint32_t i = 0; i < key_n; i++) {
         slot_rows[i] = g->adj[i] & row_mask;
     }
+    cache->x_pows[best_slot] = value->x_pow;
     cache->degs[best_slot] = (uint8_t)value->deg;
     memcpy(row_graph_cache_coeff_slot(cache, best_slot), value->coeffs,
            (size_t)(value->deg + 1) * sizeof(value->coeffs[0]));
@@ -358,6 +364,7 @@ void store_row_graph_cache_entry_rows(RowGraphCache* cache, uint64_t key_hash, u
     for (uint32_t i = 0; i < key_n; i++) {
         slot_rows[i] = rows[i];
     }
+    cache->x_pows[best_slot] = value->x_pow;
     cache->degs[best_slot] = (uint8_t)value->deg;
     memcpy(row_graph_cache_coeff_slot(cache, best_slot), value->coeffs,
            (size_t)(value->deg + 1) * sizeof(value->coeffs[0]));

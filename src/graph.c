@@ -6,6 +6,7 @@ int g_small_graph_lookup_ready = 0;
 double g_small_graph_lookup_init_time = 0.0;
 int g_small_graph_lookup_loaded_from_file = 0;
 int32_t* g_small_graph_lookup_coeffs[SMALL_GRAPH_LOOKUP_MAX_N + 1] = {0};
+uint8_t* g_small_graph_lookup_x_pows[SMALL_GRAPH_LOOKUP_MAX_N + 1] = {0};
 uint8_t g_small_graph_edge_u[SMALL_GRAPH_LOOKUP_MAX_N + 1][21];
 uint8_t g_small_graph_edge_v[SMALL_GRAPH_LOOKUP_MAX_N + 1][21];
 uint32_t g_small_graph_graph_count[SMALL_GRAPH_LOOKUP_MAX_N + 1] = {0};
@@ -267,8 +268,26 @@ static int small_graph_lookup_allocate_storage(void) {
         uint32_t graph_count = g_small_graph_graph_count[n];
         g_small_graph_lookup_coeffs[n] =
             checked_calloc((size_t)graph_count * (size_t)stride, sizeof(int32_t), "small_graph_lookup");
+        g_small_graph_lookup_x_pows[n] =
+            checked_calloc((size_t)graph_count, sizeof(uint8_t), "small_graph_lookup_x_pows");
     }
     return 1;
+}
+
+static void small_graph_lookup_factorise_tables(void) {
+    for (int n = 0; n <= SMALL_GRAPH_LOOKUP_MAX_N; n++) {
+        uint32_t graph_count = g_small_graph_graph_count[n];
+        for (uint32_t mask = 0; mask < graph_count; mask++) {
+            int32_t* coeffs = small_graph_poly_slot(n, mask);
+            int shift = 0;
+            while (shift < n && coeffs[shift] == 0) shift++;
+            g_small_graph_lookup_x_pows[n][mask] = (uint8_t)shift;
+            if (shift > 0) {
+                for (int i = 0; i <= n - shift; i++) coeffs[i] = coeffs[i + shift];
+                for (int i = n - shift + 1; i <= n; i++) coeffs[i] = 0;
+            }
+        }
+    }
 }
 
 static uint32_t small_graph_pack_mask_from_rows(const uint8_t* rows, int n) {
@@ -422,6 +441,7 @@ static int small_graph_lookup_try_load_file(const char* path) {
         }
     }
     fclose(f);
+    small_graph_lookup_factorise_tables();
     g_small_graph_lookup_loaded_from_file = 1;
     g_small_graph_lookup_ready = 1;
     return 1;
@@ -436,6 +456,7 @@ void small_graph_lookup_init(void) {
         small_graph_lookup_init_layout();
         small_graph_lookup_allocate_storage();
         small_graph_lookup_generate_tables();
+        small_graph_lookup_factorise_tables();
         g_small_graph_lookup_loaded_from_file = 0;
         g_small_graph_lookup_ready = 1;
     }
@@ -446,6 +467,8 @@ void small_graph_lookup_free(void) {
     for (int n = 0; n <= SMALL_GRAPH_LOOKUP_MAX_N; n++) {
         free(g_small_graph_lookup_coeffs[n]);
         g_small_graph_lookup_coeffs[n] = NULL;
+        free(g_small_graph_lookup_x_pows[n]);
+        g_small_graph_lookup_x_pows[n] = NULL;
     }
     g_small_graph_lookup_ready = 0;
     g_small_graph_lookup_init_time = 0.0;
@@ -454,14 +477,17 @@ void small_graph_lookup_free(void) {
 
 static void small_graph_lookup_load_poly(int n, uint32_t mask, Poly* out) {
     const int32_t* coeffs = small_graph_poly_slot(n, mask);
+    int x_pow = g_small_graph_lookup_x_pows[n][mask];
     out->deg = n;
-    for (int i = 0; i <= n; i++) out->coeffs[i] = coeffs[i];
+    for (int i = 0; i < x_pow; i++) out->coeffs[i] = 0;
+    for (int i = 0; i <= n - x_pow; i++) out->coeffs[i + x_pow] = coeffs[i];
 }
 
 void small_graph_lookup_load_graph_poly(int n, uint32_t mask, GraphPoly* out) {
     const int32_t* coeffs = small_graph_poly_slot(n, mask);
-    out->deg = (uint8_t)n;
-    for (int i = 0; i <= n; i++) out->coeffs[i] = coeffs[i];
+    out->x_pow = g_small_graph_lookup_x_pows[n][mask];
+    out->deg = (uint8_t)(n - out->x_pow);
+    for (int i = 0; i <= out->deg; i++) out->coeffs[i] = coeffs[i];
 }
 
 static const char* connected_canon_lookup_default_path(void) {
@@ -506,6 +532,13 @@ static int connected_canon_lookup_try_load_file(const char* path) {
             fclose(f);
             free(entries);
             return 0;
+        }
+        int shift = 0;
+        while (shift < (int)header.n && entries[i].coeffs[shift] == 0) shift++;
+        entries[i].x_pow = (uint8_t)shift;
+        if (shift > 0) {
+            for (int j = 0; j <= (int)header.n - shift; j++) entries[i].coeffs[j] = entries[i].coeffs[j + shift];
+            for (int j = (int)header.n - shift + 1; j <= (int)header.n; j++) entries[i].coeffs[j] = 0;
         }
     }
     long expected_size = (long)(sizeof(header) +
@@ -562,8 +595,9 @@ int connected_canon_lookup_load_graph_poly(const Graph* g, GraphPoly* out) {
                                                connected_canon_lookup_entry_cmp);
     if (!entry) return 0;
 
-    out->deg = (uint8_t)g_connected_canon_lookup_n;
-    for (int i = 0; i <= g_connected_canon_lookup_n; i++) out->coeffs[i] = entry->coeffs[i];
+    out->x_pow = entry->x_pow;
+    out->deg = (uint8_t)(g_connected_canon_lookup_n - entry->x_pow);
+    for (int i = 0; i <= out->deg; i++) out->coeffs[i] = entry->coeffs[i];
     return 1;
 }
 
@@ -602,6 +636,49 @@ void induced_subgraph_from_mask(const Graph* src, uint64_t mask, Graph* dst) {
     dst->vertex_mask = graph_row_mask((int)n);
 }
 
+enum { GRAPH_MAX_EDGE_STACK = (MAXN_NAUTY * (MAXN_NAUTY - 1)) / 2 };
+
+typedef struct {
+    int time;
+    int disc[MAXN_NAUTY];
+    int low[MAXN_NAUTY];
+    int parent[MAXN_NAUTY];
+    uint8_t edge_u[GRAPH_MAX_EDGE_STACK];
+    uint8_t edge_v[GRAPH_MAX_EDGE_STACK];
+    int edge_top;
+    uint64_t* block_masks;
+    int block_count;
+    uint64_t articulation_mask;
+} BiconnectedSearch;
+
+typedef struct {
+    uint8_t u;
+    uint8_t child_count;
+    uint64_t remaining_neighbors;
+} BiconnectedFrame;
+
+static void graph_biconnected_push_edge(BiconnectedSearch* st, int u, int v) {
+    if (st->edge_top >= GRAPH_MAX_EDGE_STACK) {
+        fprintf(stderr, "Biconnected edge stack overflow\n");
+        exit(1);
+    }
+    st->edge_u[st->edge_top] = (uint8_t)u;
+    st->edge_v[st->edge_top] = (uint8_t)v;
+    st->edge_top++;
+}
+
+static void graph_biconnected_pop_component(BiconnectedSearch* st, int stop_u, int stop_v) {
+    uint64_t mask = 0;
+    while (st->edge_top > 0) {
+        st->edge_top--;
+        int u = st->edge_u[st->edge_top];
+        int v = st->edge_v[st->edge_top];
+        mask |= (UINT64_C(1) << u) | (UINT64_C(1) << v);
+        if (u == stop_u && v == stop_v) break;
+    }
+    if (mask != 0) st->block_masks[st->block_count++] = mask;
+}
+
 int graph_collect_components(const Graph* g, uint64_t* component_masks) {
     uint64_t remaining = g->vertex_mask;
     int count = 0;
@@ -624,6 +701,77 @@ int graph_collect_components(const Graph* g, uint64_t* component_masks) {
         remaining &= ~component;
     }
     return count;
+}
+
+int graph_collect_biconnected_components(const Graph* g, uint64_t* block_masks,
+                                         uint64_t* articulation_mask) {
+    BiconnectedSearch st;
+    memset(&st, 0, sizeof(st));
+    st.block_masks = block_masks;
+    for (int i = 0; i < MAXN_NAUTY; i++) st.parent[i] = -1;
+
+    uint64_t active = g->vertex_mask;
+    uint64_t discovered = 0;
+    BiconnectedFrame stack[MAXN_NAUTY];
+    int depth = 0;
+
+    while ((active & ~discovered) != 0) {
+        int root = __builtin_ctzll(active & ~discovered);
+        st.disc[root] = ++st.time;
+        st.low[root] = st.disc[root];
+        st.parent[root] = -1;
+        discovered |= UINT64_C(1) << root;
+        stack[depth++] =
+            (BiconnectedFrame){.u = (uint8_t)root,
+                               .child_count = 0,
+                               .remaining_neighbors = (uint64_t)g->adj[root] & active};
+
+        while (depth > 0) {
+            BiconnectedFrame* frame = &stack[depth - 1];
+            int u = frame->u;
+
+            if (frame->remaining_neighbors != 0) {
+                int v = __builtin_ctzll(frame->remaining_neighbors);
+                frame->remaining_neighbors &= frame->remaining_neighbors - 1;
+
+                if (((discovered >> v) & 1U) == 0) {
+                    st.parent[v] = u;
+                    frame->child_count++;
+                    graph_biconnected_push_edge(&st, u, v);
+                    st.disc[v] = ++st.time;
+                    st.low[v] = st.disc[v];
+                    discovered |= UINT64_C(1) << v;
+                    stack[depth++] =
+                        (BiconnectedFrame){.u = (uint8_t)v,
+                                           .child_count = 0,
+                                           .remaining_neighbors = (uint64_t)g->adj[v] & active};
+                } else if (v != st.parent[u] && st.disc[v] < st.disc[u]) {
+                    graph_biconnected_push_edge(&st, u, v);
+                    if (st.disc[v] < st.low[u]) st.low[u] = st.disc[v];
+                }
+                continue;
+            }
+
+            int parent = st.parent[u];
+            int child_count = frame->child_count;
+            depth--;
+
+            if (parent == -1) {
+                if (child_count > 1) st.articulation_mask |= UINT64_C(1) << u;
+                if (child_count == 0) st.block_masks[st.block_count++] = UINT64_C(1) << u;
+                continue;
+            }
+
+            if (st.low[u] < st.low[parent]) st.low[parent] = st.low[u];
+            if (st.low[u] >= st.disc[parent]) {
+                if (st.parent[parent] != -1) st.articulation_mask |= UINT64_C(1) << parent;
+                graph_biconnected_pop_component(&st, parent, u);
+            }
+        }
+    }
+
+    if (articulation_mask) *articulation_mask = st.articulation_mask & g->vertex_mask;
+    return st.block_count;
 }
 
 int graph_has_articulation_point(const Graph* g) {

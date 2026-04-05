@@ -119,6 +119,7 @@ typedef struct {
 } Poly;
 
 typedef struct {
+    uint8_t x_pow;
     uint8_t deg;
     PolyCoeff coeffs[MAXN_NAUTY + 1];
 } GraphPoly;
@@ -174,6 +175,7 @@ typedef struct {
     CacheKey* keys;
     uint32_t* stamps;
     uint64_t* sigs;
+    uint8_t* x_pows;
     uint8_t* degs;
     PolyCoeff* coeffs;
     int mask;
@@ -186,6 +188,7 @@ typedef struct {
     CacheKey* keys;
     uint32_t* stamps;
     AdjWord* rows;
+    uint8_t* x_pows;
     uint8_t* degs;
     PolyCoeff* coeffs;
     int mask;
@@ -372,6 +375,7 @@ typedef struct {
 
 typedef struct {
     uint64_t mask;
+    uint8_t x_pow;
     int32_t coeffs[CONNECTED_CANON_LOOKUP_MAX_N + 1];
 } ConnectedCanonLookupEntry;
 
@@ -499,6 +503,7 @@ extern int g_small_graph_lookup_ready;
 extern double g_small_graph_lookup_init_time;
 extern int g_small_graph_lookup_loaded_from_file;
 extern int32_t* g_small_graph_lookup_coeffs[SMALL_GRAPH_LOOKUP_MAX_N + 1];
+extern uint8_t* g_small_graph_lookup_x_pows[SMALL_GRAPH_LOOKUP_MAX_N + 1];
 extern uint8_t g_small_graph_edge_u[SMALL_GRAPH_LOOKUP_MAX_N + 1][21];
 extern uint8_t g_small_graph_edge_v[SMALL_GRAPH_LOOKUP_MAX_N + 1][21];
 extern uint32_t g_small_graph_graph_count[SMALL_GRAPH_LOOKUP_MAX_N + 1];
@@ -610,10 +615,12 @@ void poly_mul_ref(const Poly* a, const Poly* b, Poly* out);
 void poly_scale_ref(const Poly* a, long long s, Poly* out);
 void poly_mul_falling_ref(const Poly* p, int start, int count, Poly* out);
 void poly_mul_graph_ref(const Poly* a, const GraphPoly* b, Poly* out);
+void graph_poly_normalize_ref(GraphPoly* p);
 void graph_poly_one_ref(GraphPoly* p);
 void graph_poly_mul_ref(const GraphPoly* a, const GraphPoly* b, GraphPoly* out);
 void graph_poly_sub_ref(const GraphPoly* a, const GraphPoly* b, GraphPoly* out);
 void graph_poly_mul_linear_ref(const GraphPoly* a, int c, GraphPoly* out);
+void graph_poly_div_x_ref(const GraphPoly* a, GraphPoly* out);
 int32_t* small_graph_poly_slot(int n, uint32_t mask);
 uint64_t graph_pack_upper_mask64(const Graph* g);
 int connected_canon_lookup_entry_cmp(const void* lhs, const void* rhs);
@@ -640,6 +647,8 @@ void store_row_graph_cache_entry_rows(RowGraphCache* cache, uint64_t key_hash, u
 int connected_canon_lookup_load_graph_poly(const Graph* g, GraphPoly* out);
 void induced_subgraph_from_mask(const Graph* src, uint64_t mask, Graph* dst);
 int graph_collect_components(const Graph* g, uint64_t* component_masks);
+int graph_collect_biconnected_components(const Graph* g, uint64_t* block_masks,
+                                         uint64_t* articulation_mask);
 int graph_has_articulation_point(const Graph* g);
 int graph_has_k2_separator(const Graph* g);
 uint64_t hash_graph(const Graph* g);
