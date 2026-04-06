@@ -45,6 +45,19 @@ typedef struct {
     long long local_raw_cache_hits;
 } WorkerCtx;
 
+typedef struct {
+    uint8_t old_n;
+    uint64_t old_vertex_mask;
+    uint8_t touched_prev_count;
+    uint8_t touched_prev_idx[MAXN_NAUTY];
+    AdjWord touched_prev_old_adj[MAXN_NAUTY];
+#if RECT_COUNT_K4_FEASIBILITY
+    uint8_t old_remaining_capacity;
+    uint32_t old_full_pair_mask;
+    uint32_t pair_shadow;
+#endif
+} PartialGraphAppendFrame;
+
 void canon_state_init(CanonState* st, int limit);
 void canon_state_free(CanonState* st);
 void canon_scratch_init(CanonScratch* scratch, int limit);
@@ -61,7 +74,7 @@ int partial_graph_append_checked(PartialGraphState* st, int depth, int pid,
 void build_live_prefix2_tasks(PrefixId** live_i_out, PrefixId** live_j_out,
                               long long* live_count_out);
 void dfs(int depth, int min_idx, int* stack, CanonState* canon_state,
-         const PartialGraphState* partial_graph, RowGraphCache* cache,
+         PartialGraphState* partial_graph, RowGraphCache* cache,
          RowGraphCache* raw_cache, NautyWorkspace* ws, Poly* local_total,
          long long* local_canon_calls, long long* local_cache_hits,
          long long* local_raw_cache_hits, const WeightAccum* weight_prod,
