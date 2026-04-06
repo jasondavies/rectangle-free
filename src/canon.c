@@ -1321,23 +1321,20 @@ void build_live_prefix2_tasks(PrefixId** live_i_out, PrefixId** live_j_out,
         if (!canon_state_prepare_push(&canon_state, i, &canon_scratch, &next_stabilizer)) {
             continue;
         }
-        canon_state_commit_push(&canon_state, i, &canon_scratch, next_stabilizer);
         if (!partial_graph_append_checked(&partial_graph, 0, i, stack, g_cols - 1)) {
-            canon_state_pop(&canon_state);
             continue;
         }
+        canon_state_commit_push(&canon_state, i, &canon_scratch, next_stabilizer);
 
         for (int j = i; j < num_partitions; j++) {
             stack[1] = j;
             if (!canon_state_prepare_push(&canon_state, j, &canon_scratch, &next_stabilizer)) {
                 continue;
             }
-            canon_state_commit_push(&canon_state, j, &canon_scratch, next_stabilizer);
             PartialGraphState prefix_graph = partial_graph;
             if (partial_graph_append_checked(&prefix_graph, 1, j, stack, g_cols - 2)) {
                 prefix_task_buffer_push2(&live, i, j);
             }
-            canon_state_pop(&canon_state);
         }
 
         canon_state_pop(&canon_state);
@@ -1435,20 +1432,17 @@ static void dfs_fast_orbit(int depth, int min_idx, int* stack, CanonState* canon
         }
 
         stack[depth] = i;
-        WeightAccum next_weight_prod;
-        weight_accum_mul_partition(weight_prod, i, &next_weight_prod);
-        long long next_mult_coeff = mult_coeff * (depth + 1);
-        int next_run_len = 1;
-        if (depth > 0 && i == stack[depth - 1]) {
-            next_run_len = run_len + 1;
-            next_mult_coeff /= next_run_len;
-        }
         PartialGraphState next_graph = *partial_graph;
-        if (!is_terminal) {
-            canon_state_commit_push(canon_state, i, canon_scratch, next_stabilizer);
-        }
         int ok = partial_graph_append_checked(&next_graph, depth, i, stack, cols_left);
         if (ok) {
+            WeightAccum next_weight_prod;
+            weight_accum_mul_partition(weight_prod, i, &next_weight_prod);
+            long long next_mult_coeff = mult_coeff * (depth + 1);
+            int next_run_len = 1;
+            if (depth > 0 && i == stack[depth - 1]) {
+                next_run_len = run_len + 1;
+                next_mult_coeff /= next_run_len;
+            }
             if (is_terminal) {
                 long long row_orbit = factorial[g_rows] / next_stabilizer;
                 Poly res;
@@ -1458,13 +1452,12 @@ static void dfs_fast_orbit(int depth, int min_idx, int* stack, CanonState* canon
                                                next_mult_coeff, profile, &res);
                 poly_accumulate_checked(local_total, &res);
             } else {
+                canon_state_commit_push(canon_state, i, canon_scratch, next_stabilizer);
                 dfs(depth + 1, i, stack, canon_state, &next_graph, cache, raw_cache, ws, local_total,
                     local_canon_calls, local_cache_hits, local_raw_cache_hits, &next_weight_prod,
                     next_mult_coeff, next_run_len, profile, canon_scratch);
+                canon_state_pop(canon_state);
             }
-        }
-        if (!is_terminal) {
-            canon_state_pop(canon_state);
         }
     }
 }
@@ -1495,20 +1488,17 @@ static void dfs_fast_rep(int depth, int min_idx, int* stack, CanonState* canon_s
         }
 
         stack[depth] = i;
-        WeightAccum next_weight_prod;
-        weight_accum_mul_partition(weight_prod, i, &next_weight_prod);
-        long long next_mult_coeff = mult_coeff * (depth + 1);
-        int next_run_len = 1;
-        if (depth > 0 && i == stack[depth - 1]) {
-            next_run_len = run_len + 1;
-            next_mult_coeff /= next_run_len;
-        }
         PartialGraphState next_graph = *partial_graph;
-        if (!is_terminal) {
-            canon_state_commit_push(canon_state, i, canon_scratch, next_stabilizer);
-        }
         int ok = partial_graph_append_checked(&next_graph, depth, i, stack, cols_left);
         if (ok) {
+            WeightAccum next_weight_prod;
+            weight_accum_mul_partition(weight_prod, i, &next_weight_prod);
+            long long next_mult_coeff = mult_coeff * (depth + 1);
+            int next_run_len = 1;
+            if (depth > 0 && i == stack[depth - 1]) {
+                next_run_len = run_len + 1;
+                next_mult_coeff /= next_run_len;
+            }
             if (is_terminal) {
                 long long row_orbit = factorial[g_rows] / next_stabilizer;
                 Poly res;
@@ -1518,13 +1508,12 @@ static void dfs_fast_rep(int depth, int min_idx, int* stack, CanonState* canon_s
                                                next_mult_coeff, profile, &res);
                 poly_accumulate_checked(local_total, &res);
             } else {
+                canon_state_commit_push(canon_state, i, canon_scratch, next_stabilizer);
                 dfs(depth + 1, i, stack, canon_state, &next_graph, cache, raw_cache, ws, local_total,
                     local_canon_calls, local_cache_hits, local_raw_cache_hits, &next_weight_prod,
                     next_mult_coeff, next_run_len, profile, canon_scratch);
+                canon_state_pop(canon_state);
             }
-        }
-        if (!is_terminal) {
-            canon_state_pop(canon_state);
         }
     }
 }
@@ -1593,25 +1582,9 @@ void dfs(int depth, int min_idx, int* stack, CanonState* canon_state, const Part
             profile->canon_prepare_accepts++;
             profile->canon_prepare_accepts_by_depth[depth]++;
             profile->stabilizer_sum_by_depth[depth] += next_stabilizer;
-            if (!is_terminal) {
-                profile->canon_commit_calls++;
-                t0 = omp_get_wtime();
-            }
         }
         stack[depth] = i;
-        WeightAccum next_weight_prod;
-        weight_accum_mul_partition(weight_prod, i, &next_weight_prod);
-        long long next_mult_coeff = mult_coeff * (depth + 1);
-        int next_run_len = 1;
-        if (depth > 0 && i == stack[depth - 1]) {
-            next_run_len = run_len + 1;
-            next_mult_coeff /= next_run_len;
-        }
         PartialGraphState next_graph = *partial_graph;
-        if (!is_terminal) {
-            canon_state_commit_push(canon_state, i, canon_scratch, next_stabilizer);
-            if (PROFILE_BUILD && profile) profile->canon_commit_time += omp_get_wtime() - t0;
-        }
         if (PROFILE_BUILD && profile) {
             profile->partial_append_calls++;
             t0 = omp_get_wtime();
@@ -1619,6 +1592,14 @@ void dfs(int depth, int min_idx, int* stack, CanonState* canon_state, const Part
         int ok = partial_graph_append_checked(&next_graph, depth, i, stack, cols_left);
         if (PROFILE_BUILD && profile) profile->partial_append_time += omp_get_wtime() - t0;
         if (ok) {
+            WeightAccum next_weight_prod;
+            weight_accum_mul_partition(weight_prod, i, &next_weight_prod);
+            long long next_mult_coeff = mult_coeff * (depth + 1);
+            int next_run_len = 1;
+            if (depth > 0 && i == stack[depth - 1]) {
+                next_run_len = run_len + 1;
+                next_mult_coeff /= next_run_len;
+            }
             if (is_terminal) {
                 long long row_orbit = factorial[g_rows] / next_stabilizer;
                 Poly res;
@@ -1628,13 +1609,17 @@ void dfs(int depth, int min_idx, int* stack, CanonState* canon_state, const Part
                                                next_mult_coeff, profile, &res);
                 poly_accumulate_checked(local_total, &res);
             } else {
+                if (PROFILE_BUILD && profile) {
+                    profile->canon_commit_calls++;
+                    t0 = omp_get_wtime();
+                }
+                canon_state_commit_push(canon_state, i, canon_scratch, next_stabilizer);
+                if (PROFILE_BUILD && profile) profile->canon_commit_time += omp_get_wtime() - t0;
                 dfs(depth + 1, i, stack, canon_state, &next_graph, cache, raw_cache, ws, local_total,
                     local_canon_calls, local_cache_hits, local_raw_cache_hits, &next_weight_prod,
                     next_mult_coeff, next_run_len, profile, canon_scratch);
+                canon_state_pop(canon_state);
             }
-        }
-        if (!is_terminal) {
-            canon_state_pop(canon_state);
         }
     }
 }
@@ -1679,21 +1664,20 @@ void execute_prefix2_fixed_batch(PrefixId i, const PrefixId* js, const long long
         profile->canon_prepare_accepts++;
         profile->canon_prepare_accepts_by_depth[0]++;
         profile->stabilizer_sum_by_depth[0] += next_stabilizer;
-        profile->canon_commit_calls++;
-        t0 = omp_get_wtime();
-    }
-    canon_state_commit_push(canon_state, (int)i, canon_scratch, next_stabilizer);
-    if (PROFILE_BUILD) profile->canon_commit_time += omp_get_wtime() - t0;
-    if (PROFILE_BUILD) {
         profile->partial_append_calls++;
         t0 = omp_get_wtime();
     }
     if (!partial_graph_append_checked(partial_graph, 0, (int)i, stack, g_cols - 1)) {
         if (PROFILE_BUILD) profile->partial_append_time += omp_get_wtime() - t0;
-        canon_state_pop(canon_state);
         return;
     }
     if (PROFILE_BUILD) profile->partial_append_time += omp_get_wtime() - t0;
+    if (PROFILE_BUILD) {
+        profile->canon_commit_calls++;
+        t0 = omp_get_wtime();
+    }
+    canon_state_commit_push(canon_state, (int)i, canon_scratch, next_stabilizer);
+    if (PROFILE_BUILD) profile->canon_commit_time += omp_get_wtime() - t0;
 
     for (int idx = 0; idx < count; idx++) {
         long long p = ps[idx];
@@ -1719,16 +1703,10 @@ void execute_prefix2_fixed_batch(PrefixId i, const PrefixId* js, const long long
             profile->canon_prepare_accepts++;
             profile->canon_prepare_accepts_by_depth[1]++;
             profile->stabilizer_sum_by_depth[1] += next_stabilizer;
-            profile->canon_commit_calls++;
-            t0 = omp_get_wtime();
-        }
-        canon_state_commit_push(canon_state, (int)j, canon_scratch, next_stabilizer);
-        if (PROFILE_BUILD) profile->canon_commit_time += omp_get_wtime() - t0;
-        PartialGraphState prefix_graph = *partial_graph;
-        if (PROFILE_BUILD) {
             profile->partial_append_calls++;
             t0 = omp_get_wtime();
         }
+        PartialGraphState prefix_graph = *partial_graph;
         int ok = partial_graph_append_checked(&prefix_graph, 1, (int)j, stack, g_cols - 2);
         if (PROFILE_BUILD) profile->partial_append_time += omp_get_wtime() - t0;
         if (ok) {
@@ -1737,12 +1715,18 @@ void execute_prefix2_fixed_batch(PrefixId i, const PrefixId* js, const long long
             weight_accum_mul_partition(&prefix_weight, (int)j, &prefix_weight);
             long long prefix_mult = (i == j) ? 1 : 2;
             int prefix_run = (i == j) ? 2 : 1;
+            if (PROFILE_BUILD) {
+                profile->canon_commit_calls++;
+                t0 = omp_get_wtime();
+            }
+            canon_state_commit_push(canon_state, (int)j, canon_scratch, next_stabilizer);
+            if (PROFILE_BUILD) profile->canon_commit_time += omp_get_wtime() - t0;
             dfs(2, (int)j, stack, canon_state, &prefix_graph, cache, raw_cache, ws, &task_total,
                 local_canon_calls, local_cache_hits, local_raw_cache_hits,
                 &prefix_weight, prefix_mult, prefix_run, profile, canon_scratch);
             poly_accumulate_checked(local_total, &task_total);
+            canon_state_pop(canon_state);
         }
-        canon_state_pop(canon_state);
         complete_task_report_and_time(total_tasks, progress_report_step, start_time,
                                       pending_completed, task_timing, p, task_t0);
     }
@@ -1783,24 +1767,23 @@ static int replay_local_task_prefix(const LocalTask* task, WorkerCtx* ctx,
             tls_profile->canon_prepare_accepts++;
             tls_profile->canon_prepare_accepts_by_depth[depth]++;
             tls_profile->stabilizer_sum_by_depth[depth] += next_stabilizer;
-            tls_profile->canon_commit_calls++;
-            t0 = omp_get_wtime();
-        }
-        canon_state_commit_push(&ctx->canon_state, pid,
-                                &ctx->canon_scratch, next_stabilizer);
-        if (PROFILE_BUILD) tls_profile->canon_commit_time += omp_get_wtime() - t0;
-
-        if (PROFILE_BUILD) {
             tls_profile->partial_append_calls++;
             t0 = omp_get_wtime();
         }
         if (!partial_graph_append_checked(&ctx->partial_graph, depth, pid, ctx->stack,
                                           g_cols - depth - 1)) {
             if (PROFILE_BUILD) tls_profile->partial_append_time += omp_get_wtime() - t0;
-            canon_state_pop(&ctx->canon_state);
             return 0;
         }
         if (PROFILE_BUILD) tls_profile->partial_append_time += omp_get_wtime() - t0;
+
+        if (PROFILE_BUILD) {
+            tls_profile->canon_commit_calls++;
+            t0 = omp_get_wtime();
+        }
+        canon_state_commit_push(&ctx->canon_state, pid,
+                                &ctx->canon_scratch, next_stabilizer);
+        if (PROFILE_BUILD) tls_profile->canon_commit_time += omp_get_wtime() - t0;
 
         weight_accum_mul_partition(weight_prod, pid, weight_prod);
 
@@ -1907,18 +1890,9 @@ static void dfs_runtime_split_local(int depth, int start_pid, int end_pid, long 
             tls_profile->canon_prepare_accepts++;
             tls_profile->canon_prepare_accepts_by_depth[depth]++;
             tls_profile->stabilizer_sum_by_depth[depth] += next_stabilizer;
-            if (!is_terminal) {
-                tls_profile->canon_commit_calls++;
-                t0 = omp_get_wtime();
-            }
         }
 
         PartialGraphState saved_graph = ctx->partial_graph;
-        if (!is_terminal) {
-            canon_state_commit_push(&ctx->canon_state, pid, &ctx->canon_scratch, next_stabilizer);
-            if (PROFILE_BUILD) tls_profile->canon_commit_time += omp_get_wtime() - t0;
-        }
-
         if (PROFILE_BUILD) {
             tls_profile->partial_append_calls++;
             t0 = omp_get_wtime();
@@ -1945,18 +1919,22 @@ static void dfs_runtime_split_local(int depth, int start_pid, int end_pid, long 
                                                next_mult_coeff, profile, &res);
                 poly_accumulate_checked(local_total, &res);
             } else {
+                if (PROFILE_BUILD) {
+                    tls_profile->canon_commit_calls++;
+                    t0 = omp_get_wtime();
+                }
+                canon_state_commit_push(&ctx->canon_state, pid, &ctx->canon_scratch, next_stabilizer);
+                if (PROFILE_BUILD) tls_profile->canon_commit_time += omp_get_wtime() - t0;
                 dfs_runtime_split_local(depth + 1, pid, num_partitions, root_id, ctx, local_total,
                                         &next_weight_prod, next_mult_coeff, next_run_len,
                                         profile, runtime_tasks);
+                canon_state_pop(&ctx->canon_state);
             }
         } else if (PROFILE_BUILD) {
             tls_profile->partial_append_time += omp_get_wtime() - t0;
         }
 
         ctx->partial_graph = saved_graph;
-        if (!is_terminal) {
-            canon_state_pop(&ctx->canon_state);
-        }
     }
 }
 

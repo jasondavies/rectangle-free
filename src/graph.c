@@ -924,13 +924,18 @@ uint64_t graph_fill_dense_key_rows(const Graph* g, AdjWord row_mask, AdjWord* ro
     uint64_t h = 14695981039346656037ULL;
     for (uint32_t dense_v = 0; dense_v < n; dense_v++) {
         int v = dense_vertices[dense_v];
+        AdjWord row;
+#if defined(__BMI2__) && (defined(__x86_64__) || defined(__i386__))
+        row = (AdjWord)_pext_u64((uint64_t)g->adj[v] & g->vertex_mask, g->vertex_mask);
+#else
         uint64_t row_bits = (uint64_t)g->adj[v] & g->vertex_mask;
-        AdjWord row = 0;
+        row = 0;
         while (row_bits) {
             int u = __builtin_ctzll(row_bits);
             row |= (AdjWord)(UINT64_C(1) << dense_index[u]);
             row_bits &= row_bits - 1;
         }
+#endif
         rows[dense_v] = row;
         h ^= (uint64_t)row;
         h *= 1099511628211ULL;

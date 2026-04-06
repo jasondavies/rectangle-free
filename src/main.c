@@ -550,14 +550,6 @@ static int replay_task_prefix(const int* prefix, int prefix_depth, CanonState* c
             profile->canon_prepare_accepts++;
             profile->canon_prepare_accepts_by_depth[depth]++;
             profile->stabilizer_sum_by_depth[depth] += next_stabilizer;
-            profile->canon_commit_calls++;
-            t0 = omp_get_wtime();
-        }
-        canon_state_commit_push(canon_state, pid, canon_scratch, next_stabilizer);
-        pushed++;
-        if (PROFILE_BUILD) profile->canon_commit_time += omp_get_wtime() - t0;
-
-        if (PROFILE_BUILD) {
             profile->partial_append_calls++;
             t0 = omp_get_wtime();
         }
@@ -566,6 +558,14 @@ static int replay_task_prefix(const int* prefix, int prefix_depth, CanonState* c
             goto fail;
         }
         if (PROFILE_BUILD) profile->partial_append_time += omp_get_wtime() - t0;
+
+        if (PROFILE_BUILD) {
+            profile->canon_commit_calls++;
+            t0 = omp_get_wtime();
+        }
+        canon_state_commit_push(canon_state, pid, canon_scratch, next_stabilizer);
+        pushed++;
+        if (PROFILE_BUILD) profile->canon_commit_time += omp_get_wtime() - t0;
 
         weight_accum_mul_partition(prefix_weight, pid, prefix_weight);
         {
@@ -691,12 +691,6 @@ static void execute_run_tasks(const RunConfig* run, double start_time, Execution
                     profile->canon_prepare_accepts++;
                     profile->canon_prepare_accepts_by_depth[0]++;
                     profile->stabilizer_sum_by_depth[0] += next_stabilizer;
-                    profile->canon_commit_calls++;
-                    t0 = omp_get_wtime();
-                }
-                canon_state_commit_push(&canon_state, (int)i, &canon_scratch, next_stabilizer);
-                if (PROFILE_BUILD) profile->canon_commit_time += omp_get_wtime() - t0;
-                if (PROFILE_BUILD) {
                     profile->partial_append_calls++;
                     t0 = omp_get_wtime();
                 }
@@ -705,9 +699,16 @@ static void execute_run_tasks(const RunConfig* run, double start_time, Execution
                 if (ok) {
                     WeightAccum initial_weight;
                     weight_accum_from_partition((int)i, &initial_weight);
+                    if (PROFILE_BUILD) {
+                        profile->canon_commit_calls++;
+                        t0 = omp_get_wtime();
+                    }
+                    canon_state_commit_push(&canon_state, (int)i, &canon_scratch, next_stabilizer);
+                    if (PROFILE_BUILD) profile->canon_commit_time += omp_get_wtime() - t0;
                     dfs(1, (int)i, stack, &canon_state, &partial_graph, &cache, &raw_cache, &ws,
                         &exec->thread_polys[tid], &local_canon_calls, &local_cache_hits,
                         &local_raw_cache_hits, &initial_weight, 1, 1, profile, &canon_scratch);
+                    canon_state_pop(&canon_state);
                 }
                 complete_task_report_and_time(total_tasks, progress_report_step, start_time,
                                               &pending_completed, task_timing, i, task_t0);
