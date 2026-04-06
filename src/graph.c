@@ -904,16 +904,8 @@ uint64_t graph_fill_dense_key_rows(const Graph* g, AdjWord row_mask, AdjWord* ro
         return h;
     }
 
-    int dense_index[MAXN_NAUTY];
-    int dense_vertices[MAXN_NAUTY];
-    uint64_t rem = g->vertex_mask & ADJWORD_MASK;
-    uint32_t n = 0;
-    while (rem) {
-        int v = __builtin_ctzll(rem);
-        dense_index[v] = (int)n;
-        dense_vertices[n++] = v;
-        rem &= rem - 1;
-    }
+    uint64_t active = g->vertex_mask & ADJWORD_MASK;
+    uint32_t n = (uint32_t)__builtin_popcountll(active);
 
     if (n != g->n) {
         fprintf(stderr, "Graph vertex mask/count mismatch: n=%u mask_popcount=%u\n",
@@ -922,24 +914,44 @@ uint64_t graph_fill_dense_key_rows(const Graph* g, AdjWord row_mask, AdjWord* ro
     }
 
     uint64_t h = 14695981039346656037ULL;
-    for (uint32_t dense_v = 0; dense_v < n; dense_v++) {
-        int v = dense_vertices[dense_v];
-        AdjWord row;
 #if defined(__BMI2__) && (defined(__x86_64__) || defined(__i386__))
-        row = (AdjWord)_pext_u64((uint64_t)g->adj[v] & g->vertex_mask, g->vertex_mask);
+    uint64_t rem = active;
+    uint32_t dense_v = 0;
+    while (rem) {
+        int v = __builtin_ctzll(rem);
+        AdjWord row = (AdjWord)_pext_u64((uint64_t)g->adj[v] & active, active);
+        rows[dense_v] = row;
+        h ^= (uint64_t)row;
+        h *= 1099511628211ULL;
+        dense_v++;
+        rem &= rem - 1;
+    }
 #else
-        uint64_t row_bits = (uint64_t)g->adj[v] & g->vertex_mask;
-        row = 0;
+    int dense_index[MAXN_NAUTY];
+    int dense_vertices[MAXN_NAUTY];
+    uint64_t rem = active;
+    uint32_t dense_v = 0;
+    while (rem) {
+        int v = __builtin_ctzll(rem);
+        dense_index[v] = (int)dense_v;
+        dense_vertices[dense_v++] = v;
+        rem &= rem - 1;
+    }
+
+    for (uint32_t i = 0; i < n; i++) {
+        int v = dense_vertices[i];
+        uint64_t row_bits = (uint64_t)g->adj[v] & active;
+        AdjWord row = 0;
         while (row_bits) {
             int u = __builtin_ctzll(row_bits);
             row |= (AdjWord)(UINT64_C(1) << dense_index[u]);
             row_bits &= row_bits - 1;
         }
-#endif
-        rows[dense_v] = row;
+        rows[i] = row;
         h ^= (uint64_t)row;
         h *= 1099511628211ULL;
     }
+#endif
     h ^= (uint64_t)n;
     h *= 1099511628211ULL;
     return h;
