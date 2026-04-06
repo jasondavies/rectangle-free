@@ -100,6 +100,6 @@ void execute_local_runtime_task(const LocalTask* task, WorkerCtx* ctx, Poly* thr
 void solve_graph_poly(const Graph* input_g, RowGraphCache* cache, RowGraphCache* raw_cache,
                       NautyWorkspace* ws, long long* local_canon_calls,
                       long long* local_cache_hits, long long* local_raw_cache_hits,
-                      ProfileStats* profile, GraphPoly* out_result);
+                      ProfileStats* profile, GraphResult* out_result);
 
 #endif

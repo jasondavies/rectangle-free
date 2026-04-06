@@ -277,16 +277,6 @@ void graph_poly_div_x_ref(const GraphPoly* a, GraphPoly* out) {
 }
 
 #if RECT_COUNT_K4
-void graph_poly_set_count4(uint64_t count, GraphPoly* out) {
-    out->x_pow = 0;
-    out->deg = 0;
-    out->coeffs[0] = (PolyCoeff)count;
-}
-
-uint64_t graph_poly_get_count4(const GraphPoly* p) {
-    return (uint64_t)p->coeffs[0];
-}
-
 static inline void poly_set_count4(unsigned __int128 count, Poly* out) {
     poly_zero(out);
     out->coeffs[0] = (PolyCoeff)count;

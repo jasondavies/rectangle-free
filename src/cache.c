@@ -22,12 +22,20 @@ static inline void graph_pack_signature(const Graph* g, uint32_t key_n, uint64_t
     }
 }
 
-static inline PolyCoeff* graph_cache_coeff_slot(const GraphCache* cache, int slot) {
+static inline GraphCacheValue* graph_cache_coeff_slot(const GraphCache* cache, int slot) {
+#if RECT_COUNT_K4
+    return cache->coeffs + (size_t)slot;
+#else
     return cache->coeffs + (size_t)slot * (size_t)cache->poly_len;
+#endif
 }
 
-static inline PolyCoeff* row_graph_cache_coeff_slot(const RowGraphCache* cache, int slot) {
+static inline GraphCacheValue* row_graph_cache_coeff_slot(const RowGraphCache* cache, int slot) {
+#if RECT_COUNT_K4
+    return cache->coeffs + (size_t)slot;
+#else
     return cache->coeffs + (size_t)slot * (size_t)cache->poly_len;
+#endif
 }
 
 static inline uint32_t graph_cache_next_stamp(GraphCache* cache) {
@@ -88,13 +96,9 @@ static inline int row_graph_cache_slot_matches_rows(const RowGraphCache* cache, 
     return memcmp(slot_rows, rows, (size_t)key_n * sizeof(AdjWord)) == 0;
 }
 
-static inline void graph_cache_load_poly(const GraphCache* cache, int slot, GraphPoly* value) {
+static inline void graph_cache_load_poly(const GraphCache* cache, int slot, GraphResult* value) {
 #if RECT_COUNT_K4
-    value->x_pow = cache->x_pows[slot];
-    int deg = cache->degs[slot];
-    value->deg = (uint8_t)deg;
-    memcpy(value->coeffs, graph_cache_coeff_slot(cache, slot),
-           (size_t)(deg + 1) * sizeof(value->coeffs[0]));
+    *value = *graph_cache_coeff_slot(cache, slot);
 #else
     uint32_t key_n = cache->keys[slot].key_n;
     value->x_pow = key_n == 0 ? 0 : 1;
@@ -104,13 +108,9 @@ static inline void graph_cache_load_poly(const GraphCache* cache, int slot, Grap
 #endif
 }
 
-static inline void row_graph_cache_load_poly(const RowGraphCache* cache, int slot, GraphPoly* value) {
+static inline void row_graph_cache_load_poly(const RowGraphCache* cache, int slot, GraphResult* value) {
 #if RECT_COUNT_K4
-    value->x_pow = cache->x_pows[slot];
-    int deg = cache->degs[slot];
-    value->deg = (uint8_t)deg;
-    memcpy(value->coeffs, row_graph_cache_coeff_slot(cache, slot),
-           (size_t)(deg + 1) * sizeof(value->coeffs[0]));
+    *value = *row_graph_cache_coeff_slot(cache, slot);
 #else
     uint32_t key_n = cache->keys[slot].key_n;
     value->x_pow = key_n == 0 ? 0 : 1;
@@ -136,7 +136,7 @@ static int graph_cache_find_slot(const GraphCache* cache, uint64_t key_hash, uin
 }
 
 static int graph_cache_lookup_poly(GraphCache* cache, uint64_t key_hash, uint32_t key_n,
-                                   const Graph* g, uint64_t row_mask, GraphPoly* value, int touch) {
+                                   const Graph* g, uint64_t row_mask, GraphResult* value, int touch) {
     int slot = graph_cache_find_slot(cache, key_hash, key_n, g, row_mask);
     if (slot < 0) return 0;
     graph_cache_load_poly(cache, slot, value);
@@ -145,7 +145,7 @@ static int graph_cache_lookup_poly(GraphCache* cache, uint64_t key_hash, uint32_
 }
 
 int row_graph_cache_lookup_poly(RowGraphCache* cache, uint64_t key_hash, uint32_t key_n,
-                                const Graph* g, AdjWord row_mask, GraphPoly* value,
+                                const Graph* g, AdjWord row_mask, GraphResult* value,
                                 int touch) {
     int cache_idx = (int)(key_hash & (uint64_t)cache->mask);
     for (int k = 0; k < cache->probe; k++) {
@@ -160,7 +160,7 @@ int row_graph_cache_lookup_poly(RowGraphCache* cache, uint64_t key_hash, uint32_
 }
 
 int row_graph_cache_lookup_rows(RowGraphCache* cache, uint64_t key_hash, uint32_t key_n,
-                                const AdjWord* rows, GraphPoly* value, int touch) {
+                                const AdjWord* rows, GraphResult* value, int touch) {
     int cache_idx = (int)(key_hash & (uint64_t)cache->mask);
     for (int k = 0; k < cache->probe; k++) {
         int p = (cache_idx + k) & cache->mask;
@@ -183,12 +183,17 @@ void shared_graph_cache_init(SharedGraphCache* shared, int bits, int poly_len) {
     shared->cache.keys = checked_aligned_alloc(64, sizeof(CacheKey) * size, "shared_cache_keys");
     shared->cache.stamps = checked_aligned_alloc(64, sizeof(uint32_t) * size, "shared_cache_stamps");
     shared->cache.sigs = checked_aligned_alloc(64, sizeof(uint64_t) * size * GRAPH_SIG_WORDS, "shared_cache_sigs");
-#if RECT_COUNT_K4
-    shared->cache.x_pows = checked_aligned_alloc(64, sizeof(uint8_t) * size, "shared_cache_x_pows");
-    shared->cache.degs = checked_aligned_alloc(64, sizeof(uint8_t) * size, "shared_cache_degs");
-#endif
     shared->cache.coeffs =
-        checked_aligned_alloc(64, sizeof(PolyCoeff) * size * (size_t)poly_len, "shared_cache_coeffs");
+        checked_aligned_alloc(64,
+                              sizeof(GraphCacheValue) * size *
+                                  (size_t)(
+#if RECT_COUNT_K4
+                                      1
+#else
+                                      poly_len
+#endif
+                                      ),
+                              "shared_cache_coeffs");
     memset(shared->cache.keys, 0, sizeof(CacheKey) * size);
     memset(shared->cache.stamps, 0, sizeof(uint32_t) * size);
     shared->cache.next_stamp = 0;
@@ -200,17 +205,13 @@ void shared_graph_cache_free(SharedGraphCache* shared) {
     free(shared->cache.keys);
     free(shared->cache.stamps);
     free(shared->cache.sigs);
-#if RECT_COUNT_K4
-    free(shared->cache.x_pows);
-    free(shared->cache.degs);
-#endif
     free(shared->cache.coeffs);
     pthread_rwlock_destroy(&shared->lock);
     memset(shared, 0, sizeof(*shared));
 }
 
 int shared_graph_cache_lookup_poly(SharedGraphCache* shared, uint64_t key_hash, uint32_t key_n,
-                                   const Graph* g, uint64_t row_mask, GraphPoly* value) {
+                                   const Graph* g, uint64_t row_mask, GraphResult* value) {
     if (!shared || !shared->enabled) return 0;
     int slot = -1;
     pthread_rwlock_rdlock(&shared->lock);
@@ -221,7 +222,7 @@ int shared_graph_cache_lookup_poly(SharedGraphCache* shared, uint64_t key_hash, 
 }
 
 static void store_graph_cache_entry(GraphCache* cache, uint64_t key_hash, uint32_t key_n, const Graph* g,
-                                    uint64_t row_mask, const GraphPoly* value) {
+                                    uint64_t row_mask, const GraphResult* value) {
     (void)row_mask;
     uint64_t sig[GRAPH_SIG_WORDS];
     graph_pack_signature(g, key_n, sig);
@@ -262,17 +263,11 @@ static void store_graph_cache_entry(GraphCache* cache, uint64_t key_hash, uint32
     cache->keys[best_slot].key_n = key_n;
     memcpy(graph_cache_sig_slot(cache, best_slot), sig, sizeof(sig));
 #if RECT_COUNT_K4
-    cache->x_pows[best_slot] = value->x_pow;
-    cache->degs[best_slot] = (uint8_t)value->deg;
-#endif
-    memcpy(graph_cache_coeff_slot(cache, best_slot), value->coeffs,
-           (size_t)(
-#if RECT_COUNT_K4
-               value->deg + 1
+    *graph_cache_coeff_slot(cache, best_slot) = *value;
 #else
-               key_n == 0 ? 1 : key_n
+    memcpy(graph_cache_coeff_slot(cache, best_slot), value->coeffs,
+           (size_t)(key_n == 0 ? 1 : key_n) * sizeof(value->coeffs[0]));
 #endif
-               ) * sizeof(value->coeffs[0]));
     cache->keys[best_slot].used = 1;
     graph_cache_touch_slot(cache, best_slot);
 }
@@ -291,7 +286,7 @@ void shared_graph_cache_flush_exports(void) {
 }
 
 void shared_graph_cache_export(uint64_t key_hash, uint32_t key_n, const Graph* g,
-                               uint64_t row_mask, const GraphPoly* value) {
+                               uint64_t row_mask, const GraphResult* value) {
     SharedGraphCacheExporter* exporter = tls_shared_cache_exporter;
     SharedGraphCache* shared = g_shared_graph_cache;
     if (!shared || !shared->enabled || !exporter) return;
@@ -308,7 +303,7 @@ void shared_graph_cache_export(uint64_t key_hash, uint32_t key_n, const Graph* g
 
 void store_row_graph_cache_entry(RowGraphCache* cache, uint64_t key_hash, uint32_t key_n,
                                  const Graph* g, AdjWord row_mask,
-                                 const GraphPoly* value) {
+                                 const GraphResult* value) {
     int cache_idx = (int)(key_hash & (uint64_t)cache->mask);
     int empty_slot = -1;
     int oldest_same_n_slot = -1;
@@ -353,23 +348,17 @@ void store_row_graph_cache_entry(RowGraphCache* cache, uint64_t key_hash, uint32
         }
     }
 #if RECT_COUNT_K4
-    cache->x_pows[best_slot] = value->x_pow;
-    cache->degs[best_slot] = (uint8_t)value->deg;
-#endif
-    memcpy(row_graph_cache_coeff_slot(cache, best_slot), value->coeffs,
-           (size_t)(
-#if RECT_COUNT_K4
-               value->deg + 1
+    *row_graph_cache_coeff_slot(cache, best_slot) = *value;
 #else
-               key_n == 0 ? 1 : key_n
+    memcpy(row_graph_cache_coeff_slot(cache, best_slot), value->coeffs,
+           (size_t)(key_n == 0 ? 1 : key_n) * sizeof(value->coeffs[0]));
 #endif
-               ) * sizeof(value->coeffs[0]));
     cache->keys[best_slot].used = 1;
     row_graph_cache_touch_slot(cache, best_slot);
 }
 
 void store_row_graph_cache_entry_rows(RowGraphCache* cache, uint64_t key_hash, uint32_t key_n,
-                                      const AdjWord* rows, const GraphPoly* value) {
+                                      const AdjWord* rows, const GraphResult* value) {
     int cache_idx = (int)(key_hash & (uint64_t)cache->mask);
     int empty_slot = -1;
     int oldest_same_n_slot = -1;
@@ -406,21 +395,13 @@ void store_row_graph_cache_entry_rows(RowGraphCache* cache, uint64_t key_hash, u
     cache->keys[best_slot].key_hash = key_hash;
     cache->keys[best_slot].key_n = key_n;
     AdjWord* slot_rows = row_graph_cache_row_slot(cache, best_slot);
+    memcpy(slot_rows, rows, (size_t)key_n * sizeof(AdjWord));
 #if RECT_COUNT_K4
-    memcpy(slot_rows, rows, (size_t)key_n * sizeof(AdjWord));
-    cache->x_pows[best_slot] = value->x_pow;
-    cache->degs[best_slot] = (uint8_t)value->deg;
+    *row_graph_cache_coeff_slot(cache, best_slot) = *value;
 #else
-    memcpy(slot_rows, rows, (size_t)key_n * sizeof(AdjWord));
-#endif
     memcpy(row_graph_cache_coeff_slot(cache, best_slot), value->coeffs,
-           (size_t)(
-#if RECT_COUNT_K4
-               value->deg + 1
-#else
-               key_n == 0 ? 1 : key_n
+           (size_t)(key_n == 0 ? 1 : key_n) * sizeof(value->coeffs[0]));
 #endif
-               ) * sizeof(value->coeffs[0]));
     cache->keys[best_slot].used = 1;
     row_graph_cache_touch_slot(cache, best_slot);
 }

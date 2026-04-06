@@ -1461,15 +1461,15 @@ static void solve_structure_with_row_orbit(const Graph* partial_graph, long long
     poly_scale_ref(weight_prod, mult_coeff * row_orbit, &weight);
     if (PROFILE_BUILD && profile) profile->build_weight_time += omp_get_wtime() - t0;
 #endif
-    GraphPoly graph_poly_small;
+    GraphResult graph_result_small;
     solve_graph_poly(partial_graph, cache, raw_cache, ws,
                      local_canon_calls, local_cache_hits, local_raw_cache_hits,
-                     profile, &graph_poly_small);
+                     profile, &graph_result_small);
 #if RECT_COUNT_K4
     weight_accum_scale_to_poly(weight_prod, mult_coeff, row_orbit,
-                               graph_poly_get_count4(&graph_poly_small), out_result);
+                               graph_result_get_count4(&graph_result_small), out_result);
 #else
-    poly_mul_graph_ref(&weight, &graph_poly_small, out_result);
+    poly_mul_graph_ref(&weight, &graph_result_small, out_result);
 #endif
 }
 
