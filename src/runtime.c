@@ -265,7 +265,6 @@ void flush_completed_tasks(long long total_tasks, long long report_step,
 
 static inline void complete_task_and_report(long long total_tasks, long long report_step,
                                             double start_time, long long* pending_completed) {
-    shared_graph_cache_flush_exports();
     (*pending_completed)++;
     if (*pending_completed >= PROGRESS_FLUSH_BATCH) {
         flush_completed_tasks(total_tasks, report_step, start_time, pending_completed);

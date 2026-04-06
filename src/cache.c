@@ -212,16 +212,12 @@ void shared_graph_cache_free(SharedGraphCache* shared) {
 int shared_graph_cache_lookup_poly(SharedGraphCache* shared, uint64_t key_hash, uint32_t key_n,
                                    const Graph* g, uint64_t row_mask, GraphPoly* value) {
     if (!shared || !shared->enabled) return 0;
-    int found = 0;
+    int slot = -1;
     pthread_rwlock_rdlock(&shared->lock);
-    found = (graph_cache_find_slot(&shared->cache, key_hash, key_n, g, row_mask) >= 0);
+    slot = graph_cache_find_slot(&shared->cache, key_hash, key_n, g, row_mask);
+    if (slot >= 0) graph_cache_load_poly(&shared->cache, slot, value);
     pthread_rwlock_unlock(&shared->lock);
-    if (!found) return 0;
-
-    pthread_rwlock_wrlock(&shared->lock);
-    found = graph_cache_lookup_poly(&shared->cache, key_hash, key_n, g, row_mask, value, 1);
-    pthread_rwlock_unlock(&shared->lock);
-    return found;
+    return slot >= 0;
 }
 
 static void store_graph_cache_entry(GraphCache* cache, uint64_t key_hash, uint32_t key_n, const Graph* g,
