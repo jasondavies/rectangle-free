@@ -52,7 +52,7 @@ static void solve_structure_with_row_orbit(const Graph* partial_graph, long long
                                            long long* local_cache_hits,
                                            long long* local_raw_cache_hits,
                                            const WeightAccum* weight_prod, long long mult_coeff,
-                                           ProfileStats* profile, Poly* out_result);
+                                           ProfileStats* profile, ResultAccum* out_result);
 static inline int row_insert_sorted(uint16_t* row, int len, uint16_t val) {
     switch (len) {
         case 0:
@@ -1442,7 +1442,7 @@ static void solve_structure_with_row_orbit(const Graph* partial_graph, long long
                                            long long* local_cache_hits,
                                            long long* local_raw_cache_hits,
                                            const WeightAccum* weight_prod, long long mult_coeff,
-                                           ProfileStats* profile, Poly* out_result) {
+                                           ProfileStats* profile, ResultAccum* out_result) {
     double t0 = 0.0;
     if (PROFILE_BUILD && profile) {
         profile->solve_structure_calls++;
@@ -1453,7 +1453,7 @@ static void solve_structure_with_row_orbit(const Graph* partial_graph, long long
         (*weight_prod) * (WeightAccum)mult_coeff * (WeightAccum)row_orbit;
     if (PROFILE_BUILD && profile) profile->build_weight_time += omp_get_wtime() - t0;
     if (structure_weight == 0) {
-        poly_zero(out_result);
+        *out_result = 0;
         return;
     }
 #else
@@ -1466,8 +1466,7 @@ static void solve_structure_with_row_orbit(const Graph* partial_graph, long long
                      local_canon_calls, local_cache_hits, local_raw_cache_hits,
                      profile, &graph_result_small);
 #if RECT_COUNT_K4
-    weight_accum_scale_to_poly(weight_prod, mult_coeff, row_orbit,
-                               graph_result_get_count4(&graph_result_small), out_result);
+    *out_result = structure_weight * (unsigned __int128)graph_result_get_count4(&graph_result_small);
 #else
     poly_mul_graph_ref(&weight, &graph_result_small, out_result);
 #endif
@@ -1477,7 +1476,7 @@ static void solve_structure(const Graph* partial_graph, CanonState* canon_state,
                             RowGraphCache* cache, RowGraphCache* raw_cache, NautyWorkspace* ws,
                             long long* local_canon_calls, long long* local_cache_hits,
                             long long* local_raw_cache_hits, const WeightAccum* weight_prod,
-                            long long mult_coeff, ProfileStats* profile, Poly* out_result) {
+                            long long mult_coeff, ProfileStats* profile, ResultAccum* out_result) {
     long long row_orbit = get_orbit_multiplier_state(canon_state);
     solve_structure_with_row_orbit(partial_graph, row_orbit, cache, raw_cache, ws,
                                    local_canon_calls, local_cache_hits, local_raw_cache_hits,
@@ -1486,7 +1485,7 @@ static void solve_structure(const Graph* partial_graph, CanonState* canon_state,
 
 void dfs(int depth, int min_idx, int* stack, CanonState* canon_state,
          PartialGraphState* partial_graph, RowGraphCache* cache,
-         RowGraphCache* raw_cache, NautyWorkspace* ws, Poly* local_total,
+         RowGraphCache* raw_cache, NautyWorkspace* ws, ResultAccum* local_total,
          long long* local_canon_calls, long long* local_cache_hits,
          long long* local_raw_cache_hits, const WeightAccum* weight_prod,
          long long mult_coeff, int run_len, ProfileStats* profile,
@@ -1494,7 +1493,7 @@ void dfs(int depth, int min_idx, int* stack, CanonState* canon_state,
 
 static void dfs_fast_orbit(int depth, int min_idx, int* stack, CanonState* canon_state,
                            PartialGraphState* partial_graph, RowGraphCache* cache,
-                           RowGraphCache* raw_cache, NautyWorkspace* ws, Poly* local_total,
+                           RowGraphCache* raw_cache, NautyWorkspace* ws, ResultAccum* local_total,
                            long long* local_canon_calls, long long* local_cache_hits,
                            long long* local_raw_cache_hits, const WeightAccum* weight_prod,
                            long long mult_coeff, int run_len, ProfileStats* profile,
@@ -1533,12 +1532,16 @@ static void dfs_fast_orbit(int depth, int min_idx, int* stack, CanonState* canon
             }
             if (is_terminal) {
                 long long row_orbit = factorial[g_rows] / next_stabilizer;
-                Poly res;
+                ResultAccum res;
                 solve_structure_with_row_orbit(&partial_graph->g, row_orbit, cache, raw_cache, ws,
                                                local_canon_calls, local_cache_hits,
                                                local_raw_cache_hits, &next_weight_prod,
                                                next_mult_coeff, profile, &res);
+#if RECT_COUNT_K4
+                *local_total += res;
+#else
                 poly_accumulate_checked(local_total, &res);
+#endif
             } else {
                 canon_state_commit_push(canon_state, i, canon_scratch, next_stabilizer);
                 dfs(depth + 1, i, stack, canon_state, partial_graph, cache, raw_cache, ws, local_total,
@@ -1553,7 +1556,7 @@ static void dfs_fast_orbit(int depth, int min_idx, int* stack, CanonState* canon
 
 static void dfs_fast_rep(int depth, int min_idx, int* stack, CanonState* canon_state,
                          PartialGraphState* partial_graph, RowGraphCache* cache,
-                         RowGraphCache* raw_cache, NautyWorkspace* ws, Poly* local_total,
+                         RowGraphCache* raw_cache, NautyWorkspace* ws, ResultAccum* local_total,
                          long long* local_canon_calls, long long* local_cache_hits,
                          long long* local_raw_cache_hits, const WeightAccum* weight_prod,
                          long long mult_coeff, int run_len, ProfileStats* profile,
@@ -1589,12 +1592,16 @@ static void dfs_fast_rep(int depth, int min_idx, int* stack, CanonState* canon_s
             }
             if (is_terminal) {
                 long long row_orbit = factorial[g_rows] / next_stabilizer;
-                Poly res;
+                ResultAccum res;
                 solve_structure_with_row_orbit(&partial_graph->g, row_orbit, cache, raw_cache, ws,
                                                local_canon_calls, local_cache_hits,
                                                local_raw_cache_hits, &next_weight_prod,
                                                next_mult_coeff, profile, &res);
+#if RECT_COUNT_K4
+                *local_total += res;
+#else
                 poly_accumulate_checked(local_total, &res);
+#endif
             } else {
                 canon_state_commit_push(canon_state, i, canon_scratch, next_stabilizer);
                 dfs(depth + 1, i, stack, canon_state, partial_graph, cache, raw_cache, ws, local_total,
@@ -1608,16 +1615,20 @@ static void dfs_fast_rep(int depth, int min_idx, int* stack, CanonState* canon_s
 }
 
 void dfs(int depth, int min_idx, int* stack, CanonState* canon_state, PartialGraphState* partial_graph,
-         RowGraphCache* cache, RowGraphCache* raw_cache, NautyWorkspace* ws, Poly* local_total,
+         RowGraphCache* cache, RowGraphCache* raw_cache, NautyWorkspace* ws, ResultAccum* local_total,
          long long* local_canon_calls, long long* local_cache_hits,
          long long* local_raw_cache_hits, const WeightAccum* weight_prod, long long mult_coeff,
          int run_len, ProfileStats* profile, CanonScratch* canon_scratch) {
     if (depth == g_cols) {
-        Poly res;
+        ResultAccum res;
         solve_structure(&partial_graph->g, canon_state, cache, raw_cache, ws,
                         local_canon_calls, local_cache_hits, local_raw_cache_hits,
                         weight_prod, mult_coeff, profile, &res);
+#if RECT_COUNT_K4
+        *local_total += res;
+#else
         poly_accumulate_checked(local_total, &res);
+#endif
         return;
     }
 
@@ -1691,12 +1702,16 @@ void dfs(int depth, int min_idx, int* stack, CanonState* canon_state, PartialGra
             }
             if (is_terminal) {
                 long long row_orbit = factorial[g_rows] / next_stabilizer;
-                Poly res;
+                ResultAccum res;
                 solve_structure_with_row_orbit(&partial_graph->g, row_orbit, cache, raw_cache, ws,
                                                local_canon_calls, local_cache_hits,
                                                local_raw_cache_hits, &next_weight_prod,
                                                next_mult_coeff, profile, &res);
+#if RECT_COUNT_K4
+                *local_total += res;
+#else
                 poly_accumulate_checked(local_total, &res);
+#endif
             } else {
                 if (PROFILE_BUILD && profile) {
                     profile->canon_commit_calls++;
@@ -1727,7 +1742,7 @@ PolyCoeff poly_eval(Poly p, long long x) {
 void execute_prefix2_fixed_batch(PrefixId i, const PrefixId* js, const long long* ps, int count,
                                  RowGraphCache* cache, RowGraphCache* raw_cache, NautyWorkspace* ws,
                                  CanonState* canon_state, CanonScratch* canon_scratch,
-                                 PartialGraphState* partial_graph, int* stack, Poly* local_total,
+                                 PartialGraphState* partial_graph, int* stack, ResultAccum* local_total,
                                  long long* local_canon_calls, long long* local_cache_hits,
                                  long long* local_raw_cache_hits, ProfileStats* profile,
                                  long long total_tasks, long long progress_report_step,
@@ -1773,8 +1788,12 @@ void execute_prefix2_fixed_batch(PrefixId i, const PrefixId* js, const long long
         long long p = ps[idx];
         double task_t0 = PROFILE_BUILD ? omp_get_wtime() : 0.0;
         PrefixId j = js[idx];
-        Poly task_total;
+        ResultAccum task_total;
+#if RECT_COUNT_K4
+        task_total = 0;
+#else
         poly_zero(&task_total);
+#endif
 
         stack[1] = (int)j;
         if (PROFILE_BUILD) {
@@ -1814,7 +1833,11 @@ void execute_prefix2_fixed_batch(PrefixId i, const PrefixId* js, const long long
             dfs(2, (int)j, stack, canon_state, partial_graph, cache, raw_cache, ws, &task_total,
                 local_canon_calls, local_cache_hits, local_raw_cache_hits,
                 &prefix_weight, prefix_mult, prefix_run, profile, canon_scratch);
+#if RECT_COUNT_K4
+            *local_total += task_total;
+#else
             poly_accumulate_checked(local_total, &task_total);
+#endif
             canon_state_pop(canon_state);
             partial_graph_pop(partial_graph, &frame);
         }
@@ -1894,16 +1917,20 @@ static int replay_local_task_prefix(const LocalTask* task, WorkerCtx* ctx,
 }
 
 static void dfs_runtime_split_local(int depth, int start_pid, int end_pid, long long root_id, WorkerCtx* ctx,
-                                    Poly* local_total, const WeightAccum* weight_prod,
+                                    ResultAccum* local_total, const WeightAccum* weight_prod,
                                     long long mult_coeff, int run_len, ProfileStats* profile,
                                     RuntimeTaskSystem* runtime_tasks) {
     if (depth == g_cols) {
-        Poly res;
+        ResultAccum res;
         solve_structure(&ctx->partial_graph.g, &ctx->canon_state,
                         &ctx->cache, &ctx->raw_cache, &ctx->ws,
                         &ctx->local_canon_calls, &ctx->local_cache_hits,
                         &ctx->local_raw_cache_hits, weight_prod, mult_coeff, profile, &res);
+#if RECT_COUNT_K4
+        *local_total += res;
+#else
         poly_accumulate_checked(local_total, &res);
+#endif
         return;
     }
 
@@ -2002,13 +2029,17 @@ static void dfs_runtime_split_local(int depth, int start_pid, int end_pid, long 
 
             if (is_terminal) {
                 long long row_orbit = factorial[g_rows] / next_stabilizer;
-                Poly res;
+                ResultAccum res;
                 solve_structure_with_row_orbit(&ctx->partial_graph.g, row_orbit, &ctx->cache,
                                                &ctx->raw_cache, &ctx->ws,
                                                &ctx->local_canon_calls, &ctx->local_cache_hits,
                                                &ctx->local_raw_cache_hits, &next_weight_prod,
                                                next_mult_coeff, profile, &res);
+#if RECT_COUNT_K4
+                *local_total += res;
+#else
                 poly_accumulate_checked(local_total, &res);
+#endif
             } else {
                 if (PROFILE_BUILD) {
                     tls_profile->canon_commit_calls++;
@@ -2028,7 +2059,7 @@ static void dfs_runtime_split_local(int depth, int start_pid, int end_pid, long 
     }
 }
 
-void execute_local_runtime_task(const LocalTask* task, WorkerCtx* ctx, Poly* thread_total,
+void execute_local_runtime_task(const LocalTask* task, WorkerCtx* ctx, ResultAccum* thread_total,
                                 RuntimeTaskSystem* runtime_tasks, ProfileStats* profile,
                                 long long total_tasks, long long report_step,
                                 double start_time, long long* pending_completed,
@@ -2050,12 +2081,16 @@ void execute_local_runtime_task(const LocalTask* task, WorkerCtx* ctx, Poly* thr
 
     if (replay_local_task_prefix(task, ctx, &weight_prod, &mult_coeff, &run_len, &min_idx)) {
         if (task->depth == g_cols) {
-            Poly res;
+            ResultAccum res;
             solve_structure(&ctx->partial_graph.g, &ctx->canon_state,
                             &ctx->cache, &ctx->raw_cache, &ctx->ws,
                             &ctx->local_canon_calls, &ctx->local_cache_hits,
                             &ctx->local_raw_cache_hits, &weight_prod, mult_coeff, profile, &res);
+#if RECT_COUNT_K4
+            *thread_total += res;
+#else
             poly_accumulate_checked(thread_total, &res);
+#endif
         } else {
             int start_pid = (int)task->lo;
             int end_pid = (int)task->hi;

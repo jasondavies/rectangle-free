@@ -422,7 +422,11 @@ typedef struct {
     int num_threads;
     RuntimeTaskSystem runtime_tasks;
     int runtime_tasks_active;
-    Poly* thread_polys;
+#if RECT_COUNT_K4
+    unsigned __int128* thread_totals;
+#else
+    Poly* thread_totals;
+#endif
     ProfileStats* thread_profiles;
     TaskTimingStats* thread_task_timing;
     QueueSubtaskTimingStats* thread_queue_subtask_timing;
@@ -445,8 +449,10 @@ typedef uint32_t ComplexMask;
 
 #if RECT_COUNT_K4
 typedef unsigned __int128 WeightAccum;
+typedef unsigned __int128 ResultAccum;
 #else
 typedef Poly WeightAccum;
+typedef Poly ResultAccum;
 #endif
 
 extern int num_partitions;
