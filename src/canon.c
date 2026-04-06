@@ -384,16 +384,14 @@ static inline int canon_state_prepare_terminal_fast(const CanonState* st, int pa
         const uint64_t* bucket_bits = canon_state_bucket_bits_const(st, g);
         const uint64_t* le_bits = perm_prefix_bits_row(partition_id, c);
         const uint64_t* lt_bits = (c > 0) ? perm_prefix_bits_row(partition_id, c - 1) : NULL;
-
-        if (lt_bits != NULL) {
-            for (int w = 0; w < word_count; w++) {
-                if (bucket_bits[w] & lt_bits[w]) return 0;
-            }
-        }
-
         for (int w = 0; w < word_count; w++) {
-            uint64_t eq = bucket_bits[w] & le_bits[w];
-            if (lt_bits != NULL) eq &= ~lt_bits[w];
+            uint64_t le = bucket_bits[w] & le_bits[w];
+            if (lt_bits != NULL) {
+                uint64_t lt = bucket_bits[w] & lt_bits[w];
+                if (lt) return 0;
+                le &= ~lt;
+            }
+            uint64_t eq = le;
             while (eq) {
                 int bit = __builtin_ctzll(eq);
                 int p = (w << 6) + bit;
@@ -413,15 +411,14 @@ static inline int canon_state_prepare_terminal_fast(const CanonState* st, int pa
         const uint64_t* le_bits = perm_prefix_bits_row(partition_id, pid);
         const uint64_t* lt_bits = (pid > 0) ? perm_prefix_bits_row(partition_id, pid - 1) : NULL;
 
-        if (lt_bits != NULL) {
-            for (int w = 0; w < word_count; w++) {
-                if (bucket_bits[w] & lt_bits[w]) return 0;
-            }
-        }
-
         for (int w = 0; w < word_count; w++) {
-            uint64_t eq = bucket_bits[w] & le_bits[w];
-            if (lt_bits != NULL) eq &= ~lt_bits[w];
+            uint64_t le = bucket_bits[w] & le_bits[w];
+            if (lt_bits != NULL) {
+                uint64_t lt = bucket_bits[w] & lt_bits[w];
+                if (lt) return 0;
+                le &= ~lt;
+            }
+            uint64_t eq = le;
             stabilizer += __builtin_popcountll(eq);
         }
     }
@@ -456,20 +453,9 @@ static int canon_state_prepare_terminal_profiled(const CanonState* st, int parti
             if (lt_bits != NULL) {
                 uint64_t lt = bucket_bits[w] & lt_bits[w];
                 lt_count += __builtin_popcountll(lt);
+                le &= ~lt;
             }
-        }
-
-        prof->canon_prepare_terminal_continue_by_depth[depth] +=
-            (long long)st->first_greater_bucket_count[g] - (long long)le_count;
-
-        if (lt_count > 0) {
-            prof->canon_prepare_order_rejects_by_depth[depth]++;
-            return 0;
-        }
-
-        for (int w = 0; w < word_count; w++) {
-            uint64_t eq = bucket_bits[w] & le_bits[w];
-            if (lt_bits != NULL) eq &= ~lt_bits[w];
+            uint64_t eq = le;
             while (eq) {
                 int bit = __builtin_ctzll(eq);
                 int p = (w << 6) + bit;
@@ -483,6 +469,14 @@ static int canon_state_prepare_terminal_profiled(const CanonState* st, int parti
                 if (next_fg == new_depth) stabilizer++;
                 eq &= eq - 1;
             }
+        }
+
+        prof->canon_prepare_terminal_continue_by_depth[depth] +=
+            (long long)st->first_greater_bucket_count[g] - (long long)le_count;
+
+        if (lt_count > 0) {
+            prof->canon_prepare_order_rejects_by_depth[depth]++;
+            return 0;
         }
     }
 
@@ -499,7 +493,9 @@ static int canon_state_prepare_terminal_profiled(const CanonState* st, int parti
             if (lt_bits != NULL) {
                 uint64_t lt = bucket_bits[w] & lt_bits[w];
                 lt_count += __builtin_popcountll(lt);
+                le &= ~lt;
             }
+            stabilizer += __builtin_popcountll(le);
         }
 
         prof->canon_prepare_terminal_continue_by_depth[depth] +=
@@ -509,8 +505,6 @@ static int canon_state_prepare_terminal_profiled(const CanonState* st, int parti
             prof->canon_prepare_order_rejects_by_depth[depth]++;
             return 0;
         }
-
-        stabilizer += le_count;
     }
 
     *next_stabilizer = stabilizer;
