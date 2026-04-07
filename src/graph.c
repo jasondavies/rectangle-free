@@ -132,6 +132,22 @@ static void graph_apply_permutation_dense_rows(uint32_t n, const AdjWord* dense_
     dst->vertex_mask = graph_row_mask((int)n);
 }
 
+static void graph_extract_dense_rows_from_nauty(graph* cg, int m, uint32_t n, Graph* dst) {
+    uint64_t mask = graph_row_mask((int)n);
+    dst->n = (uint8_t)n;
+    dst->vertex_mask = mask;
+    for (uint32_t i = 0; i < n; i++) {
+        AdjWord row = 0;
+        graph* row_words = GRAPHROW(cg, (int)i, m);
+        for (uint32_t j = 0; j < n; j++) {
+            if (ISELEMENT(row_words, (int)j)) {
+                row |= (AdjWord)(UINT64_C(1) << j);
+            }
+        }
+        dst->adj[i] = row & (AdjWord)mask;
+    }
+}
+
 void get_canonical_graph_from_dense_rows(int n, const AdjWord* rows, Graph* canon,
                                          NautyWorkspace* ws, ProfileStats* profile) {
     double total_t0 = 0.0;
@@ -216,9 +232,7 @@ void get_canonical_graph_from_dense_rows(int n, const AdjWord* rows, Graph* cano
         phase_t0 = omp_get_wtime();
     }
 
-    uint8_t new_index_of_old[MAXN_NAUTY];
-    for (int i = 0; i < n; i++) new_index_of_old[lab[i]] = (uint8_t)i;
-    graph_apply_permutation_dense_rows((uint32_t)n, rows, new_index_of_old, canon);
+    graph_extract_dense_rows_from_nauty(cg, m, (uint32_t)n, canon);
     if (PROFILE_BUILD && profile) {
         profile->get_canonical_graph_rebuild_time += omp_get_wtime() - phase_t0;
         profile->get_canonical_graph_time += omp_get_wtime() - total_t0;
