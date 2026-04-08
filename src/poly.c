@@ -286,11 +286,11 @@ void graph_poly_mul_linear_ref(const GraphPoly* a, int c, GraphPoly* out) {
         if ((int)r->x_pow + (int)r->deg > MAXN_NAUTY) {
             graph_poly_degree_overflow((int)r->x_pow + (int)r->deg);
         }
-        memset(r->coeffs, 0, (size_t)(r->deg + 1) * sizeof(r->coeffs[0]));
-
-        for (int i = 0; i <= a->deg; i++) r->coeffs[i + 1] += a->coeffs[i];
-        for (int i = 0; i <= a->deg; i++) r->coeffs[i] -= a->coeffs[i] * (PolyCoeff)c;
-        while (r->deg > 0 && r->coeffs[r->deg] == 0) r->deg--;
+        r->coeffs[0] = -a->coeffs[0] * (PolyCoeff)c;
+        for (int i = 1; i <= a->deg; i++) {
+            r->coeffs[i] = a->coeffs[i - 1] - (a->coeffs[i] * (PolyCoeff)c);
+        }
+        r->coeffs[a->deg + 1] = a->coeffs[a->deg];
     }
     if (r != out) *out = *r;
 }

@@ -7035,3 +7035,45 @@
   - it directly targets a common combine shape without perturbing cache behavior or the recursion tree
   - it is a good fit for the current post-canon-optimization profile, where more savings are coming from cheap algebra-path specialization than from further graph-helper micro-tuning
 - Outcome: accepted on `main`.
+
+### Experiment 172: Rewrite `graph_poly_mul_linear_ref()` as a one-pass update
+- Goal: reduce polynomial work in `partition_poly_7` by speeding up the hot `(x - c) * p(x)` path used in solver simplification and fallback construction.
+- Background:
+  - after Experiment 171, solver-side algebra still dominated the remaining easy wins
+  - `graph_poly_mul_linear_ref()` in `src/poly.c` still used:
+    - one `memset`
+    - one pass to shift coefficients
+    - one pass to subtract `c * a[i]`
+  - this path is hit in `simplify_graph_poly_multiplier()` and in fallback polynomial construction
+- Change:
+  - replace the zero-fill plus two accumulation loops with a direct one-pass write:
+    - `r[0] = -c * a[0]`
+    - `r[i] = a[i - 1] - c * a[i]` for interior terms
+    - `r[deg + 1] = a[deg]`
+  - keep the existing `c == 0` fast path unchanged
+- Matching benchmark command:
+  - `env OMP_NUM_THREADS=1 ./partition_poly_7 7 6 --task-end 1 >/dev/null`
+- Baseline:
+  - current committed tip before this change (`82ba437`)
+  - `5.677 s ± 0.057 s`
+- Experiment:
+  - same tree with only the one-pass linear multiply rewrite applied
+  - `5.553 s ± 0.079 s`
+  - `hyperfine` summary: experiment ran `1.02 ± 0.02x` faster
+- Correctness:
+  - exact `7x6` output remained unchanged apart from timing lines:
+    - `Canonicalisation calls: 105288`
+    - `Canonical cache hits: 93587`
+    - `Raw cache hits: 1997400`
+    - same chromatic polynomial, including:
+      - `P(4) = 43715355264000`
+      - `P(5) = 15297058957242888000`
+- Profile check:
+  - `env OMP_NUM_THREADS=1 ./partition_poly_7_profile 7 6 --task-end 1`
+  - `Worker Complete in 7.75 seconds`
+  - `solve_graph_poly: 2.216s`
+- Interpretation:
+  - this is another small but solid algebra-side win
+  - the change is simpler than the original implementation and directly reduces work in a frequently used polynomial primitive
+  - it outperformed the recent cache-side and branch-score experiments, reinforcing that the next gains are still more likely to come from hot algebra paths than from graph helper micro-tuning
+- Outcome: accepted on `main`.
