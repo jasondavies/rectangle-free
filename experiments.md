@@ -6994,3 +6994,44 @@
   - unlike the earlier delete-heavy tuning, this change explicitly discourages edges whose contraction would leave a large merged neighbourhood
   - the score remains cheap to compute and appears to reduce both hard-miss cost and canonicalisation volume on the target benchmark
 - Outcome: accepted on `main`.
+
+### Experiment 171: Add a monomial fast path to `graph_poly_mul_ref()`
+- Goal: reduce solver-side combine overhead in `partition_poly_7`, especially on small-graph lookups and cache-hit paths where one factor is often just `c * x^k`.
+- Background:
+  - after the accepted 7x7-targeted canon changes, the `7x6` single-thread profile shifted toward solver-side work
+  - on the current accepted baseline, a fresh profile of `env OMP_NUM_THREADS=1 ./partition_poly_7_profile 7 6 --task-end 1` showed:
+    - `solve_graph_poly: 2.310s`
+    - small-graph lookups still consumed substantial time at `n<=7`
+    - a temporary split of the small-graph lookup path showed mask packing and table load were only part of that cost, pointing at the `graph_poly_mul_ref()` combine that follows the lookup
+- Change:
+  - add `graph_poly_mul_monomial_ref()` in `src/poly.c`
+  - in `graph_poly_mul_ref()`, detect `deg == 0` on either input and replace the full convolution with:
+    - `x_pow` shift
+    - optional coefficient scaling
+    - direct coefficient copy for the common scale-1 case
+- Matching benchmark command:
+  - `env OMP_NUM_THREADS=1 ./partition_poly_7 7 6 --task-end 1 >/dev/null`
+- Baseline:
+  - current committed tip before this change (`afbd2dc`)
+  - `5.717 s ± 0.030 s`
+- Experiment:
+  - same tree with only the monomial fast path applied
+  - `5.652 s ± 0.020 s`
+  - `hyperfine` summary: experiment ran `1.01 ± 0.01x` faster
+- Correctness:
+  - exact `7x6` output remained unchanged:
+    - `Canonicalisation calls: 105288`
+    - `Canonical cache hits: 93587`
+    - `Raw cache hits: 1997400`
+    - same chromatic polynomial, including:
+      - `P(4) = 43715355264000`
+      - `P(5) = 15297058957242888000`
+- Profile check:
+  - `env OMP_NUM_THREADS=1 ./partition_poly_7_profile 7 6 --task-end 1`
+  - `Worker Complete in 7.79 seconds`
+  - `solve_graph_poly: 2.301s`
+- Interpretation:
+  - this is a small but real solver-side win
+  - it directly targets a common combine shape without perturbing cache behavior or the recursion tree
+  - it is a good fit for the current post-canon-optimization profile, where more savings are coming from cheap algebra-path specialization than from further graph-helper micro-tuning
+- Outcome: accepted on `main`.

@@ -121,6 +121,35 @@ static inline void graph_poly_zero(GraphPoly* p) {
     p->coeffs[0] = 0;
 }
 
+static inline void graph_poly_mul_monomial_ref(const GraphPoly* poly, const GraphPoly* mono,
+                                               GraphPoly* out) {
+    PolyCoeff scale = mono->coeffs[0];
+    if (scale == 0) {
+        graph_poly_zero(out);
+        return;
+    }
+
+    GraphPoly tmp;
+    GraphPoly* r = out;
+    if (out == poly || out == mono) r = &tmp;
+    r->x_pow = (uint8_t)(poly->x_pow + mono->x_pow);
+    r->deg = poly->deg;
+    if ((int)r->x_pow + (int)r->deg > MAXN_NAUTY) {
+        graph_poly_degree_overflow((int)r->x_pow + (int)r->deg);
+    }
+
+    if (scale == 1) {
+        memcpy(r->coeffs, poly->coeffs, (size_t)(poly->deg + 1) * sizeof(r->coeffs[0]));
+    } else {
+        for (int i = 0; i <= poly->deg; i++) {
+            r->coeffs[i] = poly->coeffs[i] * scale;
+        }
+    }
+
+    while (r->deg > 0 && r->coeffs[r->deg] == 0) r->deg--;
+    if (r != out) *out = *r;
+}
+
 void graph_poly_normalize_ref(GraphPoly* p) {
     if (graph_poly_is_zero(p)) {
         graph_poly_zero(p);
@@ -176,6 +205,14 @@ void poly_mul_graph_ref(const Poly* a, const GraphPoly* b, Poly* out) {
 void graph_poly_mul_ref(const GraphPoly* a, const GraphPoly* b, GraphPoly* out) {
     if (graph_poly_is_zero(a) || graph_poly_is_zero(b)) {
         graph_poly_zero(out);
+        return;
+    }
+    if (a->deg == 0) {
+        graph_poly_mul_monomial_ref(b, a, out);
+        return;
+    }
+    if (b->deg == 0) {
+        graph_poly_mul_monomial_ref(a, b, out);
         return;
     }
 
