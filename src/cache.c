@@ -150,6 +150,9 @@ int row_graph_cache_lookup_poly(RowGraphCache* cache, uint64_t key_hash, uint32_
     int cache_idx = (int)(key_hash & (uint64_t)cache->mask);
     for (int k = 0; k < cache->probe; k++) {
         int p = (cache_idx + k) & cache->mask;
+        if (!cache->keys[p].used) {
+            return 0;
+        }
         if (row_graph_cache_slot_matches_graph(cache, p, key_hash, key_n, g, row_mask)) {
             row_graph_cache_load_poly(cache, p, value);
             if (touch) row_graph_cache_touch_slot(cache, p);
@@ -164,6 +167,9 @@ int row_graph_cache_lookup_rows(RowGraphCache* cache, uint64_t key_hash, uint32_
     int cache_idx = (int)(key_hash & (uint64_t)cache->mask);
     for (int k = 0; k < cache->probe; k++) {
         int p = (cache_idx + k) & cache->mask;
+        if (!cache->keys[p].used) {
+            return 0;
+        }
         if (row_graph_cache_slot_matches_rows(cache, p, key_hash, key_n, rows)) {
             row_graph_cache_load_poly(cache, p, value);
             if (touch) row_graph_cache_touch_slot(cache, p);

@@ -98,6 +98,42 @@
 - Interpretation: the cumulative prefix-bitset table was no longer pulling its weight after the earlier terminal-scan changes. Choosing between value-sorted prefix scans and direct active-bucket scans preserves the same search behavior while removing about `463.6 MiB` of 7-row table footprint, cutting startup sharply and reducing the deepest symmetry-front-end cost further.
 - Outcome: accepted.
 
+### Experiment 19: Stop row-cache probes at the first unused slot
+- Goal: cut raw-cache miss overhead on `partition_poly_7` after profiling showed that raw-cache misses were always burning the full probe window even though an empty slot proves the key was never inserted later in that cluster.
+- Change:
+  - in `row_graph_cache_lookup_poly()` and `row_graph_cache_lookup_rows()`, return immediately on the first unused slot instead of continuing through the remaining probe window
+- Verification command: `env OMP_NUM_THREADS=1 ./partition_poly_7 4 4 --task-end 1`
+- Verification result: unchanged output
+  - `P(x) = 6*x^10 - 6*x^9 - 144*x^8 + 292*x^7 + 804*x^6 - 2920*x^5 + 2661*x^4 - 648*x^3 + 549*x^2 - 594*x`
+  - `P(4) = 1014792`
+  - `P(5) = 18467880`
+- Benchmark method:
+  - compared the working tree against baseline commit `d0853b8`
+  - command: `hyperfine --warmup 1 --runs 5 'env OMP_NUM_THREADS=1 ./partition_poly_7 7 6 --task-end 1 >/dev/null' 'env OMP_NUM_THREADS=1 /tmp/rectangle-free-baseline/partition_poly_7 7 6 --task-end 1 >/dev/null'`
+- Benchmark result:
+  - experiment: `5.673s ± 0.049s`
+  - baseline: `5.745s ± 0.067s`
+  - summary: experiment ran `1.01 ± 0.01x` faster
+- Exact-output comparison:
+  - compared `env OMP_NUM_THREADS=1 ./partition_poly_7 7 6 --task-end 1` against the same baseline commit
+  - polynomial and `P(4)` / `P(5)` values matched exactly
+  - graph-side counts were unchanged:
+    - `Canonicalisation calls`: `105288`
+    - `Canonical cache hits`: `93587`
+    - `Raw cache hits`: `1997400`
+  - worker time dropped from `5.67s` to `5.61s`
+- Profile result:
+  - current profiled run: `env OMP_NUM_THREADS=1 ./partition_poly_7_profile 7 6 --task-end 1`
+  - `Worker Complete`: `7.78s`
+  - `solve_graph_poly`: `2.300s`
+  - raw-hit times at the hot tiers:
+    - `n=8`: `0.333s`
+    - `n=9`: `0.276s`
+    - `n=10`: `0.211s`
+    - `n=11`: `0.081s`
+- Interpretation: this is a small cache-policy win rather than a structural one, but it directly matches the measured pathology: misses were paying for probes past the first empty slot even though the insertion policy makes that unnecessary. The search tree and cache hit counts stay identical, and the hot raw-hit tiers come down slightly as a result.
+- Outcome: accepted.
+
 ## 2026-03-24
 
 ### Experiment 0: Prefix geometry baseline for `7x5`
