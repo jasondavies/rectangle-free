@@ -3,9 +3,34 @@
 // --- SYMMETRY LOGIC ---
 
 #define REP_ORBIT_MARK_WORDS ((CANON_PARTITION_ID_LIMIT + 63u) / 64u)
+#define CANON_FG_BITS 5u
+#define CANON_FG_MASK ((1u << CANON_FG_BITS) - 1u)
+
+#if MAX_COLS > CANON_FG_MASK
+#error "Canon first-greater packing needs more bits"
+#endif
+#if CANON_PARTITION_ID_LIMIT > (1u << (16u - CANON_FG_BITS))
+#error "Canon first-greater value packing exceeds uint16_t capacity"
+#endif
 
 static inline int canon_perm_word_count(int limit) {
     return (limit + 63) >> 6;
+}
+
+static inline int canon_bucket_summary_word_count(int perm_word_count) {
+    return (perm_word_count + 63) >> 6;
+}
+
+static inline uint16_t canon_state_pack(uint8_t fg, uint16_t fg_val) {
+    return (uint16_t)((uint16_t)fg | (uint16_t)(fg_val << CANON_FG_BITS));
+}
+
+static inline uint8_t canon_state_fg(uint16_t state) {
+    return (uint8_t)(state & CANON_FG_MASK);
+}
+
+static inline uint16_t canon_state_fg_val(uint16_t state) {
+    return (uint16_t)(state >> CANON_FG_BITS);
 }
 
 static inline uint64_t* perm_prefix_bits_row(int partition_id, int value) {
@@ -18,24 +43,32 @@ static inline const uint64_t* canon_state_bucket_bits_const(const CanonState* st
     return st->first_greater_bucket_bits[fg];
 }
 
+static inline const uint64_t* canon_state_bucket_nonzero_words_const(const CanonState* st, int fg) {
+    return st->first_greater_bucket_nonzero_words[fg];
+}
+
 static inline void canon_state_bucket_bit_set(CanonState* st, int fg, int p) {
-    st->first_greater_bucket_bits[fg][(unsigned)p >> 6] |= UINT64_C(1) << ((unsigned)p & 63u);
+    unsigned word = (unsigned)p >> 6;
+    st->first_greater_bucket_bits[fg][word] |= UINT64_C(1) << ((unsigned)p & 63u);
+    st->first_greater_bucket_nonzero_words[fg][word >> 6] |= UINT64_C(1) << (word & 63u);
 }
 
 static inline void canon_state_bucket_bit_clear(CanonState* st, int fg, int p) {
-    st->first_greater_bucket_bits[fg][(unsigned)p >> 6] &= ~(UINT64_C(1) << ((unsigned)p & 63u));
+    unsigned word = (unsigned)p >> 6;
+    uint64_t* bucket_word = &st->first_greater_bucket_bits[fg][word];
+    *bucket_word &= ~(UINT64_C(1) << ((unsigned)p & 63u));
+    if (*bucket_word == 0) {
+        st->first_greater_bucket_nonzero_words[fg][word >> 6] &=
+            ~(UINT64_C(1) << (word & 63u));
+    }
 }
 
 static inline uint16_t* canon_state_changed_first_greater_idx_row(CanonState* st, int depth) {
     return st->changed_first_greater_idx + (size_t)depth * (size_t)st->limit;
 }
 
-static inline uint8_t* canon_state_changed_first_greater_old_idx_row(CanonState* st, int depth) {
-    return st->changed_first_greater_old_idx + (size_t)depth * (size_t)st->limit;
-}
-
-static inline uint16_t* canon_state_changed_first_greater_old_val_row(CanonState* st, int depth) {
-    return st->changed_first_greater_old_val + (size_t)depth * (size_t)st->limit;
+static inline uint16_t* canon_state_changed_first_greater_old_state_row(CanonState* st, int depth) {
+    return st->changed_first_greater_old_state + (size_t)depth * (size_t)st->limit;
 }
 
 static inline uint16_t* canon_state_equal_perm_row(CanonState* st, int depth) {
@@ -376,50 +409,64 @@ static inline int canon_state_prepare_terminal_fast(const CanonState* st, int pa
     int new_depth = depth + 1;
     int stabilizer = 0;
     int word_count = canon_perm_word_count(st->limit);
+    int summary_word_count = canon_bucket_summary_word_count(word_count);
     uint16_t pid = (uint16_t)partition_id;
     const uint16_t* stack_vals = st->stack_vals;
 
     for (int g = 0; g < depth; g++) {
         uint16_t c = stack_vals[g];
         const uint64_t* bucket_bits = canon_state_bucket_bits_const(st, g);
+        const uint64_t* bucket_nonzero_words = canon_state_bucket_nonzero_words_const(st, g);
         const uint64_t* le_bits = perm_prefix_bits_row(partition_id, c);
         const uint64_t* lt_bits = (c > 0) ? perm_prefix_bits_row(partition_id, c - 1) : NULL;
-        for (int w = 0; w < word_count; w++) {
-            uint64_t le = bucket_bits[w] & le_bits[w];
-            if (lt_bits != NULL) {
-                uint64_t lt = bucket_bits[w] & lt_bits[w];
-                if (lt) return 0;
-                le &= ~lt;
-            }
-            uint64_t eq = le;
-            while (eq) {
-                int bit = __builtin_ctzll(eq);
-                int p = (w << 6) + bit;
-                uint8_t next_fg;
-                uint16_t next_fg_val;
-                if (!canon_rebuild_equal_case(st, p, g, pid, &next_fg, &next_fg_val)) {
-                    return 0;
+        for (int sw = 0; sw < summary_word_count; sw++) {
+            uint64_t words = bucket_nonzero_words[sw];
+            while (words) {
+                int word_bit = __builtin_ctzll(words);
+                int w = (sw << 6) + word_bit;
+                uint64_t le = bucket_bits[w] & le_bits[w];
+                if (lt_bits != NULL) {
+                    uint64_t lt = bucket_bits[w] & lt_bits[w];
+                    if (lt) return 0;
+                    le &= ~lt;
                 }
-                if (next_fg == new_depth) stabilizer++;
-                eq &= eq - 1;
+                uint64_t eq = le;
+                while (eq) {
+                    int bit = __builtin_ctzll(eq);
+                    int p = (w << 6) + bit;
+                    uint8_t next_fg;
+                    uint16_t next_fg_val;
+                    if (!canon_rebuild_equal_case(st, p, g, pid, &next_fg, &next_fg_val)) {
+                        return 0;
+                    }
+                    if (next_fg == new_depth) stabilizer++;
+                    eq &= eq - 1;
+                }
+                words &= words - 1;
             }
         }
     }
 
     {
         const uint64_t* bucket_bits = canon_state_bucket_bits_const(st, depth);
+        const uint64_t* bucket_nonzero_words = canon_state_bucket_nonzero_words_const(st, depth);
         const uint64_t* le_bits = perm_prefix_bits_row(partition_id, pid);
         const uint64_t* lt_bits = (pid > 0) ? perm_prefix_bits_row(partition_id, pid - 1) : NULL;
 
-        for (int w = 0; w < word_count; w++) {
-            uint64_t le = bucket_bits[w] & le_bits[w];
-            if (lt_bits != NULL) {
-                uint64_t lt = bucket_bits[w] & lt_bits[w];
-                if (lt) return 0;
-                le &= ~lt;
+        for (int sw = 0; sw < summary_word_count; sw++) {
+            uint64_t words = bucket_nonzero_words[sw];
+            while (words) {
+                int word_bit = __builtin_ctzll(words);
+                int w = (sw << 6) + word_bit;
+                uint64_t le = bucket_bits[w] & le_bits[w];
+                if (lt_bits != NULL) {
+                    uint64_t lt = bucket_bits[w] & lt_bits[w];
+                    if (lt) return 0;
+                    le &= ~lt;
+                }
+                stabilizer += __builtin_popcountll(le);
+                words &= words - 1;
             }
-            uint64_t eq = le;
-            stabilizer += __builtin_popcountll(eq);
         }
     }
 
@@ -433,6 +480,7 @@ static int canon_state_prepare_terminal_profiled(const CanonState* st, int parti
     int new_depth = depth + 1;
     int stabilizer = 0;
     int word_count = canon_perm_word_count(st->limit);
+    int summary_word_count = canon_bucket_summary_word_count(word_count);
     uint16_t pid = (uint16_t)partition_id;
     const uint16_t* stack_vals = st->stack_vals;
     ProfileStats* prof = tls_profile;
@@ -442,32 +490,39 @@ static int canon_state_prepare_terminal_profiled(const CanonState* st, int parti
     for (int g = 0; g < depth; g++) {
         uint16_t c = stack_vals[g];
         const uint64_t* bucket_bits = canon_state_bucket_bits_const(st, g);
+        const uint64_t* bucket_nonzero_words = canon_state_bucket_nonzero_words_const(st, g);
         const uint64_t* le_bits = perm_prefix_bits_row(partition_id, c);
         const uint64_t* lt_bits = (c > 0) ? perm_prefix_bits_row(partition_id, c - 1) : NULL;
         int lt_count = 0;
         int le_count = 0;
 
-        for (int w = 0; w < word_count; w++) {
-            uint64_t le = bucket_bits[w] & le_bits[w];
-            le_count += __builtin_popcountll(le);
-            if (lt_bits != NULL) {
-                uint64_t lt = bucket_bits[w] & lt_bits[w];
-                lt_count += __builtin_popcountll(lt);
-                le &= ~lt;
-            }
-            uint64_t eq = le;
-            while (eq) {
-                int bit = __builtin_ctzll(eq);
-                int p = (w << 6) + bit;
-                uint8_t next_fg;
-                uint16_t next_fg_val;
-                prof->canon_prepare_equal_case_calls_by_depth[depth]++;
-                if (!canon_rebuild_equal_case(st, p, g, pid, &next_fg, &next_fg_val)) {
-                    prof->canon_prepare_equal_case_rejects_by_depth[depth]++;
-                    return 0;
+        for (int sw = 0; sw < summary_word_count; sw++) {
+            uint64_t words = bucket_nonzero_words[sw];
+            while (words) {
+                int word_bit = __builtin_ctzll(words);
+                int w = (sw << 6) + word_bit;
+                uint64_t le = bucket_bits[w] & le_bits[w];
+                le_count += __builtin_popcountll(le);
+                if (lt_bits != NULL) {
+                    uint64_t lt = bucket_bits[w] & lt_bits[w];
+                    lt_count += __builtin_popcountll(lt);
+                    le &= ~lt;
                 }
-                if (next_fg == new_depth) stabilizer++;
-                eq &= eq - 1;
+                uint64_t eq = le;
+                while (eq) {
+                    int bit = __builtin_ctzll(eq);
+                    int p = (w << 6) + bit;
+                    uint8_t next_fg;
+                    uint16_t next_fg_val;
+                    prof->canon_prepare_equal_case_calls_by_depth[depth]++;
+                    if (!canon_rebuild_equal_case(st, p, g, pid, &next_fg, &next_fg_val)) {
+                        prof->canon_prepare_equal_case_rejects_by_depth[depth]++;
+                        return 0;
+                    }
+                    if (next_fg == new_depth) stabilizer++;
+                    eq &= eq - 1;
+                }
+                words &= words - 1;
             }
         }
 
@@ -482,20 +537,27 @@ static int canon_state_prepare_terminal_profiled(const CanonState* st, int parti
 
     {
         const uint64_t* bucket_bits = canon_state_bucket_bits_const(st, depth);
+        const uint64_t* bucket_nonzero_words = canon_state_bucket_nonzero_words_const(st, depth);
         const uint64_t* le_bits = perm_prefix_bits_row(partition_id, pid);
         const uint64_t* lt_bits = (pid > 0) ? perm_prefix_bits_row(partition_id, pid - 1) : NULL;
         int lt_count = 0;
         int le_count = 0;
 
-        for (int w = 0; w < word_count; w++) {
-            uint64_t le = bucket_bits[w] & le_bits[w];
-            le_count += __builtin_popcountll(le);
-            if (lt_bits != NULL) {
-                uint64_t lt = bucket_bits[w] & lt_bits[w];
-                lt_count += __builtin_popcountll(lt);
-                le &= ~lt;
+        for (int sw = 0; sw < summary_word_count; sw++) {
+            uint64_t words = bucket_nonzero_words[sw];
+            while (words) {
+                int word_bit = __builtin_ctzll(words);
+                int w = (sw << 6) + word_bit;
+                uint64_t le = bucket_bits[w] & le_bits[w];
+                le_count += __builtin_popcountll(le);
+                if (lt_bits != NULL) {
+                    uint64_t lt = bucket_bits[w] & lt_bits[w];
+                    lt_count += __builtin_popcountll(lt);
+                    le &= ~lt;
+                }
+                stabilizer += __builtin_popcountll(le);
+                words &= words - 1;
             }
-            stabilizer += __builtin_popcountll(le);
         }
 
         prof->canon_prepare_terminal_continue_by_depth[depth] +=
@@ -583,43 +645,33 @@ void canon_state_init(CanonState* st, int limit) {
     memset(st, 0, sizeof(*st));
     st->capacity = limit;
     st->limit = limit;
-    st->first_greater =
-        checked_calloc((size_t)limit, sizeof(*st->first_greater), "canon_state_first_greater");
-    st->first_greater_val =
-        checked_calloc((size_t)limit, sizeof(*st->first_greater_val), "canon_state_first_greater_val");
+    st->first_greater_state =
+        checked_calloc((size_t)limit, sizeof(*st->first_greater_state), "canon_state_first_greater_state");
     st->equal_perm =
         checked_calloc((size_t)(g_cols + 1) * (size_t)limit, sizeof(*st->equal_perm),
                        "canon_state_equal_perm");
     st->changed_first_greater_idx =
         checked_calloc((size_t)g_cols * (size_t)limit, sizeof(*st->changed_first_greater_idx),
                        "canon_state_changed_first_greater_idx");
-    st->changed_first_greater_old_idx =
-        checked_calloc((size_t)g_cols * (size_t)limit, sizeof(*st->changed_first_greater_old_idx),
-                       "canon_state_changed_first_greater_old_idx");
-    st->changed_first_greater_old_val =
-        checked_calloc((size_t)g_cols * (size_t)limit, sizeof(*st->changed_first_greater_old_val),
-                       "canon_state_changed_first_greater_old_val");
+    st->changed_first_greater_old_state =
+        checked_calloc((size_t)g_cols * (size_t)limit, sizeof(*st->changed_first_greater_old_state),
+                       "canon_state_changed_first_greater_old_state");
 }
 
 void canon_state_free(CanonState* st) {
-    free(st->first_greater);
-    free(st->first_greater_val);
+    free(st->first_greater_state);
     free(st->equal_perm);
     free(st->changed_first_greater_idx);
-    free(st->changed_first_greater_old_idx);
-    free(st->changed_first_greater_old_val);
+    free(st->changed_first_greater_old_state);
     memset(st, 0, sizeof(*st));
 }
 
 void canon_scratch_init(CanonScratch* scratch, int limit) {
     memset(scratch, 0, sizeof(*scratch));
     scratch->limit = limit;
-    scratch->changed_first_greater_new_idx =
-        checked_calloc((size_t)limit, sizeof(*scratch->changed_first_greater_new_idx),
-                       "canon_scratch_changed_first_greater_new_idx");
-    scratch->changed_first_greater_new_val =
-        checked_calloc((size_t)limit, sizeof(*scratch->changed_first_greater_new_val),
-                       "canon_scratch_changed_first_greater_new_val");
+    scratch->changed_first_greater_new_state =
+        checked_calloc((size_t)limit, sizeof(*scratch->changed_first_greater_new_state),
+                       "canon_scratch_changed_first_greater_new_state");
     scratch->next_equal_perm =
         checked_calloc((size_t)limit, sizeof(*scratch->next_equal_perm),
                        "canon_scratch_next_equal_perm");
@@ -629,8 +681,7 @@ void canon_scratch_init(CanonScratch* scratch, int limit) {
 }
 
 void canon_scratch_free(CanonScratch* scratch) {
-    free(scratch->changed_first_greater_new_idx);
-    free(scratch->changed_first_greater_new_val);
+    free(scratch->changed_first_greater_new_state);
     free(scratch->next_equal_perm);
     free(scratch->changed_first_greater_idx);
     memset(scratch, 0, sizeof(*scratch));
@@ -655,11 +706,12 @@ void canon_state_reset(CanonState* st, int limit) {
     for (int p = 0; p < limit; p++) {
         equal_perm0[p] = (uint16_t)p;
     }
-    memset(st->first_greater, 0, count * sizeof(*st->first_greater));
-    memset(st->first_greater_val, 0, count * sizeof(*st->first_greater_val));
+    memset(st->first_greater_state, 0, count * sizeof(*st->first_greater_state));
     memset(st->first_greater_bucket_bits, 0, sizeof(st->first_greater_bucket_bits));
+    memset(st->first_greater_bucket_nonzero_words, 0, sizeof(st->first_greater_bucket_nonzero_words));
     for (int w = 0; w < word_count; w++) {
         st->first_greater_bucket_bits[0][w] = ~UINT64_C(0);
+        st->first_greater_bucket_nonzero_words[0][w >> 6] |= UINT64_C(1) << (w & 63u);
     }
     if (limit & 63) {
         st->first_greater_bucket_bits[0][word_count - 1] &=
@@ -676,19 +728,18 @@ static inline int canon_state_prepare_push_fast(const CanonState* st, int partit
     uint16_t pid = (uint16_t)partition_id;
     const uint16_t* partition_perm_row =
         perm_table + (size_t)partition_id * (size_t)perm_count;
-    const uint8_t* first_greater = st->first_greater;
+    const uint16_t* first_greater_state = st->first_greater_state;
     const uint16_t* stack_vals = st->stack_vals;
-    const uint16_t* first_greater_val = st->first_greater_val;
-    uint8_t* changed_first_greater_new_idx = scratch->changed_first_greater_new_idx;
-    uint16_t* changed_first_greater_new_val = scratch->changed_first_greater_new_val;
+    uint16_t* changed_first_greater_new_state = scratch->changed_first_greater_new_state;
     uint16_t* next_equal_perm = scratch->next_equal_perm;
     uint16_t* changed_first_greater_idx = scratch->changed_first_greater_idx;
     uint16_t next_equal_count = 0;
     uint16_t changed_first_greater_count = 0;
 
     for (int p = 0; p < st->limit; p++) {
-        uint8_t old_fg = first_greater[p];
-        uint16_t old_fg_val = first_greater_val[p];
+        uint16_t old_state = first_greater_state[p];
+        uint8_t old_fg = canon_state_fg(old_state);
+        uint16_t old_fg_val = canon_state_fg_val(old_state);
         uint16_t x = partition_perm_row[p];
         uint8_t g = old_fg;
         uint8_t next_fg;
@@ -732,11 +783,13 @@ static inline int canon_state_prepare_push_fast(const CanonState* st, int partit
         if (next_fg == new_depth) {
             next_equal_perm[next_equal_count++] = (uint16_t)p;
         }
-        if (old_fg != next_fg || old_fg_val != new_fg_val) {
-            changed_first_greater_idx[changed_first_greater_count] = (uint16_t)p;
-            changed_first_greater_new_idx[changed_first_greater_count] = next_fg;
-            changed_first_greater_new_val[changed_first_greater_count] = new_fg_val;
-            changed_first_greater_count++;
+        {
+            uint16_t new_state = canon_state_pack(next_fg, new_fg_val);
+            if (old_state != new_state) {
+                changed_first_greater_idx[changed_first_greater_count] = (uint16_t)p;
+                changed_first_greater_new_state[changed_first_greater_count] = new_state;
+                changed_first_greater_count++;
+            }
         }
     }
     scratch->next_equal_count = next_equal_count;
@@ -754,11 +807,9 @@ static int canon_state_prepare_push_profiled(const CanonState* st, int partition
     uint16_t pid = (uint16_t)partition_id;
     const uint16_t* partition_perm_row =
         perm_table + (size_t)partition_id * (size_t)perm_count;
-    const uint8_t* first_greater = st->first_greater;
+    const uint16_t* first_greater_state = st->first_greater_state;
     const uint16_t* stack_vals = st->stack_vals;
-    const uint16_t* first_greater_val = st->first_greater_val;
-    uint8_t* changed_first_greater_new_idx = scratch->changed_first_greater_new_idx;
-    uint16_t* changed_first_greater_new_val = scratch->changed_first_greater_new_val;
+    uint16_t* changed_first_greater_new_state = scratch->changed_first_greater_new_state;
     uint16_t* next_equal_perm = scratch->next_equal_perm;
     uint16_t* changed_first_greater_idx = scratch->changed_first_greater_idx;
     uint16_t active_count = 0;
@@ -767,8 +818,9 @@ static int canon_state_prepare_push_profiled(const CanonState* st, int partition
     ProfileStats* prof = tls_profile;
 
     for (int p = 0; p < st->limit; p++) {
-        uint8_t old_fg = first_greater[p];
-        uint16_t old_fg_val = first_greater_val[p];
+        uint16_t old_state = first_greater_state[p];
+        uint8_t old_fg = canon_state_fg(old_state);
+        uint16_t old_fg_val = canon_state_fg_val(old_state);
         uint16_t x = partition_perm_row[p];
         uint8_t g = old_fg;
         uint8_t next_fg;
@@ -818,11 +870,13 @@ static int canon_state_prepare_push_profiled(const CanonState* st, int partition
         if (next_fg == new_depth) {
             next_equal_perm[next_equal_count++] = (uint16_t)p;
         }
-        if (old_fg != next_fg || old_fg_val != new_fg_val) {
-            changed_first_greater_idx[changed_first_greater_count] = (uint16_t)p;
-            changed_first_greater_new_idx[changed_first_greater_count] = next_fg;
-            changed_first_greater_new_val[changed_first_greater_count] = new_fg_val;
-            changed_first_greater_count++;
+        {
+            uint16_t new_state = canon_state_pack(next_fg, new_fg_val);
+            if (old_state != new_state) {
+                changed_first_greater_idx[changed_first_greater_count] = (uint16_t)p;
+                changed_first_greater_new_state[changed_first_greater_count] = new_state;
+                changed_first_greater_count++;
+            }
         }
     }
     scratch->next_equal_count = next_equal_count;
@@ -851,8 +905,8 @@ void canon_state_commit_push(CanonState* st, int partition_id, const CanonScratc
     int new_depth = depth + 1;
     uint16_t* equal_perm = canon_state_equal_perm_row(st, new_depth);
     uint16_t* changed_first_greater_idx = canon_state_changed_first_greater_idx_row(st, depth);
-    uint8_t* changed_first_greater_old_idx = canon_state_changed_first_greater_old_idx_row(st, depth);
-    uint16_t* changed_first_greater_old_val = canon_state_changed_first_greater_old_val_row(st, depth);
+    uint16_t* changed_first_greater_old_state =
+        canon_state_changed_first_greater_old_state_row(st, depth);
     uint16_t changed_fg_count = scratch->changed_first_greater_count;
     st->stack_vals[depth] = (uint16_t)partition_id;
     st->stack_perm_rows[depth] = perm_table + (size_t)partition_id * (size_t)perm_count;
@@ -862,13 +916,13 @@ void canon_state_commit_push(CanonState* st, int partition_id, const CanonScratc
     }
     for (uint16_t i = 0; i < changed_fg_count; i++) {
         uint16_t p = scratch->changed_first_greater_idx[i];
-        uint8_t old_fg = st->first_greater[p];
-        uint8_t new_fg = scratch->changed_first_greater_new_idx[i];
+        uint16_t old_state = st->first_greater_state[p];
+        uint16_t new_state = scratch->changed_first_greater_new_state[i];
+        uint8_t old_fg = canon_state_fg(old_state);
+        uint8_t new_fg = canon_state_fg(new_state);
         changed_first_greater_idx[i] = p;
-        changed_first_greater_old_idx[i] = old_fg;
-        changed_first_greater_old_val[i] = st->first_greater_val[p];
-        st->first_greater[p] = new_fg;
-        st->first_greater_val[p] = scratch->changed_first_greater_new_val[i];
+        changed_first_greater_old_state[i] = old_state;
+        st->first_greater_state[p] = new_state;
         if (old_fg != new_fg) {
             canon_state_bucket_bit_clear(st, old_fg, p);
             canon_state_bucket_bit_set(st, new_fg, p);
@@ -886,14 +940,14 @@ void canon_state_commit_push(CanonState* st, int partition_id, const CanonScratc
 void canon_state_pop(CanonState* st) {
     int depth = st->depth - 1;
     uint16_t* changed_first_greater_idx = canon_state_changed_first_greater_idx_row(st, depth);
-    uint8_t* changed_first_greater_old_idx = canon_state_changed_first_greater_old_idx_row(st, depth);
-    uint16_t* changed_first_greater_old_val = canon_state_changed_first_greater_old_val_row(st, depth);
+    uint16_t* changed_first_greater_old_state =
+        canon_state_changed_first_greater_old_state_row(st, depth);
     for (uint16_t i = 0; i < st->changed_first_greater_count[depth]; i++) {
         uint16_t p = changed_first_greater_idx[i];
-        uint8_t old_fg = changed_first_greater_old_idx[i];
-        uint8_t cur_fg = st->first_greater[p];
-        st->first_greater[p] = old_fg;
-        st->first_greater_val[p] = changed_first_greater_old_val[i];
+        uint16_t old_state = changed_first_greater_old_state[i];
+        uint8_t old_fg = canon_state_fg(old_state);
+        uint8_t cur_fg = canon_state_fg(st->first_greater_state[p]);
+        st->first_greater_state[p] = old_state;
         if (cur_fg != old_fg) {
             canon_state_bucket_bit_clear(st, cur_fg, p);
             canon_state_bucket_bit_set(st, old_fg, p);

@@ -3,29 +3,29 @@
 
 #include "partition_poly.h"
 
+#define CANON_BUCKET_WORD_SUMMARY_WORDS ((PERM_BITSET_WORDS + 63) / 64)
+
 typedef struct {
     int capacity;
     int limit;
     int depth;
-    uint8_t* first_greater;
-    uint16_t* first_greater_val;
+    uint16_t* first_greater_state;
     uint16_t* equal_perm;
     uint16_t* changed_first_greater_idx;
-    uint8_t* changed_first_greater_old_idx;
-    uint16_t* changed_first_greater_old_val;
+    uint16_t* changed_first_greater_old_state;
     uint16_t equal_count[MAX_COLS + 1];
     uint16_t changed_first_greater_count[MAX_COLS];
     uint16_t first_greater_bucket_count[MAX_COLS + 1];
     uint16_t stack_vals[MAX_COLS];
     const uint16_t* stack_perm_rows[MAX_COLS];
     uint64_t first_greater_bucket_bits[MAX_COLS + 1][PERM_BITSET_WORDS];
+    uint64_t first_greater_bucket_nonzero_words[MAX_COLS + 1][CANON_BUCKET_WORD_SUMMARY_WORDS];
     int stabilizer[MAX_COLS + 1];
 } CanonState;
 
 typedef struct {
     int limit;
-    uint8_t* changed_first_greater_new_idx;
-    uint16_t* changed_first_greater_new_val;
+    uint16_t* changed_first_greater_new_state;
     uint16_t* next_equal_perm;
     uint16_t* changed_first_greater_idx;
     uint16_t next_equal_count;

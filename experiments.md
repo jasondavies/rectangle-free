@@ -1,5 +1,34 @@
 # Partition Poly 7xn Experiments
 
+## 2026-04-08
+
+### Experiment 16: Skip empty terminal canon words and pack canon state
+- Goal: reduce the dominant `canon_state_prepare_push()` cost on the `partition_poly_7` path that is the closest tractable proxy for `7x7`.
+- Change:
+  - added per-bucket nonzero-word summary bitsets for `first_greater_bucket_bits`, so terminal canon prep only iterates 64-bit words that actually contain active permutations
+  - packed `(first_greater, first_greater_val)` into one `uint16_t` state, and packed the corresponding prepare/commit/pop delta state the same way
+- Verification command: `env OMP_NUM_THREADS=1 ./partition_poly_7 4 4 --task-end 1`
+- Verification result: unchanged output
+  - `P(x) = 6*x^10 - 6*x^9 - 144*x^8 + 292*x^7 + 804*x^6 - 2920*x^5 + 2661*x^4 - 648*x^3 + 549*x^2 - 594*x`
+  - `P(4) = 1014792`
+  - `P(5) = 18467880`
+- Benchmark method:
+  - compared the working tree against baseline commit `4a3b5bb`
+  - command: `hyperfine --warmup 1 --runs 5 'env OMP_NUM_THREADS=1 ./partition_poly_7 7 6 --task-end 1 >/dev/null' 'env OMP_NUM_THREADS=1 /tmp/rectangle-free-baseline/partition_poly_7 7 6 --task-end 1 >/dev/null'`
+- Benchmark result:
+  - experiment: `7.998s ± 0.116s`
+  - baseline: `10.792s ± 0.075s`
+  - summary: experiment ran `1.35 ± 0.02x` faster
+- Profile method:
+  - compared `env OMP_NUM_THREADS=1 ./partition_poly_7_profile 7 6 --task-end 1` against the same baseline commit
+- Profile result:
+  - `Worker Complete`: `13.87s -> 9.91s`
+  - `canon_state_prepare_push`: `7.571s -> 3.904s`
+  - `canon_state_commit_push`: `0.150s -> 0.081s`
+  - `solve_graph_poly`: `2.436s -> 2.349s`
+- Interpretation: this is the first canon-state change that materially attacks the real `7x7` ceiling instead of shaving side costs. The nonzero-word summaries cut the enormous terminal bitset scan cost, and the packed state reduces memory traffic in prepare/commit/pop. Together they produce a large end-to-end win on the exact single-thread `partition_poly_7 7 6 --task-end 1` benchmark.
+- Outcome: accepted.
+
 ## 2026-03-24
 
 ### Experiment 0: Prefix geometry baseline for `7x5`
