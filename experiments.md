@@ -7077,3 +7077,41 @@
   - the change is simpler than the original implementation and directly reduces work in a frequently used polynomial primitive
   - it outperformed the recent cache-side and branch-score experiments, reinforcing that the next gains are still more likely to come from hot algebra paths than from graph helper micro-tuning
 - Outcome: accepted on `main`.
+
+### Experiment 173: Remove dead trailing-zero trims from graph polynomial multiplies
+- Goal: shave more solver-side algebra cost in `partition_poly_7` by removing post-work that cannot change the result.
+- Background:
+  - after Experiment 172, the fresh `7x6` profile still had `solve_graph_poly` as the largest remaining structured cost at `2.212s`
+  - both `graph_poly_mul_ref()` and the monomial fast path in `graph_poly_mul_monomial_ref()` still scanned downward to trim trailing zeros after multiplication
+  - for a product of nonzero polynomials, the top coefficient is the product of the top coefficients, so the resulting highest-degree term cannot cancel to zero
+- Change:
+  - remove the trailing-zero trim loops from:
+    - `graph_poly_mul_ref()`
+    - `graph_poly_mul_monomial_ref()`
+  - leave subtraction and other operations unchanged, since cancellation is still possible there
+- Matching benchmark command:
+  - `env OMP_NUM_THREADS=1 ./partition_poly_7 7 6 --task-end 1 >/dev/null`
+- Baseline:
+  - current committed tip before this change (`4c6453e`)
+  - `5.582 s ± 0.067 s`
+- Experiment:
+  - same tree with only the dead trim removal applied
+  - `5.531 s ± 0.032 s`
+  - `hyperfine` summary: experiment ran `1.01 ± 0.01x` faster
+- Correctness:
+  - exact `7x6` output remained unchanged apart from timing lines:
+    - `Canonicalisation calls: 105288`
+    - `Canonical cache hits: 93587`
+    - `Raw cache hits: 1997400`
+    - same chromatic polynomial, including:
+      - `P(4) = 43715355264000`
+      - `P(5) = 15297058957242888000`
+- Profile check:
+  - `env OMP_NUM_THREADS=1 ./partition_poly_7_profile 7 6 --task-end 1`
+  - `Worker Complete in 7.72 seconds`
+  - `solve_graph_poly: 2.196s`
+- Interpretation:
+  - this is a very small but clean win
+  - it removes work that is provably unnecessary in multiplication, so it is both low-risk and easy to justify
+  - it continues the current pattern: the remaining reliable gains are coming from simplifying hot algebra primitives rather than from broader cache or graph-structure changes
+- Outcome: accepted on `main`.

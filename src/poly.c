@@ -145,8 +145,6 @@ static inline void graph_poly_mul_monomial_ref(const GraphPoly* poly, const Grap
             r->coeffs[i] = poly->coeffs[i] * scale;
         }
     }
-
-    while (r->deg > 0 && r->coeffs[r->deg] == 0) r->deg--;
     if (r != out) *out = *r;
 }
 
@@ -231,7 +229,6 @@ void graph_poly_mul_ref(const GraphPoly* a, const GraphPoly* b, GraphPoly* out) 
             r->coeffs[i + j] += a->coeffs[i] * b->coeffs[j];
         }
     }
-    while (r->deg > 0 && r->coeffs[r->deg] == 0) r->deg--;
     if (r != out) *out = *r;
 }
 
