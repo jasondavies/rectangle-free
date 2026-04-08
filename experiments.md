@@ -29,6 +29,35 @@
 - Interpretation: this is the first canon-state change that materially attacks the real `7x7` ceiling instead of shaving side costs. The nonzero-word summaries cut the enormous terminal bitset scan cost, and the packed state reduces memory traffic in prepare/commit/pop. Together they produce a large end-to-end win on the exact single-thread `partition_poly_7 7 6 --task-end 1` benchmark.
 - Outcome: accepted.
 
+### Experiment 17: Use hybrid prefix-vs-bucket terminal canon scans
+- Goal: cut the remaining dominant deepest-level canon work on `partition_poly_7` by choosing the cheaper terminal scan shape per bucket instead of always intersecting whole bucket bitsets.
+- Change:
+  - in `canon_state_prepare_terminal_fast()`, added a hybrid path
+  - when the `<= c` prefix for the current partition value is smaller than the active `first_greater` bucket, iterate the sorted prefix-permutation list directly and test bucket membership
+  - otherwise keep the existing bucket-bitset scan
+- Verification command: `env OMP_NUM_THREADS=1 ./partition_poly_7 4 4 --task-end 1`
+- Verification result: unchanged output
+  - `P(x) = 6*x^10 - 6*x^9 - 144*x^8 + 292*x^7 + 804*x^6 - 2920*x^5 + 2661*x^4 - 648*x^3 + 549*x^2 - 594*x`
+  - `P(4) = 1014792`
+  - `P(5) = 18467880`
+- Benchmark method:
+  - compared the working tree against baseline commit `e6ea0ea`
+  - command: `hyperfine --warmup 1 --runs 5 'env OMP_NUM_THREADS=1 ./partition_poly_7 7 6 --task-end 1 >/dev/null' 'env OMP_NUM_THREADS=1 /tmp/rectangle-free-baseline/partition_poly_7 7 6 --task-end 1 >/dev/null'`
+- Benchmark result:
+  - experiment: `6.123s ± 0.035s`
+  - baseline: `8.027s ± 0.068s`
+  - summary: experiment ran `1.31 ± 0.01x` faster
+- Exact-output comparison:
+  - compared `env OMP_NUM_THREADS=1 ./partition_poly_7 7 6 --task-end 1` against the same baseline commit
+  - polynomial and `P(4)` / `P(5)` values matched exactly
+  - graph-side counts were unchanged:
+    - `Canonicalisation calls`: `105288`
+    - `Canonical cache hits`: `93587`
+    - `Raw cache hits`: `1997400`
+  - worker time dropped from `7.61s` to `5.74s`
+- Interpretation: after the earlier packed-state and nonzero-word-summary win, the remaining terminal canon cost was still paying for many whole-bucket bitset intersections even when the relevant value prefix was much smaller. This hybrid selection keeps the old path when buckets are small, but uses the value-sorted prefix order when that is cheaper. The search tree and cache behavior stay unchanged; the win is pure symmetry-front-end work reduction at the deepest level.
+- Outcome: accepted.
+
 ## 2026-03-24
 
 ### Experiment 0: Prefix geometry baseline for `7x5`
