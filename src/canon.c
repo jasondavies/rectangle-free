@@ -33,12 +33,6 @@ static inline uint16_t canon_state_fg_val(uint16_t state) {
     return (uint16_t)(state >> CANON_FG_BITS);
 }
 
-static inline uint64_t* perm_prefix_bits_row(int partition_id, int value) {
-    return perm_value_prefix_bits +
-           ((((size_t)partition_id * (size_t)num_partitions) + (size_t)value) *
-            (size_t)PERM_BITSET_WORDS);
-}
-
 static inline const uint64_t* canon_state_bucket_bits_const(const CanonState* st, int fg) {
     return st->first_greater_bucket_bits[fg];
 }
@@ -416,6 +410,7 @@ static inline int canon_state_prepare_terminal_fast(const CanonState* st, int pa
     int summary_word_count = canon_bucket_summary_word_count(word_count);
     uint16_t pid = (uint16_t)partition_id;
     const uint16_t* stack_vals = st->stack_vals;
+    const uint16_t* perm_row = perm_table + (size_t)partition_id * (size_t)perm_count;
     const uint16_t* sorted_row = perm_order_by_value + (size_t)partition_id * (size_t)perm_count;
     const uint16_t* prefix_row = perm_value_prefix_end + (size_t)partition_id * (size_t)num_partitions;
 
@@ -440,30 +435,26 @@ static inline int canon_state_prepare_terminal_fast(const CanonState* st, int pa
         } else {
             const uint64_t* bucket_bits = canon_state_bucket_bits_const(st, g);
             const uint64_t* bucket_nonzero_words = canon_state_bucket_nonzero_words_const(st, g);
-            const uint64_t* le_bits = perm_prefix_bits_row(partition_id, c);
-            const uint64_t* lt_bits = (c > 0) ? perm_prefix_bits_row(partition_id, c - 1) : NULL;
             for (int sw = 0; sw < summary_word_count; sw++) {
                 uint64_t words = bucket_nonzero_words[sw];
                 while (words) {
                     int word_bit = __builtin_ctzll(words);
                     int w = (sw << 6) + word_bit;
-                    uint64_t le = bucket_bits[w] & le_bits[w];
-                    if (lt_bits != NULL) {
-                        uint64_t lt = bucket_bits[w] & lt_bits[w];
-                        if (lt) return 0;
-                        le &= ~lt;
-                    }
-                    uint64_t eq = le;
-                    while (eq) {
-                        int bit = __builtin_ctzll(eq);
+                    uint64_t bucket = bucket_bits[w];
+                    while (bucket) {
+                        int bit = __builtin_ctzll(bucket);
                         int p = (w << 6) + bit;
-                        uint8_t next_fg;
-                        uint16_t next_fg_val;
-                        if (!canon_rebuild_equal_case(st, p, g, pid, &next_fg, &next_fg_val)) {
-                            return 0;
+                        uint16_t value = perm_row[p];
+                        if (value < c) return 0;
+                        if (value == c) {
+                            uint8_t next_fg;
+                            uint16_t next_fg_val;
+                            if (!canon_rebuild_equal_case(st, p, g, pid, &next_fg, &next_fg_val)) {
+                                return 0;
+                            }
+                            if (next_fg == new_depth) stabilizer++;
                         }
-                        if (next_fg == new_depth) stabilizer++;
-                        eq &= eq - 1;
+                        bucket &= bucket - 1;
                     }
                     words &= words - 1;
                 }
@@ -484,21 +475,21 @@ static inline int canon_state_prepare_terminal_fast(const CanonState* st, int pa
         } else {
             const uint64_t* bucket_bits = canon_state_bucket_bits_const(st, depth);
             const uint64_t* bucket_nonzero_words = canon_state_bucket_nonzero_words_const(st, depth);
-            const uint64_t* le_bits = perm_prefix_bits_row(partition_id, pid);
-            const uint64_t* lt_bits = (pid > 0) ? perm_prefix_bits_row(partition_id, pid - 1) : NULL;
 
             for (int sw = 0; sw < summary_word_count; sw++) {
                 uint64_t words = bucket_nonzero_words[sw];
                 while (words) {
                     int word_bit = __builtin_ctzll(words);
                     int w = (sw << 6) + word_bit;
-                    uint64_t le = bucket_bits[w] & le_bits[w];
-                    if (lt_bits != NULL) {
-                        uint64_t lt = bucket_bits[w] & lt_bits[w];
-                        if (lt) return 0;
-                        le &= ~lt;
+                    uint64_t bucket = bucket_bits[w];
+                    while (bucket) {
+                        int bit = __builtin_ctzll(bucket);
+                        int p = (w << 6) + bit;
+                        uint16_t value = perm_row[p];
+                        if (value < pid) return 0;
+                        stabilizer += (value == pid);
+                        bucket &= bucket - 1;
                     }
-                    stabilizer += __builtin_popcountll(le);
                     words &= words - 1;
                 }
             }
@@ -518,46 +509,70 @@ static int canon_state_prepare_terminal_profiled(const CanonState* st, int parti
     int summary_word_count = canon_bucket_summary_word_count(word_count);
     uint16_t pid = (uint16_t)partition_id;
     const uint16_t* stack_vals = st->stack_vals;
+    const uint16_t* perm_row = perm_table + (size_t)partition_id * (size_t)perm_count;
+    const uint16_t* sorted_row = perm_order_by_value + (size_t)partition_id * (size_t)perm_count;
+    const uint16_t* prefix_row = perm_value_prefix_end + (size_t)partition_id * (size_t)num_partitions;
     ProfileStats* prof = tls_profile;
 
     prof->canon_prepare_terminal_calls_by_depth[depth]++;
 
     for (int g = 0; g < depth; g++) {
         uint16_t c = stack_vals[g];
-        const uint64_t* bucket_bits = canon_state_bucket_bits_const(st, g);
-        const uint64_t* bucket_nonzero_words = canon_state_bucket_nonzero_words_const(st, g);
-        const uint64_t* le_bits = perm_prefix_bits_row(partition_id, c);
-        const uint64_t* lt_bits = (c > 0) ? perm_prefix_bits_row(partition_id, c - 1) : NULL;
         int lt_count = 0;
         int le_count = 0;
 
-        for (int sw = 0; sw < summary_word_count; sw++) {
-            uint64_t words = bucket_nonzero_words[sw];
-            while (words) {
-                int word_bit = __builtin_ctzll(words);
-                int w = (sw << 6) + word_bit;
-                uint64_t le = bucket_bits[w] & le_bits[w];
-                le_count += __builtin_popcountll(le);
-                if (lt_bits != NULL) {
-                    uint64_t lt = bucket_bits[w] & lt_bits[w];
-                    lt_count += __builtin_popcountll(lt);
-                    le &= ~lt;
+        uint16_t le_end = prefix_row[c];
+        if (le_end <= st->first_greater_bucket_count[g]) {
+            uint16_t lt_end = (c > 0) ? prefix_row[c - 1] : 0;
+            for (uint16_t idx = 0; idx < lt_end; idx++) {
+                if (canon_state_bucket_bit_test(st, g, sorted_row[idx])) {
+                    prof->canon_prepare_order_rejects_by_depth[depth]++;
+                    return 0;
                 }
-                uint64_t eq = le;
-                while (eq) {
-                    int bit = __builtin_ctzll(eq);
-                    int p = (w << 6) + bit;
-                    uint8_t next_fg;
-                    uint16_t next_fg_val;
-                    prof->canon_prepare_equal_case_calls_by_depth[depth]++;
-                    if (!canon_rebuild_equal_case(st, p, g, pid, &next_fg, &next_fg_val)) {
-                        prof->canon_prepare_equal_case_rejects_by_depth[depth]++;
-                        return 0;
+            }
+            for (uint16_t idx = lt_end; idx < le_end; idx++) {
+                int p = sorted_row[idx];
+                if (!canon_state_bucket_bit_test(st, g, p)) continue;
+                le_count++;
+                uint8_t next_fg;
+                uint16_t next_fg_val;
+                prof->canon_prepare_equal_case_calls_by_depth[depth]++;
+                if (!canon_rebuild_equal_case(st, p, g, pid, &next_fg, &next_fg_val)) {
+                    prof->canon_prepare_equal_case_rejects_by_depth[depth]++;
+                    return 0;
+                }
+                if (next_fg == new_depth) stabilizer++;
+            }
+        } else {
+            const uint64_t* bucket_bits = canon_state_bucket_bits_const(st, g);
+            const uint64_t* bucket_nonzero_words = canon_state_bucket_nonzero_words_const(st, g);
+            for (int sw = 0; sw < summary_word_count; sw++) {
+                uint64_t words = bucket_nonzero_words[sw];
+                while (words) {
+                    int word_bit = __builtin_ctzll(words);
+                    int w = (sw << 6) + word_bit;
+                    uint64_t bucket = bucket_bits[w];
+                    while (bucket) {
+                        int bit = __builtin_ctzll(bucket);
+                        int p = (w << 6) + bit;
+                        uint16_t value = perm_row[p];
+                        if (value <= c) le_count++;
+                        if (value < c) {
+                            lt_count++;
+                        } else if (value == c) {
+                            uint8_t next_fg;
+                            uint16_t next_fg_val;
+                            prof->canon_prepare_equal_case_calls_by_depth[depth]++;
+                            if (!canon_rebuild_equal_case(st, p, g, pid, &next_fg, &next_fg_val)) {
+                                prof->canon_prepare_equal_case_rejects_by_depth[depth]++;
+                                return 0;
+                            }
+                            if (next_fg == new_depth) stabilizer++;
+                        }
+                        bucket &= bucket - 1;
                     }
-                    if (next_fg == new_depth) stabilizer++;
-                    eq &= eq - 1;
+                    words &= words - 1;
                 }
-                words &= words - 1;
             }
         }
 
@@ -571,27 +586,46 @@ static int canon_state_prepare_terminal_profiled(const CanonState* st, int parti
     }
 
     {
-        const uint64_t* bucket_bits = canon_state_bucket_bits_const(st, depth);
-        const uint64_t* bucket_nonzero_words = canon_state_bucket_nonzero_words_const(st, depth);
-        const uint64_t* le_bits = perm_prefix_bits_row(partition_id, pid);
-        const uint64_t* lt_bits = (pid > 0) ? perm_prefix_bits_row(partition_id, pid - 1) : NULL;
         int lt_count = 0;
         int le_count = 0;
 
-        for (int sw = 0; sw < summary_word_count; sw++) {
-            uint64_t words = bucket_nonzero_words[sw];
-            while (words) {
-                int word_bit = __builtin_ctzll(words);
-                int w = (sw << 6) + word_bit;
-                uint64_t le = bucket_bits[w] & le_bits[w];
-                le_count += __builtin_popcountll(le);
-                if (lt_bits != NULL) {
-                    uint64_t lt = bucket_bits[w] & lt_bits[w];
-                    lt_count += __builtin_popcountll(lt);
-                    le &= ~lt;
+        uint16_t le_end = prefix_row[pid];
+        if (le_end <= st->first_greater_bucket_count[depth]) {
+            uint16_t lt_end = (pid > 0) ? prefix_row[pid - 1] : 0;
+            for (uint16_t idx = 0; idx < lt_end; idx++) {
+                if (canon_state_bucket_bit_test(st, depth, sorted_row[idx])) {
+                    prof->canon_prepare_order_rejects_by_depth[depth]++;
+                    return 0;
                 }
-                stabilizer += __builtin_popcountll(le);
-                words &= words - 1;
+            }
+            for (uint16_t idx = lt_end; idx < le_end; idx++) {
+                int hit = canon_state_bucket_bit_test(st, depth, sorted_row[idx]);
+                le_count += hit;
+                stabilizer += hit;
+            }
+        } else {
+            const uint64_t* bucket_bits = canon_state_bucket_bits_const(st, depth);
+            const uint64_t* bucket_nonzero_words = canon_state_bucket_nonzero_words_const(st, depth);
+            for (int sw = 0; sw < summary_word_count; sw++) {
+                uint64_t words = bucket_nonzero_words[sw];
+                while (words) {
+                    int word_bit = __builtin_ctzll(words);
+                    int w = (sw << 6) + word_bit;
+                    uint64_t bucket = bucket_bits[w];
+                    while (bucket) {
+                        int bit = __builtin_ctzll(bucket);
+                        int p = (w << 6) + bit;
+                        uint16_t value = perm_row[p];
+                        if (value <= pid) le_count++;
+                        if (value < pid) {
+                            lt_count++;
+                        } else if (value == pid) {
+                            stabilizer++;
+                        }
+                        bucket &= bucket - 1;
+                    }
+                    words &= words - 1;
+                }
             }
         }
 

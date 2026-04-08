@@ -58,6 +58,46 @@
 - Interpretation: after the earlier packed-state and nonzero-word-summary win, the remaining terminal canon cost was still paying for many whole-bucket bitset intersections even when the relevant value prefix was much smaller. This hybrid selection keeps the old path when buckets are small, but uses the value-sorted prefix order when that is cheaper. The search tree and cache behavior stay unchanged; the win is pure symmetry-front-end work reduction at the deepest level.
 - Outcome: accepted.
 
+### Experiment 18: Remove `perm_value_prefix_bits` and compare values directly
+- Goal: remove the giant `perm_value_prefix_bits` table from the `partition_poly_7` path and make terminal canon choose between sorted-prefix scans and active-bucket scans without precomputed cumulative bitsets.
+- Change:
+  - removed `perm_value_prefix_bits` allocation, build, and teardown entirely
+  - rewrote both terminal canon prepare paths to use:
+    - sorted-prefix membership tests when the value prefix is smaller than the active bucket
+    - direct active-bucket scans with `perm_table` value comparisons when the bucket is smaller
+- Verification command: `env OMP_NUM_THREADS=1 ./partition_poly_7 4 4 --task-end 1`
+- Verification result: unchanged output
+  - `P(x) = 6*x^10 - 6*x^9 - 144*x^8 + 292*x^7 + 804*x^6 - 2920*x^5 + 2661*x^4 - 648*x^3 + 549*x^2 - 594*x`
+  - `P(4) = 1014792`
+  - `P(5) = 18467880`
+- Benchmark method:
+  - compared the working tree against baseline commit `00e149e`
+  - command: `hyperfine --warmup 1 --runs 5 'env OMP_NUM_THREADS=1 ./partition_poly_7 7 6 --task-end 1 >/dev/null' 'env OMP_NUM_THREADS=1 /tmp/rectangle-free-baseline/partition_poly_7 7 6 --task-end 1 >/dev/null'`
+- Benchmark result:
+  - experiment: `5.681s ± 0.041s`
+  - baseline: `6.195s ± 0.041s`
+  - summary: experiment ran `1.09 ± 0.01x` faster
+- Startup-only benchmark:
+  - command: `hyperfine --warmup 1 --runs 5 'env OMP_NUM_THREADS=1 ./partition_poly_7 7 7 --task-end 0 >/dev/null' 'env OMP_NUM_THREADS=1 /tmp/rectangle-free-baseline/partition_poly_7 7 7 --task-end 0 >/dev/null'`
+  - experiment: `89.4ms ± 0.6ms`
+  - baseline: `372.7ms ± 7.3ms`
+  - summary: experiment ran `4.17 ± 0.09x` faster
+- Exact-output comparison:
+  - compared `env OMP_NUM_THREADS=1 ./partition_poly_7 7 6 --task-end 1` against the same baseline commit
+  - polynomial and `P(4)` / `P(5)` values matched exactly
+  - graph-side counts were unchanged:
+    - `Canonicalisation calls`: `105288`
+    - `Canonical cache hits`: `93587`
+    - `Raw cache hits`: `1997400`
+- Profile method:
+  - compared `env OMP_NUM_THREADS=1 ./partition_poly_7_profile 7 6 --task-end 1` against the pre-change profile numbers from the same baseline commit
+- Profile result:
+  - `Worker Complete`: `10.12s -> 7.89s`
+  - `canon_state_prepare_push`: `4.030s -> 1.915s`
+  - `solve_graph_poly`: `2.409s -> 2.330s`
+- Interpretation: the cumulative prefix-bitset table was no longer pulling its weight after the earlier terminal-scan changes. Choosing between value-sorted prefix scans and direct active-bucket scans preserves the same search behavior while removing about `463.6 MiB` of 7-row table footprint, cutting startup sharply and reducing the deepest symmetry-front-end cost further.
+- Outcome: accepted.
+
 ## 2026-03-24
 
 ### Experiment 0: Prefix geometry baseline for `7x5`
