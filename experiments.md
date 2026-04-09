@@ -7158,3 +7158,43 @@
   - it confirms that even a more aggressive word-parallel Tarjan rewrite does not unlock a large gain on this workload
   - the reason is that decomposition itself is not the dominant cost center; the expensive work remains recursive solving, cache hits, and polynomial combination after decomposition
 - Outcome: accepted on `main`.
+
+### Experiment 175: Add monomial and linear fast paths to `graph_poly_mul_div_x_ref()`
+- Goal: reduce solver-side polynomial combine cost in the biconnected articulation path by specializing the remaining generic multiply-and-divide-by-`x` helper.
+- Background:
+  - after the recent accepted algebra cleanups, the next obvious remaining generic helper was `graph_poly_mul_div_x_ref()` in `src/poly.c`
+  - it is used in the biconnected combine path
+  - unlike `graph_poly_mul_ref()`, it still had no special handling for:
+    - monomial inputs (`deg == 0`)
+    - linear inputs (`deg == 1`)
+- Change:
+  - add `deg == 0` fast paths by turning one operand into a monomial with `x_pow - 1` and routing through `graph_poly_mul_monomial_ref()`
+  - add `deg == 1` fast paths with direct coefficient formulas, avoiding the generic nested convolution loop
+  - keep the existing generic path for higher degrees unchanged
+- Matching benchmark command:
+  - `env OMP_NUM_THREADS=1 ./partition_poly_7 7 6 --task-end 1 >/dev/null`
+- Baseline:
+  - clean `HEAD` before this change (`6324fec`)
+  - `5.580 s ± 0.021 s`
+- Experiment:
+  - same tree with only the `graph_poly_mul_div_x_ref()` fast paths applied
+  - `5.518 s ± 0.038 s`
+  - `hyperfine` summary: experiment ran `1.01 ± 0.01x` faster
+- Correctness:
+  - exact `4x4` output matched
+  - exact `7x6` output matched apart from timing lines:
+    - `Canonicalisation calls: 105288`
+    - `Canonical cache hits: 93587`
+    - `Raw cache hits: 1997400`
+    - same chromatic polynomial, including:
+      - `P(4) = 43715355264000`
+      - `P(5) = 15297058957242888000`
+- Profile check:
+  - `env OMP_NUM_THREADS=1 ./partition_poly_7_profile 7 6 --task-end 1`
+  - `Worker Complete in 7.64 seconds`
+  - `solve_graph_poly: 2.142s`
+- Interpretation:
+  - this is another small but real algebra win
+  - it matches the recent pattern: when a graph-polynomial helper still has an over-generic hot path, adding tiny-degree specialization tends to pay modestly but reliably
+  - the biconnected combine path is not dominant, so the upside is limited, but the change is tight and low-risk
+- Outcome: accepted on `main`.

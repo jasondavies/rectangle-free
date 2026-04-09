@@ -238,6 +238,27 @@ void graph_poly_mul_div_x_ref(const GraphPoly* a, const GraphPoly* b, GraphPoly*
         return;
     }
 
+    if (a->deg == 0) {
+        GraphPoly mono = *a;
+        if (mono.x_pow == 0) {
+            fprintf(stderr, "graph_poly_mul_div_x_ref requires divisibility by x\n");
+            exit(1);
+        }
+        mono.x_pow--;
+        graph_poly_mul_monomial_ref(b, &mono, out);
+        return;
+    }
+    if (b->deg == 0) {
+        GraphPoly mono = *b;
+        if (mono.x_pow == 0) {
+            fprintf(stderr, "graph_poly_mul_div_x_ref requires divisibility by x\n");
+            exit(1);
+        }
+        mono.x_pow--;
+        graph_poly_mul_monomial_ref(a, &mono, out);
+        return;
+    }
+
     GraphPoly tmp;
     GraphPoly* r = out;
     if (out == a || out == b) r = &tmp;
@@ -253,6 +274,30 @@ void graph_poly_mul_div_x_ref(const GraphPoly* a, const GraphPoly* b, GraphPoly*
     if ((int)r->x_pow + (int)r->deg > MAXN_NAUTY) {
         graph_poly_degree_overflow((int)r->x_pow + (int)r->deg);
     }
+
+    if (a->deg == 1) {
+        PolyCoeff a0 = a->coeffs[0];
+        PolyCoeff a1 = a->coeffs[1];
+        r->coeffs[0] = a0 * b->coeffs[0];
+        for (int j = 1; j <= b->deg; j++) {
+            r->coeffs[j] = a0 * b->coeffs[j] + a1 * b->coeffs[j - 1];
+        }
+        r->coeffs[b->deg + 1] = a1 * b->coeffs[b->deg];
+        if (r != out) *out = *r;
+        return;
+    }
+    if (b->deg == 1) {
+        PolyCoeff b0 = b->coeffs[0];
+        PolyCoeff b1 = b->coeffs[1];
+        r->coeffs[0] = a->coeffs[0] * b0;
+        for (int i = 1; i <= a->deg; i++) {
+            r->coeffs[i] = a->coeffs[i] * b0 + a->coeffs[i - 1] * b1;
+        }
+        r->coeffs[a->deg + 1] = a->coeffs[a->deg] * b1;
+        if (r != out) *out = *r;
+        return;
+    }
+
     memset(r->coeffs, 0, (size_t)(r->deg + 1) * sizeof(r->coeffs[0]));
     for (int i = 0; i <= a->deg; i++) {
         if (a->coeffs[i] == 0) continue;
