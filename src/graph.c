@@ -116,22 +116,6 @@ static void graph_transpose_dense_rows(uint32_t n, const AdjWord* src_rows, AdjW
     }
 }
 
-static void graph_apply_permutation_dense_rows(uint32_t n, const AdjWord* dense_rows,
-                                               const uint8_t* new_index_of_old, Graph* dst) {
-    AdjWord row_permuted[MAXN_NAUTY];
-    AdjWord transposed[MAXN_NAUTY];
-
-    for (uint32_t i = 0; i < n; i++) {
-        row_permuted[new_index_of_old[i]] = dense_rows[i];
-    }
-    graph_transpose_dense_rows(n, row_permuted, transposed);
-    for (uint32_t i = 0; i < n; i++) {
-        dst->adj[new_index_of_old[i]] = transposed[i];
-    }
-    dst->n = (uint8_t)n;
-    dst->vertex_mask = graph_row_mask((int)n);
-}
-
 static void graph_extract_dense_rows_from_nauty(graph* cg, int m, uint32_t n, Graph* dst) {
     uint64_t mask = graph_row_mask((int)n);
     dst->n = (uint8_t)n;
@@ -494,14 +478,6 @@ void small_graph_lookup_free(void) {
     g_small_graph_lookup_ready = 0;
     g_small_graph_lookup_init_time = 0.0;
     g_small_graph_lookup_loaded_from_file = 0;
-}
-
-static void small_graph_lookup_load_poly(int n, uint32_t mask, Poly* out) {
-    const int32_t* coeffs = small_graph_poly_slot(n, mask);
-    int x_pow = g_small_graph_lookup_x_pows[n][mask];
-    out->deg = n;
-    for (int i = 0; i < x_pow; i++) out->coeffs[i] = 0;
-    for (int i = 0; i <= n - x_pow; i++) out->coeffs[i + x_pow] = coeffs[i];
 }
 
 void small_graph_lookup_load_graph_poly(int n, uint32_t mask, GraphPoly* out) {

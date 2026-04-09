@@ -634,7 +634,6 @@ void graph_poly_mul_ref(const GraphPoly* a, const GraphPoly* b, GraphPoly* out);
 void graph_poly_mul_div_x_ref(const GraphPoly* a, const GraphPoly* b, GraphPoly* out);
 void graph_poly_sub_ref(const GraphPoly* a, const GraphPoly* b, GraphPoly* out);
 void graph_poly_mul_linear_ref(const GraphPoly* a, int c, GraphPoly* out);
-void graph_poly_div_x_ref(const GraphPoly* a, GraphPoly* out);
 int32_t* small_graph_poly_slot(int n, uint32_t mask);
 uint64_t graph_pack_upper_mask64(const Graph* g);
 uint64_t graph_row_mask(int n);

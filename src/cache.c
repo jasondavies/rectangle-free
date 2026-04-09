@@ -135,15 +135,6 @@ static int graph_cache_find_slot(const GraphCache* cache, uint64_t key_hash, uin
     return -1;
 }
 
-static int graph_cache_lookup_poly(GraphCache* cache, uint64_t key_hash, uint32_t key_n,
-                                   const Graph* g, uint64_t row_mask, GraphResult* value, int touch) {
-    int slot = graph_cache_find_slot(cache, key_hash, key_n, g, row_mask);
-    if (slot < 0) return 0;
-    graph_cache_load_poly(cache, slot, value);
-    if (touch) graph_cache_touch_slot(cache, slot);
-    return 1;
-}
-
 int row_graph_cache_lookup_poly(RowGraphCache* cache, uint64_t key_hash, uint32_t key_n,
                                 const Graph* g, AdjWord row_mask, GraphResult* value,
                                 int touch) {

@@ -368,30 +368,7 @@ void graph_poly_mul_linear_ref(const GraphPoly* a, int c, GraphPoly* out) {
     if (r != out) *out = *r;
 }
 
-void graph_poly_div_x_ref(const GraphPoly* a, GraphPoly* out) {
-    if (graph_poly_is_zero(a)) {
-        graph_poly_zero(out);
-        return;
-    }
-    if (a->x_pow == 0) {
-        fprintf(stderr, "graph_poly_div_x_ref requires divisibility by x\n");
-        exit(1);
-    }
-
-    GraphPoly tmp;
-    GraphPoly* r = out;
-    if (out == a) r = &tmp;
-    *r = *a;
-    r->x_pow--;
-    if (r != out) *out = *r;
-}
-
 #if RECT_COUNT_K4
-static inline void poly_set_count4(unsigned __int128 count, Poly* out) {
-    poly_zero(out);
-    out->coeffs[0] = (PolyCoeff)count;
-}
-
 static uint64_t eval_int32_poly_at_4(const int32_t* coeffs, int deg) {
     __int128 acc = 0;
     for (int i = deg; i >= 0; i--) acc = (acc * 4) + coeffs[i];
