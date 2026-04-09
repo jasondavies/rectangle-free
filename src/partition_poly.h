@@ -631,6 +631,7 @@ void poly_mul_graph_ref(const Poly* a, const GraphPoly* b, Poly* out);
 void graph_poly_normalize_ref(GraphPoly* p);
 void graph_poly_one_ref(GraphPoly* p);
 void graph_poly_mul_ref(const GraphPoly* a, const GraphPoly* b, GraphPoly* out);
+void graph_poly_mul_div_x_ref(const GraphPoly* a, const GraphPoly* b, GraphPoly* out);
 void graph_poly_sub_ref(const GraphPoly* a, const GraphPoly* b, GraphPoly* out);
 void graph_poly_mul_linear_ref(const GraphPoly* a, int c, GraphPoly* out);
 void graph_poly_div_x_ref(const GraphPoly* a, GraphPoly* out);

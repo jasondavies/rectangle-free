@@ -244,12 +244,7 @@ static int solve_graph_try_biconnected_poly(const Graph* g, RowGraphCache* cache
         solve_graph_poly(&subgraph, cache, raw_cache, ws,
                          local_canon_calls, local_cache_hits, local_raw_cache_hits,
                          profile, &part);
-        graph_poly_mul_ref(&acc, &part, &combined);
-        if (combined.x_pow == 0) {
-            fprintf(stderr, "Biconnected combine requires at least one x factor\n");
-            exit(1);
-        }
-        combined.x_pow--;
+        graph_poly_mul_div_x_ref(&acc, &part, &combined);
         acc = combined;
     }
 

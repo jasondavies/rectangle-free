@@ -232,6 +232,37 @@ void graph_poly_mul_ref(const GraphPoly* a, const GraphPoly* b, GraphPoly* out) 
     if (r != out) *out = *r;
 }
 
+void graph_poly_mul_div_x_ref(const GraphPoly* a, const GraphPoly* b, GraphPoly* out) {
+    if (graph_poly_is_zero(a) || graph_poly_is_zero(b)) {
+        graph_poly_zero(out);
+        return;
+    }
+
+    GraphPoly tmp;
+    GraphPoly* r = out;
+    if (out == a || out == b) r = &tmp;
+
+    int combined_x_pow = (int)a->x_pow + (int)b->x_pow;
+    if (combined_x_pow <= 0) {
+        fprintf(stderr, "graph_poly_mul_div_x_ref requires divisibility by x\n");
+        exit(1);
+    }
+
+    r->x_pow = (uint8_t)(combined_x_pow - 1);
+    r->deg = (uint8_t)(a->deg + b->deg);
+    if ((int)r->x_pow + (int)r->deg > MAXN_NAUTY) {
+        graph_poly_degree_overflow((int)r->x_pow + (int)r->deg);
+    }
+    memset(r->coeffs, 0, (size_t)(r->deg + 1) * sizeof(r->coeffs[0]));
+    for (int i = 0; i <= a->deg; i++) {
+        if (a->coeffs[i] == 0) continue;
+        for (int j = 0; j <= b->deg; j++) {
+            r->coeffs[i + j] += a->coeffs[i] * b->coeffs[j];
+        }
+    }
+    if (r != out) *out = *r;
+}
+
 void graph_poly_sub_ref(const GraphPoly* a, const GraphPoly* b, GraphPoly* out) {
     GraphPoly tmp;
     GraphPoly* r = out;
