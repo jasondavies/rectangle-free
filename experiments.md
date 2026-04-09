@@ -7115,3 +7115,46 @@
   - it removes work that is provably unnecessary in multiplication, so it is both low-risk and easy to justify
   - it continues the current pattern: the remaining reliable gains are coming from simplifying hot algebra primitives rather than from broader cache or graph-structure changes
 - Outcome: accepted on `main`.
+
+### Experiment 174: Replace edge-stack Tarjan with subtree-mask biconnected blocks
+- Goal: test the stronger version of the “word-parallel Tarjan” idea by removing the explicit edge stack and keeping biconnected decomposition in bitmasks throughout.
+- Background:
+  - the existing `graph_collect_biconnected_components()` already used bitset adjacency and `ctzll`, but it still followed classic Tarjan structure with:
+    - an explicit edge stack
+    - `push_edge()` on tree edges and back edges
+    - `pop_component()` to recover each block mask
+  - the hypothesis was that for `MAXN_NAUTY <= 64`, a subtree-mask formulation could do less work and fit the intended “word-parallel Tarjan” design better
+- Change:
+  - remove the edge stack from `BiconnectedSearch`
+  - add `open_mask[u]` for each DFS node
+  - when a child `u` finishes:
+    - if `low[u] >= disc[parent]`, emit the block as `open_mask[u] | {parent}`
+    - otherwise merge `open_mask[u]` upward into `open_mask[parent]`
+  - keep the DFS itself iterative and bitset-based
+- Matching benchmark command:
+  - `env OMP_NUM_THREADS=1 ./partition_poly_7 7 6 --task-end 1 >/dev/null`
+- Baseline:
+  - clean `HEAD` before this change (`123e378`)
+  - `5.604 s ± 0.034 s`
+- Experiment:
+  - same tree with only the subtree-mask Tarjan rewrite applied
+  - `5.565 s ± 0.044 s`
+  - `hyperfine` summary: experiment ran `1.01 ± 0.01x` faster
+- Correctness:
+  - exact `4x4` output matched
+  - exact `7x6` output matched apart from timing lines:
+    - `Canonicalisation calls: 105288`
+    - `Canonical cache hits: 93587`
+    - `Raw cache hits: 1997400`
+    - same chromatic polynomial, including:
+      - `P(4) = 43715355264000`
+      - `P(5) = 15297058957242888000`
+- Profile check:
+  - `env OMP_NUM_THREADS=1 ./partition_poly_7_profile 7 6 --task-end 1`
+  - `Worker Complete in 7.61 seconds`
+  - `solve_graph_poly: 2.152s`
+- Interpretation:
+  - this is a real but small win
+  - it confirms that even a more aggressive word-parallel Tarjan rewrite does not unlock a large gain on this workload
+  - the reason is that decomposition itself is not the dominant cost center; the expensive work remains recursive solving, cache hits, and polynomial combination after decomposition
+- Outcome: accepted on `main`.

@@ -689,16 +689,12 @@ void induced_subgraph_from_mask(const Graph* src, uint64_t mask, Graph* dst) {
     dst->vertex_mask = graph_row_mask((int)n);
 }
 
-enum { GRAPH_MAX_EDGE_STACK = (MAXN_NAUTY * (MAXN_NAUTY - 1)) / 2 };
-
 typedef struct {
     int time;
     int disc[MAXN_NAUTY];
     int low[MAXN_NAUTY];
     int parent[MAXN_NAUTY];
-    uint8_t edge_u[GRAPH_MAX_EDGE_STACK];
-    uint8_t edge_v[GRAPH_MAX_EDGE_STACK];
-    int edge_top;
+    uint64_t open_mask[MAXN_NAUTY];
     uint64_t* block_masks;
     int block_count;
     uint64_t articulation_mask;
@@ -709,28 +705,6 @@ typedef struct {
     uint8_t child_count;
     uint64_t remaining_neighbors;
 } BiconnectedFrame;
-
-static void graph_biconnected_push_edge(BiconnectedSearch* st, int u, int v) {
-    if (st->edge_top >= GRAPH_MAX_EDGE_STACK) {
-        fprintf(stderr, "Biconnected edge stack overflow\n");
-        exit(1);
-    }
-    st->edge_u[st->edge_top] = (uint8_t)u;
-    st->edge_v[st->edge_top] = (uint8_t)v;
-    st->edge_top++;
-}
-
-static void graph_biconnected_pop_component(BiconnectedSearch* st, int stop_u, int stop_v) {
-    uint64_t mask = 0;
-    while (st->edge_top > 0) {
-        st->edge_top--;
-        int u = st->edge_u[st->edge_top];
-        int v = st->edge_v[st->edge_top];
-        mask |= (UINT64_C(1) << u) | (UINT64_C(1) << v);
-        if (u == stop_u && v == stop_v) break;
-    }
-    if (mask != 0) st->block_masks[st->block_count++] = mask;
-}
 
 int graph_collect_components(const Graph* g, uint64_t* component_masks) {
     uint64_t remaining = g->vertex_mask;
@@ -773,6 +747,7 @@ int graph_collect_biconnected_components(const Graph* g, uint64_t* block_masks,
         st.disc[root] = ++st.time;
         st.low[root] = st.disc[root];
         st.parent[root] = -1;
+        st.open_mask[root] = UINT64_C(1) << root;
         discovered |= UINT64_C(1) << root;
         stack[depth++] =
             (BiconnectedFrame){.u = (uint8_t)root,
@@ -790,16 +765,15 @@ int graph_collect_biconnected_components(const Graph* g, uint64_t* block_masks,
                 if (((discovered >> v) & 1U) == 0) {
                     st.parent[v] = u;
                     frame->child_count++;
-                    graph_biconnected_push_edge(&st, u, v);
                     st.disc[v] = ++st.time;
                     st.low[v] = st.disc[v];
+                    st.open_mask[v] = UINT64_C(1) << v;
                     discovered |= UINT64_C(1) << v;
                     stack[depth++] =
                         (BiconnectedFrame){.u = (uint8_t)v,
                                            .child_count = 0,
                                            .remaining_neighbors = (uint64_t)g->adj[v] & active};
                 } else if (v != st.parent[u] && st.disc[v] < st.disc[u]) {
-                    graph_biconnected_push_edge(&st, u, v);
                     if (st.disc[v] < st.low[u]) st.low[u] = st.disc[v];
                 }
                 continue;
@@ -818,7 +792,10 @@ int graph_collect_biconnected_components(const Graph* g, uint64_t* block_masks,
             if (st.low[u] < st.low[parent]) st.low[parent] = st.low[u];
             if (st.low[u] >= st.disc[parent]) {
                 if (st.parent[parent] != -1) st.articulation_mask |= UINT64_C(1) << parent;
-                graph_biconnected_pop_component(&st, parent, u);
+                uint64_t block = st.open_mask[u] | (UINT64_C(1) << parent);
+                if (block != 0) st.block_masks[st.block_count++] = block;
+            } else {
+                st.open_mask[parent] |= st.open_mask[u];
             }
         }
     }
