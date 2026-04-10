@@ -285,5 +285,12 @@ The partition-based solver line owes a lot to [Adam P. Goucher][adam]. In
 particular, the polynomial / graph approach and the focus on canonical graph
 labelling with [nauty][nauty] came directly out of those discussions.
 
+## OEIS
+
+This work has contributed to the [On-Line Encyclopedia of Integer Sequences](https://oeis.org/):
+
+- [A200045](https://oeis.org/A200045): Number of 4-colourings of an nxm grid with no monochromatic axis-aligned rectangle (best known: 6x8).
+- [A391612](https://oeis.org/A391612): Number of n-colourings of a 6x6 grid with no monochromatic axis-aligned rectangle (all n via chromatic polynomial).
+
 [adam]: https://cp4space.hatsya.com/
 [nauty]: https://pallini.di.uniroma1.it/
