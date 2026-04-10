@@ -189,11 +189,16 @@ Useful options:
 - `--prefix-depth N`
 - `--task-start N --task-end M`
 - `--adaptive-subdivide`
+- `--no-adaptive-subdivide`
 - `--adaptive-max-depth N`
 - `--adaptive-work-budget N`
 - `--poly-out FILE`
 - `--profile`
 - `--task-times-out FILE`
+
+`partition_poly` defaults to adaptive subdivision enabled with max depth `5`
+and work budget `1000`. Use `--no-adaptive-subdivide` to force the legacy
+non-adaptive path or to run with `--prefix-depth 3/4`.
 
 For sharded runs:
 

@@ -3,7 +3,7 @@
 static void usage(const char* prog) {
     fprintf(stderr,
             "Usage:\n"
-            "  %s [rows cols] [--task-start N] [--task-end N] [--prefix-depth N] [--reorder] [--adaptive-subdivide] [--adaptive-max-depth N] [--adaptive-work-budget N] [--poly-out FILE]"
+            "  %s [rows cols] [--task-start N] [--task-end N] [--prefix-depth N] [--reorder] [--adaptive-subdivide|--no-adaptive-subdivide] [--adaptive-max-depth N] [--adaptive-work-budget N] [--poly-out FILE]"
 #if RECT_PROFILE
             " [--task-times-out FILE]"
 #endif
@@ -14,6 +14,7 @@ static void usage(const char* prog) {
             "  --prefix-depth may be 2, 3, or 4.\n"
             "  --reorder changes partition IDs and task numbering.\n"
             "  Adaptive subdivision currently supports only --prefix-depth 2.\n"
+            "  Use --no-adaptive-subdivide to force the legacy non-adaptive path.\n"
             "  In full polynomial mode it uses a local runtime queue of donated subtrees.\n"
             "  Profiling is selected at compile time.\n",
             prog);
@@ -55,6 +56,10 @@ static int parse_main_options(int argc, char** argv, MainOptions* opts) {
             opts->reorder_partitions_flag = 1;
         } else if (strcmp(argv[i], "--adaptive-subdivide") == 0) {
             g_adaptive_subdivide = 1;
+            opts->adaptive_subdivide_explicit = 1;
+        } else if (strcmp(argv[i], "--no-adaptive-subdivide") == 0) {
+            g_adaptive_subdivide = 0;
+            opts->adaptive_subdivide_explicit = 1;
         } else if (strcmp(argv[i], "--adaptive-max-depth") == 0) {
             if (i + 1 >= argc) {
                 usage(argv[0]);
@@ -67,6 +72,7 @@ static int parse_main_options(int argc, char** argv, MainOptions* opts) {
                 return 0;
             }
             g_adaptive_work_budget = parse_ll_or_die(argv[++i], "--adaptive-work-budget");
+            opts->adaptive_work_budget_explicit = 1;
         } else if (strcmp(argv[i], "--task-times-out") == 0) {
 #if !RECT_PROFILE
             fprintf(stderr, "--task-times-out requires a profiling build\n");
@@ -93,11 +99,16 @@ static int parse_main_options(int argc, char** argv, MainOptions* opts) {
         }
     }
 
+    if (!g_adaptive_subdivide && !opts->adaptive_work_budget_explicit) {
+        g_adaptive_work_budget = 0;
+    }
+
     return 1;
 }
 
 static int choose_prefix_depth(int prefix_depth_override) {
     if (prefix_depth_override != -1) return prefix_depth_override;
+    if (g_adaptive_subdivide && g_cols >= 2) return 2;
     if (g_rows == 7 && g_cols >= 6) return 2;
     if (g_cols >= 6) return 3;
     if (g_cols >= 2) return 2;

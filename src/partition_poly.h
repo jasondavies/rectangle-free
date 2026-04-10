@@ -103,6 +103,18 @@ typedef uint64_t AdjWord;
 #define RECT_REP_ORBIT_MARK_THRESHOLD 8
 #endif
 
+#ifndef DEFAULT_ADAPTIVE_SUBDIVIDE
+#define DEFAULT_ADAPTIVE_SUBDIVIDE 0
+#endif
+
+#ifndef DEFAULT_ADAPTIVE_MAX_DEPTH
+#define DEFAULT_ADAPTIVE_MAX_DEPTH 3
+#endif
+
+#ifndef DEFAULT_ADAPTIVE_WORK_BUDGET
+#define DEFAULT_ADAPTIVE_WORK_BUDGET 0
+#endif
+
 typedef __int128_t PolyCoeff;
 typedef uint16_t PrefixId;
 
@@ -395,6 +407,8 @@ typedef struct {
     const char* poly_out_path;
     int prefix_depth_override;
     int reorder_partitions_flag;
+    int adaptive_subdivide_explicit;
+    int adaptive_work_budget_explicit;
 } MainOptions;
 
 typedef struct {
