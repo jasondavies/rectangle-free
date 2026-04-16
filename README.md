@@ -41,18 +41,18 @@ The repository currently contains:
 
 ### Partition-based C solvers
 
-- `partition_poly.c`
-  General partition / structure-graph solver. It enumerates canonical column
-  multisets, builds the induced conflict graph, and computes the chromatic
-  polynomial.
+- `partition_poly`
+  General partition / structure-graph solver built from the shared sources
+  under `src/`. It enumerates canonical column multisets, builds the induced
+  conflict graph, and computes the chromatic polynomial.
 
 - `partition_count4`
-  Fixed-`k = 4` build target for `partition_poly.c`. It uses the same
+  Fixed-`k = 4` build target for the shared partition solver. It uses the same
   search, but runs the direct exact 4-colouring path with the special-4
   pruning enabled.
 
 - `partition_poly_7`
-  Build target that compiles `partition_poly.c` with `DEFAULT_ROWS=7`,
+  Build target that compiles the same shared solver with `DEFAULT_ROWS=7`,
   `DEFAULT_COLS=7`, and `MAX_COLS=7`. This is the current 7-row polynomial
   executable in the tree.
 
@@ -87,7 +87,7 @@ canonicalises under row and colour permutations.
 
 Used by:
 
-- `partition_poly.c`
+- `partition_poly`
 - `partition_count4`
 - `partition_poly_7`
 
@@ -101,7 +101,7 @@ conflict graph for the complex colour classes, and weight each structure by:
 
 The graph contribution differs by solver:
 
-- `partition_poly.c`
+- `partition_poly`
   computes the chromatic polynomial symbolically, with [nauty][nauty]-backed
   canonical graph caching.
 
@@ -111,7 +111,7 @@ The graph contribution differs by solver:
   and exact 4-colourability tests.
 
 - `partition_poly_7`
-  is the `7 x 7` build of `partition_poly.c`, used for the current 7-row
+  is the `7 x 7` build of `partition_poly`, used for the current 7-row
   experiments.
 
 ## Running the small solvers
@@ -153,6 +153,8 @@ This builds the tracked top-level executables:
 - `partition_count4`
 - `partition_poly`
 - `partition_poly_7`
+- `partition_poly_profile`
+- `partition_poly_7_profile`
 
 If you want to override the nauty source path:
 
@@ -188,17 +190,24 @@ Useful options:
 
 - `--prefix-depth N`
 - `--task-start N --task-end M`
+- `--reorder`
+- `--no-reorder`
 - `--adaptive-subdivide`
 - `--no-adaptive-subdivide`
 - `--adaptive-max-depth N`
 - `--adaptive-work-budget N`
 - `--poly-out FILE`
-- `--profile`
-- `--task-times-out FILE`
 
 `partition_poly` defaults to adaptive subdivision enabled with max depth `5`
 and work budget `1000`. Use `--no-adaptive-subdivide` to force the legacy
 non-adaptive path or to run with `--prefix-depth 3/4`.
+
+Partition hardness reorder is enabled by default. Use `--no-reorder` to
+restore the legacy partition IDs and task numbering.
+
+Profiling is selected at build time, not by a runtime `--profile` flag. Build
+`partition_poly_profile` or `partition_poly_7_profile` for a profiling binary;
+only profiling builds accept `--task-times-out FILE`.
 
 For sharded runs:
 
@@ -226,18 +235,20 @@ Explicit size:
 
 Useful options:
 
-- `--profile`
 - `--prefix-depth N`
 - `--task-start N --task-end M`
+- `--reorder`
+- `--no-reorder`
 - `--adaptive-subdivide`
+- `--no-adaptive-subdivide`
 - `--adaptive-max-depth N`
 - `--adaptive-work-budget N`
 
 Examples:
 
 ```bash
-./partition_count4 6 8 --profile
 ./partition_count4 6 8 --prefix-depth 4
+./partition_count4 6 8 --no-reorder
 ./partition_count4 6 8 --task-start 0 --task-end 100
 ```
 
@@ -265,8 +276,8 @@ Or pass the dimensions explicitly:
 
 Current limits in the checked-in C sources:
 
-- `partition_poly.c`: up to 7 rows and 16 columns.
-- `partition_count4`: same solver limits as `partition_poly.c`.
+- `partition_poly`: up to 7 rows and 16 columns.
+- `partition_count4`: same solver limits as `partition_poly`.
 - `partition_poly_7`: 7 rows and up to 7 columns.
 
 These limits come from the current fixed-size structures and the size of the
