@@ -3,7 +3,7 @@
 static void usage(const char* prog) {
     fprintf(stderr,
             "Usage:\n"
-            "  %s [rows cols] [--task-start N] [--task-end N] [--prefix-depth N] [--reorder] [--adaptive-subdivide|--no-adaptive-subdivide] [--adaptive-max-depth N] [--adaptive-work-budget N] [--poly-out FILE]"
+            "  %s [rows cols] [--task-start N] [--task-end N] [--prefix-depth N] [--reorder|--no-reorder] [--adaptive-subdivide|--no-adaptive-subdivide] [--adaptive-max-depth N] [--adaptive-work-budget N] [--poly-out FILE]"
 #if RECT_PROFILE
             " [--task-times-out FILE]"
 #endif
@@ -12,7 +12,8 @@ static void usage(const char* prog) {
             "Notes:\n"
             "  --task-start/--task-end define a half-open task range [start, end).\n"
             "  --prefix-depth may be 2, 3, or 4.\n"
-            "  --reorder changes partition IDs and task numbering.\n"
+            "  Partition hardness reorder is enabled by default.\n"
+            "  --no-reorder restores the legacy partition IDs and task numbering.\n"
             "  Adaptive subdivision currently supports only --prefix-depth 2.\n"
             "  Use --no-adaptive-subdivide to force the legacy non-adaptive path.\n"
             "  In full polynomial mode it uses a local runtime queue of donated subtrees.\n"
@@ -26,6 +27,7 @@ static int parse_main_options(int argc, char** argv, MainOptions* opts) {
     memset(opts, 0, sizeof(*opts));
     opts->task_end = -1;
     opts->prefix_depth_override = -1;
+    opts->reorder_partitions_flag = 1;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--poly-out") == 0) {
@@ -54,6 +56,8 @@ static int parse_main_options(int argc, char** argv, MainOptions* opts) {
             opts->prefix_depth_override = (int)parse_ll_or_die(argv[++i], "--prefix-depth");
         } else if (strcmp(argv[i], "--reorder") == 0) {
             opts->reorder_partitions_flag = 1;
+        } else if (strcmp(argv[i], "--no-reorder") == 0) {
+            opts->reorder_partitions_flag = 0;
         } else if (strcmp(argv[i], "--adaptive-subdivide") == 0) {
             g_adaptive_subdivide = 1;
             opts->adaptive_subdivide_explicit = 1;
@@ -166,9 +170,8 @@ static int init_problem_and_run_config(const MainOptions* opts, RunConfig* cfg) 
     printf("Grid: %dx%d\n", g_rows, g_cols);
     printf("Partitions: %d\n", num_partitions);
     printf("Threads: %d\n", omp_get_max_threads());
-    if (opts->reorder_partitions_flag) {
-        printf("Partition hardness reorder: enabled\n");
-    }
+    printf("Partition hardness reorder: %s\n",
+           opts->reorder_partitions_flag ? "enabled" : "disabled");
 #if RECT_COUNT_K4
     printf("Mode: fixed 4-colour count\n");
 #else
