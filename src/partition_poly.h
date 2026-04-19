@@ -195,17 +195,6 @@ typedef struct {
 typedef struct {
     CacheKey* keys;
     uint32_t* stamps;
-    uint64_t* sigs;
-    GraphCacheValue* coeffs;
-    int mask;
-    int probe;
-    int poly_len;
-    uint32_t next_stamp;
-} GraphCache;
-
-typedef struct {
-    CacheKey* keys;
-    uint32_t* stamps;
     AdjWord* rows;
     GraphCacheValue* coeffs;
     int mask;
@@ -312,27 +301,6 @@ typedef struct {
     int max_degree;
 } GraphHardStats;
 
-#define SHARED_CACHE_EXPORT_CAP 64
-
-typedef struct {
-    uint64_t key_hash;
-    uint32_t key_n;
-    Graph g;
-    uint64_t row_mask;
-    GraphResult value;
-} SharedGraphCacheExportEntry;
-
-typedef struct {
-    SharedGraphCacheExportEntry entries[SHARED_CACHE_EXPORT_CAP];
-    int count;
-} SharedGraphCacheExporter;
-
-typedef struct {
-    GraphCache cache;
-    pthread_rwlock_t lock;
-    int enabled;
-} SharedGraphCache;
-
 typedef struct {
     PrefixId* i;
     PrefixId* j;
@@ -422,8 +390,6 @@ typedef struct {
     long long prefix2_batch_count;
     double prefix_generation_time;
     int use_runtime_split_queue;
-    SharedGraphCache shared_graph_cache;
-    int shared_graph_cache_active;
     long long full_tasks;
     long long active_task_start;
     long long active_task_end;
@@ -509,17 +475,13 @@ extern long long g_adaptive_work_budget;
 extern __thread ProfileStats* tls_profile;
 extern __thread GraphHardStats* tls_hard_graph_stats;
 extern __thread long long* tls_adaptive_work_counter;
-extern __thread SharedGraphCacheExporter* tls_shared_cache_exporter;
 extern const char* g_task_times_out_path;
 extern long long g_task_times_first_task;
 extern long long g_task_times_count;
 extern double* g_task_times_values;
 extern int g_effective_prefix_depth;
 extern double g_queue_profile_report_step;
-extern int g_shared_cache_merge;
-extern int g_shared_cache_bits;
 extern int g_profile_separators;
-extern SharedGraphCache* g_shared_graph_cache;
 
 #define SMALL_GRAPH_LOOKUP_MAX_N 7
 extern int g_small_graph_lookup_ready;
@@ -559,7 +521,6 @@ static inline ComplexMask overlap_mask_get(int lhs_partition_id, int rhs_partiti
 
 void* checked_calloc(size_t count, size_t size, const char* label);
 void* checked_aligned_alloc(size_t alignment, size_t size, const char* label);
-void shared_graph_cache_flush_exports(void);
 void task_timing_insert_topk(TaskTimingStats* stats, long long task_index, double elapsed);
 void queue_subtask_record(QueueSubtaskTimingStats* stats, const LocalTask* task,
                           double elapsed, long long solve_graph_calls,
@@ -662,10 +623,6 @@ int row_graph_cache_lookup_poly(RowGraphCache* cache, uint64_t key_hash, uint32_
                                 const Graph* g, AdjWord row_mask, GraphResult* value, int touch);
 int row_graph_cache_lookup_rows(RowGraphCache* cache, uint64_t key_hash, uint32_t key_n,
                                 const AdjWord* rows, GraphResult* value, int touch);
-int shared_graph_cache_lookup_poly(SharedGraphCache* shared, uint64_t key_hash, uint32_t key_n,
-                                   const Graph* g, uint64_t row_mask, GraphResult* value);
-void shared_graph_cache_export(uint64_t key_hash, uint32_t key_n, const Graph* g,
-                               uint64_t row_mask, const GraphResult* value);
 void store_row_graph_cache_entry(RowGraphCache* cache, uint64_t key_hash, uint32_t key_n,
                                  const Graph* g, AdjWord row_mask, const GraphResult* value);
 void store_row_graph_cache_entry_rows(RowGraphCache* cache, uint64_t key_hash, uint32_t key_n,
@@ -685,8 +642,6 @@ void small_graph_lookup_init(void);
 void small_graph_lookup_free(void);
 void connected_canon_lookup_init(void);
 void connected_canon_lookup_free(void);
-void shared_graph_cache_init(SharedGraphCache* shared, int bits, int poly_len);
-void shared_graph_cache_free(SharedGraphCache* shared);
 #if RECT_COUNT_K4
 static inline void graph_result_set_count4(uint64_t count, GraphResult* out) {
     *out = count;

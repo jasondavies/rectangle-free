@@ -225,23 +225,6 @@ static int init_problem_and_run_config(const MainOptions* opts, RunConfig* cfg) 
             g_queue_profile_report_step = strtod(queue_profile_step_env, NULL);
             if (g_queue_profile_report_step < 0.0) g_queue_profile_report_step = 0.0;
         }
-        {
-            const char* shared_cache_env = getenv("RECT_SHARED_CACHE_MERGE");
-            if (shared_cache_env && *shared_cache_env && strcmp(shared_cache_env, "0") != 0) {
-                g_shared_cache_merge = 1;
-            }
-        }
-        {
-            const char* shared_cache_bits_env = getenv("RECT_SHARED_CACHE_BITS");
-            if (shared_cache_bits_env && *shared_cache_bits_env) {
-                g_shared_cache_bits =
-                    (int)parse_ll_or_die(shared_cache_bits_env, "RECT_SHARED_CACHE_BITS");
-                if (g_shared_cache_bits < 10 || g_shared_cache_bits > 24) {
-                    fprintf(stderr, "RECT_SHARED_CACHE_BITS must be between 10 and 24\n");
-                    return 0;
-                }
-            }
-        }
 #if RECT_PROFILE
         {
             const char* profile_separators_env = getenv("RECT_PROFILE_SEPARATORS");
@@ -276,13 +259,6 @@ static int init_problem_and_run_config(const MainOptions* opts, RunConfig* cfg) 
 }
 
 static int prepare_run_config(const MainOptions* opts, RunConfig* cfg) {
-    if (g_shared_cache_merge) {
-        shared_graph_cache_init(&cfg->shared_graph_cache, g_shared_cache_bits, cfg->graph_poly_len);
-        g_shared_graph_cache = &cfg->shared_graph_cache;
-        cfg->shared_graph_cache_active = 1;
-        printf("Shared canonical cache merge enabled: 2^%d slots\n", g_shared_cache_bits);
-    }
-
     if (cfg->prefix_depth > 0) {
         double prefix_start_time = omp_get_wtime();
         if (cfg->prefix_depth == 2) {
@@ -445,12 +421,6 @@ static void cleanup_run_config(RunConfig* cfg) {
 
     free(g_task_times_values);
     g_task_times_values = NULL;
-
-    if (cfg->shared_graph_cache_active) {
-        shared_graph_cache_free(&cfg->shared_graph_cache);
-        g_shared_graph_cache = NULL;
-        cfg->shared_graph_cache_active = 0;
-    }
 
     small_graph_lookup_free();
     connected_canon_lookup_free();
@@ -691,10 +661,8 @@ static void execute_run_tasks(const RunConfig* run, double start_time, Execution
         QueueSubtaskTimingStats* queue_subtask_timing = exec->thread_queue_subtask_timing
             ? exec->thread_queue_subtask_timing + (size_t)tid * (size_t)(MAX_COLS + 1)
             : NULL;
-        SharedGraphCacheExporter shared_cache_exporter = {0};
         long long pending_completed = 0;
         tls_profile = profile;
-        tls_shared_cache_exporter = g_shared_cache_merge ? &shared_cache_exporter : NULL;
 
         if (g_cols == 1) {
             #pragma omp for schedule(runtime)
@@ -879,9 +847,7 @@ static void execute_run_tasks(const RunConfig* run, double start_time, Execution
         }
 
         flush_completed_tasks(total_tasks, progress_report_step, start_time, &pending_completed);
-        shared_graph_cache_flush_exports();
         tls_profile = NULL;
-        tls_shared_cache_exporter = NULL;
 
         total_canon_calls += local_canon_calls;
         total_cache_hits += local_cache_hits;

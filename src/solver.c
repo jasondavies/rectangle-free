@@ -472,20 +472,6 @@ void solve_graph_poly(const Graph* input_g, RowGraphCache* cache, RowGraphCache*
             goto done;
         }
 
-        if (shared_graph_cache_lookup_poly(g_shared_graph_cache, hash, (uint32_t)canon.n,
-                                           &canon, ADJWORD_MASK, &res)) {
-            store_row_graph_cache_entry(cache, hash, (uint32_t)canon.n, &canon,
-                                        (AdjWord)ADJWORD_MASK, &res);
-            (*local_cache_hits)++;
-            if (PROFILE_BUILD && profile && canon.n <= MAXN_NAUTY) {
-                profile->solve_graph_canon_hits_by_n[canon.n]++;
-            }
-            solve_graph_store_raw_cache(&g, raw_cache, &key_rows, &res);
-            graph_result_set_count4(multiplier * graph_result_get_count4(&res), out_result);
-            outcome = SG_OUTCOME_CANON_HIT;
-            goto done;
-        }
-
         uint64_t connected_lookup = connected_canon_lookup_load_count4(&canon);
         if (connected_lookup != UINT64_MAX) {
             graph_result_set_count4(connected_lookup, &res);
@@ -509,7 +495,6 @@ void solve_graph_poly(const Graph* input_g, RowGraphCache* cache, RowGraphCache*
         graph_result_set_count4(count4, &res);
         store_row_graph_cache_entry(cache, hash, (uint32_t)canon.n, &canon,
                                     (AdjWord)ADJWORD_MASK, &res);
-        shared_graph_cache_export(hash, (uint32_t)canon.n, &canon, ADJWORD_MASK, &res);
 
         solve_graph_store_raw_cache(&g, raw_cache, &key_rows, &res);
     }
@@ -592,20 +577,6 @@ done:
             if (PROFILE_BUILD && profile && canon.n <= MAXN_NAUTY) {
                 profile->solve_graph_canon_hits_by_n[canon.n]++;
             }
-            graph_poly_mul_ref(&multiplier, &res, out_result);
-            outcome = SG_OUTCOME_CANON_HIT;
-            goto done;
-        }
-
-        if (shared_graph_cache_lookup_poly(g_shared_graph_cache, hash, (uint32_t)canon.n,
-                                           &canon, ADJWORD_MASK, &res)) {
-            store_row_graph_cache_entry(cache, hash, (uint32_t)canon.n, &canon,
-                                        (AdjWord)ADJWORD_MASK, &res);
-            (*local_cache_hits)++;
-            if (PROFILE_BUILD && profile && canon.n <= MAXN_NAUTY) {
-                profile->solve_graph_canon_hits_by_n[canon.n]++;
-            }
-            solve_graph_store_raw_cache(&g, raw_cache, &key_rows, &res);
             graph_poly_mul_ref(&multiplier, &res, out_result);
             outcome = SG_OUTCOME_CANON_HIT;
             goto done;
@@ -706,7 +677,6 @@ done:
         }
         store_row_graph_cache_entry(cache, hash, (uint32_t)canon.n, &canon,
                                     (AdjWord)ADJWORD_MASK, &res);
-        shared_graph_cache_export(hash, (uint32_t)canon.n, &canon, ADJWORD_MASK, &res);
         solve_graph_store_raw_cache(&g, raw_cache, &key_rows, &res);
         if (PROFILE_BUILD && profile && branch_g->n >= 0 && branch_g->n <= MAXN_NAUTY) {
             hard_store_t += omp_get_wtime() - phase_t0;

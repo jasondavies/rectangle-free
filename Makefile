@@ -4,7 +4,7 @@ NAUTY_DIR ?= ./third_party/nauty
 NAUTY_BUILD_DIR ?= ./third_party/nauty-build
 NAUTY_CONFIGURE_FLAGS ?= --enable-tls
 NAUTY_BUILD_CFLAGS ?= -O3 -march=native
-LTO ?= 0
+LTO ?= 1
 UNAME_S := $(shell uname -s)
 LIBOMP_DIR ?= /opt/homebrew/opt/libomp
 
