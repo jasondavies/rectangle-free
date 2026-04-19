@@ -1,5 +1,56 @@
 # Partition Poly 7xn Experiments
 
+## 2026-04-19
+
+### Experiment 20: Specialise nauty pack/unpack for `m == 1` and fuse canonical rebuild/hash
+- Goal: cut canonicalisation overhead in the common `MAXN_NAUTY <= 64`, `SETWORDSNEEDED(n) == 1` case by removing bit-by-bit nauty row packing/unpacking and by avoiding a second pass over the canonical graph just to hash it.
+- Change:
+  - replaced `pack_row_to_nauty1()` with a direct 64-bit bit-reverse path instead of iterating set bits through `bit[j]`
+  - added an `m == 1` fast path in `graph_extract_dense_rows_from_nauty()` using the inverse bit-reverse instead of `ISELEMENT` over `j = 0..n-1`
+  - fused canonical graph rebuild with canonical FNV hashing, so the solver no longer calls `hash_graph(&canon)` after nauty
+  - threaded an optional canonical upper-triangle mask out of rebuild so connected-lookup on canonical graphs can skip `graph_pack_upper_mask64(&canon)`
+- Verification:
+  - build commands:
+    - `make -j4 partition_poly_7`
+    - `make -j4 partition_count4`
+    - `make -j4 partition_poly_7_profile`
+  - result: all built successfully
+- Benchmark method:
+  - sequential runs only
+  - used `OMP_NUM_THREADS=15`, matching this host instead of the earlier oversubscribed `32`-thread runs
+  - compared `HEAD` against parent commit `5c584a4`
+  - commands:
+    - `env OMP_NUM_THREADS=15 ./partition_poly_7 6 6 --prefix-depth 2 --adaptive-subdivide --adaptive-work-budget 1000 --adaptive-max-depth 5`
+    - `env OMP_NUM_THREADS=15 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --adaptive-work-budget 1000 --adaptive-max-depth 5`
+- Benchmark result:
+  - `6x6`: `6.79s -> 6.67s`
+    - baseline counters: `Canonicalisation calls 35699834`, `Canonical cache hits 24453016 (68.5%)`, `Raw cache hits 52600298`
+    - experiment counters: `Canonicalisation calls 35824263`, `Canonical cache hits 24526806 (68.5%)`, `Raw cache hits 52559951`
+  - `7x5`: `27.45s -> 27.76s`
+    - baseline counters: `Canonicalisation calls 95025396`, `Canonical cache hits 74987623 (78.9%)`, `Raw cache hits 304613420`
+    - experiment counters: `Canonicalisation calls 95009206`, `Canonical cache hits 74984513 (78.9%)`, `Raw cache hits 304602478`
+  - summary:
+    - `6x6` improved by about `1.8%`
+    - `7x5` regressed by about `1.1%`
+- Profile method:
+  - exploratory only: compared one older profiled `7x5` run of the optimized tree against the earlier saved profile from the previous kept baseline
+  - command used there: `env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly_7_profile 7 5 --prefix-depth 2 --adaptive-subdivide --adaptive-work-budget 1000 --adaptive-max-depth 5`
+- Profile result:
+  - previous baseline:
+    - `Worker Complete`: `111.60s`
+    - `get_canonical_graph`: `330.504s`
+    - `build nauty input`: `53.099s`
+    - `densenauty`: `150.705s`
+    - `rebuild canon graph`: `26.778s`
+  - experiment:
+    - `Worker Complete`: `172.68s`
+    - `get_canonical_graph`: `376.672s`
+    - `build nauty input`: `60.672s`
+    - `densenauty`: `172.064s`
+    - `rebuild canon graph`: `23.850s`
+- Interpretation: the targeted local mechanism still looks plausible, because the exploratory profile showed rebuild time dropping from `26.778s` to `23.850s`, which matches the fused rebuild/hash path and the direct `m == 1` pack/unpack specialisation. But the host-realistic `15`-thread end-to-end rerun did not reproduce a clear overall win: `6x6` improved slightly while `7x5` regressed slightly. So on this machine the change is mixed rather than clearly positive.
+- Outcome: mixed.
+
 ## 2026-04-08
 
 ### Experiment 16: Skip empty terminal canon words and pack canon state

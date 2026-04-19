@@ -615,6 +615,12 @@ uint64_t graph_row_mask(int n);
 void get_canonical_graph(Graph* g, Graph* canon, NautyWorkspace* ws, ProfileStats* profile);
 void get_canonical_graph_from_dense_rows(int n, const AdjWord* rows, Graph* canon,
                                          NautyWorkspace* ws, ProfileStats* profile);
+uint64_t get_canonical_graph_hashed(Graph* g, Graph* canon, NautyWorkspace* ws,
+                                    ProfileStats* profile, uint64_t* upper_mask_out);
+uint64_t get_canonical_graph_from_dense_rows_hashed(int n, const AdjWord* rows, Graph* canon,
+                                                    NautyWorkspace* ws,
+                                                    ProfileStats* profile,
+                                                    uint64_t* upper_mask_out);
 uint32_t small_graph_pack_mask(const Graph* g);
 void small_graph_lookup_load_graph_poly(int n, uint32_t mask, GraphPoly* out);
 uint32_t graph_build_dense_rows(const Graph* g, AdjWord* rows);
@@ -629,6 +635,7 @@ void store_row_graph_cache_entry_rows(RowGraphCache* cache, uint64_t key_hash, u
                                       const AdjWord* rows, const GraphResult* value);
 const int32_t* connected_canon_lookup_find_coeffs(uint64_t mask);
 int connected_canon_lookup_load_graph_poly(const Graph* g, GraphPoly* out);
+int connected_canon_lookup_load_graph_poly_mask(uint64_t mask, int n, GraphPoly* out);
 void induced_subgraph_from_mask(const Graph* src, uint64_t mask, Graph* dst);
 int graph_collect_components(const Graph* g, uint64_t* component_masks);
 int graph_collect_biconnected_components(const Graph* g, uint64_t* block_masks,
@@ -653,6 +660,7 @@ static inline uint64_t graph_result_get_count4(const GraphResult* p) {
 
 uint64_t small_graph_lookup_load_count4(int n, uint32_t mask);
 uint64_t connected_canon_lookup_load_count4(const Graph* g);
+uint64_t connected_canon_lookup_load_count4_mask(uint64_t mask, int n);
 uint64_t count_graph_4_dsat(const Graph* g);
 #endif
 PolyCoeff poly_eval(Poly p, long long x);

@@ -111,15 +111,20 @@ static int solve_graph_prepare_raw_cache(const Graph* g, RowGraphCache* raw_cach
     return 1;
 }
 
-static void solve_graph_build_canon(Graph* g, const SolveGraphKeyRows* prep,
-                                    NautyWorkspace* ws, ProfileStats* profile,
-                                    long long* local_canon_calls, Graph* canon) {
+static uint64_t solve_graph_build_canon(Graph* g, const SolveGraphKeyRows* prep,
+                                        NautyWorkspace* ws, ProfileStats* profile,
+                                        long long* local_canon_calls, Graph* canon,
+                                        uint64_t* upper_mask_out) {
+    uint64_t canon_hash;
     if (prep->has_raw_rows) {
-        get_canonical_graph_from_dense_rows((int)g->n, prep->raw_rows, canon, ws, profile);
+        canon_hash = get_canonical_graph_from_dense_rows_hashed((int)g->n, prep->raw_rows,
+                                                                canon, ws, profile,
+                                                                upper_mask_out);
     } else {
-        get_canonical_graph(g, canon, ws, profile);
+        canon_hash = get_canonical_graph_hashed(g, canon, ws, profile, upper_mask_out);
     }
     (*local_canon_calls)++;
+    return canon_hash;
 }
 
 static void solve_graph_store_raw_cache(const Graph* g, RowGraphCache* raw_cache,
@@ -457,8 +462,10 @@ void solve_graph_poly(const Graph* input_g, RowGraphCache* cache, RowGraphCache*
         }
 
         Graph canon;
-        solve_graph_build_canon(&g, &key_rows, ws, profile, local_canon_calls, &canon);
-        uint64_t hash = hash_graph(&canon);
+        uint64_t canon_upper_mask = 0;
+        uint64_t hash = solve_graph_build_canon(&g, &key_rows, ws, profile,
+                                                local_canon_calls, &canon,
+                                                &canon_upper_mask);
 
         if (row_graph_cache_lookup_poly(cache, hash, (uint32_t)canon.n, &canon,
                                         (AdjWord)ADJWORD_MASK, &res, 1)) {
@@ -472,7 +479,8 @@ void solve_graph_poly(const Graph* input_g, RowGraphCache* cache, RowGraphCache*
             goto done;
         }
 
-        uint64_t connected_lookup = connected_canon_lookup_load_count4(&canon);
+        uint64_t connected_lookup =
+            connected_canon_lookup_load_count4_mask(canon_upper_mask, canon.n);
         if (connected_lookup != UINT64_MAX) {
             graph_result_set_count4(connected_lookup, &res);
             store_row_graph_cache_entry(cache, hash, (uint32_t)canon.n, &canon,
@@ -566,9 +574,10 @@ done:
         }
 
         Graph canon;
-        solve_graph_build_canon(&g, &key_rows, ws, profile, local_canon_calls, &canon);
-        
-        uint64_t hash = hash_graph(&canon);
+        uint64_t canon_upper_mask = 0;
+        uint64_t hash = solve_graph_build_canon(&g, &key_rows, ws, profile,
+                                                local_canon_calls, &canon,
+                                                &canon_upper_mask);
 
         if (row_graph_cache_lookup_poly(cache, hash, (uint32_t)canon.n, &canon,
                                         (AdjWord)ADJWORD_MASK, &res, 1)) {
@@ -582,7 +591,7 @@ done:
             goto done;
         }
 
-        if (connected_canon_lookup_load_graph_poly(&canon, &res)) {
+        if (connected_canon_lookup_load_graph_poly_mask(canon_upper_mask, canon.n, &res)) {
             store_row_graph_cache_entry(cache, hash, (uint32_t)canon.n, &canon,
                                         (AdjWord)ADJWORD_MASK, &res);
             solve_graph_store_raw_cache(&g, raw_cache, &key_rows, &res);

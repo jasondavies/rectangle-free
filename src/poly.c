@@ -395,6 +395,16 @@ uint64_t connected_canon_lookup_load_count4(const Graph* g) {
     }
 }
 
+uint64_t connected_canon_lookup_load_count4_mask(uint64_t mask, int n) {
+    if (!g_connected_canon_lookup_ready || n != g_connected_canon_lookup_n) return UINT64_MAX;
+
+    {
+        const int32_t* coeffs = connected_canon_lookup_find_coeffs(mask);
+        if (!coeffs) return UINT64_MAX;
+        return eval_int32_poly_at_4(coeffs, g_connected_canon_lookup_n - 1) << 2;
+    }
+}
+
 static const uint64_t g_fall4[5] = {1, 4, 12, 24, 24};
 
 static uint64_t count_graph_4_rec(const Graph* g, AdjWord uncoloured,
