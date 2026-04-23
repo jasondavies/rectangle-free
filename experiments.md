@@ -7385,3 +7385,48 @@
   - the deeper probe recovers enough hits within the smaller table to beat the old `15/12` setting
   - this should still be periodically rechecked on full longer workloads, but it is the best current bounded-slice default
 - Outcome: accepted on `main`.
+
+### Experiment 179: Fast-pack small-graph lookup masks
+- Goal: reduce overhead in the frequent `n <= 7` graph lookup exit by avoiding unnecessary dense-row rebuilding and per-edge upper-triangle tests.
+- Background:
+  - a single-thread profiling `7x5 --task-end 1` shard showed `solve_graph_poly` dominating runtime
+  - small-graph lookup calls for `n <= 7` accounted for about `0.25s` of a `3.9s` profiling run
+  - `small_graph_pack_mask()` always called `graph_build_dense_rows()` and then tested one upper-triangle bit at a time, even when the graph already had dense vertex IDs
+- Change:
+  - add a direct dense-graph fast path in `small_graph_pack_mask()`
+  - pack each row's lower bits with one shift/or operation instead of testing every edge individually
+  - reuse the same row-value packer for temporary small-graph table rows
+- Benchmark setup:
+  - baseline: last commit before this change (`b48585f`), compiled as `/tmp/partition_poly_7_head`
+  - experiment: current working tree with fast small-graph mask packing
+  - benchmarks were run sequentially with no concurrent all-core runs
+  - primary command:
+    - `/usr/bin/time -f "%e" env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly_7 6 6 >/dev/null`
+- Primary timings:
+  - baseline raw runs: `15.05`, `14.90` seconds
+  - baseline mean: `14.975 s`
+  - experiment raw runs: `14.77`, `14.68` seconds
+  - experiment mean: `14.725 s`
+  - summary: experiment ran `1.017x` faster, about a `1.7%` wall-time reduction on full `6x6`
+- Secondary check:
+  - command: `/usr/bin/time -f "%e" env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-end 1 >/dev/null`
+  - one baseline run and one experiment run both reported `1.14s`, so this very short shard was too noisy to show the small lookup-packing win
+- Correctness:
+  - exact full `6x6` polynomial/value lines matched the baseline
+  - key values matched:
+    - `P(4) = 203716633441803914880`
+    - `P(5) = 2852707805646422930409600`
+  - a small single-thread shard also matched the known output:
+    - `env OMP_NUM_THREADS=1 ./partition_poly_7 6 3 --prefix-depth 2 --task-end 1`
+    - `P(4) = 32567040`
+    - `P(5) = 1050404400`
+- Verification:
+  - `make partition_poly_7`
+  - `make partition_poly`
+  - `make partition_count4`
+  - `make connected_canon_lookup_gen`
+- Interpretation:
+  - this is a small but repeatable end-to-end win on full `6x6`
+  - the short `7x5` slice is dominated by scheduler/timing noise at this magnitude
+  - the change is local and low-risk because it preserves the existing dense-row fallback for non-dense vertex masks
+- Outcome: accepted on `main`.

@@ -386,28 +386,29 @@ static void small_graph_lookup_factorise_tables(void) {
 #endif
 }
 
-static uint32_t small_graph_pack_mask_from_rows(const uint8_t* rows, int n) {
+static inline uint32_t small_graph_pack_mask_from_row_values(const AdjWord* rows, int n) {
     uint32_t mask = 0;
     int bit = 0;
     for (int j = 1; j < n; j++) {
-        for (int i = 0; i < j; i++, bit++) {
-            if ((rows[i] >> j) & 1U) mask |= 1U << bit;
-        }
+        mask |= (uint32_t)(((uint64_t)rows[j] & graph_row_mask(j)) << bit);
+        bit += j;
     }
     return mask;
 }
 
+static uint32_t small_graph_pack_mask_from_rows(const uint8_t* rows, int n) {
+    AdjWord dense_rows[SMALL_GRAPH_LOOKUP_MAX_N];
+    for (int i = 0; i < n; i++) dense_rows[i] = rows[i];
+    return small_graph_pack_mask_from_row_values(dense_rows, n);
+}
+
 uint32_t small_graph_pack_mask(const Graph* g) {
+    if (g->vertex_mask == graph_row_mask(g->n)) {
+        return small_graph_pack_mask_from_row_values(g->adj, g->n);
+    }
     AdjWord rows[MAXN_NAUTY];
     uint32_t n = graph_build_dense_rows(g, rows);
-    uint32_t mask = 0;
-    int bit = 0;
-    for (uint32_t j = 1; j < n; j++) {
-        for (uint32_t i = 0; i < j; i++, bit++) {
-            if (((uint64_t)rows[i] >> j) & 1ULL) mask |= 1U << bit;
-        }
-    }
-    return mask;
+    return small_graph_pack_mask_from_row_values(rows, (int)n);
 }
 
 uint64_t graph_pack_upper_mask64(const Graph* g) {
