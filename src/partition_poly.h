@@ -97,6 +97,14 @@ typedef uint64_t AdjWord;
 #define RAW_CACHE_PROBE 8
 #endif
 
+#ifndef DEFAULT_HARD_CACHE_BITS
+#define DEFAULT_HARD_CACHE_BITS 0
+#endif
+
+#ifndef DEFAULT_HARD_CACHE_MAX_ENTRIES
+#define DEFAULT_HARD_CACHE_MAX_ENTRIES 0
+#endif
+
 #ifndef FIXED_PREFIX2_BATCH_SIZE
 #define FIXED_PREFIX2_BATCH_SIZE 16
 #endif

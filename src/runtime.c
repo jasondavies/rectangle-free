@@ -54,11 +54,14 @@ typedef struct {
     pthread_mutex_t alloc_lock;
     HardGraphCacheSlab* slabs;
     HardGraphCacheSlab* active_slab;
+    size_t entry_count;
+    size_t max_entries;
     int enabled;
     int use_locks;
     atomic_uint_fast64_t lookups;
     atomic_uint_fast64_t hits;
     atomic_uint_fast64_t stores;
+    atomic_uint_fast64_t skipped_stores;
     atomic_uint_fast64_t duplicate_stores;
 } HardGraphCache;
 
@@ -164,9 +167,15 @@ static int hard_graph_cache_entry_matches(const HardGraphCacheEntry* entry, uint
     return memcmp(entry->sig, sig, (size_t)words * sizeof(uint64_t)) == 0;
 }
 
-static HardGraphCacheEntry* hard_graph_cache_alloc_entry(void) {
+static HardGraphCacheEntry* hard_graph_cache_alloc_entry(int* capacity_full) {
     HardGraphCache* cache = &g_hard_graph_cache;
+    *capacity_full = 0;
     if (cache->use_locks) pthread_mutex_lock(&cache->alloc_lock);
+    if (cache->max_entries && cache->entry_count >= cache->max_entries) {
+        *capacity_full = 1;
+        if (cache->use_locks) pthread_mutex_unlock(&cache->alloc_lock);
+        return NULL;
+    }
     if (!cache->active_slab || cache->active_slab->used == HARD_GRAPH_CACHE_SLAB_ENTRIES) {
         HardGraphCacheSlab* slab = (HardGraphCacheSlab*)malloc(sizeof(*slab));
         if (!slab) {
@@ -179,26 +188,53 @@ static HardGraphCacheEntry* hard_graph_cache_alloc_entry(void) {
         cache->active_slab = slab;
     }
     HardGraphCacheEntry* entry = &cache->active_slab->entries[cache->active_slab->used++];
+    cache->entry_count++;
     if (cache->use_locks) pthread_mutex_unlock(&cache->alloc_lock);
     return entry;
 }
 
 int hard_graph_cache_init_from_env(void) {
     const char* bits_env = getenv("RECT_HARD_CACHE_BITS");
-    if (!bits_env || !*bits_env) return 1;
-
+    int explicit_bits = bits_env && *bits_env;
     char* end = NULL;
     errno = 0;
-    unsigned long bits = strtoul(bits_env, &end, 10);
-    if (errno || end == bits_env || *end != '\0' || bits < 10 || bits > 31) {
-        fprintf(stderr, "Invalid RECT_HARD_CACHE_BITS=%s; expected an integer in [10, 31]\n",
-                bits_env);
+    unsigned long bits = DEFAULT_HARD_CACHE_BITS;
+    if (explicit_bits) {
+        bits = strtoul(bits_env, &end, 10);
+        if (errno || end == bits_env || *end != '\0') {
+            fprintf(stderr,
+                    "Invalid RECT_HARD_CACHE_BITS=%s; expected 0 or an integer in [10, 31]\n",
+                    bits_env);
+            return 0;
+        }
+    }
+    if (!explicit_bits && bits != 0 && g_rows < 7) return 1;
+    if (bits == 0) return 1;
+    if (bits < 10 || bits > 31) {
+        fprintf(stderr,
+                "Invalid hard cache bit count %lu; expected 0 or an integer in [10, 31]\n",
+                bits);
         return 0;
+    }
+
+    const char* max_entries_env = getenv("RECT_HARD_CACHE_MAX_ENTRIES");
+    unsigned long long max_entries = DEFAULT_HARD_CACHE_MAX_ENTRIES;
+    if (max_entries_env && *max_entries_env) {
+        char* max_end = NULL;
+        errno = 0;
+        max_entries = strtoull(max_entries_env, &max_end, 10);
+        if (errno || max_end == max_entries_env || *max_end != '\0') {
+            fprintf(stderr,
+                    "Invalid RECT_HARD_CACHE_MAX_ENTRIES=%s; expected a non-negative integer\n",
+                    max_entries_env);
+            return 0;
+        }
     }
 
     HardGraphCache* cache = &g_hard_graph_cache;
     cache->bucket_count = (size_t)1ULL << bits;
     cache->mask = (uint64_t)cache->bucket_count - 1ULL;
+    cache->max_entries = (size_t)max_entries;
     cache->buckets = (HardGraphCacheEntry**)calloc(cache->bucket_count, sizeof(cache->buckets[0]));
     if (!cache->buckets) {
         fprintf(stderr, "Failed to allocate hard graph cache buckets (%zu entries)\n",
@@ -212,12 +248,13 @@ int hard_graph_cache_init_from_env(void) {
     atomic_store_explicit(&cache->lookups, 0, memory_order_relaxed);
     atomic_store_explicit(&cache->hits, 0, memory_order_relaxed);
     atomic_store_explicit(&cache->stores, 0, memory_order_relaxed);
+    atomic_store_explicit(&cache->skipped_stores, 0, memory_order_relaxed);
     atomic_store_explicit(&cache->duplicate_stores, 0, memory_order_relaxed);
     cache->enabled = 1;
     cache->use_locks = omp_get_max_threads() > 1;
 
-    printf("Hard graph cache: enabled, buckets=%zu, locks=%s\n", cache->bucket_count,
-           cache->use_locks ? "on" : "off");
+    printf("Hard graph cache: enabled, buckets=%zu, max_entries=%zu, locks=%s\n",
+           cache->bucket_count, cache->max_entries, cache->use_locks ? "on" : "off");
     return 1;
 }
 
@@ -262,10 +299,15 @@ void hard_graph_cache_store(uint64_t hash, const Graph* g, const GraphResult* va
         }
     }
 
-    HardGraphCacheEntry* entry = hard_graph_cache_alloc_entry();
+    int capacity_full = 0;
+    HardGraphCacheEntry* entry = hard_graph_cache_alloc_entry(&capacity_full);
     if (!entry) {
         if (cache->use_locks) pthread_mutex_unlock(lock);
-        fprintf(stderr, "Failed to allocate hard graph cache entry\n");
+        if (capacity_full) {
+            atomic_fetch_add_explicit(&cache->skipped_stores, 1, memory_order_relaxed);
+        } else {
+            fprintf(stderr, "Failed to allocate hard graph cache entry\n");
+        }
         return;
     }
     entry->next = cache->buckets[bucket];
@@ -285,12 +327,16 @@ void hard_graph_cache_close(void) {
     uint64_t lookups = atomic_load_explicit(&cache->lookups, memory_order_relaxed);
     uint64_t hits = atomic_load_explicit(&cache->hits, memory_order_relaxed);
     uint64_t stores = atomic_load_explicit(&cache->stores, memory_order_relaxed);
+    uint64_t skipped_stores =
+        atomic_load_explicit(&cache->skipped_stores, memory_order_relaxed);
     uint64_t duplicate_stores =
         atomic_load_explicit(&cache->duplicate_stores, memory_order_relaxed);
     double hit_rate = lookups ? (100.0 * (double)hits / (double)lookups) : 0.0;
-    printf("Hard graph cache hits: %llu/%llu (%.1f%%), stores=%llu, duplicate stores=%llu\n",
+    printf("Hard graph cache hits: %llu/%llu (%.1f%%), stores=%llu, skipped stores=%llu, "
+           "duplicate stores=%llu\n",
            (unsigned long long)hits, (unsigned long long)lookups, hit_rate,
-           (unsigned long long)stores, (unsigned long long)duplicate_stores);
+           (unsigned long long)stores, (unsigned long long)skipped_stores,
+           (unsigned long long)duplicate_stores);
 
     HardGraphCacheSlab* slab = cache->slabs;
     while (slab) {

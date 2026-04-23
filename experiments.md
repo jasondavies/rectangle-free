@@ -7640,3 +7640,50 @@
   - a persistent/read-mostly cache remains plausible because cross-shard overlap is measurable, but it should use a compact file format rather than dumping the current in-memory table
   - next useful step is a multi-thread benchmark with a smaller task sample to measure lock contention and shared-table benefit
 - Outcome: accepted as opt-in instrumentation/cache path on `main`.
+
+### Experiment 185: Default hard-graph cache for 7-row polynomial runs
+- Goal: make the hard-graph cache the default where it was measured to help, without making smaller-grid runs pay the memory cost.
+- Change:
+  - add compile-time defaults `DEFAULT_HARD_CACHE_BITS` and `DEFAULT_HARD_CACHE_MAX_ENTRIES`
+  - set the `partition_poly_7` default to `DEFAULT_HARD_CACHE_BITS=22` and `DEFAULT_HARD_CACHE_MAX_ENTRIES=2000000`
+  - apply the compile-time default only when `g_rows >= 7`
+  - keep `RECT_HARD_CACHE_BITS=0` as an explicit opt-out
+  - add `RECT_HARD_CACHE_MAX_ENTRIES` for runtime cap override; `0` means unlimited
+- Benchmark setup:
+  - command:
+    - `/usr/bin/time -f "time_wall=%e maxrss_kb=%M" env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 5 --prefix-depth 2 --task-start 2 --task-end 4`
+  - no hard-cache environment variables were set
+- Timing:
+  - default-cache run: `62.85s`, max RSS `1000960 KiB`
+  - previous disabled-cache mean from Experiment 184: `68.765 s`
+  - summary: the default path preserves the measured hard-cache win, about `1.094x` faster than disabled on this shard
+- Runtime counters:
+  - hard-cache hits: `1,167,042 / 2,995,360` lookups (`39.0%`)
+  - hard-cache stores: `1,828,318`
+  - skipped stores: `0`, so the `2,000,000` entry cap did not affect this shard
+  - canonicalisation calls remained at the opt-in-cache level: `10,071,998`
+- Guardrail check:
+  - full `6x6` through `partition_poly_7` did not enable the hard cache because `g_rows < 7`
+  - command:
+    - `/usr/bin/time -f "time_wall=%e maxrss_kb=%M" env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly_7 6 6 --prefix-depth 2`
+  - result: `14.70s`, max RSS `3677696 KiB`, no hard-cache banner
+  - key values matched:
+    - `P(4) = 203716633441803914880`
+    - `P(5) = 2852707805646422930409600`
+- Correctness:
+  - default-cache `7x5 --task-start 2 --task-end 4` matched the previous polynomial and key values:
+    - `P(4) = 3686405505703603200`
+    - `P(5) = 8917506514720645632000`
+  - `RECT_HARD_CACHE_BITS=0` on `4x4` disabled the cache and matched `P(4) = 2545607472`
+  - explicit `RECT_HARD_CACHE_BITS=12` on `4x4` enabled the cache and matched `P(4) = 2545607472`
+  - fixed-4 `4x4` returned `2545607472`
+- Verification:
+  - `make partition_poly_7`
+  - `make partition_count4`
+  - `make partition_poly`
+  - `make connected_canon_lookup_gen`
+- Interpretation:
+  - making the cache default is reasonable for 7-row polynomial runs as long as it remains bounded and easy to disable
+  - the default cap is high enough for the measured high-reuse shard, but long 7-row runs may hit it; cache-close counters report skipped stores so this is visible
+  - smaller grids keep the previous default behaviour unless the cache is explicitly requested
+- Outcome: accepted on `main`.
