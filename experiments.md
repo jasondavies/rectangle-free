@@ -7548,3 +7548,46 @@
   - the upper-mask row-value packer also removes a branchy per-edge pack loop on the connected-canonical lookup path
   - the change is local and preserves the existing sparse fallback for non-dense `vertex_mask` values
 - Outcome: accepted on `main`.
+
+### Experiment 183: Avoid full `GraphPoly` copies in hot helper paths
+- Goal: reduce memory traffic from copying entire `GraphPoly` structs when only live coefficients are meaningful.
+- Background:
+  - `graph_poly_mul_linear_ref(c == 0)` is used as multiplication by `x`
+  - the in-place path copied the full `GraphPoly` to a temporary, incremented `x_pow`, then copied the full struct back
+  - monomial and degree-1 multiply helper paths also copied full structs when resolving aliasing through a temporary
+- Change:
+  - add `graph_poly_copy_live()` to copy only metadata and `deg + 1` coefficients
+  - make in-place `graph_poly_mul_linear_ref(c == 0)` increment `x_pow` directly
+  - use live-copy assignment for aliasing exits in monomial and `mul_div_x` helper paths
+- Benchmark setup:
+  - baseline: previous commit (`aa495fd`), preserved as `/tmp/partition_poly_7_aa495fd`
+  - experiment: current working tree with live `GraphPoly` copy helpers
+  - benchmarks were run sequentially with no concurrent all-core runs
+  - primary command:
+    - `/usr/bin/time -f "%e" env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly_7 6 6 >/dev/null`
+- Primary timings:
+  - baseline raw runs: `14.59`, `14.80`, `14.56` seconds
+  - baseline mean: `14.650 s`
+  - experiment raw runs: `14.39`, `14.61`, `14.48` seconds
+  - experiment mean: `14.493 s`
+  - summary: experiment ran `1.011x` faster, about a `1.1%` wall-time reduction on full `6x6`
+- Secondary check:
+  - command: `/usr/bin/time -f "%e" env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-end 1 >/dev/null`
+  - baseline: `1.27s`
+  - experiment: `1.22s`
+- Correctness:
+  - exact full `6x6` polynomial/value lines matched the baseline
+  - key values matched:
+    - `P(4) = 203716633441803914880`
+    - `P(5) = 2852707805646422930409600`
+  - the bounded `7x5 --task-end 1` polynomial/value lines also matched the baseline
+- Verification:
+  - `make partition_poly_7`
+  - `make partition_poly`
+  - `make partition_count4`
+  - `make connected_canon_lookup_gen`
+- Interpretation:
+  - the win is modest but repeatable across three full `6x6` runs
+  - avoiding full 1 KiB-ish `GraphPoly` copies matters in the simplification and decomposition helper paths
+  - this also makes the intended invariant clearer: coefficients above `deg` are not semantically live
+- Outcome: accepted on `main`.
