@@ -7717,6 +7717,35 @@
   - the normal runtime cache path remains unchanged, so this does not alter graph-solver behaviour or cache hit semantics for workers
 - Outcome: accepted on `main`.
 
+### Experiment 188: Memory-map persistent hard-cache loads
+- Goal: remove the remaining per-field `fread()` overhead from `RECT_HARD_CACHE_LOAD` after Experiment 187 made insertion cheaper.
+- Change:
+  - load persistent hard-cache files with `mmap(PROT_READ, MAP_PRIVATE)`
+  - parse the existing native binary format directly from a bounds-checked byte reader
+  - keep the write path unchanged
+  - remove the now-unused `fread()` loader helpers
+- Benchmark setup:
+  - same isolated load-only command as Experiment 187:
+    - `/usr/bin/time -f "time_wall=%e maxrss_kb=%M" env RECT_PROGRESS_STEP=1000000 RECT_HARD_CACHE_LOAD=/tmp/hardcache_7x5_2_4.rhc RECT_HARD_CACHE_MAX_ENTRIES=3000000 OMP_NUM_THREADS=32 ./partition_poly_7 7 5 --prefix-depth 2 --task-start 2 --task-end 2`
+  - cache file: `366 MiB`, `1,828,318` records
+- Timing:
+  - Experiment 187 baseline repeats: `1.54s`, `1.53s` wall
+  - mmap parser repeats: `1.08s`, `1.11s` wall
+  - summary: mmap loading ran about `1.40x` faster than the fast-insert baseline, and about `1.51x` faster than the original `1.65s` load path from Experiment 187
+- Tradeoff:
+  - max RSS during the load-only run increased from about `1.02 GiB` to about `1.21 GiB`
+  - that is a transient startup footprint from mapping and faulting the cache file while the in-memory table is being built
+- Correctness:
+  - `4x4` polynomial load smoke test reported `1/1` hard-cache hits and produced:
+    - `P(4) = 52293528`
+    - `P(5) = 1231294680`
+- Verification:
+  - `make partition_poly_7 partition_poly partition_count4 connected_canon_lookup_gen`
+- Interpretation:
+  - this is still a startup-only improvement, but it makes persistent exact-cache workflows noticeably cheaper before worker timing begins
+  - the memory tradeoff is acceptable for the current large-cache workflow, but it should be kept in mind on memory-constrained machines or when loading much larger precomputed caches
+- Outcome: accepted on `main`.
+
 ## 2026-04-19
 
 ### Experiment 189: Specialise nauty pack/unpack for `m == 1` and fuse canonical rebuild/hash

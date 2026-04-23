@@ -1,5 +1,9 @@
 #include "partition_poly.h"
 
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+
 PrefixId* g_live_prefix2_i = NULL;
 PrefixId* g_live_prefix2_j = NULL;
 long long g_live_prefix2_count = 0;
@@ -82,14 +86,21 @@ static int checked_fwrite(const void* ptr, size_t size, size_t count, FILE* f,
     return 0;
 }
 
-static int checked_fread(void* ptr, size_t size, size_t count, FILE* f, const char* label) {
-    if (fread(ptr, size, count, f) == count) return 1;
-    if (feof(f)) {
-        fprintf(stderr, "Unexpected EOF while reading %s\n", label);
-    } else {
-        fprintf(stderr, "Failed to read %s: %s\n", label, strerror(errno));
+typedef struct {
+    const uint8_t* cur;
+    const uint8_t* end;
+    const char* path;
+} HardGraphCacheReader;
+
+static int hard_graph_cache_read_bytes(HardGraphCacheReader* reader, void* dst,
+                                       size_t len, const char* label) {
+    if ((size_t)(reader->end - reader->cur) < len) {
+        fprintf(stderr, "Unexpected EOF while reading %s from %s\n", label, reader->path);
+        return 0;
     }
-    return 0;
+    memcpy(dst, reader->cur, len);
+    reader->cur += len;
+    return 1;
 }
 
 int hard_miss_log_init_from_env(void) {
@@ -173,7 +184,7 @@ static int hard_graph_cache_write_file_header(FILE* f) {
            checked_fwrite(&coeff_size, sizeof(coeff_size), 1, f, "hard-cache coeff size");
 }
 
-static int hard_graph_cache_read_file_header(FILE* f, const char* path) {
+static int hard_graph_cache_read_file_header_mapped(HardGraphCacheReader* reader) {
     unsigned char magic[8];
     uint32_t version = 0;
     uint32_t count_k4 = 0;
@@ -184,15 +195,17 @@ static int hard_graph_cache_read_file_header(FILE* f, const char* path) {
     uint32_t result_size = 0;
     uint32_t coeff_size = 0;
 
-    if (!checked_fread(magic, sizeof(magic), 1, f, "hard-cache magic") ||
-        !checked_fread(&version, sizeof(version), 1, f, "hard-cache version") ||
-        !checked_fread(&count_k4, sizeof(count_k4), 1, f, "hard-cache mode") ||
-        !checked_fread(&max_rows, sizeof(max_rows), 1, f, "hard-cache max rows") ||
-        !checked_fread(&max_cols, sizeof(max_cols), 1, f, "hard-cache max cols") ||
-        !checked_fread(&maxn, sizeof(maxn), 1, f, "hard-cache maxn") ||
-        !checked_fread(&sig_words, sizeof(sig_words), 1, f, "hard-cache sig words") ||
-        !checked_fread(&result_size, sizeof(result_size), 1, f, "hard-cache result size") ||
-        !checked_fread(&coeff_size, sizeof(coeff_size), 1, f, "hard-cache coeff size")) {
+    if (!hard_graph_cache_read_bytes(reader, magic, sizeof(magic), "hard-cache magic") ||
+        !hard_graph_cache_read_bytes(reader, &version, sizeof(version), "hard-cache version") ||
+        !hard_graph_cache_read_bytes(reader, &count_k4, sizeof(count_k4), "hard-cache mode") ||
+        !hard_graph_cache_read_bytes(reader, &max_rows, sizeof(max_rows), "hard-cache max rows") ||
+        !hard_graph_cache_read_bytes(reader, &max_cols, sizeof(max_cols), "hard-cache max cols") ||
+        !hard_graph_cache_read_bytes(reader, &maxn, sizeof(maxn), "hard-cache maxn") ||
+        !hard_graph_cache_read_bytes(reader, &sig_words, sizeof(sig_words), "hard-cache sig words") ||
+        !hard_graph_cache_read_bytes(reader, &result_size, sizeof(result_size),
+                                     "hard-cache result size") ||
+        !hard_graph_cache_read_bytes(reader, &coeff_size, sizeof(coeff_size),
+                                     "hard-cache coeff size")) {
         return 0;
     }
 
@@ -205,7 +218,8 @@ static int hard_graph_cache_read_file_header(FILE* f, const char* path) {
         sig_words != GRAPH_SIG_WORDS ||
         result_size != sizeof(GraphResult) ||
         coeff_size != sizeof(PolyCoeff)) {
-        fprintf(stderr, "Hard graph cache file %s is not compatible with this build\n", path);
+        fprintf(stderr, "Hard graph cache file %s is not compatible with this build\n",
+                reader->path);
         return 0;
     }
     return 1;
@@ -233,19 +247,23 @@ static int hard_graph_cache_write_value(FILE* f, const GraphResult* value) {
 #endif
 }
 
-static int hard_graph_cache_read_value(FILE* f, GraphResult* value) {
+static int hard_graph_cache_read_value_mapped(HardGraphCacheReader* reader,
+                                              GraphResult* value) {
 #if RECT_COUNT_K4
-    return checked_fread(value, sizeof(*value), 1, f, "hard-cache count4 value");
+    return hard_graph_cache_read_bytes(reader, value, sizeof(*value),
+                                       "hard-cache count4 value");
 #else
     uint8_t x_pow = 0;
     uint8_t deg = 0;
     uint16_t reserved = 0;
     uint32_t coeff_count = 0;
     memset(value, 0, sizeof(*value));
-    if (!checked_fread(&x_pow, sizeof(x_pow), 1, f, "hard-cache x_pow") ||
-        !checked_fread(&deg, sizeof(deg), 1, f, "hard-cache degree") ||
-        !checked_fread(&reserved, sizeof(reserved), 1, f, "hard-cache reserved") ||
-        !checked_fread(&coeff_count, sizeof(coeff_count), 1, f, "hard-cache coeff count")) {
+    if (!hard_graph_cache_read_bytes(reader, &x_pow, sizeof(x_pow), "hard-cache x_pow") ||
+        !hard_graph_cache_read_bytes(reader, &deg, sizeof(deg), "hard-cache degree") ||
+        !hard_graph_cache_read_bytes(reader, &reserved, sizeof(reserved),
+                                     "hard-cache reserved") ||
+        !hard_graph_cache_read_bytes(reader, &coeff_count, sizeof(coeff_count),
+                                     "hard-cache coeff count")) {
         return 0;
     }
     if (reserved != 0 || deg > MAXN_NAUTY || coeff_count != (uint32_t)deg + 1U) {
@@ -254,8 +272,9 @@ static int hard_graph_cache_read_value(FILE* f, GraphResult* value) {
     }
     value->x_pow = x_pow;
     value->deg = deg;
-    return checked_fread(value->coeffs, sizeof(value->coeffs[0]), coeff_count, f,
-                         "hard-cache coeffs");
+    return hard_graph_cache_read_bytes(reader, value->coeffs,
+                                       sizeof(value->coeffs[0]) * coeff_count,
+                                       "hard-cache coeffs");
 #endif
 }
 
@@ -397,27 +416,28 @@ static int hard_graph_cache_write_record(FILE* f, uint64_t hash, int n,
            hard_graph_cache_write_value(f, value);
 }
 
-static int hard_graph_cache_read_record(FILE* f, uint64_t* hash_out, int* n_out,
-                                        uint64_t sig_out[GRAPH_SIG_WORDS],
-                                        GraphResult* value_out, int* eof_out) {
+static int hard_graph_cache_read_record_mapped(HardGraphCacheReader* reader,
+                                               uint64_t* hash_out, int* n_out,
+                                               uint64_t sig_out[GRAPH_SIG_WORDS],
+                                               GraphResult* value_out, int* eof_out) {
     uint8_t record_n = 0;
     uint8_t sig_words = 0;
     uint16_t reserved = 0;
     *eof_out = 0;
     memset(sig_out, 0, sizeof(uint64_t) * GRAPH_SIG_WORDS);
 
-    size_t got = fread(&record_n, sizeof(record_n), 1, f);
-    if (got != 1) {
-        if (feof(f)) {
-            *eof_out = 1;
-            return 1;
-        }
-        fprintf(stderr, "Failed to read hard-cache record n: %s\n", strerror(errno));
-        return 0;
+    if (reader->cur == reader->end) {
+        *eof_out = 1;
+        return 1;
     }
-    if (!checked_fread(&sig_words, sizeof(sig_words), 1, f, "hard-cache record sig words") ||
-        !checked_fread(&reserved, sizeof(reserved), 1, f, "hard-cache record reserved") ||
-        !checked_fread(hash_out, sizeof(*hash_out), 1, f, "hard-cache record hash")) {
+    if (!hard_graph_cache_read_bytes(reader, &record_n, sizeof(record_n),
+                                     "hard-cache record n") ||
+        !hard_graph_cache_read_bytes(reader, &sig_words, sizeof(sig_words),
+                                     "hard-cache record sig words") ||
+        !hard_graph_cache_read_bytes(reader, &reserved, sizeof(reserved),
+                                     "hard-cache record reserved") ||
+        !hard_graph_cache_read_bytes(reader, hash_out, sizeof(*hash_out),
+                                     "hard-cache record hash")) {
         return 0;
     }
     if (reserved != 0 || record_n > MAXN_NAUTY || sig_words > GRAPH_SIG_WORDS ||
@@ -425,8 +445,9 @@ static int hard_graph_cache_read_record(FILE* f, uint64_t* hash_out, int* n_out,
         fprintf(stderr, "Invalid hard-cache record metadata\n");
         return 0;
     }
-    if (!checked_fread(sig_out, sizeof(sig_out[0]), sig_words, f, "hard-cache record sig") ||
-        !hard_graph_cache_read_value(f, value_out)) {
+    if (!hard_graph_cache_read_bytes(reader, sig_out, sizeof(sig_out[0]) * sig_words,
+                                     "hard-cache record sig") ||
+        !hard_graph_cache_read_value_mapped(reader, value_out)) {
         return 0;
     }
     *n_out = record_n;
@@ -434,13 +455,36 @@ static int hard_graph_cache_read_record(FILE* f, uint64_t* hash_out, int* n_out,
 }
 
 static int hard_graph_cache_load_file(const char* path) {
-    FILE* f = fopen(path, "rb");
-    if (!f) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
         fprintf(stderr, "Failed to open RECT_HARD_CACHE_LOAD=%s: %s\n", path, strerror(errno));
         return 0;
     }
-    if (!hard_graph_cache_read_file_header(f, path)) {
-        fclose(f);
+
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size <= 0) {
+        fprintf(stderr, "Failed to stat RECT_HARD_CACHE_LOAD=%s: %s\n", path, strerror(errno));
+        close(fd);
+        return 0;
+    }
+    size_t map_len = (size_t)st.st_size;
+    void* map = mmap(NULL, map_len, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (map == MAP_FAILED) {
+        fprintf(stderr, "Failed to mmap RECT_HARD_CACHE_LOAD=%s: %s\n", path, strerror(errno));
+        return 0;
+    }
+#ifdef MADV_SEQUENTIAL
+    madvise(map, map_len, MADV_SEQUENTIAL);
+#endif
+
+    HardGraphCacheReader reader = {
+        .cur = (const uint8_t*)map,
+        .end = (const uint8_t*)map + map_len,
+        .path = path,
+    };
+    if (!hard_graph_cache_read_file_header_mapped(&reader)) {
+        munmap(map, map_len);
         return 0;
     }
 
@@ -455,8 +499,8 @@ static int hard_graph_cache_load_file(const char* path) {
         uint64_t sig[GRAPH_SIG_WORDS];
         GraphResult value;
         int eof = 0;
-        if (!hard_graph_cache_read_record(f, &hash, &n, sig, &value, &eof)) {
-            fclose(f);
+        if (!hard_graph_cache_read_record_mapped(&reader, &hash, &n, sig, &value, &eof)) {
+            munmap(map, map_len);
             return 0;
         }
         if (eof) break;
@@ -474,13 +518,13 @@ static int hard_graph_cache_load_file(const char* path) {
             break;
         }
         if (insert_status < 0) {
-            fclose(f);
+            munmap(map, map_len);
             fprintf(stderr, "Failed to allocate hard graph cache entry while loading %s\n", path);
             return 0;
         }
         duplicates++;
     }
-    fclose(f);
+    munmap(map, map_len);
     atomic_fetch_add_explicit(&g_hard_graph_cache.loaded_entries, loaded, memory_order_relaxed);
     if (capacity_skips) {
         printf("Hard graph cache load: %s records=%llu, loaded=%llu, duplicates=%llu, capacity reached\n",
