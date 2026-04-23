@@ -7684,6 +7684,39 @@
   - loading still requires canonicalising terminal graphs before hard-cache lookup, so the next improvement would be a persistent raw/canonical cache layer or partial-state cache if we want to avoid more of the front-end work
 - Outcome: accepted on `main`.
 
+### Experiment 187: Fast startup insertion for persistent hard-cache loads
+- Goal: reduce persistent hard-cache load overhead by avoiding normal online-cache duplicate scans and lock traffic while the cache is being populated at process startup.
+- Rejected micro-candidate before this change:
+  - reusing the hard-cache graph signature between lookup and store removed one repack on hard misses, but did not improve the `7x5 --task-start 2 --task-end 4` benchmark
+  - baseline from Experiment 186: `61.56s` wall
+  - candidate: `61.62s` wall with identical hard-cache counters
+  - outcome: reverted as noise/regression
+- Change:
+  - split hard-cache slab allocation into an unlocked helper
+  - add a startup-only fresh insert path for `RECT_HARD_CACHE_LOAD`
+  - use that path only when loading into an empty cache, before any worker threads can access it
+  - preserve the normal locked duplicate-checking insert path for runtime stores
+- Benchmark setup:
+  - isolated load-only command with no selected tasks:
+    - `/usr/bin/time -f "time_wall=%e maxrss_kb=%M" env RECT_PROGRESS_STEP=1000000 RECT_HARD_CACHE_LOAD=/tmp/hardcache_7x5_2_4.rhc RECT_HARD_CACHE_MAX_ENTRIES=3000000 OMP_NUM_THREADS=32 ./partition_poly_7 7 5 --prefix-depth 2 --task-start 2 --task-end 2`
+  - cache file: `366 MiB`, `1,828,318` records from Experiment 186
+- Timing:
+  - baseline: `1.65s` wall, loaded `1,828,318` records
+  - experiment repeats: `1.54s`, `1.53s` wall, loaded `1,828,318` records
+  - summary: load-only startup time improved by about `1.08x`, roughly a `7%` wall-time reduction for this cache file
+- Correctness:
+  - `4x4` polynomial load smoke test reported `1/1` hard-cache hits and produced the expected shard values:
+    - `P(4) = 52293528`
+    - `P(5) = 1231294680`
+- Verification:
+  - `make partition_poly_7`
+  - `make partition_poly partition_count4 connected_canon_lookup_gen`
+- Interpretation:
+  - this is a startup-only improvement; worker time excludes hard-cache loading, so ordinary no-load runs are unaffected
+  - the win is small in absolute terms on a `366 MiB` file, but it is deterministic and scales with preloaded cache size
+  - the normal runtime cache path remains unchanged, so this does not alter graph-solver behaviour or cache hit semantics for workers
+- Outcome: accepted on `main`.
+
 ## 2026-04-19
 
 ### Experiment 189: Specialise nauty pack/unpack for `m == 1` and fuse canonical rebuild/hash

@@ -293,19 +293,16 @@ static int hard_graph_cache_entry_matches(const HardGraphCacheEntry* entry, uint
     return memcmp(entry->sig, sig, (size_t)words * sizeof(uint64_t)) == 0;
 }
 
-static HardGraphCacheEntry* hard_graph_cache_alloc_entry(int* capacity_full) {
+static HardGraphCacheEntry* hard_graph_cache_alloc_entry_unlocked(int* capacity_full) {
     HardGraphCache* cache = &g_hard_graph_cache;
     *capacity_full = 0;
-    if (cache->use_locks) pthread_mutex_lock(&cache->alloc_lock);
     if (cache->max_entries && cache->entry_count >= cache->max_entries) {
         *capacity_full = 1;
-        if (cache->use_locks) pthread_mutex_unlock(&cache->alloc_lock);
         return NULL;
     }
     if (!cache->active_slab || cache->active_slab->used == HARD_GRAPH_CACHE_SLAB_ENTRIES) {
         HardGraphCacheSlab* slab = (HardGraphCacheSlab*)malloc(sizeof(*slab));
         if (!slab) {
-            if (cache->use_locks) pthread_mutex_unlock(&cache->alloc_lock);
             return NULL;
         }
         slab->next = cache->slabs;
@@ -315,8 +312,35 @@ static HardGraphCacheEntry* hard_graph_cache_alloc_entry(int* capacity_full) {
     }
     HardGraphCacheEntry* entry = &cache->active_slab->entries[cache->active_slab->used++];
     cache->entry_count++;
+    return entry;
+}
+
+static HardGraphCacheEntry* hard_graph_cache_alloc_entry(int* capacity_full) {
+    HardGraphCache* cache = &g_hard_graph_cache;
+    if (cache->use_locks) pthread_mutex_lock(&cache->alloc_lock);
+    HardGraphCacheEntry* entry = hard_graph_cache_alloc_entry_unlocked(capacity_full);
     if (cache->use_locks) pthread_mutex_unlock(&cache->alloc_lock);
     return entry;
+}
+
+static int hard_graph_cache_insert_signature_fresh(uint64_t hash, int n,
+                                                   const uint64_t sig[GRAPH_SIG_WORDS],
+                                                   const GraphResult* value,
+                                                   int* capacity_full) {
+    HardGraphCache* cache = &g_hard_graph_cache;
+    *capacity_full = 0;
+
+    HardGraphCacheEntry* entry = hard_graph_cache_alloc_entry_unlocked(capacity_full);
+    if (!entry) return -1;
+
+    uint64_t bucket = hard_graph_cache_index_mix(hash) & cache->mask;
+    entry->next = cache->buckets[bucket];
+    entry->hash = hash;
+    memcpy(entry->sig, sig, sizeof(uint64_t) * GRAPH_SIG_WORDS);
+    entry->value = *value;
+    entry->n = (uint8_t)n;
+    cache->buckets[bucket] = entry;
+    return 1;
 }
 
 static int hard_graph_cache_insert_signature(uint64_t hash, int n,
@@ -424,6 +448,7 @@ static int hard_graph_cache_load_file(const char* path) {
     uint64_t loaded = 0;
     uint64_t duplicates = 0;
     uint64_t capacity_skips = 0;
+    int fast_load = (g_hard_graph_cache.entry_count == 0);
     for (;;) {
         uint64_t hash = 0;
         int n = 0;
@@ -437,8 +462,9 @@ static int hard_graph_cache_load_file(const char* path) {
         if (eof) break;
         records++;
         int capacity_full = 0;
-        int insert_status =
-            hard_graph_cache_insert_signature(hash, n, sig, &value, 0, &capacity_full);
+        int insert_status = fast_load
+            ? hard_graph_cache_insert_signature_fresh(hash, n, sig, &value, &capacity_full)
+            : hard_graph_cache_insert_signature(hash, n, sig, &value, 0, &capacity_full);
         if (insert_status > 0) {
             loaded++;
             continue;
