@@ -1285,6 +1285,15 @@ int main(int argc, char** argv) {
         cleanup_run_config(&run);
         return 1;
     }
+    if (!hard_miss_log_init_from_env()) {
+        cleanup_run_config(&run);
+        return 1;
+    }
+    if (!hard_graph_cache_init_from_env()) {
+        hard_miss_log_close();
+        cleanup_run_config(&run);
+        return 1;
+    }
 
     double start_time = omp_get_wtime();
     if (run.total_tasks > 0) {
@@ -1321,6 +1330,8 @@ int main(int argc, char** argv) {
     print_execution_report(&run, &exec, &summary, worker_time);
     write_task_times_report();
     print_final_output(&opts, &run, &global_poly);
+    hard_graph_cache_close();
+    hard_miss_log_close();
 
     cleanup_run_config(&run);
 

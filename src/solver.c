@@ -510,6 +510,15 @@ void solve_graph_poly(const Graph* input_g, RowGraphCache* cache, RowGraphCache*
             goto done;
         }
 
+        if (hard_graph_cache_lookup(hash, &canon, &res)) {
+            store_row_graph_cache_entry(cache, hash, (uint32_t)canon.n, &canon,
+                                        (AdjWord)ADJWORD_MASK, &res);
+            solve_graph_store_raw_cache(&g, raw_cache, &key_rows, &res);
+            graph_result_set_count4(multiplier * graph_result_get_count4(&res), out_result);
+            outcome = SG_OUTCOME_CANON_HIT;
+            goto done;
+        }
+
         const Graph* branch_g = &canon;
         int max_deg = -1;
         for (int i = 0; i < branch_g->n; i++) {
@@ -517,9 +526,11 @@ void solve_graph_poly(const Graph* input_g, RowGraphCache* cache, RowGraphCache*
             if (d > max_deg) max_deg = d;
         }
         if (max_deg > 0) record_hard_graph_node(profile, branch_g->n, max_deg);
+        if (max_deg > 0) hard_miss_log_record(branch_g, hash, max_deg);
         outcome = SG_OUTCOME_HARD_MISS;
         uint64_t count4 = count_graph_4_dsat(branch_g);
         graph_result_set_count4(count4, &res);
+        hard_graph_cache_store(hash, &canon, &res);
         store_row_graph_cache_entry(cache, hash, (uint32_t)canon.n, &canon,
                                     (AdjWord)ADJWORD_MASK, &res);
 
@@ -636,6 +647,15 @@ done:
             goto done;
         }
 
+        if (hard_graph_cache_lookup(hash, &canon, &res)) {
+            store_row_graph_cache_entry(cache, hash, (uint32_t)canon.n, &canon,
+                                        (AdjWord)ADJWORD_MASK, &res);
+            solve_graph_store_raw_cache(&g, raw_cache, &key_rows, &res);
+            graph_poly_mul_ref(&multiplier, &res, out_result);
+            outcome = SG_OUTCOME_CANON_HIT;
+            goto done;
+        }
+
         // Deletion-contraction on canonical graph
         double hard_sep_t = 0.0;
         double hard_pick_t = 0.0;
@@ -654,6 +674,7 @@ done:
             hard_pick_t += omp_get_wtime() - phase_t0;
         }
         if (u != -1 && max_deg > 0) record_hard_graph_node(profile, branch_g->n, max_deg);
+        if (u != -1 && max_deg > 0) hard_miss_log_record(branch_g, hash, max_deg);
         outcome = SG_OUTCOME_HARD_MISS;
         if (PROFILE_BUILD && g_profile_separators && profile &&
             branch_g->n >= 10 && branch_g->n <= MAXN_NAUTY) {
@@ -717,6 +738,7 @@ done:
             for (int k = 0; k < branch_g->n; k++) graph_poly_mul_linear_ref(&res, 0, &res);
         }
 
+        hard_graph_cache_store(hash, &canon, &res);
         if (PROFILE_BUILD && profile && branch_g->n >= 0 && branch_g->n <= MAXN_NAUTY) {
             phase_t0 = omp_get_wtime();
         }

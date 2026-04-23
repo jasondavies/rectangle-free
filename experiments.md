@@ -7591,3 +7591,52 @@
   - avoiding full 1 KiB-ish `GraphPoly` copies matters in the simplification and decomposition helper paths
   - this also makes the intended invariant clearer: coefficients above `deg` are not semantically live
 - Outcome: accepted on `main`.
+
+### Experiment 184: Opt-in exact hard-graph cache
+- Goal: test whether canonical hard-graph solves are repeated enough to justify a larger shared solved-hard table, as a stepping stone toward a persistent cache.
+- Rejected prototypes before this change:
+  - fixed-4 colour-signature DP: validated on small grids, but `5x5` took `45.557s` with `1,807,714` states at depth 5 versus about `0.14s` for the existing fixed-4 path
+  - row-word clique counter: did not finish `5x5` within one minute, so it was dropped as a near-term path
+  - adjacent-only 2-cut decomposition: on `7x5 --task-end 2`, prototype timings `7.12`, `7.15`, `7.11` seconds regressed versus baseline `6.96`, `6.94`, `6.98` seconds
+- Measurement instrumentation:
+  - added optional `RECT_HARD_MISS_LOG=path` binary logging for canonical hard misses and `hard_miss_overlap.py` for overlap summaries
+  - sample commands used single-thread sequential runs, not concurrent benchmarks
+  - `7x5 --task-start 0 --task-end 2`: `169,768` records, `169,751` unique, duplicate record rate `0.01%`, worker time `7.01s` with logging
+  - `7x5 --task-start 2 --task-end 4`: `3,701,487` records, `1,828,318` unique, duplicate record rate `50.61%`, worker time `72.19s` with logging
+  - cross-shard overlap: `128,091` unique keys; `75.46%` of shard `0..2` keys appeared in shard `2..4`; `11.63%` of shard `2..4` hard-miss records would be covered by preloading shard `0..2`
+- Change:
+  - add opt-in `RECT_HARD_CACHE_BITS=N` exact in-process cache for canonical hard graph results
+  - store compact upper-triangle graph signatures plus `GraphResult`, not full row arrays
+  - share the table across threads, with lock striping enabled only when `omp_get_max_threads() > 1`
+  - keep the feature disabled by default because the memory footprint is significant
+- Benchmark setup:
+  - command:
+    - `/usr/bin/time -f "time_wall=%e maxrss_kb=%M" env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 5 --prefix-depth 2 --task-start 2 --task-end 4`
+  - enabled-cache command adds `RECT_HARD_CACHE_BITS=22`
+- Timings:
+  - disabled raw runs: `68.32`, `69.21` seconds, mean `68.765 s`, max RSS `196608 KiB`
+  - enabled raw runs: `61.80`, `62.11` seconds, mean `61.955 s`, max RSS about `1001 MiB`
+  - summary: enabled cache ran about `1.110x` faster, roughly a `9.9%` wall-time reduction on this high-reuse shard
+- Runtime counters:
+  - hard-cache hits: `1,167,042 / 2,995,360` lookups (`39.0%`)
+  - hard-cache stores: `1,828,318`
+  - canonicalisation calls dropped from `13,509,017` to `10,071,998`
+  - raw-cache hits were effectively unchanged
+- Correctness:
+  - enabled and disabled polynomial outputs matched for the benchmark shard
+  - key values matched:
+    - `P(4) = 3686405505703603200`
+    - `P(5) = 8917506514720645632000`
+  - `4x4` polynomial mode with and without `RECT_HARD_CACHE_BITS=12` matched `P(4) = 2545607472`
+  - fixed-4 `4x4` with `RECT_HARD_CACHE_BITS=12` returned `2545607472`
+- Verification:
+  - `make partition_poly_7`
+  - `make partition_count4`
+  - `make partition_poly`
+  - `make connected_canon_lookup_gen`
+  - `python3 hard_miss_overlap.py /tmp/hardmiss_7x5_0_2.bin /tmp/hardmiss_7x5_2_4.bin`
+- Interpretation:
+  - the reuse signal is real, but the memory cost is high: this is best treated as an opt-in tool for high-reuse shards
+  - a persistent/read-mostly cache remains plausible because cross-shard overlap is measurable, but it should use a compact file format rather than dumping the current in-memory table
+  - next useful step is a multi-thread benchmark with a smaller task sample to measure lock contention and shared-table benefit
+- Outcome: accepted as opt-in instrumentation/cache path on `main`.

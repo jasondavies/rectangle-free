@@ -665,6 +665,13 @@ int graph_collect_biconnected_components(const Graph* g, uint64_t* block_masks,
 int graph_has_articulation_point(const Graph* g);
 int graph_has_k2_separator(const Graph* g);
 uint64_t hash_graph(const Graph* g);
+int hard_miss_log_init_from_env(void);
+void hard_miss_log_record(const Graph* g, uint64_t hash, int max_degree);
+void hard_miss_log_close(void);
+int hard_graph_cache_init_from_env(void);
+int hard_graph_cache_lookup(uint64_t hash, const Graph* g, GraphResult* out);
+void hard_graph_cache_store(uint64_t hash, const Graph* g, const GraphResult* value);
+void hard_graph_cache_close(void);
 void nauty_workspace_init(NautyWorkspace* ws, int n);
 void nauty_workspace_free(NautyWorkspace* ws);
 void small_graph_lookup_init(void);
