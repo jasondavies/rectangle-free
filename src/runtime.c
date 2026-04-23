@@ -31,6 +31,10 @@ static uint64_t g_hard_miss_log_records = 0;
 
 #define HARD_GRAPH_CACHE_LOCKS 4096
 #define HARD_GRAPH_CACHE_SLAB_ENTRIES 32768
+#define HARD_GRAPH_CACHE_FILE_VERSION 1U
+
+static const unsigned char HARD_GRAPH_CACHE_FILE_MAGIC[8] =
+    {'R', 'H', 'C', 'A', 'C', 'H', '1', 0};
 
 typedef struct HardGraphCacheEntry {
     struct HardGraphCacheEntry* next;
@@ -52,10 +56,12 @@ typedef struct {
     uint64_t mask;
     pthread_mutex_t locks[HARD_GRAPH_CACHE_LOCKS];
     pthread_mutex_t alloc_lock;
+    pthread_mutex_t save_lock;
     HardGraphCacheSlab* slabs;
     HardGraphCacheSlab* active_slab;
     size_t entry_count;
     size_t max_entries;
+    FILE* save_file;
     int enabled;
     int use_locks;
     atomic_uint_fast64_t lookups;
@@ -63,6 +69,8 @@ typedef struct {
     atomic_uint_fast64_t stores;
     atomic_uint_fast64_t skipped_stores;
     atomic_uint_fast64_t duplicate_stores;
+    atomic_uint_fast64_t loaded_entries;
+    atomic_uint_fast64_t saved_entries;
 } HardGraphCache;
 
 static HardGraphCache g_hard_graph_cache = {0};
@@ -70,7 +78,17 @@ static HardGraphCache g_hard_graph_cache = {0};
 static int checked_fwrite(const void* ptr, size_t size, size_t count, FILE* f,
                           const char* label) {
     if (fwrite(ptr, size, count, f) == count) return 1;
-    fprintf(stderr, "Failed to write %s to hard-miss log\n", label);
+    fprintf(stderr, "Failed to write %s\n", label);
+    return 0;
+}
+
+static int checked_fread(void* ptr, size_t size, size_t count, FILE* f, const char* label) {
+    if (fread(ptr, size, count, f) == count) return 1;
+    if (feof(f)) {
+        fprintf(stderr, "Unexpected EOF while reading %s\n", label);
+    } else {
+        fprintf(stderr, "Failed to read %s: %s\n", label, strerror(errno));
+    }
     return 0;
 }
 
@@ -133,6 +151,114 @@ void hard_miss_log_close(void) {
     printf("Hard-miss log records: %llu\n", (unsigned long long)g_hard_miss_log_records);
 }
 
+static int hard_graph_cache_write_file_header(FILE* f) {
+    uint32_t version = HARD_GRAPH_CACHE_FILE_VERSION;
+    uint32_t count_k4 = RECT_COUNT_K4;
+    uint32_t max_rows = MAX_ROWS;
+    uint32_t max_cols = MAX_COLS;
+    uint32_t maxn = MAXN_NAUTY;
+    uint32_t sig_words = GRAPH_SIG_WORDS;
+    uint32_t result_size = sizeof(GraphResult);
+    uint32_t coeff_size = sizeof(PolyCoeff);
+
+    return checked_fwrite(HARD_GRAPH_CACHE_FILE_MAGIC, sizeof(HARD_GRAPH_CACHE_FILE_MAGIC), 1, f,
+                          "hard-cache magic") &&
+           checked_fwrite(&version, sizeof(version), 1, f, "hard-cache version") &&
+           checked_fwrite(&count_k4, sizeof(count_k4), 1, f, "hard-cache mode") &&
+           checked_fwrite(&max_rows, sizeof(max_rows), 1, f, "hard-cache max rows") &&
+           checked_fwrite(&max_cols, sizeof(max_cols), 1, f, "hard-cache max cols") &&
+           checked_fwrite(&maxn, sizeof(maxn), 1, f, "hard-cache maxn") &&
+           checked_fwrite(&sig_words, sizeof(sig_words), 1, f, "hard-cache sig words") &&
+           checked_fwrite(&result_size, sizeof(result_size), 1, f, "hard-cache result size") &&
+           checked_fwrite(&coeff_size, sizeof(coeff_size), 1, f, "hard-cache coeff size");
+}
+
+static int hard_graph_cache_read_file_header(FILE* f, const char* path) {
+    unsigned char magic[8];
+    uint32_t version = 0;
+    uint32_t count_k4 = 0;
+    uint32_t max_rows = 0;
+    uint32_t max_cols = 0;
+    uint32_t maxn = 0;
+    uint32_t sig_words = 0;
+    uint32_t result_size = 0;
+    uint32_t coeff_size = 0;
+
+    if (!checked_fread(magic, sizeof(magic), 1, f, "hard-cache magic") ||
+        !checked_fread(&version, sizeof(version), 1, f, "hard-cache version") ||
+        !checked_fread(&count_k4, sizeof(count_k4), 1, f, "hard-cache mode") ||
+        !checked_fread(&max_rows, sizeof(max_rows), 1, f, "hard-cache max rows") ||
+        !checked_fread(&max_cols, sizeof(max_cols), 1, f, "hard-cache max cols") ||
+        !checked_fread(&maxn, sizeof(maxn), 1, f, "hard-cache maxn") ||
+        !checked_fread(&sig_words, sizeof(sig_words), 1, f, "hard-cache sig words") ||
+        !checked_fread(&result_size, sizeof(result_size), 1, f, "hard-cache result size") ||
+        !checked_fread(&coeff_size, sizeof(coeff_size), 1, f, "hard-cache coeff size")) {
+        return 0;
+    }
+
+    if (memcmp(magic, HARD_GRAPH_CACHE_FILE_MAGIC, sizeof(magic)) != 0 ||
+        version != HARD_GRAPH_CACHE_FILE_VERSION ||
+        count_k4 != RECT_COUNT_K4 ||
+        max_rows != MAX_ROWS ||
+        max_cols != MAX_COLS ||
+        maxn != MAXN_NAUTY ||
+        sig_words != GRAPH_SIG_WORDS ||
+        result_size != sizeof(GraphResult) ||
+        coeff_size != sizeof(PolyCoeff)) {
+        fprintf(stderr, "Hard graph cache file %s is not compatible with this build\n", path);
+        return 0;
+    }
+    return 1;
+}
+
+static int hard_graph_cache_write_value(FILE* f, const GraphResult* value) {
+#if RECT_COUNT_K4
+    return checked_fwrite(value, sizeof(*value), 1, f, "hard-cache count4 value");
+#else
+    uint8_t x_pow = value->x_pow;
+    uint8_t deg = value->deg;
+    uint16_t reserved = 0;
+    uint32_t coeff_count = (uint32_t)value->deg + 1U;
+    if (value->deg > MAXN_NAUTY) {
+        fprintf(stderr, "Refusing to write invalid hard-cache GraphPoly degree %u\n",
+                (unsigned)value->deg);
+        return 0;
+    }
+    return checked_fwrite(&x_pow, sizeof(x_pow), 1, f, "hard-cache x_pow") &&
+           checked_fwrite(&deg, sizeof(deg), 1, f, "hard-cache degree") &&
+           checked_fwrite(&reserved, sizeof(reserved), 1, f, "hard-cache reserved") &&
+           checked_fwrite(&coeff_count, sizeof(coeff_count), 1, f, "hard-cache coeff count") &&
+           checked_fwrite(value->coeffs, sizeof(value->coeffs[0]), coeff_count, f,
+                          "hard-cache coeffs");
+#endif
+}
+
+static int hard_graph_cache_read_value(FILE* f, GraphResult* value) {
+#if RECT_COUNT_K4
+    return checked_fread(value, sizeof(*value), 1, f, "hard-cache count4 value");
+#else
+    uint8_t x_pow = 0;
+    uint8_t deg = 0;
+    uint16_t reserved = 0;
+    uint32_t coeff_count = 0;
+    memset(value, 0, sizeof(*value));
+    if (!checked_fread(&x_pow, sizeof(x_pow), 1, f, "hard-cache x_pow") ||
+        !checked_fread(&deg, sizeof(deg), 1, f, "hard-cache degree") ||
+        !checked_fread(&reserved, sizeof(reserved), 1, f, "hard-cache reserved") ||
+        !checked_fread(&coeff_count, sizeof(coeff_count), 1, f, "hard-cache coeff count")) {
+        return 0;
+    }
+    if (reserved != 0 || deg > MAXN_NAUTY || coeff_count != (uint32_t)deg + 1U) {
+        fprintf(stderr, "Invalid hard-cache GraphPoly metadata\n");
+        return 0;
+    }
+    value->x_pow = x_pow;
+    value->deg = deg;
+    return checked_fread(value->coeffs, sizeof(value->coeffs[0]), coeff_count, f,
+                         "hard-cache coeffs");
+#endif
+}
+
 static inline uint64_t hard_graph_cache_index_mix(uint64_t x) {
     x ^= x >> 33;
     x *= UINT64_C(0xff51afd7ed558ccd);
@@ -193,9 +319,177 @@ static HardGraphCacheEntry* hard_graph_cache_alloc_entry(int* capacity_full) {
     return entry;
 }
 
+static int hard_graph_cache_insert_signature(uint64_t hash, int n,
+                                             const uint64_t sig[GRAPH_SIG_WORDS],
+                                             const GraphResult* value,
+                                             int count_duplicate_store,
+                                             int* capacity_full) {
+    HardGraphCache* cache = &g_hard_graph_cache;
+    uint64_t bucket = hard_graph_cache_index_mix(hash) & cache->mask;
+    pthread_mutex_t* lock = &cache->locks[bucket & (HARD_GRAPH_CACHE_LOCKS - 1)];
+    *capacity_full = 0;
+
+    if (cache->use_locks) pthread_mutex_lock(lock);
+    for (HardGraphCacheEntry* entry = cache->buckets[bucket]; entry; entry = entry->next) {
+        if (hard_graph_cache_entry_matches(entry, hash, n, sig)) {
+            if (cache->use_locks) pthread_mutex_unlock(lock);
+            if (count_duplicate_store) {
+                atomic_fetch_add_explicit(&cache->duplicate_stores, 1, memory_order_relaxed);
+            }
+            return 0;
+        }
+    }
+
+    HardGraphCacheEntry* entry = hard_graph_cache_alloc_entry(capacity_full);
+    if (!entry) {
+        if (cache->use_locks) pthread_mutex_unlock(lock);
+        return -1;
+    }
+    entry->next = cache->buckets[bucket];
+    entry->hash = hash;
+    memcpy(entry->sig, sig, sizeof(uint64_t) * GRAPH_SIG_WORDS);
+    entry->value = *value;
+    entry->n = (uint8_t)n;
+    cache->buckets[bucket] = entry;
+    if (cache->use_locks) pthread_mutex_unlock(lock);
+    return 1;
+}
+
+static int hard_graph_cache_write_record(FILE* f, uint64_t hash, int n,
+                                         const uint64_t sig[GRAPH_SIG_WORDS],
+                                         const GraphResult* value) {
+    if (n < 0 || n > MAXN_NAUTY) {
+        fprintf(stderr, "Refusing to write invalid hard-cache record n=%d\n", n);
+        return 0;
+    }
+    uint8_t record_n = (uint8_t)n;
+    uint8_t sig_words = (uint8_t)hard_graph_cache_sig_words(n);
+    uint16_t reserved = 0;
+    return checked_fwrite(&record_n, sizeof(record_n), 1, f, "hard-cache record n") &&
+           checked_fwrite(&sig_words, sizeof(sig_words), 1, f, "hard-cache record sig words") &&
+           checked_fwrite(&reserved, sizeof(reserved), 1, f, "hard-cache record reserved") &&
+           checked_fwrite(&hash, sizeof(hash), 1, f, "hard-cache record hash") &&
+           checked_fwrite(sig, sizeof(sig[0]), sig_words, f, "hard-cache record sig") &&
+           hard_graph_cache_write_value(f, value);
+}
+
+static int hard_graph_cache_read_record(FILE* f, uint64_t* hash_out, int* n_out,
+                                        uint64_t sig_out[GRAPH_SIG_WORDS],
+                                        GraphResult* value_out, int* eof_out) {
+    uint8_t record_n = 0;
+    uint8_t sig_words = 0;
+    uint16_t reserved = 0;
+    *eof_out = 0;
+    memset(sig_out, 0, sizeof(uint64_t) * GRAPH_SIG_WORDS);
+
+    size_t got = fread(&record_n, sizeof(record_n), 1, f);
+    if (got != 1) {
+        if (feof(f)) {
+            *eof_out = 1;
+            return 1;
+        }
+        fprintf(stderr, "Failed to read hard-cache record n: %s\n", strerror(errno));
+        return 0;
+    }
+    if (!checked_fread(&sig_words, sizeof(sig_words), 1, f, "hard-cache record sig words") ||
+        !checked_fread(&reserved, sizeof(reserved), 1, f, "hard-cache record reserved") ||
+        !checked_fread(hash_out, sizeof(*hash_out), 1, f, "hard-cache record hash")) {
+        return 0;
+    }
+    if (reserved != 0 || record_n > MAXN_NAUTY || sig_words > GRAPH_SIG_WORDS ||
+        sig_words != hard_graph_cache_sig_words(record_n)) {
+        fprintf(stderr, "Invalid hard-cache record metadata\n");
+        return 0;
+    }
+    if (!checked_fread(sig_out, sizeof(sig_out[0]), sig_words, f, "hard-cache record sig") ||
+        !hard_graph_cache_read_value(f, value_out)) {
+        return 0;
+    }
+    *n_out = record_n;
+    return 1;
+}
+
+static int hard_graph_cache_load_file(const char* path) {
+    FILE* f = fopen(path, "rb");
+    if (!f) {
+        fprintf(stderr, "Failed to open RECT_HARD_CACHE_LOAD=%s: %s\n", path, strerror(errno));
+        return 0;
+    }
+    if (!hard_graph_cache_read_file_header(f, path)) {
+        fclose(f);
+        return 0;
+    }
+
+    uint64_t records = 0;
+    uint64_t loaded = 0;
+    uint64_t duplicates = 0;
+    uint64_t capacity_skips = 0;
+    for (;;) {
+        uint64_t hash = 0;
+        int n = 0;
+        uint64_t sig[GRAPH_SIG_WORDS];
+        GraphResult value;
+        int eof = 0;
+        if (!hard_graph_cache_read_record(f, &hash, &n, sig, &value, &eof)) {
+            fclose(f);
+            return 0;
+        }
+        if (eof) break;
+        records++;
+        int capacity_full = 0;
+        int insert_status =
+            hard_graph_cache_insert_signature(hash, n, sig, &value, 0, &capacity_full);
+        if (insert_status > 0) {
+            loaded++;
+            continue;
+        }
+        if (capacity_full) {
+            capacity_skips++;
+            break;
+        }
+        if (insert_status < 0) {
+            fclose(f);
+            fprintf(stderr, "Failed to allocate hard graph cache entry while loading %s\n", path);
+            return 0;
+        }
+        duplicates++;
+    }
+    fclose(f);
+    atomic_fetch_add_explicit(&g_hard_graph_cache.loaded_entries, loaded, memory_order_relaxed);
+    if (capacity_skips) {
+        printf("Hard graph cache load: %s records=%llu, loaded=%llu, duplicates=%llu, capacity reached\n",
+               path, (unsigned long long)records, (unsigned long long)loaded,
+               (unsigned long long)duplicates);
+    } else {
+        printf("Hard graph cache load: %s records=%llu, loaded=%llu, duplicates=%llu\n",
+               path, (unsigned long long)records, (unsigned long long)loaded,
+               (unsigned long long)duplicates);
+    }
+    return 1;
+}
+
+static int hard_graph_cache_open_save_file(const char* path) {
+    FILE* f = fopen(path, "wb");
+    if (!f) {
+        fprintf(stderr, "Failed to open RECT_HARD_CACHE_SAVE=%s: %s\n", path, strerror(errno));
+        return 0;
+    }
+    if (!hard_graph_cache_write_file_header(f)) {
+        fclose(f);
+        return 0;
+    }
+    g_hard_graph_cache.save_file = f;
+    printf("Hard graph cache save: %s\n", path);
+    return 1;
+}
+
 int hard_graph_cache_init_from_env(void) {
     const char* bits_env = getenv("RECT_HARD_CACHE_BITS");
+    const char* load_path = getenv("RECT_HARD_CACHE_LOAD");
+    const char* save_path = getenv("RECT_HARD_CACHE_SAVE");
     int explicit_bits = bits_env && *bits_env;
+    int has_load_path = load_path && *load_path;
+    int has_save_path = save_path && *save_path;
     char* end = NULL;
     errno = 0;
     unsigned long bits = DEFAULT_HARD_CACHE_BITS;
@@ -208,7 +502,9 @@ int hard_graph_cache_init_from_env(void) {
             return 0;
         }
     }
-    if (!explicit_bits && bits != 0 && g_rows < 7) return 1;
+    if (explicit_bits && bits == 0) return 1;
+    if (!explicit_bits && bits == 0 && (has_load_path || has_save_path)) bits = 22;
+    if (!explicit_bits && bits != 0 && g_rows < 7 && !has_load_path && !has_save_path) return 1;
     if (bits == 0) return 1;
     if (bits < 10 || bits > 31) {
         fprintf(stderr,
@@ -245,16 +541,27 @@ int hard_graph_cache_init_from_env(void) {
         pthread_mutex_init(&cache->locks[i], NULL);
     }
     pthread_mutex_init(&cache->alloc_lock, NULL);
+    pthread_mutex_init(&cache->save_lock, NULL);
     atomic_store_explicit(&cache->lookups, 0, memory_order_relaxed);
     atomic_store_explicit(&cache->hits, 0, memory_order_relaxed);
     atomic_store_explicit(&cache->stores, 0, memory_order_relaxed);
     atomic_store_explicit(&cache->skipped_stores, 0, memory_order_relaxed);
     atomic_store_explicit(&cache->duplicate_stores, 0, memory_order_relaxed);
+    atomic_store_explicit(&cache->loaded_entries, 0, memory_order_relaxed);
+    atomic_store_explicit(&cache->saved_entries, 0, memory_order_relaxed);
     cache->enabled = 1;
     cache->use_locks = omp_get_max_threads() > 1;
 
     printf("Hard graph cache: enabled, buckets=%zu, max_entries=%zu, locks=%s\n",
            cache->bucket_count, cache->max_entries, cache->use_locks ? "on" : "off");
+    if (has_load_path && !hard_graph_cache_load_file(load_path)) {
+        hard_graph_cache_close();
+        return 0;
+    }
+    if (has_save_path && !hard_graph_cache_open_save_file(save_path)) {
+        hard_graph_cache_close();
+        return 0;
+    }
     return 1;
 }
 
@@ -287,42 +594,34 @@ void hard_graph_cache_store(uint64_t hash, const Graph* g, const GraphResult* va
 
     uint64_t sig[GRAPH_SIG_WORDS];
     hard_graph_cache_signature(g, sig);
-    uint64_t bucket = hard_graph_cache_index_mix(hash) & cache->mask;
-    pthread_mutex_t* lock = &cache->locks[bucket & (HARD_GRAPH_CACHE_LOCKS - 1)];
-
-    if (cache->use_locks) pthread_mutex_lock(lock);
-    for (HardGraphCacheEntry* entry = cache->buckets[bucket]; entry; entry = entry->next) {
-        if (hard_graph_cache_entry_matches(entry, hash, g->n, sig)) {
-            if (cache->use_locks) pthread_mutex_unlock(lock);
-            atomic_fetch_add_explicit(&cache->duplicate_stores, 1, memory_order_relaxed);
-            return;
-        }
-    }
-
     int capacity_full = 0;
-    HardGraphCacheEntry* entry = hard_graph_cache_alloc_entry(&capacity_full);
-    if (!entry) {
-        if (cache->use_locks) pthread_mutex_unlock(lock);
+    int insert_status = hard_graph_cache_insert_signature(hash, g->n, sig, value, 1, &capacity_full);
+    if (insert_status <= 0) {
         if (capacity_full) {
             atomic_fetch_add_explicit(&cache->skipped_stores, 1, memory_order_relaxed);
-        } else {
+        } else if (insert_status < 0) {
             fprintf(stderr, "Failed to allocate hard graph cache entry\n");
         }
         return;
     }
-    entry->next = cache->buckets[bucket];
-    entry->hash = hash;
-    memcpy(entry->sig, sig, sizeof(uint64_t) * GRAPH_SIG_WORDS);
-    entry->value = *value;
-    entry->n = (uint8_t)g->n;
-    cache->buckets[bucket] = entry;
-    if (cache->use_locks) pthread_mutex_unlock(lock);
     atomic_fetch_add_explicit(&cache->stores, 1, memory_order_relaxed);
+
+    if (cache->save_file) {
+        pthread_mutex_lock(&cache->save_lock);
+        if (hard_graph_cache_write_record(cache->save_file, hash, g->n, sig, value)) {
+            atomic_fetch_add_explicit(&cache->saved_entries, 1, memory_order_relaxed);
+        }
+        pthread_mutex_unlock(&cache->save_lock);
+    }
 }
 
 void hard_graph_cache_close(void) {
     HardGraphCache* cache = &g_hard_graph_cache;
     if (!cache->enabled) return;
+    if (cache->save_file) {
+        fclose(cache->save_file);
+        cache->save_file = NULL;
+    }
 
     uint64_t lookups = atomic_load_explicit(&cache->lookups, memory_order_relaxed);
     uint64_t hits = atomic_load_explicit(&cache->hits, memory_order_relaxed);
@@ -331,12 +630,17 @@ void hard_graph_cache_close(void) {
         atomic_load_explicit(&cache->skipped_stores, memory_order_relaxed);
     uint64_t duplicate_stores =
         atomic_load_explicit(&cache->duplicate_stores, memory_order_relaxed);
+    uint64_t loaded_entries =
+        atomic_load_explicit(&cache->loaded_entries, memory_order_relaxed);
+    uint64_t saved_entries =
+        atomic_load_explicit(&cache->saved_entries, memory_order_relaxed);
     double hit_rate = lookups ? (100.0 * (double)hits / (double)lookups) : 0.0;
     printf("Hard graph cache hits: %llu/%llu (%.1f%%), stores=%llu, skipped stores=%llu, "
-           "duplicate stores=%llu\n",
+           "duplicate stores=%llu, loaded=%llu, saved=%llu\n",
            (unsigned long long)hits, (unsigned long long)lookups, hit_rate,
            (unsigned long long)stores, (unsigned long long)skipped_stores,
-           (unsigned long long)duplicate_stores);
+           (unsigned long long)duplicate_stores, (unsigned long long)loaded_entries,
+           (unsigned long long)saved_entries);
 
     HardGraphCacheSlab* slab = cache->slabs;
     while (slab) {
@@ -348,6 +652,7 @@ void hard_graph_cache_close(void) {
         pthread_mutex_destroy(&cache->locks[i]);
     }
     pthread_mutex_destroy(&cache->alloc_lock);
+    pthread_mutex_destroy(&cache->save_lock);
     free(cache->buckets);
     memset(cache, 0, sizeof(*cache));
 }
