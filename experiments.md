@@ -7340,3 +7340,48 @@
   - the bounded `7x5` result is a strong win, but should still be rechecked on larger full workloads after the next cache-size retune because the metadata arrays slightly increase cache footprint
   - this change also removes a correctness footgun from future solver-cache experiments
 - Outcome: accepted on `main`.
+
+### Experiment 178: Retune `partition_poly_7` raw-cache size after metadata payloads
+- Goal: retune the raw row-cache defaults after Experiment 177 added polynomial metadata arrays and re-enabled disconnected component-product raw-cache stores.
+- Background:
+  - the previous default was `RAW_CACHE_BITS=15`, `RAW_CACHE_PROBE=12`
+  - adding `x_pow` and `deg` metadata changes the per-entry footprint
+  - Experiment 177 also changed reuse shape by making more polynomial raw-cache stores safe
+  - therefore the old `15/12` local optimum was no longer guaranteed to be best
+- Benchmark command:
+  - `/usr/bin/time -f "%e" env OMP_NUM_THREADS=32 ./partition_poly_7 7 5 --task-end 1 >/dev/null`
+  - variants were compiled one at a time and benchmarks were run sequentially, not concurrently
+- One-run sweep:
+  - `14/8`: `1.13s`
+  - `14/12`: `1.12s`
+  - `14/16`: `1.10s`
+  - `15/8`: `1.22s`
+  - `15/12`: `1.18s`
+  - `15/16`: `1.17s`
+  - `16/8`: `1.27s`
+  - `16/12`: `1.20s`
+  - `16/16`: `1.23s`
+- Repeat benchmark:
+  - baseline `15/12`: `1.22`, `1.07`, `1.14` seconds, mean `1.143 s ± 0.075 s`
+  - candidate `14/16`: `1.13`, `1.06`, `1.05` seconds, mean `1.080 s ± 0.044 s`
+  - summary: candidate ran `1.06x` faster, about a `5.5%` wall-time reduction on this bounded shard
+- Secondary check:
+  - command: `/usr/bin/time -f "%e" env OMP_NUM_THREADS=32 ./partition_poly_7 6 6 --task-end 1 >/dev/null`
+  - baseline `15/12`: `0.80`, `0.81`, `0.78` seconds, mean `0.797 s`
+  - candidate `14/16`: `0.79`, `0.74`, `0.78` seconds, mean `0.770 s`
+  - candidate also edged out the old default on this shorter `6x6` shard
+- Correctness:
+  - exact `7x5 --task-end 1` values remained unchanged:
+    - `P(4) = 73015213753036800`
+    - `P(5) = 183220793650295755200`
+  - captured candidate counters:
+    - `Canonicalisation calls: 926988`
+    - `Canonical cache hits: 527668`
+    - `Raw cache hits: 1866942`
+- Change:
+  - set `PARTITION_POLY_7_CACHE_CFLAGS` to `-DRAW_CACHE_BITS=14 -DRAW_CACHE_PROBE=16`
+- Interpretation:
+  - the smaller cache likely wins because the added metadata and current access pattern make locality more important than total raw entry count on these bounded shards
+  - the deeper probe recovers enough hits within the smaller table to beat the old `15/12` setting
+  - this should still be periodically rechecked on full longer workloads, but it is the best current bounded-slice default
+- Outcome: accepted on `main`.
