@@ -23,6 +23,20 @@ static inline int canon_bucket_summary_word_count(int perm_word_count) {
     return (perm_word_count + 63) >> 6;
 }
 
+static inline long long row_orbit_for_stabilizer(int stabilizer) {
+    static __thread int cached_rows = -1;
+    static __thread long long table[MAX_PERMUTATIONS + 1];
+    if (stabilizer <= 0) return 0;
+    if (cached_rows != g_rows) {
+        uint64_t total = factorial[g_rows];
+        for (int s = 1; s <= perm_count; s++) {
+            table[s] = (long long)(total / (uint64_t)s);
+        }
+        cached_rows = g_rows;
+    }
+    return table[stabilizer];
+}
+
 static inline CanonPackedState canon_state_pack(uint8_t fg, uint16_t fg_val) {
     return (CanonPackedState)((CanonPackedState)fg |
                               ((CanonPackedState)fg_val << CANON_FG_BITS));
@@ -869,17 +883,18 @@ void canon_state_reset(CanonState* st, int limit) {
         equal_perm0[p] = (uint16_t)p;
     }
     memset(st->first_greater_state, 0, count * sizeof(*st->first_greater_state));
-    memset(st->first_greater_bucket_bits, 0, sizeof(st->first_greater_bucket_bits));
-    memset(st->first_greater_bucket_nonzero_words, 0, sizeof(st->first_greater_bucket_nonzero_words));
+    memset(st->first_greater_bucket_bits, 0,
+           (size_t)(g_cols + 1) * PERM_BITSET_WORDS * sizeof(uint64_t));
+    memset(st->first_greater_bucket_nonzero_words, 0,
+           (size_t)(g_cols + 1) * CANON_BUCKET_WORD_SUMMARY_WORDS * sizeof(uint64_t));
     memset(st->first_greater_value_bucket_nonempty_bits, 0,
-           sizeof(st->first_greater_value_bucket_nonempty_bits));
+           (size_t)(g_cols + 1) * CANON_VALUE_BUCKET_WORDS * sizeof(uint64_t));
     {
         size_t bucket_count = (size_t)(g_cols + 1) * (size_t)st->value_bucket_limit;
         memset(st->first_greater_value_bucket_count, 0,
                bucket_count * sizeof(*st->first_greater_value_bucket_count));
-        for (size_t i = 0; i < bucket_count; i++) {
-            st->first_greater_value_bucket_head[i] = CANON_NO_PERM;
-        }
+        memset(st->first_greater_value_bucket_head, 0xff,
+               bucket_count * sizeof(*st->first_greater_value_bucket_head));
     }
     for (int p = 0; p < limit; p++) {
         st->first_greater_value_next[p] = (p + 1 < limit) ? (uint16_t)(p + 1) : CANON_NO_PERM;
@@ -920,8 +935,10 @@ static int canon_state_prepare_push_selective(const CanonState* st, int partitio
     uint16_t* changed_first_greater_idx = scratch->changed_first_greater_idx;
     uint16_t next_equal_count = 0;
     uint16_t changed_first_greater_count = 0;
+#if RECT_PROFILE
     long long scanned_count = 0;
     long long active_count = 0;
+#endif
     CanonPackedState equal_state = canon_state_pack((uint8_t)depth, 0);
     int value_word_count = (st->value_bucket_limit + 63) >> 6;
 
@@ -931,8 +948,10 @@ static int canon_state_prepare_push_selective(const CanonState* st, int partitio
         uint8_t next_fg;
         uint16_t next_fg_val;
 
+#if RECT_PROFILE
         scanned_count++;
         active_count++;
+#endif
         if (x < pid) {
             if (prof) prof->canon_prepare_order_rejects_by_depth[depth]++;
             return 0;
@@ -990,8 +1009,10 @@ static int canon_state_prepare_push_selective(const CanonState* st, int partitio
                         uint8_t next_fg;
                         uint16_t next_fg_val;
 
+#if RECT_PROFILE
                         scanned_count++;
                         active_count++;
+#endif
                         if (__builtin_expect(x > c, 1)) {
                             next_fg = (uint8_t)g;
                             next_fg_val = x;
@@ -1035,8 +1056,10 @@ static int canon_state_prepare_push_selective(const CanonState* st, int partitio
                             continue;
                         }
 
+#if RECT_PROFILE
                         scanned_count++;
                         active_count++;
+#endif
                         if (__builtin_expect(x > c, 1)) {
                             next_fg = (uint8_t)g;
                             next_fg_val = x;
@@ -1077,9 +1100,11 @@ static int canon_state_prepare_push_selective(const CanonState* st, int partitio
     }
     scratch->next_equal_count = next_equal_count;
     scratch->changed_first_greater_count = changed_first_greater_count;
-    if (prof) {
+    if (RECT_PROFILE && prof) {
+#if RECT_PROFILE
         prof->canon_prepare_scanned_by_depth[depth] += scanned_count;
         prof->canon_prepare_active_by_depth[depth] += active_count;
+#endif
     }
     *next_stabilizer = stabilizer;
     return 1;
@@ -1249,10 +1274,18 @@ static int partial_graph_new_has_k5(const PartialGraphState* st) {
         }
     }
 
-    if (num_new >= 3) {
-        uint64_t common = old_mask;
-        for (int i = 0; i < 3; i++) common &= (uint64_t)st->g.adj[base_new + i];
-        if (contains_edge_mask(&st->g, common)) return 1;
+    for (int i = 0; i < num_new; i++) {
+        int a = base_new + i;
+        for (int j = i + 1; j < num_new; j++) {
+            int b = base_new + j;
+            for (int k = j + 1; k < num_new; k++) {
+                int c = base_new + k;
+                uint64_t common =
+                    old_mask & (uint64_t)st->g.adj[a] & (uint64_t)st->g.adj[b] &
+                    (uint64_t)st->g.adj[c];
+                if (contains_edge_mask(&st->g, common)) return 1;
+            }
+        }
     }
 
     return 0;
@@ -1454,6 +1487,7 @@ static int graph_component_colourable(const Graph* g, int8_t* out_colour) {
 static int partial_graph_is_feasible(const PartialGraphState* st, int cols_left) {
     if (cols_left <= 0) return 1;
     if (st->remaining_capacity < min_partition_pairs * cols_left) return 0;
+    if (partial_graph_new_has_k5(st)) return 0;
 
     Graph core;
     int peel_order[MAXN_NAUTY];
@@ -1465,8 +1499,6 @@ static int partial_graph_is_feasible(const PartialGraphState* st, int cols_left)
         memset(colour, -1, sizeof(colour));
         return extend_colouring_over_peel(&st->g, peel_order, peel_len, colour);
     }
-
-    if (partial_graph_new_has_k5(st)) return 0;
 
     int8_t core_colour[MAXN_NAUTY];
     if (!graph_component_colourable(&core, core_colour)) return 0;
@@ -1781,10 +1813,10 @@ static void dfs_fast_orbit(int depth, int min_idx, int* stack, CanonState* canon
         if (orbit_mark_bit_test(orbit_mark_bits, i)) {
             continue;
         }
-        canon_state_mark_orbit_nonreps(canon_state, min_idx, i, orbit_mark_bits);
         if (!partial_graph_candidate_can_fit(partial_graph, i, cols_left)) {
             continue;
         }
+        canon_state_mark_orbit_nonreps(canon_state, min_idx, i, orbit_mark_bits);
         int ok_prepare = is_terminal
             ? canon_state_prepare_terminal(canon_state, i, &next_stabilizer)
             : canon_state_prepare_push(canon_state, i, canon_scratch, &next_stabilizer);
@@ -1804,7 +1836,7 @@ static void dfs_fast_orbit(int depth, int min_idx, int* stack, CanonState* canon
                 next_mult_coeff /= next_run_len;
             }
             if (is_terminal) {
-                long long row_orbit = factorial[g_rows] / next_stabilizer;
+                long long row_orbit = row_orbit_for_stabilizer(next_stabilizer);
                 ResultAccum res;
                 solve_structure_with_row_orbit(&partial_graph->g, row_orbit, cache, raw_cache, ws,
                                                local_canon_calls, local_cache_hits,
@@ -1864,7 +1896,7 @@ static void dfs_fast_rep(int depth, int min_idx, int* stack, CanonState* canon_s
                 next_mult_coeff /= next_run_len;
             }
             if (is_terminal) {
-                long long row_orbit = factorial[g_rows] / next_stabilizer;
+                long long row_orbit = row_orbit_for_stabilizer(next_stabilizer);
                 ResultAccum res;
                 solve_structure_with_row_orbit(&partial_graph->g, row_orbit, cache, raw_cache, ws,
                                                local_canon_calls, local_cache_hits,
@@ -1930,10 +1962,12 @@ void dfs(int depth, int min_idx, int* stack, CanonState* canon_state, PartialGra
             if (orbit_mark_bit_test(orbit_mark_bits, i)) {
                 continue;
             }
-            canon_state_mark_orbit_nonreps(canon_state, min_idx, i, orbit_mark_bits);
         }
         if (!partial_graph_candidate_can_fit(partial_graph, i, cols_left)) {
             continue;
+        }
+        if (use_orbit_marking) {
+            canon_state_mark_orbit_nonreps(canon_state, min_idx, i, orbit_mark_bits);
         }
         if (!use_orbit_marking && !canon_state_partition_is_rep(canon_state, min_idx, i)) {
             continue;
@@ -1974,7 +2008,7 @@ void dfs(int depth, int min_idx, int* stack, CanonState* canon_state, PartialGra
                 next_mult_coeff /= next_run_len;
             }
             if (is_terminal) {
-                long long row_orbit = factorial[g_rows] / next_stabilizer;
+                long long row_orbit = row_orbit_for_stabilizer(next_stabilizer);
                 ResultAccum res;
                 solve_structure_with_row_orbit(&partial_graph->g, row_orbit, cache, raw_cache, ws,
                                                local_canon_calls, local_cache_hits,
@@ -2256,12 +2290,14 @@ static void dfs_runtime_split_local(int depth, int start_pid, int end_pid, long 
             if (orbit_mark_bit_test(orbit_mark_bits, pid)) {
                 continue;
             }
-            canon_state_mark_orbit_nonreps(&ctx->canon_state, rep_min_idx, pid, orbit_mark_bits);
         } else if (!canon_state_partition_is_rep(&ctx->canon_state, rep_min_idx, pid)) {
             continue;
         }
         if (!partial_graph_candidate_can_fit(&ctx->partial_graph, pid, cols_left)) {
             continue;
+        }
+        if (use_orbit_marking) {
+            canon_state_mark_orbit_nonreps(&ctx->canon_state, rep_min_idx, pid, orbit_mark_bits);
         }
         ctx->stack[depth] = pid;
         if (PROFILE_BUILD) {
@@ -2301,7 +2337,7 @@ static void dfs_runtime_split_local(int depth, int start_pid, int end_pid, long 
             }
 
             if (is_terminal) {
-                long long row_orbit = factorial[g_rows] / next_stabilizer;
+                long long row_orbit = row_orbit_for_stabilizer(next_stabilizer);
                 ResultAccum res;
                 solve_structure_with_row_orbit(&ctx->partial_graph.g, row_orbit, &ctx->cache,
                                                &ctx->raw_cache, &ctx->ws,

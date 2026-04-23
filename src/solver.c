@@ -402,10 +402,20 @@ void solve_graph_poly(const Graph* input_g, RowGraphCache* cache, RowGraphCache*
                       long long* local_cache_hits, long long* local_raw_cache_hits,
                       ProfileStats* profile, GraphResult* out_result) {
 #if RECT_COUNT_K4
-    Graph g = *input_g;
     double solve_t0 = begin_solve_graph_profile(profile);
-    int profile_n = 0;
+    int profile_n = input_g->n;
     SolveGraphOutcome outcome = SG_OUTCOME_NONE;
+    if (input_g->n <= SMALL_GRAPH_LOOKUP_MAX_N) {
+        if (PROFILE_BUILD && profile && profile_n >= 0 && profile_n <= MAXN_NAUTY) {
+            profile->solve_graph_calls_by_n[profile_n]++;
+        }
+        uint64_t count4 = small_graph_lookup_load_count4(input_g->n, small_graph_pack_mask(input_g));
+        graph_result_set_count4(count4, out_result);
+        outcome = SG_OUTCOME_LOOKUP;
+        goto done;
+    }
+
+    Graph g = *input_g;
 
     uint64_t multiplier = 1;
     if (!simplify_graph_count4(&g, &multiplier, &outcome, out_result)) goto done;
@@ -427,6 +437,15 @@ void solve_graph_poly(const Graph* input_g, RowGraphCache* cache, RowGraphCache*
         goto done;
     }
 
+    SolveGraphKeyRows key_rows;
+    GraphResult raw_cached;
+    if (solve_graph_prepare_raw_cache(&g, raw_cache, profile, local_raw_cache_hits,
+                                      &key_rows, &raw_cached)) {
+        graph_result_set_count4(multiplier * graph_result_get_count4(&raw_cached), out_result);
+        outcome = SG_OUTCOME_RAW_HIT;
+        goto done;
+    }
+
     GraphResult res;
     uint64_t component_masks[MAXN_NAUTY];
     int component_count = graph_collect_components(&g, component_masks);
@@ -443,29 +462,28 @@ void solve_graph_poly(const Graph* input_g, RowGraphCache* cache, RowGraphCache*
             total *= graph_result_get_count4(&part);
         }
         graph_result_set_count4(total, &res);
+        solve_graph_store_raw_cache(&g, raw_cache, &key_rows, &res);
     } else {
         if (solve_graph_try_biconnected_count4(&g, cache, raw_cache, ws,
                                                local_canon_calls, local_cache_hits,
                                                local_raw_cache_hits, profile,
                                                &outcome, &res)) {
+            solve_graph_store_raw_cache(&g, raw_cache, &key_rows, &res);
             graph_result_set_count4(multiplier * graph_result_get_count4(&res), out_result);
-            goto done;
-        }
-
-        SolveGraphKeyRows key_rows;
-        GraphResult raw_cached;
-        if (solve_graph_prepare_raw_cache(&g, raw_cache, profile, local_raw_cache_hits,
-                                          &key_rows, &raw_cached)) {
-            graph_result_set_count4(multiplier * graph_result_get_count4(&raw_cached), out_result);
-            outcome = SG_OUTCOME_RAW_HIT;
             goto done;
         }
 
         Graph canon;
         uint64_t canon_upper_mask = 0;
+        int edge_bits = (int)g.n * ((int)g.n - 1) / 2;
+        int want_connected_lookup =
+            g_connected_canon_lookup_ready &&
+            g.n == g_connected_canon_lookup_n &&
+            edge_bits <= 64;
+        uint64_t* upper_mask_ptr = want_connected_lookup ? &canon_upper_mask : NULL;
         uint64_t hash = solve_graph_build_canon(&g, &key_rows, ws, profile,
                                                 local_canon_calls, &canon,
-                                                &canon_upper_mask);
+                                                upper_mask_ptr);
 
         if (row_graph_cache_lookup_poly(cache, hash, (uint32_t)canon.n, &canon,
                                         (AdjWord)ADJWORD_MASK, &res, 1)) {
@@ -479,8 +497,9 @@ void solve_graph_poly(const Graph* input_g, RowGraphCache* cache, RowGraphCache*
             goto done;
         }
 
-        uint64_t connected_lookup =
-            connected_canon_lookup_load_count4_mask(canon_upper_mask, canon.n);
+        uint64_t connected_lookup = want_connected_lookup
+            ? connected_canon_lookup_load_count4_mask(canon_upper_mask, canon.n)
+            : UINT64_MAX;
         if (connected_lookup != UINT64_MAX) {
             graph_result_set_count4(connected_lookup, &res);
             store_row_graph_cache_entry(cache, hash, (uint32_t)canon.n, &canon,
@@ -512,10 +531,19 @@ done:
     finish_solve_graph_profile(profile, solve_t0, profile_n, outcome);
     return;
 #else
-    Graph g = *input_g;
     double solve_t0 = begin_solve_graph_profile(profile);
-    int profile_n = 0;
+    int profile_n = input_g->n;
     SolveGraphOutcome outcome = SG_OUTCOME_NONE;
+    if (input_g->n <= SMALL_GRAPH_LOOKUP_MAX_N) {
+        if (PROFILE_BUILD && profile && profile_n >= 0 && profile_n <= MAXN_NAUTY) {
+            profile->solve_graph_calls_by_n[profile_n]++;
+        }
+        small_graph_lookup_load_graph_poly(input_g->n, small_graph_pack_mask(input_g), out_result);
+        outcome = SG_OUTCOME_LOOKUP;
+        goto done;
+    }
+
+    Graph g = *input_g;
     GraphPoly multiplier;
     graph_poly_one_ref(&multiplier);
 
@@ -539,6 +567,15 @@ done:
         goto done;
     }
 
+    SolveGraphKeyRows key_rows;
+    GraphPoly raw_cached;
+    if (solve_graph_prepare_raw_cache(&g, raw_cache, profile, local_raw_cache_hits,
+                                      &key_rows, &raw_cached)) {
+        graph_poly_mul_ref(&multiplier, &raw_cached, out_result);
+        outcome = SG_OUTCOME_RAW_HIT;
+        goto done;
+    }
+
     GraphPoly res;
     uint64_t component_masks[MAXN_NAUTY];
     int component_count = graph_collect_components(&g, component_masks);
@@ -559,25 +596,22 @@ done:
                                              local_canon_calls, local_cache_hits,
                                              local_raw_cache_hits, profile,
                                              &outcome, &res)) {
+            solve_graph_store_raw_cache(&g, raw_cache, &key_rows, &res);
             graph_poly_mul_ref(&multiplier, &res, out_result);
-            goto done;
-        }
-
-        SolveGraphKeyRows key_rows;
-        GraphPoly raw_cached;
-
-        if (solve_graph_prepare_raw_cache(&g, raw_cache, profile, local_raw_cache_hits,
-                                          &key_rows, &raw_cached)) {
-            graph_poly_mul_ref(&multiplier, &raw_cached, out_result);
-            outcome = SG_OUTCOME_RAW_HIT;
             goto done;
         }
 
         Graph canon;
         uint64_t canon_upper_mask = 0;
+        int edge_bits = (int)g.n * ((int)g.n - 1) / 2;
+        int want_connected_lookup =
+            g_connected_canon_lookup_ready &&
+            g.n == g_connected_canon_lookup_n &&
+            edge_bits <= 64;
+        uint64_t* upper_mask_ptr = want_connected_lookup ? &canon_upper_mask : NULL;
         uint64_t hash = solve_graph_build_canon(&g, &key_rows, ws, profile,
                                                 local_canon_calls, &canon,
-                                                &canon_upper_mask);
+                                                upper_mask_ptr);
 
         if (row_graph_cache_lookup_poly(cache, hash, (uint32_t)canon.n, &canon,
                                         (AdjWord)ADJWORD_MASK, &res, 1)) {
@@ -591,7 +625,8 @@ done:
             goto done;
         }
 
-        if (connected_canon_lookup_load_graph_poly_mask(canon_upper_mask, canon.n, &res)) {
+        if (want_connected_lookup &&
+            connected_canon_lookup_load_graph_poly_mask(canon_upper_mask, canon.n, &res)) {
             store_row_graph_cache_entry(cache, hash, (uint32_t)canon.n, &canon,
                                         (AdjWord)ADJWORD_MASK, &res);
             solve_graph_store_raw_cache(&g, raw_cache, &key_rows, &res);

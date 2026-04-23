@@ -380,9 +380,7 @@ static uint64_t eval_int32_poly_at_4(const int32_t* coeffs, int deg) {
 }
 
 uint64_t small_graph_lookup_load_count4(int n, uint32_t mask) {
-    int x_pow = g_small_graph_lookup_x_pows[n][mask];
-    uint64_t value = eval_int32_poly_at_4(small_graph_poly_slot(n, mask), n - x_pow);
-    return value << (2 * x_pow);
+    return (uint64_t)g_small_graph_lookup_count4[n][mask];
 }
 
 uint64_t connected_canon_lookup_load_count4(const Graph* g) {

@@ -32,7 +32,7 @@ static void row_graph_cache_init_poly(RowGraphCache* cache, int size, int mask, 
         snprintf(label, sizeof(label), "%s_keys", prefix);
         cache->keys = checked_aligned_alloc(64, sizeof(CacheKey) * (size_t)size, label);
         snprintf(label, sizeof(label), "%s_stamps", prefix);
-        cache->stamps = checked_aligned_alloc(64, sizeof(uint32_t) * (size_t)size, label);
+        cache->stamps = checked_aligned_alloc(64, sizeof(uint64_t) * (size_t)size, label);
         snprintf(label, sizeof(label), "%s_rows", prefix);
         cache->rows =
             checked_aligned_alloc(64, sizeof(AdjWord) * (size_t)size * MAXN_NAUTY, label);
@@ -42,7 +42,7 @@ static void row_graph_cache_init_poly(RowGraphCache* cache, int size, int mask, 
     }
 
     memset(cache->keys, 0, sizeof(CacheKey) * (size_t)size);
-    memset(cache->stamps, 0, sizeof(uint32_t) * (size_t)size);
+    memset(cache->stamps, 0, sizeof(uint64_t) * (size_t)size);
 }
 
 static void row_graph_cache_free_all(RowGraphCache* cache) {

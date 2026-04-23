@@ -206,13 +206,13 @@ typedef struct {
 
 typedef struct {
     CacheKey* keys;
-    uint32_t* stamps;
+    uint64_t* stamps;
     AdjWord* rows;
     GraphCacheValue* coeffs;
     int mask;
     int probe;
     int poly_len;
-    uint32_t next_stamp;
+    uint64_t next_stamp;
 } RowGraphCache;
 
 typedef struct {
@@ -350,6 +350,7 @@ typedef struct {
     int count;
     int inflight;
     int stop;
+    atomic_int queue_count;
     atomic_int outstanding_tasks;
     atomic_int idle_threads;
     atomic_long donated_tasks;
@@ -505,6 +506,9 @@ extern uint8_t g_small_graph_edge_u[SMALL_GRAPH_LOOKUP_MAX_N + 1][21];
 extern uint8_t g_small_graph_edge_v[SMALL_GRAPH_LOOKUP_MAX_N + 1][21];
 extern uint32_t g_small_graph_graph_count[SMALL_GRAPH_LOOKUP_MAX_N + 1];
 extern uint8_t g_small_graph_edge_count[SMALL_GRAPH_LOOKUP_MAX_N + 1];
+#if RECT_COUNT_K4
+extern uint16_t* g_small_graph_lookup_count4[SMALL_GRAPH_LOOKUP_MAX_N + 1];
+#endif
 extern uint32_t g_connected_canon_lookup_count;
 extern int g_connected_canon_lookup_ready;
 extern int g_connected_canon_lookup_loaded;
@@ -623,7 +627,11 @@ void graph_poly_sub_ref(const GraphPoly* a, const GraphPoly* b, GraphPoly* out);
 void graph_poly_mul_linear_ref(const GraphPoly* a, int c, GraphPoly* out);
 int32_t* small_graph_poly_slot(int n, uint32_t mask);
 uint64_t graph_pack_upper_mask64(const Graph* g);
-uint64_t graph_row_mask(int n);
+static inline uint64_t graph_row_mask(int n) {
+    if (n >= 64) return ~UINT64_C(0);
+    if (n <= 0) return 0;
+    return (UINT64_C(1) << n) - UINT64_C(1);
+}
 void get_canonical_graph(Graph* g, Graph* canon, NautyWorkspace* ws, ProfileStats* profile);
 void get_canonical_graph_from_dense_rows(int n, const AdjWord* rows, Graph* canon,
                                          NautyWorkspace* ws, ProfileStats* profile);

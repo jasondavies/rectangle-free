@@ -308,6 +308,7 @@ void local_queue_init(LocalTaskQueue* queue, int capacity,
     queue->root_count = root_count;
     queue->total_threads = total_threads;
     atomic_init(&queue->outstanding_tasks, 0);
+    atomic_init(&queue->queue_count, 0);
     atomic_init(&queue->idle_threads, 0);
     atomic_init(&queue->donated_tasks, 0);
     atomic_init(&queue->work_budget_continuations, 0);
@@ -346,6 +347,7 @@ int local_queue_try_push(LocalTaskQueue* queue, const LocalTask* task) {
         queue->tasks[queue->tail] = *task;
         queue->tail = (queue->tail + 1) % queue->capacity;
         queue->count++;
+        atomic_store_explicit(&queue->queue_count, queue->count, memory_order_relaxed);
         outstanding = atomic_fetch_add_explicit(&queue->outstanding_tasks, 1, memory_order_relaxed) + 1;
         local_queue_note_outstanding(queue, outstanding);
         pushed = 1;
@@ -374,6 +376,7 @@ int local_queue_pop(LocalTaskQueue* queue, LocalTask* task) {
             *task = queue->tasks[queue->head];
             queue->head = (queue->head + 1) % queue->capacity;
             queue->count--;
+            atomic_store_explicit(&queue->queue_count, queue->count, memory_order_relaxed);
             queue->inflight++;
             if (queue->roots[task->root_id].launched_at < 0.0) {
                 queue->roots[task->root_id].launched_at = omp_get_wtime();
@@ -529,7 +532,8 @@ int runtime_task_system_needs_balance(const RuntimeTaskSystem* system) {
     if (idle_workers <= 0) return 0;
     int min_global = system->shared_queue.total_threads;
     if (min_global < 4) min_global = 4;
-    return system->shared_queue.count < min_global;
+    int count = atomic_load_explicit(&system->shared_queue.queue_count, memory_order_relaxed);
+    return count < min_global;
 }
 
 void runtime_task_system_note_balance_push(RuntimeTaskSystem* system) {

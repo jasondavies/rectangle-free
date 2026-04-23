@@ -605,7 +605,7 @@ static void execute_run_tasks(const RunConfig* run, double start_time, Execution
         cache.probe = CACHE_PROBE;
         cache.poly_len = graph_poly_len;
         cache.keys = checked_aligned_alloc(64, sizeof(CacheKey) * CACHE_SIZE, "cache_keys");
-        cache.stamps = checked_aligned_alloc(64, sizeof(uint32_t) * CACHE_SIZE, "cache_stamps");
+        cache.stamps = checked_aligned_alloc(64, sizeof(uint64_t) * CACHE_SIZE, "cache_stamps");
         cache.rows = checked_aligned_alloc(64, sizeof(AdjWord) * CACHE_SIZE * MAXN_NAUTY, "cache_rows");
         cache.coeffs =
             checked_aligned_alloc(64,
@@ -624,7 +624,7 @@ static void execute_run_tasks(const RunConfig* run, double start_time, Execution
         raw_cache.probe = RAW_CACHE_PROBE;
         raw_cache.poly_len = graph_poly_len;
         raw_cache.keys = checked_aligned_alloc(64, sizeof(CacheKey) * RAW_CACHE_SIZE, "raw_cache_keys");
-        raw_cache.stamps = checked_aligned_alloc(64, sizeof(uint32_t) * RAW_CACHE_SIZE, "raw_cache_stamps");
+        raw_cache.stamps = checked_aligned_alloc(64, sizeof(uint64_t) * RAW_CACHE_SIZE, "raw_cache_stamps");
         raw_cache.rows =
             checked_aligned_alloc(64, sizeof(AdjWord) * RAW_CACHE_SIZE * MAXN_NAUTY, "raw_cache_rows");
         raw_cache.coeffs =
@@ -641,9 +641,9 @@ static void execute_run_tasks(const RunConfig* run, double start_time, Execution
         raw_cache.next_stamp = 0;
 
         memset(cache.keys, 0, sizeof(CacheKey) * CACHE_SIZE);
-        memset(cache.stamps, 0, sizeof(uint32_t) * CACHE_SIZE);
+        memset(cache.stamps, 0, sizeof(uint64_t) * CACHE_SIZE);
         memset(raw_cache.keys, 0, sizeof(CacheKey) * RAW_CACHE_SIZE);
-        memset(raw_cache.stamps, 0, sizeof(uint32_t) * RAW_CACHE_SIZE);
+        memset(raw_cache.stamps, 0, sizeof(uint64_t) * RAW_CACHE_SIZE);
 
         int stack[MAX_COLS];
         CanonState canon_state;
@@ -663,6 +663,12 @@ static void execute_run_tasks(const RunConfig* run, double start_time, Execution
             : NULL;
         long long pending_completed = 0;
         tls_profile = profile;
+#if RECT_COUNT_K4
+        ResultAccum local_thread_total = 0;
+        ResultAccum* thread_total = &local_thread_total;
+#else
+        ResultAccum* thread_total = &exec->thread_totals[tid];
+#endif
 
         if (g_cols == 1) {
             #pragma omp for schedule(runtime)
@@ -704,7 +710,7 @@ static void execute_run_tasks(const RunConfig* run, double start_time, Execution
                     canon_state_commit_push(&canon_state, (int)i, &canon_scratch, next_stabilizer);
                     if (PROFILE_BUILD) profile->canon_commit_time += omp_get_wtime() - t0;
                     dfs(1, (int)i, stack, &canon_state, &partial_graph, &cache, &raw_cache, &ws,
-                        &exec->thread_totals[tid], &local_canon_calls, &local_cache_hits,
+                        thread_total, &local_canon_calls, &local_cache_hits,
                         &local_raw_cache_hits, &initial_weight, 1, 1, profile, &canon_scratch);
                     canon_state_pop(&canon_state);
                 }
@@ -722,7 +728,7 @@ static void execute_run_tasks(const RunConfig* run, double start_time, Execution
                                                 batch.count,
                                                 &cache, &raw_cache, &ws, &canon_state,
                                                 &canon_scratch, &partial_graph, stack,
-                                                &exec->thread_totals[tid], &local_canon_calls,
+                                                thread_total, &local_canon_calls,
                                                 &local_cache_hits, &local_raw_cache_hits, profile,
                                                 total_tasks, progress_report_step, start_time,
                                                 &pending_completed, task_timing);
@@ -742,7 +748,7 @@ static void execute_run_tasks(const RunConfig* run, double start_time, Execution
                 for (;;) {
                     LocalTask task;
                     if (!runtime_task_system_pop_task(&exec->runtime_tasks, &task)) break;
-                    execute_local_runtime_task(&task, &ctx, &exec->thread_totals[tid], &exec->runtime_tasks,
+                    execute_local_runtime_task(&task, &ctx, thread_total, &exec->runtime_tasks,
                                                profile, total_tasks, progress_report_step,
                                                start_time, &pending_completed, task_timing,
                                                queue_subtask_timing);
@@ -772,7 +778,7 @@ static void execute_run_tasks(const RunConfig* run, double start_time, Execution
                                            &partial_graph, stack, profile, &prefix_weight,
                                            &prefix_mult, &prefix_run)) {
                         dfs(2, prefix[1], stack, &canon_state, &partial_graph, &cache, &raw_cache, &ws,
-                            &exec->thread_totals[tid], &local_canon_calls, &local_cache_hits,
+                            thread_total, &local_canon_calls, &local_cache_hits,
                             &local_raw_cache_hits, &prefix_weight, prefix_mult, prefix_run,
                             profile, &canon_scratch);
                         canon_state_pop(&canon_state);
@@ -802,7 +808,7 @@ static void execute_run_tasks(const RunConfig* run, double start_time, Execution
                                        &partial_graph, stack, profile, &prefix_weight,
                                        &prefix_mult, &prefix_run)) {
                     dfs(3, prefix[2], stack, &canon_state, &partial_graph, &cache, &raw_cache, &ws,
-                        &exec->thread_totals[tid], &local_canon_calls, &local_cache_hits,
+                        thread_total, &local_canon_calls, &local_cache_hits,
                         &local_raw_cache_hits, &prefix_weight, prefix_mult, prefix_run,
                         profile, &canon_scratch);
                     canon_state_pop(&canon_state);
@@ -832,7 +838,7 @@ static void execute_run_tasks(const RunConfig* run, double start_time, Execution
                                        &partial_graph, stack, profile, &prefix_weight,
                                        &prefix_mult, &prefix_run)) {
                     dfs(4, prefix[3], stack, &canon_state, &partial_graph, &cache, &raw_cache, &ws,
-                        &exec->thread_totals[tid], &local_canon_calls, &local_cache_hits,
+                        thread_total, &local_canon_calls, &local_cache_hits,
                         &local_raw_cache_hits, &prefix_weight, prefix_mult, prefix_run,
                         profile, &canon_scratch);
                     canon_state_pop(&canon_state);
@@ -852,6 +858,9 @@ static void execute_run_tasks(const RunConfig* run, double start_time, Execution
         total_canon_calls += local_canon_calls;
         total_cache_hits += local_cache_hits;
         total_raw_cache_hits += local_raw_cache_hits;
+#if RECT_COUNT_K4
+        exec->thread_totals[tid] = local_thread_total;
+#endif
 
         canon_state_free(&canon_state);
         canon_scratch_free(&canon_scratch);

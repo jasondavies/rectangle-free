@@ -14,7 +14,16 @@ static inline GraphCacheValue* row_graph_cache_coeff_slot(const RowGraphCache* c
 #endif
 }
 
-static inline uint32_t row_graph_cache_next_stamp(RowGraphCache* cache) {
+static inline uint64_t cache_index_mix(uint64_t x) {
+    x ^= x >> 33;
+    x *= UINT64_C(0xff51afd7ed558ccd);
+    x ^= x >> 33;
+    x *= UINT64_C(0xc4ceb9fe1a85ec53);
+    x ^= x >> 33;
+    return x;
+}
+
+static inline uint64_t row_graph_cache_next_stamp(RowGraphCache* cache) {
     cache->next_stamp++;
     if (cache->next_stamp == 0) cache->next_stamp = 1;
     return cache->next_stamp;
@@ -67,7 +76,7 @@ static inline void row_graph_cache_load_poly(const RowGraphCache* cache, int slo
 int row_graph_cache_lookup_poly(RowGraphCache* cache, uint64_t key_hash, uint32_t key_n,
                                 const Graph* g, AdjWord row_mask, GraphResult* value,
                                 int touch) {
-    int cache_idx = (int)(key_hash & (uint64_t)cache->mask);
+    int cache_idx = (int)(cache_index_mix(key_hash) & (uint64_t)cache->mask);
     for (int k = 0; k < cache->probe; k++) {
         int p = (cache_idx + k) & cache->mask;
         if (!cache->keys[p].used) {
@@ -84,7 +93,7 @@ int row_graph_cache_lookup_poly(RowGraphCache* cache, uint64_t key_hash, uint32_
 
 int row_graph_cache_lookup_rows(RowGraphCache* cache, uint64_t key_hash, uint32_t key_n,
                                 const AdjWord* rows, GraphResult* value, int touch) {
-    int cache_idx = (int)(key_hash & (uint64_t)cache->mask);
+    int cache_idx = (int)(cache_index_mix(key_hash) & (uint64_t)cache->mask);
     for (int k = 0; k < cache->probe; k++) {
         int p = (cache_idx + k) & cache->mask;
         if (!cache->keys[p].used) {
@@ -102,12 +111,12 @@ int row_graph_cache_lookup_rows(RowGraphCache* cache, uint64_t key_hash, uint32_
 void store_row_graph_cache_entry(RowGraphCache* cache, uint64_t key_hash, uint32_t key_n,
                                  const Graph* g, AdjWord row_mask,
                                  const GraphResult* value) {
-    int cache_idx = (int)(key_hash & (uint64_t)cache->mask);
+    int cache_idx = (int)(cache_index_mix(key_hash) & (uint64_t)cache->mask);
     int empty_slot = -1;
     int oldest_same_n_slot = -1;
     int oldest_other_n_slot = -1;
-    uint32_t oldest_same_n_stamp = UINT32_MAX;
-    uint32_t oldest_other_n_stamp = UINT32_MAX;
+    uint64_t oldest_same_n_stamp = UINT64_MAX;
+    uint64_t oldest_other_n_stamp = UINT64_MAX;
     for (int k = 0; k < cache->probe; k++) {
         int p = (cache_idx + k) & cache->mask;
         if (row_graph_cache_slot_matches_graph(cache, p, key_hash, key_n, g, row_mask)) {
@@ -119,7 +128,7 @@ void store_row_graph_cache_entry(RowGraphCache* cache, uint64_t key_hash, uint32
             continue;
         }
 
-        uint32_t stamp = cache->stamps[p];
+        uint64_t stamp = cache->stamps[p];
         if (cache->keys[p].key_n != key_n) {
             if (stamp < oldest_other_n_stamp) {
                 oldest_other_n_stamp = stamp;
@@ -157,12 +166,12 @@ void store_row_graph_cache_entry(RowGraphCache* cache, uint64_t key_hash, uint32
 
 void store_row_graph_cache_entry_rows(RowGraphCache* cache, uint64_t key_hash, uint32_t key_n,
                                       const AdjWord* rows, const GraphResult* value) {
-    int cache_idx = (int)(key_hash & (uint64_t)cache->mask);
+    int cache_idx = (int)(cache_index_mix(key_hash) & (uint64_t)cache->mask);
     int empty_slot = -1;
     int oldest_same_n_slot = -1;
     int oldest_other_n_slot = -1;
-    uint32_t oldest_same_n_stamp = UINT32_MAX;
-    uint32_t oldest_other_n_stamp = UINT32_MAX;
+    uint64_t oldest_same_n_stamp = UINT64_MAX;
+    uint64_t oldest_other_n_stamp = UINT64_MAX;
     for (int k = 0; k < cache->probe; k++) {
         int p = (cache_idx + k) & cache->mask;
         if (row_graph_cache_slot_matches_rows(cache, p, key_hash, key_n, rows)) {
@@ -174,7 +183,7 @@ void store_row_graph_cache_entry_rows(RowGraphCache* cache, uint64_t key_hash, u
             continue;
         }
 
-        uint32_t stamp = cache->stamps[p];
+        uint64_t stamp = cache->stamps[p];
         if (cache->keys[p].key_n != key_n) {
             if (stamp < oldest_other_n_stamp) {
                 oldest_other_n_stamp = stamp;

@@ -11,6 +11,9 @@ double g_small_graph_lookup_init_time = 0.0;
 int g_small_graph_lookup_loaded_from_file = 0;
 int32_t* g_small_graph_lookup_coeffs[SMALL_GRAPH_LOOKUP_MAX_N + 1] = {0};
 uint8_t* g_small_graph_lookup_x_pows[SMALL_GRAPH_LOOKUP_MAX_N + 1] = {0};
+#if RECT_COUNT_K4
+uint16_t* g_small_graph_lookup_count4[SMALL_GRAPH_LOOKUP_MAX_N + 1] = {0};
+#endif
 uint8_t g_small_graph_edge_u[SMALL_GRAPH_LOOKUP_MAX_N + 1][21];
 uint8_t g_small_graph_edge_v[SMALL_GRAPH_LOOKUP_MAX_N + 1][21];
 uint32_t g_small_graph_graph_count[SMALL_GRAPH_LOOKUP_MAX_N + 1] = {0};
@@ -63,12 +66,6 @@ void nauty_workspace_free(NautyWorkspace* ws) {
     free(ws->ptn);
     free(ws->orbits);
     memset(ws, 0, sizeof(*ws));
-}
-
-uint64_t graph_row_mask(int n) {
-    if (n >= 64) return ~0ULL;
-    if (n <= 0) return 0ULL;
-    return (1ULL << n) - 1ULL;
 }
 
 uint32_t graph_build_dense_rows(const Graph* g, AdjWord* rows) {
@@ -135,6 +132,7 @@ static uint64_t graph_extract_dense_rows_from_nauty(graph* cg, int m, uint32_t n
     uint64_t mask = graph_row_mask((int)n);
     uint64_t h = 14695981039346656037ULL;
     uint64_t upper_mask = 0;
+    int pack_upper = upper_mask_out && ((uint64_t)n * (uint64_t)(n - 1) / 2ULL) <= 64ULL;
     dst->n = (uint8_t)n;
     dst->vertex_mask = mask;
     h ^= mask;
@@ -147,7 +145,7 @@ static uint64_t graph_extract_dense_rows_from_nauty(graph* cg, int m, uint32_t n
             h ^= (uint64_t)row;
             h *= 1099511628211ULL;
         }
-        if (upper_mask_out) {
+        if (pack_upper) {
             upper_mask = graph_pack_upper_mask_from_dense_rows(n, dst->adj);
         }
         h ^= (uint64_t)n;
@@ -162,7 +160,7 @@ static uint64_t graph_extract_dense_rows_from_nauty(graph* cg, int m, uint32_t n
         for (uint32_t j = 0; j < n; j++) {
             if (ISELEMENT(row_words, (int)j)) {
                 row |= (AdjWord)(UINT64_C(1) << j);
-                if (upper_mask_out && j > i) {
+                if (pack_upper && j > i) {
                     upper_mask |= UINT64_C(1) << (((uint64_t)j * (uint64_t)(j - 1) / 2ULL) + i);
                 }
             }
@@ -337,9 +335,37 @@ static int small_graph_lookup_allocate_storage(void) {
             checked_calloc((size_t)graph_count * (size_t)stride, sizeof(int32_t), "small_graph_lookup");
         g_small_graph_lookup_x_pows[n] =
             checked_calloc((size_t)graph_count, sizeof(uint8_t), "small_graph_lookup_x_pows");
+#if RECT_COUNT_K4
+        g_small_graph_lookup_count4[n] =
+            checked_calloc((size_t)graph_count, sizeof(uint16_t), "small_graph_lookup_count4");
+#endif
     }
     return 1;
 }
+
+#if RECT_COUNT_K4
+static uint16_t small_graph_eval_factorised_at_4(int n, uint32_t mask) {
+    int x_pow = g_small_graph_lookup_x_pows[n][mask];
+    const int32_t* coeffs = small_graph_poly_slot(n, mask);
+    __int128 acc = 0;
+    for (int i = n - x_pow; i >= 0; i--) acc = (acc * 4) + coeffs[i];
+    acc <<= 2 * x_pow;
+    if (acc < 0 || acc > UINT16_MAX) {
+        fprintf(stderr, "small graph 4-colouring count out of uint16 range\n");
+        exit(1);
+    }
+    return (uint16_t)acc;
+}
+
+static void small_graph_lookup_build_count4_tables(void) {
+    for (int n = 0; n <= SMALL_GRAPH_LOOKUP_MAX_N; n++) {
+        uint32_t graph_count = g_small_graph_graph_count[n];
+        for (uint32_t mask = 0; mask < graph_count; mask++) {
+            g_small_graph_lookup_count4[n][mask] = small_graph_eval_factorised_at_4(n, mask);
+        }
+    }
+}
+#endif
 
 static void small_graph_lookup_factorise_tables(void) {
     for (int n = 0; n <= SMALL_GRAPH_LOOKUP_MAX_N; n++) {
@@ -355,6 +381,9 @@ static void small_graph_lookup_factorise_tables(void) {
             }
         }
     }
+#if RECT_COUNT_K4
+    small_graph_lookup_build_count4_tables();
+#endif
 }
 
 static uint32_t small_graph_pack_mask_from_rows(const uint8_t* rows, int n) {
@@ -536,6 +565,10 @@ void small_graph_lookup_free(void) {
         g_small_graph_lookup_coeffs[n] = NULL;
         free(g_small_graph_lookup_x_pows[n]);
         g_small_graph_lookup_x_pows[n] = NULL;
+#if RECT_COUNT_K4
+        free(g_small_graph_lookup_count4[n]);
+        g_small_graph_lookup_count4[n] = NULL;
+#endif
     }
     g_small_graph_lookup_ready = 0;
     g_small_graph_lookup_init_time = 0.0;
@@ -889,7 +922,7 @@ int graph_has_k2_separator(const Graph* g) {
     uint64_t rem_u = full;
     while (rem_u) {
         int u = __builtin_ctzll(rem_u);
-        uint64_t nbrs = ((uint64_t)g->adj[u] & full) & ~((1ULL << (u + 1)) - 1ULL);
+        uint64_t nbrs = ((uint64_t)g->adj[u] & full) & ~graph_row_mask(u + 1);
         while (nbrs) {
             int v = __builtin_ctzll(nbrs);
             nbrs &= nbrs - 1;

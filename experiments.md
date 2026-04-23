@@ -7249,3 +7249,48 @@
   - it matches the recent pattern: when a graph-polynomial helper still has an over-generic hot path, adding tiny-degree specialization tends to pay modestly but reliably
   - the biconnected combine path is not dominant, so the upside is limited, but the change is tight and low-risk
 - Outcome: accepted on `main`.
+
+### Experiment 176: Apply static-review correctness and cache hot-path fixes
+- Goal: address the high-confidence static-review findings around canonical upper-mask packing, raw-cache placement, cache indexing, stamp wraparound, runtime queue accounting, and several small canon/K4 hot paths.
+- Changes:
+  - only request `canon_upper_mask` when the connected canonical lookup can actually use it, avoiding undefined shifts for larger residual graphs
+  - fix the `graph_has_k2_separator()` `u == 63` shift hazard by using `graph_row_mask(u + 1)`
+  - move the raw-cache lookup ahead of component and biconnected decomposition
+  - store biconnected decomposition results in the raw cache; do not store disconnected polynomial component products because the current polynomial cache payload does not preserve arbitrary `x_pow`
+  - mix cache hashes before indexing and widen cache stamps from 32 to 64 bits
+  - move `graph_row_mask()` into the header as `static inline`
+  - add an atomic runtime queue-count shadow for balance decisions
+  - add K4-only precomputed `uint16_t` small-graph counts and avoid K4 `thread_totals` false sharing with per-thread local accumulation
+  - trim `canon_state_reset()` clearing, gate prepare-scan profiling counters behind `RECT_PROFILE`, precompute row-orbit division by stabilizer, and run the cheap K5 feasibility check earlier
+- Regression found during validation:
+  - the first implementation stored disconnected polynomial products in the raw cache after moving the raw-cache lookup earlier
+  - that was wrong because `row_graph_cache_load_poly()` reconstructs cached polynomial values with `x_pow = 1`, which is valid for connected residual entries but not for disconnected products
+  - symptom: `./partition_poly_7 6 6` aborted with `128-bit overflow in polynomial accumulation`
+  - fix: keep the earlier raw-cache lookup, but skip raw-cache storage for disconnected polynomial component products unless the cache format is widened in a future change
+- Benchmark setup:
+  - baseline: clean `HEAD` before this change (`82e80df`), built in `/tmp/rectangle-free2-head`
+  - experiment: current working tree after the fixes
+  - both builds used the same `third_party/nauty-build/nautyTL1.a`
+  - benchmark command for each repetition:
+    - `/usr/bin/time -f "%e" env OMP_NUM_THREADS=32 ./partition_poly_7 6 6 >/dev/null`
+  - `hyperfine` was not installed, so timing used three manual `/usr/bin/time` repetitions
+- Baseline timings:
+  - raw runs: `16.58`, `16.65`, `16.65` seconds
+  - mean: `16.627 s ± 0.040 s`
+- Experiment timings:
+  - raw runs: `16.08`, `16.17`, `16.07` seconds
+  - mean: `16.107 s ± 0.055 s`
+  - summary: experiment ran `1.03x` faster, about a `3.1%` wall-time reduction
+- Correctness:
+  - captured one full baseline and one full experiment `6x6` output and compared the polynomial/value lines
+  - exact chromatic polynomial matched
+  - key values matched:
+    - `P(4) = 203716633441803914880`
+    - `P(5) = 2852707805646422930409600`
+  - adaptive runtime counters differed slightly between captured runs, as expected from dynamic queue scheduling
+- Interpretation:
+  - this patch is a modest end-to-end win on the standard `6x6` 32-thread workload
+  - the highest-value part is the correctness hardening around upper-mask packing and shift safety
+  - the raw-cache move still helps, but the existing compact polynomial cache representation limits what can safely be stored without preserving `x_pow`
+  - a future cache-format change could revisit storing disconnected polynomial component products safely
+- Outcome: accepted on `main`.
