@@ -7467,3 +7467,40 @@
   - `CACHE_BITS=18` pays extra memory for fewer canonical misses and wins modestly on the full `6x6` workload
   - the gain is small, so this should be revisited if memory pressure or NUMA effects show up on longer `7x5`/`7x6` runs
 - Outcome: accepted on `main`.
+
+### Experiment 181: Retune `partition_poly_7` canonical cache probe depth
+- Goal: retune canonical cache probe depth after increasing `partition_poly_7` to `CACHE_BITS=18`.
+- Background:
+  - Experiment 180 made the canonical cache larger, which should reduce clustering pressure
+  - with the larger table, the previous default `CACHE_PROBE=16` might do unnecessary unsuccessful probe work
+- Benchmark command:
+  - `/usr/bin/time -f "%e" env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly_7 6 6 >/dev/null`
+  - variants were compiled one at a time and benchmarks were run sequentially, not concurrently
+- One-run sweep:
+  - `CACHE_PROBE=8`: `14.76s`, canonical cache hit ratio `68.1%`
+  - `CACHE_PROBE=12`: `14.59s`, canonical cache hit ratio `68.4%`
+  - `CACHE_PROBE=16`: `14.71s`, canonical cache hit ratio `68.5%`
+  - `CACHE_PROBE=20`: `14.73s`, canonical cache hit ratio `68.2%`
+- Repeat benchmark:
+  - baseline `CACHE_PROBE=16`: `14.71`, `14.75`, `14.56` seconds, mean `14.673 s`
+  - candidate `CACHE_PROBE=12`: `14.59`, `14.60`, `14.63`, `14.57` seconds, mean `14.598 s`
+  - summary: candidate ran about `1.005x` faster, roughly a `0.5%` wall-time reduction on full `6x6`
+- Correctness:
+  - exact full `6x6` polynomial/value lines matched the baseline
+  - key values matched:
+    - `P(4) = 203716633441803914880`
+    - `P(5) = 2852707805646422930409600`
+  - local rebuilt `partition_poly_7` with `CACHE_PROBE=12` passed the small single-thread shard:
+    - `env OMP_NUM_THREADS=1 ./partition_poly_7 6 3 --prefix-depth 2 --task-end 1`
+    - `P(4) = 32567040`
+    - `P(5) = 1050404400`
+- Verification:
+  - direct `gcc` rebuild of `partition_poly_7` with `CACHE_BITS=18` and `CACHE_PROBE=12`
+  - `make -n partition_poly_7 partition_poly_7_profile connected_canon_lookup_gen | rg "CACHE_BITS=18|CACHE_PROBE=12|CACHE_PROBE=16"` confirmed all 7-row Makefile commands use `CACHE_PROBE=12`
+- Change:
+  - add `-DCACHE_PROBE=12` to `PARTITION_POLY_7_CACHE_CFLAGS`
+- Interpretation:
+  - this is a marginal but repeatable locality/probe-work win on the full `6x6` benchmark
+  - `CACHE_PROBE=8` loses too much, while `20` spends extra probe work without a hit-rate payoff
+  - because the gain is small, recheck this together with cache size if longer `7x5`/`7x6` runs show different cache pressure
+- Outcome: accepted on `main`.
