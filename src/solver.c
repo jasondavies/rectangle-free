@@ -591,6 +591,7 @@ done:
                              profile, &part);
             graph_poly_mul_ref(&res, &part, &res);
         }
+        solve_graph_store_raw_cache(&g, raw_cache, &key_rows, &res);
     } else {
         if (solve_graph_try_biconnected_poly(&g, cache, raw_cache, ws,
                                              local_canon_calls, local_cache_hits,

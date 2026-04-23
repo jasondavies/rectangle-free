@@ -39,6 +39,10 @@ static void row_graph_cache_init_poly(RowGraphCache* cache, int size, int mask, 
         snprintf(label, sizeof(label), "%s_coeffs", prefix);
         cache->coeffs = checked_aligned_alloc(
             64, sizeof(PolyCoeff) * (size_t)size * (size_t)poly_len, label);
+        snprintf(label, sizeof(label), "%s_x_pows", prefix);
+        cache->x_pows = checked_aligned_alloc(64, sizeof(uint8_t) * (size_t)size, label);
+        snprintf(label, sizeof(label), "%s_degs", prefix);
+        cache->degs = checked_aligned_alloc(64, sizeof(uint8_t) * (size_t)size, label);
     }
 
     memset(cache->keys, 0, sizeof(CacheKey) * (size_t)size);
@@ -50,6 +54,8 @@ static void row_graph_cache_free_all(RowGraphCache* cache) {
     free(cache->stamps);
     free(cache->rows);
     free(cache->coeffs);
+    free(cache->x_pows);
+    free(cache->degs);
     memset(cache, 0, sizeof(*cache));
 }
 

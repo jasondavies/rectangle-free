@@ -7294,3 +7294,49 @@
   - the raw-cache move still helps, but the existing compact polynomial cache representation limits what can safely be stored without preserving `x_pow`
   - a future cache-format change could revisit storing disconnected polynomial component products safely
 - Outcome: accepted on `main`.
+
+### Experiment 177: Preserve graph-polynomial metadata in row caches
+- Goal: make row-cache entries capable of representing all `GraphPoly` values, not just connected residual polynomials with implicit `x_pow = 1`, so disconnected component products can be cached safely.
+- Background:
+  - Experiment 176 moved the raw-cache lookup before decomposition, but disconnected polynomial component products could not be stored safely
+  - the row-cache payload stored coefficients only and reconstructed loaded values as:
+    - `x_pow = 1`
+    - `deg = key_n - 1`
+  - that representation is correct for connected residual chromatic polynomials, but not for arbitrary products returned by component decomposition
+  - the first attempt to store disconnected products without metadata caused an overflow via corrupted polynomials, so Experiment 176 deliberately skipped that store
+- Change:
+  - add per-slot `x_pows` and `degs` arrays to `RowGraphCache`
+  - store and load exact `GraphPoly.x_pow` and `GraphPoly.deg` in polynomial mode
+  - keep K4 scalar mode unchanged
+  - re-enable raw-cache storage for disconnected polynomial component products
+  - update `connected_canon_lookup_gen.c` cache allocation/free paths to initialise the new metadata arrays
+- Benchmark setup:
+  - baseline: clean `HEAD` before this change (`06d1982`), built in `/tmp/rectangle-free2-head-cachemeta`
+  - experiment: current working tree with cache metadata
+  - benchmark command:
+    - `/usr/bin/time -f "%e" env OMP_NUM_THREADS=32 ./partition_poly_7 7 5 --task-end 1 >/dev/null`
+  - full `7x5` repetitions were not used here because each run was about a minute on this machine
+- Baseline timings:
+  - raw runs: `1.57`, `1.45`, `1.53` seconds
+  - mean: `1.517 s ± 0.061 s`
+- Experiment timings:
+  - raw runs: `1.19`, `1.12`, `1.03` seconds
+  - mean: `1.113 s ± 0.080 s`
+  - summary: experiment ran `1.36x` faster, about a `26.6%` wall-time reduction on this bounded shard
+- Correctness:
+  - exact `7x5 --task-end 1` polynomial/value lines matched the baseline
+  - key values matched:
+    - `P(4) = 73015213753036800`
+    - `P(5) = 183220793650295755200`
+  - the previous overflow-prone check also completed:
+    - `env OMP_NUM_THREADS=1 ./partition_poly_7 6 6 --task-end 1`
+    - `P(4) = 985671974256537600`
+    - `P(5) = 4988377088567109216000`
+- Observed counters on the captured `7x5 --task-end 1` outputs:
+  - baseline: `Canonicalisation calls 941754`, `Canonical cache hits 535223`, `Raw cache hits 1846189`
+  - experiment: `Canonicalisation calls 949062`, `Canonical cache hits 538835`, `Raw cache hits 1864736`
+- Interpretation:
+  - preserving `x_pow`/`deg` fixes the cache representation and unlocks a useful raw-cache store that was previously unsafe
+  - the bounded `7x5` result is a strong win, but should still be rechecked on larger full workloads after the next cache-size retune because the metadata arrays slightly increase cache footprint
+  - this change also removes a correctness footgun from future solver-cache experiments
+- Outcome: accepted on `main`.

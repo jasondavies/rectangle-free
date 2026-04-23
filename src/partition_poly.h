@@ -209,6 +209,8 @@ typedef struct {
     uint64_t* stamps;
     AdjWord* rows;
     GraphCacheValue* coeffs;
+    uint8_t* x_pows;
+    uint8_t* degs;
     int mask;
     int probe;
     int poly_len;

@@ -618,6 +618,10 @@ static void execute_run_tasks(const RunConfig* run, double start_time, Execution
 #endif
                                           ),
                                   "cache_coeffs");
+#if !RECT_COUNT_K4
+        cache.x_pows = checked_aligned_alloc(64, sizeof(uint8_t) * CACHE_SIZE, "cache_x_pows");
+        cache.degs = checked_aligned_alloc(64, sizeof(uint8_t) * CACHE_SIZE, "cache_degs");
+#endif
         cache.next_stamp = 0;
 
         raw_cache.mask = RAW_CACHE_MASK;
@@ -638,6 +642,11 @@ static void execute_run_tasks(const RunConfig* run, double start_time, Execution
 #endif
                                           ),
                                   "raw_cache_coeffs");
+#if !RECT_COUNT_K4
+        raw_cache.x_pows =
+            checked_aligned_alloc(64, sizeof(uint8_t) * RAW_CACHE_SIZE, "raw_cache_x_pows");
+        raw_cache.degs = checked_aligned_alloc(64, sizeof(uint8_t) * RAW_CACHE_SIZE, "raw_cache_degs");
+#endif
         raw_cache.next_stamp = 0;
 
         memset(cache.keys, 0, sizeof(CacheKey) * CACHE_SIZE);
@@ -869,10 +878,14 @@ static void execute_run_tasks(const RunConfig* run, double start_time, Execution
         free(cache.stamps);
         free(cache.rows);
         free(cache.coeffs);
+        free(cache.x_pows);
+        free(cache.degs);
         free(raw_cache.keys);
         free(raw_cache.stamps);
         free(raw_cache.rows);
         free(raw_cache.coeffs);
+        free(raw_cache.x_pows);
+        free(raw_cache.degs);
     }
 
     exec->total_canon_calls = total_canon_calls;
