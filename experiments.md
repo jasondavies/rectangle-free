@@ -7504,3 +7504,47 @@
   - `CACHE_PROBE=8` loses too much, while `20` spends extra probe work without a hit-rate payoff
   - because the gain is small, recheck this together with cache size if longer `7x5`/`7x6` runs show different cache pressure
 - Outcome: accepted on `main`.
+
+### Experiment 182: Dense fast path for dense-row and upper-mask packing
+- Goal: avoid sparse vertex-mask repacking when graph vertices are already densely numbered.
+- Background:
+  - `graph_fill_dense_key_rows()` and `small_graph_pack_mask()` already had dense fast paths
+  - `graph_build_dense_rows()` still walked `vertex_mask` and used `_pext` even when `vertex_mask == graph_row_mask(n)`
+  - `graph_pack_upper_mask64()` also rebuilt dense rows before packing the connected-canonical lookup mask
+- Change:
+  - add a direct dense-copy path to `graph_build_dense_rows()`
+  - add a row-value upper-mask packer for `graph_pack_upper_mask64()`
+  - use the row-value packer both for dense graphs and for the sparse fallback after dense-row extraction
+- Benchmark setup:
+  - baseline: last commit before this change (`97c1e29`), built from a `git archive` export in `/tmp`
+  - experiment: current working tree with dense-row and upper-mask fast paths
+  - benchmarks were run sequentially with no concurrent all-core runs
+  - primary command:
+    - `/usr/bin/time -f "%e" env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly_7 6 6 >/dev/null`
+- Primary timings:
+  - baseline raw runs: `15.06`, `15.07` seconds
+  - baseline mean: `15.065 s`
+  - experiment raw runs: `14.65`, `14.67` seconds
+  - experiment mean: `14.660 s`
+  - summary: experiment ran `1.028x` faster, about a `2.7%` wall-time reduction on full `6x6`
+- Secondary check:
+  - command: `/usr/bin/time -f "%e" env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly_7 7 5 --prefix-depth 2 --adaptive-subdivide --task-end 1 >/dev/null`
+  - baseline: `1.68s`
+  - experiment: `1.19s`
+  - this short shard is noisy, but it also favoured the dense fast path
+- Correctness:
+  - exact full `6x6` polynomial/value lines matched the baseline
+  - key values matched:
+    - `P(4) = 203716633441803914880`
+    - `P(5) = 2852707805646422930409600`
+  - the bounded `7x5 --task-end 1` polynomial/value lines also matched the baseline
+- Verification:
+  - `make partition_poly_7`
+  - `make partition_poly`
+  - `make partition_count4`
+  - `make connected_canon_lookup_gen`
+- Interpretation:
+  - dense vertex IDs are common enough in the solver that avoiding `_pext`/sparse remapping is a repeatable end-to-end win
+  - the upper-mask row-value packer also removes a branchy per-edge pack loop on the connected-canonical lookup path
+  - the change is local and preserves the existing sparse fallback for non-dense `vertex_mask` values
+- Outcome: accepted on `main`.

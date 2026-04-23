@@ -78,6 +78,12 @@ uint32_t graph_build_dense_rows(const Graph* g, AdjWord* rows) {
         exit(1);
     }
 
+    if (g->vertex_mask == graph_row_mask(g->n)) {
+        uint64_t mask = graph_row_mask(g->n);
+        for (uint32_t i = 0; i < n; i++) rows[i] = (AdjWord)((uint64_t)g->adj[i] & mask);
+        return n;
+    }
+
     uint64_t rem = active;
     uint32_t dense_v = 0;
     while (rem) {
@@ -411,22 +417,28 @@ uint32_t small_graph_pack_mask(const Graph* g) {
     return small_graph_pack_mask_from_row_values(rows, (int)n);
 }
 
+static inline uint64_t graph_pack_upper_mask_from_row_values64(const AdjWord* rows, int n) {
+    uint64_t mask = 0;
+    int bit = 0;
+    for (int j = 1; j < n; j++) {
+        mask |= (((uint64_t)rows[j] & graph_row_mask(j)) << bit);
+        bit += j;
+    }
+    return mask;
+}
+
 uint64_t graph_pack_upper_mask64(const Graph* g) {
     int edge_total = g->n * (g->n - 1) / 2;
     if (edge_total > 64) {
         fprintf(stderr, "graph_pack_upper_mask64 only supports graphs with at most 64 edge bits\n");
         exit(1);
     }
+    if (g->vertex_mask == graph_row_mask(g->n)) {
+        return graph_pack_upper_mask_from_row_values64(g->adj, g->n);
+    }
     AdjWord rows[MAXN_NAUTY];
     uint32_t n = graph_build_dense_rows(g, rows);
-    uint64_t mask = 0;
-    int bit = 0;
-    for (uint32_t j = 1; j < n; j++) {
-        for (uint32_t i = 0; i < j; i++, bit++) {
-            if (((uint64_t)rows[i] >> j) & 1ULL) mask |= 1ULL << bit;
-        }
-    }
-    return mask;
+    return graph_pack_upper_mask_from_row_values64(rows, (int)n);
 }
 
 static uint32_t small_graph_contract_mask(uint32_t mask, int n, int u, int v) {
