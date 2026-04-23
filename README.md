@@ -276,7 +276,7 @@ Or pass the dimensions explicitly:
 
 Current limits in the checked-in C sources:
 
-- `partition_poly`: up to 7 rows and 16 columns.
+- `partition_poly`: up to 8 rows and 16 columns.
 - `partition_count4`: same solver limits as `partition_poly`.
 - `partition_poly_7`: 7 rows and up to 7 columns.
 

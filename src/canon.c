@@ -6,12 +6,13 @@
 #define CANON_FG_BITS 5u
 #define CANON_FG_MASK ((1u << CANON_FG_BITS) - 1u)
 #define CANON_NO_PERM UINT16_MAX
+typedef uint32_t CanonPackedState;
 
 #if MAX_COLS > CANON_FG_MASK
 #error "Canon first-greater packing needs more bits"
 #endif
-#if CANON_PARTITION_ID_LIMIT > (1u << (16u - CANON_FG_BITS))
-#error "Canon first-greater value packing exceeds uint16_t capacity"
+#if CANON_PARTITION_ID_LIMIT > (1u << (32u - CANON_FG_BITS))
+#error "Canon first-greater value packing exceeds CanonPackedState capacity"
 #endif
 
 static inline int canon_perm_word_count(int limit) {
@@ -22,15 +23,16 @@ static inline int canon_bucket_summary_word_count(int perm_word_count) {
     return (perm_word_count + 63) >> 6;
 }
 
-static inline uint16_t canon_state_pack(uint8_t fg, uint16_t fg_val) {
-    return (uint16_t)((uint16_t)fg | (uint16_t)(fg_val << CANON_FG_BITS));
+static inline CanonPackedState canon_state_pack(uint8_t fg, uint16_t fg_val) {
+    return (CanonPackedState)((CanonPackedState)fg |
+                              ((CanonPackedState)fg_val << CANON_FG_BITS));
 }
 
-static inline uint8_t canon_state_fg(uint16_t state) {
+static inline uint8_t canon_state_fg(CanonPackedState state) {
     return (uint8_t)(state & CANON_FG_MASK);
 }
 
-static inline uint16_t canon_state_fg_val(uint16_t state) {
+static inline uint16_t canon_state_fg_val(CanonPackedState state) {
     return (uint16_t)(state >> CANON_FG_BITS);
 }
 
@@ -133,7 +135,8 @@ static inline uint16_t* canon_state_changed_first_greater_idx_row(CanonState* st
     return st->changed_first_greater_idx + (size_t)depth * (size_t)st->limit;
 }
 
-static inline uint16_t* canon_state_changed_first_greater_old_state_row(CanonState* st, int depth) {
+static inline CanonPackedState* canon_state_changed_first_greater_old_state_row(CanonState* st,
+                                                                                int depth) {
     return st->changed_first_greater_old_state + (size_t)depth * (size_t)st->limit;
 }
 
@@ -911,14 +914,15 @@ static int canon_state_prepare_push_selective(const CanonState* st, int partitio
     const uint16_t* sorted_row = perm_order_by_value + (size_t)partition_id * (size_t)perm_count;
     const uint16_t* prefix_row = perm_value_prefix_end + (size_t)partition_id * (size_t)num_partitions;
     const uint16_t* equal_perm = canon_state_equal_perm_row_const(st, depth);
-    uint16_t* changed_first_greater_new_state = scratch->changed_first_greater_new_state;
+    CanonPackedState* changed_first_greater_new_state =
+        scratch->changed_first_greater_new_state;
     uint16_t* next_equal_perm = scratch->next_equal_perm;
     uint16_t* changed_first_greater_idx = scratch->changed_first_greater_idx;
     uint16_t next_equal_count = 0;
     uint16_t changed_first_greater_count = 0;
     long long scanned_count = 0;
     long long active_count = 0;
-    uint16_t equal_state = canon_state_pack((uint8_t)depth, 0);
+    CanonPackedState equal_state = canon_state_pack((uint8_t)depth, 0);
     int value_word_count = (st->value_bucket_limit + 63) >> 6;
 
     for (uint16_t i = 0; i < st->equal_count[depth]; i++) {
@@ -948,7 +952,7 @@ static int canon_state_prepare_push_selective(const CanonState* st, int partitio
                 next_equal_perm[next_equal_count++] = (uint16_t)p;
             }
             {
-                uint16_t new_state = canon_state_pack(next_fg, new_fg_val);
+                CanonPackedState new_state = canon_state_pack(next_fg, new_fg_val);
                 if (equal_state != new_state) {
                     changed_first_greater_idx[changed_first_greater_count] = (uint16_t)p;
                     changed_first_greater_new_state[changed_first_greater_count] = new_state;
@@ -973,8 +977,8 @@ static int canon_state_prepare_push_selective(const CanonState* st, int partitio
                 rs &= rs - 1;
                 if (r >= st->value_bucket_limit) break;
 
-            uint16_t bucket_count = canon_state_value_bucket_count(st, g, r);
-            uint16_t bucket_state = canon_state_pack((uint8_t)g, (uint16_t)r);
+                uint16_t bucket_count = canon_state_value_bucket_count(st, g, r);
+                CanonPackedState bucket_state = canon_state_pack((uint8_t)g, (uint16_t)r);
                 if (bucket_count == 0) continue;
 
                 uint16_t threshold_end = prefix_row[r - 1];
@@ -1010,7 +1014,7 @@ static int canon_state_prepare_push_selective(const CanonState* st, int partitio
                             next_equal_perm[next_equal_count++] = (uint16_t)p;
                         }
                         {
-                            uint16_t new_state = canon_state_pack(next_fg, new_fg_val);
+                            CanonPackedState new_state = canon_state_pack(next_fg, new_fg_val);
                             if (bucket_state != new_state) {
                                 changed_first_greater_idx[changed_first_greater_count] = (uint16_t)p;
                                 changed_first_greater_new_state[changed_first_greater_count] = new_state;
@@ -1057,7 +1061,7 @@ static int canon_state_prepare_push_selective(const CanonState* st, int partitio
                             next_equal_perm[next_equal_count++] = (uint16_t)p;
                         }
                         {
-                            uint16_t new_state = canon_state_pack(next_fg, new_fg_val);
+                            CanonPackedState new_state = canon_state_pack(next_fg, new_fg_val);
                             if (bucket_state != new_state) {
                                 changed_first_greater_idx[changed_first_greater_count] =
                                     (uint16_t)p;
@@ -1112,7 +1116,7 @@ void canon_state_commit_push(CanonState* st, int partition_id, const CanonScratc
     int new_depth = depth + 1;
     uint16_t* equal_perm = canon_state_equal_perm_row(st, new_depth);
     uint16_t* changed_first_greater_idx = canon_state_changed_first_greater_idx_row(st, depth);
-    uint16_t* changed_first_greater_old_state =
+    CanonPackedState* changed_first_greater_old_state =
         canon_state_changed_first_greater_old_state_row(st, depth);
     uint16_t changed_fg_count = scratch->changed_first_greater_count;
     st->stack_vals[depth] = (uint16_t)partition_id;
@@ -1123,8 +1127,8 @@ void canon_state_commit_push(CanonState* st, int partition_id, const CanonScratc
     }
     for (uint16_t i = 0; i < changed_fg_count; i++) {
         uint16_t p = scratch->changed_first_greater_idx[i];
-        uint16_t old_state = st->first_greater_state[p];
-        uint16_t new_state = scratch->changed_first_greater_new_state[i];
+        CanonPackedState old_state = st->first_greater_state[p];
+        CanonPackedState new_state = scratch->changed_first_greater_new_state[i];
         uint8_t old_fg = canon_state_fg(old_state);
         uint8_t new_fg = canon_state_fg(new_state);
         uint16_t old_fg_val = canon_state_fg_val(old_state);
@@ -1151,11 +1155,11 @@ void canon_state_commit_push(CanonState* st, int partition_id, const CanonScratc
 void canon_state_pop(CanonState* st) {
     int depth = st->depth - 1;
     uint16_t* changed_first_greater_idx = canon_state_changed_first_greater_idx_row(st, depth);
-    uint16_t* changed_first_greater_old_state =
+    CanonPackedState* changed_first_greater_old_state =
         canon_state_changed_first_greater_old_state_row(st, depth);
     for (uint16_t i = 0; i < st->changed_first_greater_count[depth]; i++) {
         uint16_t p = changed_first_greater_idx[i];
-        uint16_t old_state = changed_first_greater_old_state[i];
+        CanonPackedState old_state = changed_first_greater_old_state[i];
         uint8_t old_fg = canon_state_fg(old_state);
         uint8_t cur_fg = canon_state_fg(st->first_greater_state[p]);
         uint16_t old_fg_val = canon_state_fg_val(old_state);
@@ -1182,7 +1186,7 @@ static long long get_orbit_multiplier_state(const CanonState* st) {
 static int contains_edge_mask(const Graph* g, uint64_t mask) {
     while (mask) {
         int a = __builtin_ctzll(mask);
-        uint64_t na = (uint64_t)g->adj[a] & mask & ~((UINT64_C(1) << (a + 1)) - 1U);
+        uint64_t na = (uint64_t)g->adj[a] & mask & ~graph_row_mask(a + 1);
         if (na) return 1;
         mask &= mask - 1;
     }
@@ -1192,10 +1196,10 @@ static int contains_edge_mask(const Graph* g, uint64_t mask) {
 static int contains_triangle_mask(const Graph* g, uint64_t mask) {
     while (mask) {
         int a = __builtin_ctzll(mask);
-        uint64_t na = (uint64_t)g->adj[a] & mask & ~((UINT64_C(1) << (a + 1)) - 1U);
+        uint64_t na = (uint64_t)g->adj[a] & mask & ~graph_row_mask(a + 1);
         while (na) {
             int b = __builtin_ctzll(na);
-            if ((na & (uint64_t)g->adj[b]) & ~((UINT64_C(1) << (b + 1)) - 1U)) return 1;
+            if ((na & (uint64_t)g->adj[b]) & ~graph_row_mask(b + 1)) return 1;
             na &= na - 1;
         }
         mask &= mask - 1;
@@ -1206,13 +1210,13 @@ static int contains_triangle_mask(const Graph* g, uint64_t mask) {
 static int contains_k4_mask(const Graph* g, uint64_t mask) {
     while (mask) {
         int a = __builtin_ctzll(mask);
-        uint64_t na = (uint64_t)g->adj[a] & mask & ~((UINT64_C(1) << (a + 1)) - 1U);
+        uint64_t na = (uint64_t)g->adj[a] & mask & ~graph_row_mask(a + 1);
         while (na) {
             int b = __builtin_ctzll(na);
-            uint64_t nb = (na & (uint64_t)g->adj[b]) & ~((UINT64_C(1) << (b + 1)) - 1U);
+            uint64_t nb = (na & (uint64_t)g->adj[b]) & ~graph_row_mask(b + 1);
             while (nb) {
                 int c = __builtin_ctzll(nb);
-                if ((nb & (uint64_t)g->adj[c]) & ~((UINT64_C(1) << (c + 1)) - 1U)) return 1;
+                if ((nb & (uint64_t)g->adj[c]) & ~graph_row_mask(c + 1)) return 1;
                 nb &= nb - 1;
             }
             na &= na - 1;
@@ -1497,7 +1501,7 @@ static int partial_graph_append(PartialGraphState* st, int depth, int pid, const
     st->last_num_new = (uint8_t)num_complex;
 #endif
     st->g.n = (uint8_t)(st->g.n + num_complex);
-    st->g.vertex_mask |= ((UINT64_C(1) << num_complex) - 1U) << base_new;
+    if (num_complex > 0) st->g.vertex_mask |= graph_row_mask(num_complex) << base_new;
     for (int i = 0; i < num_complex; i++) st->g.adj[base_new + i] = 0;
 
     for (int i1 = 0; i1 < num_complex; i1++) {
@@ -1604,7 +1608,7 @@ static int partial_graph_push_checked(PartialGraphState* st, int depth, int pid,
     st->last_num_new = (uint8_t)num_complex;
 #endif
     st->g.n = (uint8_t)(st->g.n + num_complex);
-    st->g.vertex_mask |= ((UINT64_C(1) << num_complex) - 1U) << base_new;
+    if (num_complex > 0) st->g.vertex_mask |= graph_row_mask(num_complex) << base_new;
     for (int i = 0; i < num_complex; i++) st->g.adj[base_new + i] = 0;
 
     for (int i1 = 0; i1 < num_complex; i1++) {

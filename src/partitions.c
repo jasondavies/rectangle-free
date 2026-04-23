@@ -28,7 +28,7 @@ int min_partition_pairs = 0;
 #endif
 
 static int bell_number_upper_bound(int rows) {
-    static const int bell_numbers[] = {0, 1, 2, 5, 15, 52, 203, 877};
+    static const int bell_numbers[] = {0, 1, 2, 5, 15, 52, 203, 877, 4140};
     if (rows < 0 || rows >= (int)(sizeof(bell_numbers) / sizeof(bell_numbers[0]))) {
         fprintf(stderr, "Unsupported row count for Bell number lookup: %d\n", rows);
         exit(1);

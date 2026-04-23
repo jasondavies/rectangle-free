@@ -285,7 +285,7 @@ static void graph_choose_branch_edge(const Graph* g, int* u_out, int* v_out, int
         uint64_t u_neighbors = (uint64_t)g->adj[u] & g->vertex_mask;
         int u_deg = __builtin_popcountll(u_neighbors);
         if (u_deg > max_deg) max_deg = u_deg;
-        uint64_t rem = u_neighbors & ~((UINT64_C(1) << (u + 1)) - 1);
+        uint64_t rem = u_neighbors & ~graph_row_mask(u + 1);
         while (rem) {
             int v = __builtin_ctzll(rem);
             uint64_t v_neighbors = (uint64_t)g->adj[v] & g->vertex_mask;

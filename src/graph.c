@@ -221,7 +221,7 @@ uint64_t get_canonical_graph_from_dense_rows_hashed(int n, const AdjWord* rows, 
     } else {
         EMPTYGRAPH(ng, m, n);
         for (int i = 0; i < n; i++) {
-            uint64_t upper = (uint64_t)rows[i] & ~((UINT64_C(1) << (i + 1)) - 1U);
+            uint64_t upper = (uint64_t)rows[i] & ~graph_row_mask(i + 1);
             while (upper) {
                 int j = __builtin_ctzll(upper);
                 ADDONEEDGE(ng, i, j, m);

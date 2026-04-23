@@ -11,10 +11,10 @@ typedef struct {
     int limit;
     int depth;
     int value_bucket_limit;
-    uint16_t* first_greater_state;
+    uint32_t* first_greater_state;
     uint16_t* equal_perm;
     uint16_t* changed_first_greater_idx;
-    uint16_t* changed_first_greater_old_state;
+    uint32_t* changed_first_greater_old_state;
     uint16_t* first_greater_value_bucket_count;
     uint16_t* first_greater_value_bucket_head;
     uint16_t* first_greater_value_next;
@@ -32,7 +32,7 @@ typedef struct {
 
 typedef struct {
     int limit;
-    uint16_t* changed_first_greater_new_state;
+    uint32_t* changed_first_greater_new_state;
     uint16_t* next_equal_perm;
     uint16_t* changed_first_greater_idx;
     uint16_t next_equal_count;

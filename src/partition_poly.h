@@ -32,10 +32,14 @@
 #define DEFAULT_COLS 6
 #endif
 #ifndef MAX_ROWS
-#define MAX_ROWS 7
+#define MAX_ROWS 8
 #endif
 #ifndef MAX_COLS
 #define MAX_COLS 16
+#endif
+
+#if MAX_ROWS > 8
+#error "Partition encoding currently supports at most 8 rows"
 #endif
 
 #define MAX_COMPLEX_PER_COL (MAX_ROWS / 2)
@@ -62,10 +66,18 @@ typedef uint64_t AdjWord;
 #endif
 #endif
 
+#if MAX_ROWS <= 7
 #define MAX_PERMUTATIONS 5040
+#else
+#define MAX_PERMUTATIONS 40320
+#endif
 #define PERM_BITSET_WORDS ((MAX_PERMUTATIONS + 63) / 64)
 #define MAX_DEGREE ((MAX_ROWS * MAX_COLS) + 1)
-#define CANON_PARTITION_ID_LIMIT (1u << 11)
+#if MAX_ROWS <= 7
+#define CANON_PARTITION_ID_LIMIT (1u << 10)
+#else
+#define CANON_PARTITION_ID_LIMIT (1u << 13)
+#endif
 
 #ifndef CACHE_BITS
 #define CACHE_BITS 18

@@ -49,8 +49,6 @@ static void row_graph_cache_free_all(RowGraphCache* cache) {
     free(cache->keys);
     free(cache->stamps);
     free(cache->rows);
-    free(cache->x_pows);
-    free(cache->degs);
     free(cache->coeffs);
     memset(cache, 0, sizeof(*cache));
 }
