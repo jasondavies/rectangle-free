@@ -7430,3 +7430,40 @@
   - the short `7x5` slice is dominated by scheduler/timing noise at this magnitude
   - the change is local and low-risk because it preserves the existing dense-row fallback for non-dense vertex masks
 - Outcome: accepted on `main`.
+
+### Experiment 180: Retune `partition_poly_7` canonical cache size
+- Goal: retune the canonical row-cache size after the raw-cache and small-lookup changes.
+- Background:
+  - `partition_poly_7` had been overriding the default canonical cache with `CACHE_BITS=17`
+  - the raw cache was retuned in Experiment 178, but the canonical cache size had not been rechecked afterwards
+  - current profiling still showed canonical cache lookups and nauty calls as a material part of `solve_graph_poly`
+- Benchmark command:
+  - `/usr/bin/time -f "%e" env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=32 ./partition_poly_7 6 6 >/dev/null`
+  - cache-size variants were compiled one at a time and benchmarks were run sequentially, not concurrently
+- One-run sweep:
+  - `CACHE_BITS=16`: `15.11s`, canonical cache hit ratio `63.1%`
+  - `CACHE_BITS=17`: `14.71s`, canonical cache hit ratio `66.3%`
+  - `CACHE_BITS=18`: `14.62s`, canonical cache hit ratio `68.4%`
+- Repeat benchmark:
+  - baseline `CACHE_BITS=17`: `14.71`, `14.79`, `14.80` seconds, mean `14.767 s`
+  - candidate `CACHE_BITS=18`: `14.62`, `14.68`, `14.69` seconds, mean `14.663 s`
+  - summary: candidate ran `1.007x` faster, about a `0.7%` wall-time reduction on full `6x6`
+- Correctness:
+  - exact full `6x6` polynomial/value lines matched the baseline
+  - key values matched:
+    - `P(4) = 203716633441803914880`
+    - `P(5) = 2852707805646422930409600`
+  - a small single-thread shard also matched the known output:
+    - `env OMP_NUM_THREADS=1 ./partition_poly_7 6 3 --prefix-depth 2 --task-end 1`
+    - `P(4) = 32567040`
+    - `P(5) = 1050404400`
+- Verification:
+  - `make -B partition_poly_7`
+  - `make -n partition_poly_7_profile connected_canon_lookup_gen | rg "CACHE_BITS=18|CACHE_BITS=17"` confirmed both auxiliary 7-row targets now use `CACHE_BITS=18`
+- Change:
+  - update the `partition_poly_7`, `partition_poly_7_profile`, and `connected_canon_lookup_gen` Makefile commands from `-DCACHE_BITS=17` to `-DCACHE_BITS=18`
+- Interpretation:
+  - `CACHE_BITS=16` loses too many canonical hits
+  - `CACHE_BITS=18` pays extra memory for fewer canonical misses and wins modestly on the full `6x6` workload
+  - the gain is small, so this should be revisited if memory pressure or NUMA effects show up on longer `7x5`/`7x6` runs
+- Outcome: accepted on `main`.
