@@ -133,6 +133,310 @@ static inline uint64_t graph_pack_upper_mask_from_dense_rows(uint32_t n, const A
     return mask;
 }
 
+#define WL_CANON_MAX_N 32
+#define WL_CANON_COUNT_BITS 5
+#define WL_CANON_SIG_WORDS ((WL_CANON_MAX_N * WL_CANON_COUNT_BITS + 63) / 64)
+
+typedef struct {
+    uint8_t vertex;
+    uint8_t old_colour;
+    uint64_t packed_counts[WL_CANON_SIG_WORDS];
+} WlColourSignature32;
+
+static inline void wl_colour_signature32_set_count(WlColourSignature32* sig, int colour,
+                                                   uint32_t count) {
+    int bit = colour * WL_CANON_COUNT_BITS;
+    int word = bit >> 6;
+    int shift = bit & 63;
+    uint64_t value = (uint64_t)(count & ((1U << WL_CANON_COUNT_BITS) - 1U));
+    sig->packed_counts[word] |= value << shift;
+    if (shift > 64 - WL_CANON_COUNT_BITS) {
+        sig->packed_counts[word + 1] |= value >> (64 - shift);
+    }
+}
+
+static int wl_colour_signature32_cmp(const WlColourSignature32* a,
+                                     const WlColourSignature32* b) {
+    if (a->old_colour != b->old_colour) {
+        return (int)a->old_colour - (int)b->old_colour;
+    }
+    for (int i = 0; i < WL_CANON_SIG_WORDS; i++) {
+        if (a->packed_counts[i] != b->packed_counts[i]) {
+            return a->packed_counts[i] < b->packed_counts[i] ? -1 : 1;
+        }
+    }
+    return (int)a->vertex - (int)b->vertex;
+}
+
+static int wl_colour_signature32_same(const WlColourSignature32* a,
+                                      const WlColourSignature32* b) {
+    if (a->old_colour != b->old_colour) return 0;
+    for (int i = 0; i < WL_CANON_SIG_WORDS; i++) {
+        if (a->packed_counts[i] != b->packed_counts[i]) return 0;
+    }
+    return 1;
+}
+
+static int graph_build_discrete_wl_canon(int n, const AdjWord* rows, const int* colours,
+                                         Graph* canon, uint64_t* hash_out) {
+    int order[MAXN_NAUTY];
+    int new_pos[MAXN_NAUTY];
+    for (int i = 0; i < n; i++) {
+        order[i] = -1;
+        new_pos[i] = -1;
+    }
+    for (int v = 0; v < n; v++) {
+        int colour = colours[v];
+        if (colour < 0 || colour >= n || order[colour] >= 0) return 0;
+        order[colour] = v;
+    }
+    for (int i = 0; i < n; i++) {
+        if (order[i] < 0) return 0;
+        new_pos[order[i]] = i;
+    }
+
+    uint64_t mask = graph_row_mask(n);
+    uint64_t h = 14695981039346656037ULL;
+    canon->n = (uint8_t)n;
+    canon->vertex_mask = mask;
+    h ^= mask;
+    h *= 1099511628211ULL;
+    for (int pos = 0; pos < n; pos++) {
+        int old_v = order[pos];
+        uint64_t rem = (uint64_t)rows[old_v] & mask;
+        AdjWord row = 0;
+        while (rem) {
+            int old_u = __builtin_ctzll(rem);
+            row |= (AdjWord)(UINT64_C(1) << new_pos[old_u]);
+            rem &= rem - 1;
+        }
+        canon->adj[pos] = row;
+        h ^= (uint64_t)row;
+        h *= 1099511628211ULL;
+    }
+    h ^= (uint64_t)n;
+    h *= 1099511628211ULL;
+    *hash_out = h;
+    return 1;
+}
+
+typedef struct {
+    int n;
+    const AdjWord* rows;
+    int cell_count;
+    int cell_start[MAXN_NAUTY + 1];
+    int order[MAXN_NAUTY];
+    int have_best;
+    AdjWord best_rows[MAXN_NAUTY];
+} WlCanonEnumState;
+
+static void graph_build_rows_for_order(int n, const AdjWord* rows, const int* order,
+                                       AdjWord* out_rows) {
+    int new_pos[MAXN_NAUTY];
+    uint64_t mask = graph_row_mask(n);
+    for (int i = 0; i < n; i++) new_pos[order[i]] = i;
+    for (int pos = 0; pos < n; pos++) {
+        int old_v = order[pos];
+        uint64_t rem = (uint64_t)rows[old_v] & mask;
+        AdjWord row = 0;
+        while (rem) {
+            int old_u = __builtin_ctzll(rem);
+            row |= (AdjWord)(UINT64_C(1) << new_pos[old_u]);
+            rem &= rem - 1;
+        }
+        out_rows[pos] = row;
+    }
+}
+
+static int graph_rows_lex_less(int n, const AdjWord* lhs, const AdjWord* rhs) {
+    for (int i = 0; i < n; i++) {
+        if (lhs[i] != rhs[i]) return lhs[i] < rhs[i];
+    }
+    return 0;
+}
+
+static void wl_enum_consider_order(WlCanonEnumState* st) {
+    AdjWord candidate[MAXN_NAUTY];
+    graph_build_rows_for_order(st->n, st->rows, st->order, candidate);
+    if (!st->have_best || graph_rows_lex_less(st->n, candidate, st->best_rows)) {
+        memcpy(st->best_rows, candidate, (size_t)st->n * sizeof(st->best_rows[0]));
+        st->have_best = 1;
+    }
+}
+
+static void wl_enum_permute_cell(WlCanonEnumState* st, int cell_idx, int pos) {
+    int start = st->cell_start[cell_idx];
+    int end = st->cell_start[cell_idx + 1];
+    if (pos == end) {
+        if (cell_idx + 1 == st->cell_count) {
+            wl_enum_consider_order(st);
+        } else {
+            wl_enum_permute_cell(st, cell_idx + 1, st->cell_start[cell_idx + 1]);
+        }
+        return;
+    }
+    for (int i = pos; i < end; i++) {
+        int tmp = st->order[pos];
+        st->order[pos] = st->order[i];
+        st->order[i] = tmp;
+        wl_enum_permute_cell(st, cell_idx, pos + 1);
+        tmp = st->order[pos];
+        st->order[pos] = st->order[i];
+        st->order[i] = tmp;
+    }
+    (void)start;
+}
+
+static void graph_build_canon_from_rows(int n, const AdjWord* rows, Graph* canon,
+                                        uint64_t* hash_out) {
+    uint64_t mask = graph_row_mask(n);
+    uint64_t h = 14695981039346656037ULL;
+    canon->n = (uint8_t)n;
+    canon->vertex_mask = mask;
+    h ^= mask;
+    h *= 1099511628211ULL;
+    for (int i = 0; i < n; i++) {
+        AdjWord row = (AdjWord)((uint64_t)rows[i] & mask);
+        canon->adj[i] = row;
+        h ^= (uint64_t)row;
+        h *= 1099511628211ULL;
+    }
+    h ^= (uint64_t)n;
+    h *= 1099511628211ULL;
+    *hash_out = h;
+}
+
+static long long wl_enum_permutation_budget(int n, int colour_count, const int* colours,
+                                            long long limit) {
+    if (limit <= 0) return (colour_count == n) ? 1 : limit + 1;
+
+    int counts[MAXN_NAUTY] = {0};
+    long long total = 1;
+    for (int v = 0; v < n; v++) counts[colours[v]]++;
+    for (int c = 0; c < colour_count; c++) {
+        for (int k = 2; k <= counts[c]; k++) {
+            if (total > limit / k) return limit + 1;
+            total *= k;
+        }
+    }
+    return total;
+}
+
+static int graph_build_bounded_wl_canon(int n, const AdjWord* rows, int colour_count,
+                                        const int* colours, Graph* canon,
+                                        uint64_t* hash_out, long long enum_limit) {
+    long long budget = wl_enum_permutation_budget(n, colour_count, colours, enum_limit);
+    if (budget > enum_limit && colour_count != n) return 0;
+    if (colour_count == n) {
+        return graph_build_discrete_wl_canon(n, rows, colours, canon, hash_out);
+    }
+
+    WlCanonEnumState st;
+    memset(&st, 0, sizeof(st));
+    st.n = n;
+    st.rows = rows;
+    st.cell_count = colour_count;
+
+    int counts[MAXN_NAUTY] = {0};
+    int offsets[MAXN_NAUTY];
+    for (int v = 0; v < n; v++) counts[colours[v]]++;
+    int pos = 0;
+    for (int c = 0; c < colour_count; c++) {
+        st.cell_start[c] = pos;
+        offsets[c] = pos;
+        pos += counts[c];
+    }
+    st.cell_start[colour_count] = n;
+    for (int v = 0; v < n; v++) {
+        st.order[offsets[colours[v]]++] = v;
+    }
+
+    wl_enum_permute_cell(&st, 0, st.cell_start[0]);
+    if (!st.have_best) return 0;
+    graph_build_canon_from_rows(n, st.best_rows, canon, hash_out);
+    return 1;
+}
+
+static int graph_try_wl_canon(int n, const AdjWord* rows, Graph* canon,
+                              uint64_t* hash_out, long long enum_limit) {
+    if (n > WL_CANON_MAX_N) return 0;
+
+    int colours[MAXN_NAUTY];
+    int next_colours[MAXN_NAUTY];
+    int degree_counts[WL_CANON_MAX_N + 1] = {0};
+    int degree_colour[WL_CANON_MAX_N + 1];
+    WlColourSignature32 sigs[MAXN_NAUTY];
+    uint32_t mask = (uint32_t)graph_row_mask(n);
+
+    for (int i = 0; i <= WL_CANON_MAX_N; i++) degree_colour[i] = -1;
+    for (int v = 0; v < n; v++) {
+        int degree = __builtin_popcount((uint32_t)rows[v] & mask);
+        degree_counts[degree]++;
+    }
+
+    int colour_count = 0;
+    for (int degree = 0; degree <= n; degree++) {
+        if (degree_counts[degree] > 0) degree_colour[degree] = colour_count++;
+    }
+    for (int v = 0; v < n; v++) {
+        int degree = __builtin_popcount((uint32_t)rows[v] & mask);
+        colours[v] = degree_colour[degree];
+    }
+    if (colour_count == n) {
+        return graph_build_discrete_wl_canon(n, rows, colours, canon, hash_out);
+    }
+
+    for (int iter = 0; iter < n; iter++) {
+        uint32_t colour_masks[WL_CANON_MAX_N] = {0};
+        for (int v = 0; v < n; v++) {
+            colour_masks[colours[v]] |= UINT32_C(1) << v;
+        }
+
+        for (int v = 0; v < n; v++) {
+            sigs[v].vertex = (uint8_t)v;
+            sigs[v].old_colour = (uint8_t)colours[v];
+            for (int i = 0; i < WL_CANON_SIG_WORDS; i++) sigs[v].packed_counts[i] = 0;
+            uint32_t row = (uint32_t)rows[v] & mask;
+            for (int c = 0; c < colour_count; c++) {
+                uint32_t count = (uint32_t)__builtin_popcount(row & colour_masks[c]);
+                wl_colour_signature32_set_count(&sigs[v], c, count);
+            }
+        }
+
+        for (int i = 1; i < n; i++) {
+            WlColourSignature32 tmp = sigs[i];
+            int j = i;
+            while (j > 0 && wl_colour_signature32_cmp(&tmp, &sigs[j - 1]) < 0) {
+                sigs[j] = sigs[j - 1];
+                j--;
+            }
+            sigs[j] = tmp;
+        }
+
+        int next_colour_count = 0;
+        for (int i = 0; i < n; i++) {
+            if (i > 0 && !wl_colour_signature32_same(&sigs[i - 1], &sigs[i])) {
+                next_colour_count++;
+            }
+            next_colours[sigs[i].vertex] = next_colour_count;
+        }
+        next_colour_count++;
+
+        int changed = 0;
+        for (int v = 0; v < n; v++) {
+            if (colours[v] != next_colours[v]) changed = 1;
+            colours[v] = next_colours[v];
+        }
+        colour_count = next_colour_count;
+        if (colour_count == n) {
+            return graph_build_discrete_wl_canon(n, rows, colours, canon, hash_out);
+        }
+        if (!changed) break;
+    }
+    return graph_build_bounded_wl_canon(n, rows, colour_count, colours, canon,
+                                        hash_out, enum_limit);
+}
+
 static uint64_t graph_extract_dense_rows_from_nauty(graph* cg, int m, uint32_t n, Graph* dst,
                                                     uint64_t* upper_mask_out) {
     uint64_t mask = graph_row_mask((int)n);
@@ -204,6 +508,54 @@ uint64_t get_canonical_graph_from_dense_rows_hashed(int n, const AdjWord* rows, 
         return hash_graph(canon);
     }
 
+    if (PROFILE_BUILD && profile) {
+        total_t0 = omp_get_wtime();
+        phase_t0 = total_t0;
+    }
+
+    if (g_use_wl_canon && upper_mask_out == NULL && n >= g_wl_canon_min_n) {
+        double wl_t0 = 0.0;
+        uint64_t wl_hash = 0;
+        if (PROFILE_BUILD && profile) {
+            profile->wl_canon_attempts++;
+            wl_t0 = omp_get_wtime();
+        }
+        if (graph_try_wl_canon(n, rows, canon, &wl_hash, g_wl_canon_enum_limit)) {
+            if (PROFILE_BUILD && profile) {
+                profile->wl_canon_successes++;
+                profile->wl_canon_time += omp_get_wtime() - wl_t0;
+                profile->get_canonical_graph_time += omp_get_wtime() - total_t0;
+            }
+            return wl_hash;
+        }
+        if (PROFILE_BUILD && profile) {
+            profile->wl_canon_time += omp_get_wtime() - wl_t0;
+            phase_t0 = omp_get_wtime();
+        }
+    }
+
+    if (g_disable_nauty) {
+        uint64_t mask = graph_row_mask(n);
+        uint64_t h = 14695981039346656037ULL;
+        canon->n = (uint8_t)n;
+        canon->vertex_mask = mask;
+        h ^= mask;
+        h *= 1099511628211ULL;
+        for (int i = 0; i < n; i++) {
+            AdjWord row = (AdjWord)((uint64_t)rows[i] & mask);
+            canon->adj[i] = row;
+            h ^= (uint64_t)row;
+            h *= 1099511628211ULL;
+        }
+        h ^= (uint64_t)n;
+        h *= 1099511628211ULL;
+        if (upper_mask_out) *upper_mask_out = graph_pack_upper_mask_from_dense_rows((uint32_t)n, rows);
+        if (PROFILE_BUILD && profile) {
+            profile->get_canonical_graph_time += omp_get_wtime() - total_t0;
+        }
+        return h;
+    }
+
     int m = SETWORDSNEEDED(n);
     nauty_workspace_init(ws, n);
 
@@ -213,10 +565,6 @@ uint64_t get_canonical_graph_from_dense_rows_hashed(int n, const AdjWord* rows, 
     int* ptn = ws->ptn;
     int* orbits = ws->orbits;
     uint8_t degrees[MAXN_NAUTY];
-    if (PROFILE_BUILD && profile) {
-        total_t0 = omp_get_wtime();
-        phase_t0 = total_t0;
-    }
 
     if (m == 1) {
         for (int i = 0; i < n; i++) {

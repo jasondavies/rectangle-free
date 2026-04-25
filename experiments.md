@@ -7796,3 +7796,38 @@
     - `rebuild canon graph`: `23.850s`
 - Interpretation: the targeted local mechanism still looks plausible, because the exploratory profile showed rebuild time dropping from `26.778s` to `23.850s`, which matches the fused rebuild/hash path and the direct `m == 1` pack/unpack specialisation. But the host-realistic `15`-thread end-to-end rerun did not reproduce a clear overall win: `6x6` improved slightly while `7x5` regressed slightly. So on this machine the change is mixed rather than clearly positive.
 - Outcome: mixed.
+
+## 2026-04-25
+
+### Experiment 190: Prototype WL32 canonical key as a no-nauty/GPU-friendly graph key
+- Goal: test whether full nauty can be replaced, or at least bypassed, by a cheaper canonicalisation-like key that supports hard overlap graphs with `n <= 32` and is structurally easier to port to GPU.
+- Change:
+  - added an opt-in `RECT_WL_CANON=1` path before nauty in `get_canonical_graph_from_dense_rows_hashed()`
+  - added `RECT_DISABLE_NAUTY=1` to force a no-nauty prototype mode
+  - added `RECT_WL_CANON_MIN_N` and `RECT_WL_CANON_ENUM_LIMIT` controls
+  - implemented 1-WL colour refinement over 32-bit dense rows, using colour-class bitmasks and `popcount(row & class_mask)` signatures
+  - when WL leaves unresolved colour cells, optionally enumerates permutations inside those cells up to the configured budget and chooses the lexicographically smallest dense row sequence
+  - if nauty is disabled and WL cannot produce a bounded key, falls back to the labelled dense graph key
+  - added profile counters for WL canonical attempts, successes, and time
+- Verification:
+  - build commands:
+    - `make partition_poly_7_profile partition_poly_7`
+    - `make partition_poly_7`
+  - correctness check:
+    - baseline command: `env OMP_NUM_THREADS=1 ./partition_poly_7 7 3 --prefix-depth 2 --task-end 2`
+    - WL/no-nauty command: `env OMP_NUM_THREADS=1 RECT_DISABLE_NAUTY=1 RECT_WL_CANON=1 RECT_WL_CANON_ENUM_LIMIT=100000 ./partition_poly_7 7 3 --prefix-depth 2 --task-end 2`
+    - both produced `P(4) = 3076516800`, `P(5) = 126873860400`
+    - both reported `Canonicalisation calls: 11`, `Canonical cache hits: 6 (54.5%)`, `Raw cache hits: 23`
+- Benchmark method:
+  - single-thread only, no concurrent all-core benchmarks
+  - command: `/usr/bin/time -f 'time_wall=%e maxrss_kb=%M' env RECT_PROGRESS_STEP=1000000 RECT_DISABLE_NAUTY=1 RECT_WL_CANON=1 RECT_WL_CANON_ENUM_LIMIT=100000 OMP_NUM_THREADS=1 ./partition_poly_7 7 5 --prefix-depth 2 --task-start 2 --task-end 3`
+- Benchmark result:
+  - current WL32/no-nauty prototype: `28.41s` wall, `632576 KiB` max RSS
+  - previous bounded-WL/no-nauty prototype before the 32-bit bitset signature rewrite: `28.36s` wall
+  - earlier nauty baseline for the same shard: `24.87s` wall
+  - output matched baseline: `P(4) = 1109267002575244800`, `P(5) = 2662967976667408368000`
+  - graph-side counters stayed close to nauty’s merge shape:
+    - WL32/no-nauty: `Canonicalisation calls 4051558`, `Canonical cache hits 2733951 (67.5%)`, `Raw cache hits 8855488`
+    - nauty baseline: `Canonicalisation calls 4091945`, `Canonical cache hits 2769704 (67.7%)`, `Raw cache hits 8825316`
+- Interpretation: this is not a CPU performance win. It is about `14%` slower than nauty on this shard, and the 32-bit bitset rewrite did not materially improve the previous bounded-WL CPU timing. The useful result is that bounded WL can preserve almost the same recurrence/cache merge shape without calling nauty, using operations that are far closer to a GPU implementation: fixed-width rows, colour-class masks, popcounts, small sorts, and bounded within-cell enumeration.
+- Outcome: kept as opt-in prototype for GPU-oriented follow-up, not enabled by default.

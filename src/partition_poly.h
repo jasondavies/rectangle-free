@@ -233,6 +233,8 @@ typedef struct {
     long long solve_structure_calls;
     long long solve_graph_calls;
     long long nauty_calls;
+    long long wl_canon_attempts;
+    long long wl_canon_successes;
     long long hard_graph_nodes;
     long long canon_prepare_calls_by_depth[MAX_COLS + 1];
     long long canon_prepare_accepts_by_depth[MAX_COLS + 1];
@@ -266,6 +268,7 @@ typedef struct {
     double get_canonical_graph_time;
     double get_canonical_graph_dense_rows_time;
     double get_canonical_graph_build_input_time;
+    double wl_canon_time;
     double nauty_time;
     double get_canonical_graph_rebuild_time;
     double solve_graph_time_by_n[MAXN_NAUTY + 1];
@@ -491,6 +494,10 @@ extern int g_rows;
 extern int g_cols;
 extern ProgressReporter progress_reporter;
 extern int g_use_raw_cache;
+extern int g_use_wl_canon;
+extern int g_disable_nauty;
+extern int g_wl_canon_min_n;
+extern long long g_wl_canon_enum_limit;
 extern long long progress_last_reported;
 extern int g_adaptive_subdivide;
 extern int g_adaptive_max_depth;

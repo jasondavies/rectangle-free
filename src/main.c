@@ -182,7 +182,7 @@ static int init_problem_and_run_config(const MainOptions* opts, RunConfig* cfg) 
 #else
     printf("Profiling build: disabled\n");
 #endif
-    printf("Using nauty for canonical graph caching\n");
+    printf("Graph canonical cache backend: nauty with optional WL/labelled prototypes\n");
 
     cfg->prefix_depth = choose_prefix_depth(opts->prefix_depth_override);
     if (cfg->prefix_depth != 0 && cfg->prefix_depth != 2 && cfg->prefix_depth != 3 &&
@@ -240,6 +240,31 @@ static int init_problem_and_run_config(const MainOptions* opts, RunConfig* cfg) 
                 g_use_raw_cache = (strcmp(raw_cache_env, "0") != 0);
             }
         }
+        {
+            const char* wl_canon_env = getenv("RECT_WL_CANON");
+            if (wl_canon_env && *wl_canon_env) {
+                g_use_wl_canon = (strcmp(wl_canon_env, "0") != 0);
+            }
+        }
+        {
+            const char* disable_nauty_env = getenv("RECT_DISABLE_NAUTY");
+            if (disable_nauty_env && *disable_nauty_env) {
+                g_disable_nauty = (strcmp(disable_nauty_env, "0") != 0);
+            }
+        }
+        {
+            const char* wl_min_n_env = getenv("RECT_WL_CANON_MIN_N");
+            if (wl_min_n_env && *wl_min_n_env) {
+                g_wl_canon_min_n = (int)parse_ll_or_die(wl_min_n_env, "RECT_WL_CANON_MIN_N");
+            }
+        }
+        {
+            const char* wl_enum_limit_env = getenv("RECT_WL_CANON_ENUM_LIMIT");
+            if (wl_enum_limit_env && *wl_enum_limit_env) {
+                g_wl_canon_enum_limit =
+                    parse_ll_or_die(wl_enum_limit_env, "RECT_WL_CANON_ENUM_LIMIT");
+            }
+        }
     }
 
     if (opts->task_start < 0) {
@@ -252,6 +277,12 @@ static int init_problem_and_run_config(const MainOptions* opts, RunConfig* cfg) 
     }
 
     printf("Raw cache: %s\n", g_use_raw_cache ? "enabled" : "disabled");
+    printf("WL canonical fast path: %s\n", g_use_wl_canon ? "enabled" : "disabled");
+    if (g_use_wl_canon) {
+        printf("WL canonical min n: %d, enum limit: %lld\n",
+               g_wl_canon_min_n, g_wl_canon_enum_limit);
+    }
+    printf("Nauty fallback: %s\n", g_disable_nauty ? "disabled" : "enabled");
     g_effective_prefix_depth = cfg->prefix_depth;
     cfg->graph_poly_len = RECT_COUNT_K4 ? 1 : (g_cols * (g_rows / 2) + 1);
 
@@ -919,6 +950,8 @@ static void aggregate_execution_summary(const ExecutionState* exec, ExecutionSum
         summary->profile.solve_structure_calls += src->solve_structure_calls;
         summary->profile.solve_graph_calls += src->solve_graph_calls;
         summary->profile.nauty_calls += src->nauty_calls;
+        summary->profile.wl_canon_attempts += src->wl_canon_attempts;
+        summary->profile.wl_canon_successes += src->wl_canon_successes;
         summary->profile.hard_graph_nodes += src->hard_graph_nodes;
         summary->profile.canon_prepare_time += src->canon_prepare_time;
         summary->profile.canon_commit_time += src->canon_commit_time;
@@ -928,6 +961,7 @@ static void aggregate_execution_summary(const ExecutionState* exec, ExecutionSum
         summary->profile.get_canonical_graph_time += src->get_canonical_graph_time;
         summary->profile.get_canonical_graph_dense_rows_time += src->get_canonical_graph_dense_rows_time;
         summary->profile.get_canonical_graph_build_input_time += src->get_canonical_graph_build_input_time;
+        summary->profile.wl_canon_time += src->wl_canon_time;
         summary->profile.nauty_time += src->nauty_time;
         summary->profile.get_canonical_graph_rebuild_time += src->get_canonical_graph_rebuild_time;
         if (src->hard_graph_max_n > summary->profile.hard_graph_max_n) {
@@ -1040,12 +1074,20 @@ static void print_execution_report(const RunConfig* run, const ExecutionState* e
                total_profile->solve_structure_calls, total_profile->build_weight_time);
         printf("  solve_graph_poly: %lld calls, %.3fs\n",
                total_profile->solve_graph_calls, total_profile->solve_graph_time);
+        long long canonical_graph_calls =
+            total_profile->nauty_calls + total_profile->wl_canon_successes;
         printf("  get_canonical_graph: %lld calls, %.3fs\n",
-               total_profile->nauty_calls, total_profile->get_canonical_graph_time);
+               canonical_graph_calls, total_profile->get_canonical_graph_time);
         printf("    dense rows: %.3fs\n",
                total_profile->get_canonical_graph_dense_rows_time);
         printf("    build nauty input: %.3fs\n",
                total_profile->get_canonical_graph_build_input_time);
+        if (g_use_wl_canon || total_profile->wl_canon_attempts > 0) {
+            printf("    WL canonical key: %lld/%lld successes, %.3fs\n",
+                   total_profile->wl_canon_successes,
+                   total_profile->wl_canon_attempts,
+                   total_profile->wl_canon_time);
+        }
         printf("    densenauty: %.3fs\n",
                total_profile->nauty_time);
         printf("    rebuild canon graph: %.3fs\n",
