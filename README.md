@@ -102,8 +102,8 @@ conflict graph for the complex colour classes, and weight each structure by:
 The graph contribution differs by solver:
 
 - `partition_poly`
-  computes the chromatic polynomial symbolically, with [nauty][nauty]-backed
-  canonical graph caching.
+  computes the chromatic polynomial symbolically, with WL-based canonical graph
+  keys and a labelled fallback.
 
 - `partition_count4`
   counts proper 4-colourings directly inside the shared solver, with
@@ -133,13 +133,7 @@ make 5xn_count4
 
 ## Building the partition-based solvers
 
-`partition_poly` and `partition_count4` require:
-
-- OpenMP,
-- the vendored nauty source under `third_party/nauty`.
-
-The top-level `Makefile` builds [nauty][nauty] in a private configured copy
-under `third_party/nauty-build`, then links against `nautyT.a`.
+`partition_poly` and `partition_count4` require OpenMP.
 
 Normal build:
 
@@ -155,19 +149,6 @@ This builds the tracked top-level executables:
 - `partition_poly_7`
 - `partition_poly_profile`
 - `partition_poly_7_profile`
-
-If you want to override the nauty source path:
-
-```bash
-make NAUTY_DIR=/path/to/nauty
-```
-
-The default layout is:
-
-```text
-third_party/nauty
-third_party/nauty-build
-```
 
 On macOS with Apple clang, OpenMP usually also needs Homebrew `libomp`. The
 current `Makefile` uses `/opt/homebrew/opt/libomp` automatically on Darwin.
@@ -294,7 +275,7 @@ above.
 
 The partition-based solver line owes a lot to [Adam P. Goucher][adam]. In
 particular, the polynomial / graph approach and the focus on canonical graph
-labelling with [nauty][nauty] came directly out of those discussions.
+keys came directly out of those discussions.
 
 ## OEIS
 
@@ -304,4 +285,3 @@ This work has contributed to the [On-Line Encyclopedia of Integer Sequences](htt
 - [A391612](https://oeis.org/A391612): Number of n-colourings of a 6x6 grid with no monochromatic axis-aligned rectangle (all n via chromatic polynomial).
 
 [adam]: https://cp4space.hatsya.com/
-[nauty]: https://pallini.di.uniroma1.it/

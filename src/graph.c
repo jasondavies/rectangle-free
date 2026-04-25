@@ -28,44 +28,8 @@ static size_t g_connected_canon_lookup_map_len = 0;
 static const uint8_t* g_connected_canon_lookup_entries = NULL;
 static size_t g_connected_canon_lookup_entry_size = 0;
 
-static inline uint64_t bit_reverse64(uint64_t x) {
-    x = ((x & 0x5555555555555555ULL) << 1) | ((x >> 1) & 0x5555555555555555ULL);
-    x = ((x & 0x3333333333333333ULL) << 2) | ((x >> 2) & 0x3333333333333333ULL);
-    x = ((x & 0x0f0f0f0f0f0f0f0fULL) << 4) | ((x >> 4) & 0x0f0f0f0f0f0f0f0fULL);
-    x = ((x & 0x00ff00ff00ff00ffULL) << 8) | ((x >> 8) & 0x00ff00ff00ff00ffULL);
-    x = ((x & 0x0000ffff0000ffffULL) << 16) | ((x >> 16) & 0x0000ffff0000ffffULL);
-    return (x << 32) | (x >> 32);
-}
-
-static inline setword pack_row_to_nauty1(uint64_t row_bits, int n) {
-    if (n < 64) row_bits &= (1ULL << n) - 1ULL;
-    return (setword)bit_reverse64(row_bits);
-}
-
-void nauty_workspace_init(NautyWorkspace* ws, int n) {
-    int m = SETWORDSNEEDED(n);
-    if (n <= ws->nmax && m <= ws->mmax) return;
-    free(ws->ng);
-    free(ws->cg);
-    free(ws->lab);
-    free(ws->ptn);
-    free(ws->orbits);
-    ws->ng = checked_calloc((size_t)n * (size_t)m, sizeof(graph), "nauty_ng");
-    ws->cg = checked_calloc((size_t)n * (size_t)m, sizeof(graph), "nauty_cg");
-    ws->lab = checked_calloc((size_t)n, sizeof(int), "nauty_lab");
-    ws->ptn = checked_calloc((size_t)n, sizeof(int), "nauty_ptn");
-    ws->orbits = checked_calloc((size_t)n, sizeof(int), "nauty_orbits");
-    ws->nmax = n;
-    ws->mmax = m;
-}
-
-void nauty_workspace_free(NautyWorkspace* ws) {
-    free(ws->ng);
-    free(ws->cg);
-    free(ws->lab);
-    free(ws->ptn);
-    free(ws->orbits);
-    memset(ws, 0, sizeof(*ws));
+void graph_canon_workspace_free(GraphCanonWorkspace* ws) {
+    if (ws) memset(ws, 0, sizeof(*ws));
 }
 
 uint32_t graph_build_dense_rows(const Graph* g, AdjWord* rows) {
@@ -224,8 +188,8 @@ static int wl_colour_signature32_same(const WlColourSignature32* a,
 
 static int graph_build_discrete_wl_canon(int n, const AdjWord* rows, const int* colours,
                                          Graph* canon, uint64_t* hash_out) {
-    int order[MAXN_NAUTY];
-    int new_pos[MAXN_NAUTY];
+    int order[MAX_GRAPH_VERTICES];
+    int new_pos[MAX_GRAPH_VERTICES];
     for (int i = 0; i < n; i++) {
         order[i] = -1;
         new_pos[i] = -1;
@@ -282,12 +246,12 @@ typedef struct {
     int n;
     const AdjWord* rows;
     int cell_count;
-    int cell_start[MAXN_NAUTY + 1];
-    int order[MAXN_NAUTY];
-    int new_pos[MAXN_NAUTY];
+    int cell_start[MAX_GRAPH_VERTICES + 1];
+    int order[MAX_GRAPH_VERTICES];
+    int new_pos[MAX_GRAPH_VERTICES];
     int have_best;
     long long permutation_count;
-    AdjWord best_rows[MAXN_NAUTY];
+    AdjWord best_rows[MAX_GRAPH_VERTICES];
 } WlCanonEnumState;
 
 static AdjWord graph_build_row_for_new_pos(int n, const AdjWord* rows, int old_v,
@@ -304,7 +268,7 @@ static AdjWord graph_build_row_for_new_pos(int n, const AdjWord* rows, int old_v
 }
 
 static void wl_enum_consider_order(WlCanonEnumState* st) {
-    AdjWord candidate[MAXN_NAUTY];
+    AdjWord candidate[MAX_GRAPH_VERTICES];
     st->permutation_count++;
 
     if (!st->have_best) {
@@ -383,7 +347,7 @@ static long long wl_enum_permutation_budget(int n, int colour_count, const int* 
                                             long long limit) {
     if (limit <= 0) return (colour_count == n) ? 1 : limit + 1;
 
-    int counts[MAXN_NAUTY] = {0};
+    int counts[MAX_GRAPH_VERTICES] = {0};
     long long total = 1;
     for (int v = 0; v < n; v++) counts[colours[v]]++;
     for (int c = 0; c < colour_count; c++) {
@@ -461,8 +425,8 @@ static int graph_build_bounded_wl_canon(int n, const AdjWord* rows, int colour_c
     st.rows = rows;
     st.cell_count = colour_count;
 
-    int counts[MAXN_NAUTY] = {0};
-    int offsets[MAXN_NAUTY];
+    int counts[MAX_GRAPH_VERTICES] = {0};
+    int offsets[MAX_GRAPH_VERTICES];
     for (int v = 0; v < n; v++) counts[colours[v]]++;
     int pos = 0;
     for (int c = 0; c < colour_count; c++) {
@@ -506,11 +470,11 @@ static int graph_try_wl_canon(int n, const AdjWord* rows, Graph* canon,
     double init_t0 = 0.0;
     if (PROFILE_BUILD && profile) init_t0 = omp_get_wtime();
 
-    int colours[MAXN_NAUTY];
-    int next_colours[MAXN_NAUTY];
+    int colours[MAX_GRAPH_VERTICES];
+    int next_colours[MAX_GRAPH_VERTICES];
     int degree_counts[WL_CANON_MAX_N + 1] = {0};
     int degree_colour[WL_CANON_MAX_N + 1];
-    WlColourSignature32 sigs[MAXN_NAUTY];
+    WlColourSignature32 sigs[MAX_GRAPH_VERTICES];
     uint32_t mask = (uint32_t)graph_row_mask(n);
 
     for (int i = 0; i <= WL_CANON_MAX_N; i++) degree_colour[i] = -1;
@@ -605,60 +569,12 @@ static int graph_try_wl_canon(int n, const AdjWord* rows, Graph* canon,
                                         hash_out, enum_limit, profile);
 }
 
-static uint64_t graph_extract_dense_rows_from_nauty(graph* cg, int m, uint32_t n, Graph* dst,
-                                                    uint64_t* upper_mask_out) {
-    uint64_t mask = graph_row_mask((int)n);
-    uint64_t h = 14695981039346656037ULL;
-    uint64_t upper_mask = 0;
-    int pack_upper = upper_mask_out && ((uint64_t)n * (uint64_t)(n - 1) / 2ULL) <= 64ULL;
-    dst->n = (uint8_t)n;
-    dst->vertex_mask = mask;
-    h ^= mask;
-    h *= 1099511628211ULL;
-
-    if (m == 1) {
-        for (uint32_t i = 0; i < n; i++) {
-            AdjWord row = (AdjWord)(bit_reverse64((uint64_t)GRAPHROW(cg, (int)i, 1)[0]) & mask);
-            dst->adj[i] = row;
-            h ^= (uint64_t)row;
-            h *= 1099511628211ULL;
-        }
-        if (pack_upper) {
-            upper_mask = graph_pack_upper_mask_from_dense_rows(n, dst->adj);
-        }
-        h ^= (uint64_t)n;
-        h *= 1099511628211ULL;
-        if (upper_mask_out) *upper_mask_out = upper_mask;
-        return h;
-    }
-
-    for (uint32_t i = 0; i < n; i++) {
-        AdjWord row = 0;
-        graph* row_words = GRAPHROW(cg, (int)i, m);
-        for (uint32_t j = 0; j < n; j++) {
-            if (ISELEMENT(row_words, (int)j)) {
-                row |= (AdjWord)(UINT64_C(1) << j);
-                if (pack_upper && j > i) {
-                    upper_mask |= UINT64_C(1) << (((uint64_t)j * (uint64_t)(j - 1) / 2ULL) + i);
-                }
-            }
-        }
-        dst->adj[i] = row & (AdjWord)mask;
-        h ^= (uint64_t)dst->adj[i];
-        h *= 1099511628211ULL;
-    }
-    h ^= (uint64_t)n;
-    h *= 1099511628211ULL;
-    if (upper_mask_out) *upper_mask_out = upper_mask;
-    return h;
-}
-
 uint64_t get_canonical_graph_from_dense_rows_hashed(int n, const AdjWord* rows, Graph* canon,
-                                                    NautyWorkspace* ws,
+                                                    GraphCanonWorkspace* ws,
                                                     ProfileStats* profile,
                                                     uint64_t* upper_mask_out) {
     double total_t0 = 0.0;
-    double phase_t0 = 0.0;
+    (void)ws;
 
     if (n == 0) {
         canon->n = 0;
@@ -677,8 +593,8 @@ uint64_t get_canonical_graph_from_dense_rows_hashed(int n, const AdjWord* rows, 
     }
 
     if (PROFILE_BUILD && profile) {
+        profile->canon_key_calls++;
         total_t0 = omp_get_wtime();
-        phase_t0 = total_t0;
     }
 
     if (g_use_wl_canon && upper_mask_out == NULL && n >= g_wl_canon_min_n) {
@@ -699,110 +615,43 @@ uint64_t get_canonical_graph_from_dense_rows_hashed(int n, const AdjWord* rows, 
         if (PROFILE_BUILD && profile) {
             profile->wl_canon_failures++;
             profile->wl_canon_time += omp_get_wtime() - wl_t0;
-            phase_t0 = omp_get_wtime();
         }
     }
 
-    if (g_disable_nauty) {
-        uint64_t mask = graph_row_mask(n);
-        uint64_t h = 14695981039346656037ULL;
-        canon->n = (uint8_t)n;
-        canon->vertex_mask = mask;
-        h ^= mask;
-        h *= 1099511628211ULL;
-        for (int i = 0; i < n; i++) {
-            AdjWord row = (AdjWord)((uint64_t)rows[i] & mask);
-            canon->adj[i] = row;
-            h ^= (uint64_t)row;
-            h *= 1099511628211ULL;
-        }
-        h ^= (uint64_t)n;
-        h *= 1099511628211ULL;
-        if (upper_mask_out) *upper_mask_out = graph_pack_upper_mask_from_dense_rows((uint32_t)n, rows);
-        if (PROFILE_BUILD && profile) {
-            profile->get_canonical_graph_time += omp_get_wtime() - total_t0;
-        }
-        return h;
-    }
-
-    int m = SETWORDSNEEDED(n);
-    nauty_workspace_init(ws, n);
-
-    graph* ng = ws->ng;
-    graph* cg = ws->cg;
-    int* lab = ws->lab;
-    int* ptn = ws->ptn;
-    int* orbits = ws->orbits;
-    uint8_t degrees[MAXN_NAUTY];
-
-    if (m == 1) {
-        for (int i = 0; i < n; i++) {
-            GRAPHROW(ng, i, 1)[0] = pack_row_to_nauty1((uint64_t)rows[i], n);
-        }
-    } else {
-        EMPTYGRAPH(ng, m, n);
-        for (int i = 0; i < n; i++) {
-            uint64_t upper = (uint64_t)rows[i] & ~graph_row_mask(i + 1);
-            while (upper) {
-                int j = __builtin_ctzll(upper);
-                ADDONEEDGE(ng, i, j, m);
-                upper &= upper - 1;
-            }
-        }
-    }
-    if (PROFILE_BUILD && profile) {
-        profile->get_canonical_graph_build_input_time += omp_get_wtime() - phase_t0;
-    }
-
-    int degree_counts[MAXN_NAUTY + 1] = {0};
+    uint64_t mask = graph_row_mask(n);
+    uint64_t h = 14695981039346656037ULL;
+    canon->n = (uint8_t)n;
+    canon->vertex_mask = mask;
+    h ^= mask;
+    h *= 1099511628211ULL;
     for (int i = 0; i < n; i++) {
-        degrees[i] = (uint8_t)__builtin_popcountll((uint64_t)rows[i]);
-        degree_counts[degrees[i]]++;
+        AdjWord row = (AdjWord)((uint64_t)rows[i] & mask);
+        canon->adj[i] = row;
+        h ^= (uint64_t)row;
+        h *= 1099511628211ULL;
     }
-    int degree_offsets[MAXN_NAUTY + 1];
-    int pos = 0;
-    for (int deg = 0; deg <= MAXN_NAUTY; deg++) {
-        degree_offsets[deg] = pos;
-        pos += degree_counts[deg];
+    h ^= (uint64_t)n;
+    h *= 1099511628211ULL;
+    if (upper_mask_out) {
+        uint64_t edge_bits = (uint64_t)n * (uint64_t)(n - 1) / 2ULL;
+        *upper_mask_out = edge_bits <= 64ULL
+            ? graph_pack_upper_mask_from_dense_rows((uint32_t)n, rows)
+            : 0;
     }
-    for (int v = 0; v < n; v++) {
-        lab[degree_offsets[degrees[v]]++] = v;
-    }
-    for (int i = 0; i < n; i++) {
-        ptn[i] = (i + 1 < n && degrees[lab[i]] == degrees[lab[i + 1]]) ? 1 : 0;
-    }
-
-    DEFAULTOPTIONS_GRAPH(options);
-    options.getcanon = TRUE;
-    options.defaultptn = FALSE;
-
-    statsblk stats;
-
-    if (PROFILE_BUILD && profile) phase_t0 = omp_get_wtime();
-    densenauty(ng, lab, ptn, orbits, &options, &stats, m, n, cg);
     if (PROFILE_BUILD && profile) {
-        profile->nauty_calls++;
-        profile->nauty_time += omp_get_wtime() - phase_t0;
-        phase_t0 = omp_get_wtime();
-    }
-
-    uint64_t canon_hash =
-        graph_extract_dense_rows_from_nauty(cg, m, (uint32_t)n, canon, upper_mask_out);
-    if (PROFILE_BUILD && profile) {
-        profile->get_canonical_graph_rebuild_time += omp_get_wtime() - phase_t0;
         profile->get_canonical_graph_time += omp_get_wtime() - total_t0;
     }
-    return canon_hash;
+    return h;
 }
 
 void get_canonical_graph_from_dense_rows(int n, const AdjWord* rows, Graph* canon,
-                                         NautyWorkspace* ws, ProfileStats* profile) {
+                                         GraphCanonWorkspace* ws, ProfileStats* profile) {
     (void)get_canonical_graph_from_dense_rows_hashed(n, rows, canon, ws, profile, NULL);
 }
 
-uint64_t get_canonical_graph_hashed(Graph* g, Graph* canon, NautyWorkspace* ws,
+uint64_t get_canonical_graph_hashed(Graph* g, Graph* canon, GraphCanonWorkspace* ws,
                                     ProfileStats* profile, uint64_t* upper_mask_out) {
-    AdjWord rows[MAXN_NAUTY];
+    AdjWord rows[MAX_GRAPH_VERTICES];
     double phase_t0 = 0.0;
     if (PROFILE_BUILD && profile) phase_t0 = omp_get_wtime();
     int n = (int)graph_build_dense_rows(g, rows);
@@ -815,7 +664,8 @@ uint64_t get_canonical_graph_hashed(Graph* g, Graph* canon, NautyWorkspace* ws,
                                                       upper_mask_out);
 }
 
-void get_canonical_graph(Graph* g, Graph* canon, NautyWorkspace* ws, ProfileStats* profile) {
+void get_canonical_graph(Graph* g, Graph* canon, GraphCanonWorkspace* ws,
+                         ProfileStats* profile) {
     (void)get_canonical_graph_hashed(g, canon, ws, profile, NULL);
 }
 
@@ -929,7 +779,7 @@ uint32_t small_graph_pack_mask(const Graph* g) {
     if (g->vertex_mask == graph_row_mask(g->n)) {
         return small_graph_pack_mask_from_row_values(g->adj, g->n);
     }
-    AdjWord rows[MAXN_NAUTY];
+    AdjWord rows[MAX_GRAPH_VERTICES];
     uint32_t n = graph_build_dense_rows(g, rows);
     return small_graph_pack_mask_from_row_values(rows, (int)n);
 }
@@ -953,7 +803,7 @@ uint64_t graph_pack_upper_mask64(const Graph* g) {
     if (g->vertex_mask == graph_row_mask(g->n)) {
         return graph_pack_upper_mask_from_row_values64(g->adj, g->n);
     }
-    AdjWord rows[MAXN_NAUTY];
+    AdjWord rows[MAX_GRAPH_VERTICES];
     uint32_t n = graph_build_dense_rows(g, rows);
     return graph_pack_upper_mask_from_row_values64(rows, (int)n);
 }
@@ -1305,10 +1155,10 @@ void induced_subgraph_from_mask(const Graph* src, uint64_t mask, Graph* dst) {
 
 typedef struct {
     int time;
-    int disc[MAXN_NAUTY];
-    int low[MAXN_NAUTY];
-    int parent[MAXN_NAUTY];
-    uint64_t open_mask[MAXN_NAUTY];
+    int disc[MAX_GRAPH_VERTICES];
+    int low[MAX_GRAPH_VERTICES];
+    int parent[MAX_GRAPH_VERTICES];
+    uint64_t open_mask[MAX_GRAPH_VERTICES];
     uint64_t* block_masks;
     int block_count;
     uint64_t articulation_mask;
@@ -1349,11 +1199,11 @@ int graph_collect_biconnected_components(const Graph* g, uint64_t* block_masks,
     BiconnectedSearch st;
     memset(&st, 0, sizeof(st));
     st.block_masks = block_masks;
-    for (int i = 0; i < MAXN_NAUTY; i++) st.parent[i] = -1;
+    for (int i = 0; i < MAX_GRAPH_VERTICES; i++) st.parent[i] = -1;
 
     uint64_t active = g->vertex_mask;
     uint64_t discovered = 0;
-    BiconnectedFrame stack[MAXN_NAUTY];
+    BiconnectedFrame stack[MAX_GRAPH_VERTICES];
     int depth = 0;
 
     while ((active & ~discovered) != 0) {
@@ -1532,8 +1382,8 @@ uint64_t graph_fill_dense_key_rows(const Graph* g, AdjWord row_mask, AdjWord* ro
         rem &= rem - 1;
     }
 #else
-    int dense_index[MAXN_NAUTY];
-    int dense_vertices[MAXN_NAUTY];
+    int dense_index[MAX_GRAPH_VERTICES];
+    int dense_vertices[MAX_GRAPH_VERTICES];
     uint64_t rem = active;
     uint32_t dense_v = 0;
     while (rem) {

@@ -42,7 +42,7 @@ typedef struct {
 typedef struct {
     RowGraphCache cache;
     RowGraphCache raw_cache;
-    NautyWorkspace ws;
+    GraphCanonWorkspace ws;
     CanonState canon_state;
     CanonScratch canon_scratch;
     PartialGraphState partial_graph;
@@ -56,8 +56,8 @@ typedef struct {
     uint8_t old_n;
     uint64_t old_vertex_mask;
     uint8_t touched_prev_count;
-    uint8_t touched_prev_idx[MAXN_NAUTY];
-    AdjWord touched_prev_old_adj[MAXN_NAUTY];
+    uint8_t touched_prev_idx[MAX_GRAPH_VERTICES];
+    AdjWord touched_prev_old_adj[MAX_GRAPH_VERTICES];
 #if RECT_COUNT_K4_FEASIBILITY
     uint8_t old_remaining_capacity;
     uint32_t old_full_pair_mask;
@@ -82,14 +82,14 @@ void build_live_prefix2_tasks(PrefixId** live_i_out, PrefixId** live_j_out,
                               long long* live_count_out);
 void dfs(int depth, int min_idx, int* stack, CanonState* canon_state,
          PartialGraphState* partial_graph, RowGraphCache* cache,
-         RowGraphCache* raw_cache, NautyWorkspace* ws, ResultAccum* local_total,
+         RowGraphCache* raw_cache, GraphCanonWorkspace* ws, ResultAccum* local_total,
          long long* local_canon_calls, long long* local_cache_hits,
          long long* local_raw_cache_hits, const WeightAccum* weight_prod,
          long long mult_coeff, int run_len, ProfileStats* profile,
          CanonScratch* canon_scratch);
 void execute_prefix2_fixed_batch(PrefixId i, const PrefixId* js, const long long* ps, int count,
                                  RowGraphCache* cache, RowGraphCache* raw_cache,
-                                 NautyWorkspace* ws, CanonState* canon_state,
+                                 GraphCanonWorkspace* ws, CanonState* canon_state,
                                  CanonScratch* canon_scratch,
                                  PartialGraphState* partial_graph, int* stack,
                                  ResultAccum* local_total, long long* local_canon_calls,
@@ -105,7 +105,7 @@ void execute_local_runtime_task(const LocalTask* task, WorkerCtx* ctx, ResultAcc
                                 TaskTimingStats* task_timing,
                                 QueueSubtaskTimingStats* queue_subtask_stats);
 void solve_graph_poly(const Graph* input_g, RowGraphCache* cache, RowGraphCache* raw_cache,
-                      NautyWorkspace* ws, long long* local_canon_calls,
+                      GraphCanonWorkspace* ws, long long* local_canon_calls,
                       long long* local_cache_hits, long long* local_raw_cache_hits,
                       ProfileStats* profile, GraphResult* out_result);
 

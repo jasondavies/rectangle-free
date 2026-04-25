@@ -7879,5 +7879,14 @@
   - interpretation: discrete-only WL is too weak, but a small bounded enumeration cap works better than the large exploratory cap.
 - Default change:
   - enabled WL canonicalisation by default with nauty fallback disabled and enum limit `16`
-  - the old nauty path can still be forced with `RECT_WL_CANON=0 RECT_DISABLE_NAUTY=0`
-- Outcome: accepted as the default graph canonical key path.
+  - the old nauty path could still be forced with `RECT_WL_CANON=0 RECT_DISABLE_NAUTY=0`
+- Nauty removal follow-up:
+  - removed the nauty build/link dependency, deleted the vendored `third_party/nauty` tree, and removed the nauty-backed connected lookup generator
+  - production graph keys are now WL with the same labelled fallback used by the accepted default path; `RECT_DISABLE_NAUTY` is gone
+  - renamed `MAXN_NAUTY` to `MAX_GRAPH_VERTICES` and replaced profile/output counters that reported "nauty" with "canon-key"
+  - kept the previous WL gate for connected-lookup upper-mask calls; a trial that let WL handle those calls slowed the same shard to `22.86s`
+  - verification: `make all`; `env OMP_NUM_THREADS=1 ./partition_poly_7 7 3 --prefix-depth 2 --task-end 2`; `env OMP_NUM_THREADS=1 ./partition_poly_7_profile 7 3 --prefix-depth 2 --task-end 2`
+  - correctness output remained `P(4) = 3076516800`, `P(5) = 126873860400`
+  - benchmark command: `/usr/bin/time -f 'time_wall=%e maxrss_kb=%M' env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 5 --prefix-depth 2 --task-start 2 --task-end 3`
+  - benchmark result after restoring the gate: `22.30s` wall, `649216 KiB` max RSS, matching output; this is effectively neutral against the previous accepted WL default (`22.26s`) and still faster than the earlier nauty baseline for this shard (`24.87s`)
+- Outcome: accepted as the default graph canonical key path; nauty has been removed from the production build.

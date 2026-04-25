@@ -164,7 +164,7 @@ static inline const uint16_t* canon_state_equal_perm_row_const(const CanonState*
 
 static void solve_structure_with_row_orbit(const Graph* partial_graph, long long row_orbit,
                                            RowGraphCache* cache, RowGraphCache* raw_cache,
-                                           NautyWorkspace* ws, long long* local_canon_calls,
+                                           GraphCanonWorkspace* ws, long long* local_canon_calls,
                                            long long* local_cache_hits,
                                            long long* local_raw_cache_hits,
                                            const WeightAccum* weight_prod, long long mult_coeff,
@@ -1315,13 +1315,13 @@ static int choose_dsat_vertex_colourable(const Graph* g, const int8_t* colour,
 static int dsatur_is_4_colourable(const Graph* g, int coloured, int8_t* colour,
                                   uint8_t* saturation, int8_t* solution) {
     if (coloured == g->n) {
-        if (solution) memcpy(solution, colour, sizeof(int8_t) * MAXN_NAUTY);
+        if (solution) memcpy(solution, colour, sizeof(int8_t) * MAX_GRAPH_VERTICES);
         return 1;
     }
 
     int v = choose_dsat_vertex_colourable(g, colour, saturation);
     if (v < 0) {
-        if (solution) memcpy(solution, colour, sizeof(int8_t) * MAXN_NAUTY);
+        if (solution) memcpy(solution, colour, sizeof(int8_t) * MAX_GRAPH_VERTICES);
         return 1;
     }
 
@@ -1331,7 +1331,7 @@ static int dsatur_is_4_colourable(const Graph* g, int coloured, int8_t* colour,
         uint8_t bit = (uint8_t)bit_u;
         int c = __builtin_ctz((unsigned)bit);
         available &= (uint8_t)(available - 1);
-        int changed[MAXN_NAUTY];
+        int changed[MAX_GRAPH_VERTICES];
         int changed_count = 0;
         colour[v] = (int8_t)c;
 
@@ -1392,7 +1392,7 @@ static int induced_subgraph_with_vertices(const Graph* src, uint64_t mask, Graph
 
 static int peel_to_4_core(const Graph* src, Graph* core, int* peel_order, int* peel_len,
                           int* core_vertices) {
-    int degree[MAXN_NAUTY];
+    int degree[MAX_GRAPH_VERTICES];
     uint64_t active = src->vertex_mask;
     uint64_t queue = 0;
 
@@ -1447,7 +1447,7 @@ static int graph_component_colourable(const Graph* g, int8_t* out_colour) {
     if (g->n == 0) return 1;
     if (g->n == 1) {
         if (out_colour) {
-            memset(out_colour, -1, sizeof(int8_t) * MAXN_NAUTY);
+            memset(out_colour, -1, sizeof(int8_t) * MAX_GRAPH_VERTICES);
             out_colour[__builtin_ctzll(g->vertex_mask)] = 0;
         }
         return 1;
@@ -1466,9 +1466,9 @@ static int graph_component_colourable(const Graph* g, int8_t* out_colour) {
         rem &= rem - 1;
     }
 
-    int8_t colour[MAXN_NAUTY];
-    uint8_t saturation[MAXN_NAUTY];
-    for (int i = 0; i < MAXN_NAUTY; i++) {
+    int8_t colour[MAX_GRAPH_VERTICES];
+    uint8_t saturation[MAX_GRAPH_VERTICES];
+    for (int i = 0; i < MAX_GRAPH_VERTICES; i++) {
         colour[i] = -1;
         saturation[i] = 0;
     }
@@ -1490,20 +1490,20 @@ static int partial_graph_is_feasible(const PartialGraphState* st, int cols_left)
     if (partial_graph_new_has_k5(st)) return 0;
 
     Graph core;
-    int peel_order[MAXN_NAUTY];
+    int peel_order[MAX_GRAPH_VERTICES];
     int peel_len = 0;
-    int core_vertices[MAXN_NAUTY];
+    int core_vertices[MAX_GRAPH_VERTICES];
     int core_n = peel_to_4_core(&st->g, &core, peel_order, &peel_len, core_vertices);
     if (core_n == 0) {
-        int8_t colour[MAXN_NAUTY];
+        int8_t colour[MAX_GRAPH_VERTICES];
         memset(colour, -1, sizeof(colour));
         return extend_colouring_over_peel(&st->g, peel_order, peel_len, colour);
     }
 
-    int8_t core_colour[MAXN_NAUTY];
+    int8_t core_colour[MAX_GRAPH_VERTICES];
     if (!graph_component_colourable(&core, core_colour)) return 0;
 
-    int8_t colour[MAXN_NAUTY];
+    int8_t colour[MAX_GRAPH_VERTICES];
     memset(colour, -1, sizeof(colour));
     for (int i = 0; i < core_n; i++) colour[core_vertices[i]] = core_colour[i];
     return extend_colouring_over_peel(&st->g, peel_order, peel_len, colour);
@@ -1743,7 +1743,7 @@ void build_live_prefix2_tasks(PrefixId** live_i_out, PrefixId** live_j_out,
 
 static void solve_structure_with_row_orbit(const Graph* partial_graph, long long row_orbit,
                                            RowGraphCache* cache, RowGraphCache* raw_cache,
-                                           NautyWorkspace* ws, long long* local_canon_calls,
+                                           GraphCanonWorkspace* ws, long long* local_canon_calls,
                                            long long* local_cache_hits,
                                            long long* local_raw_cache_hits,
                                            const WeightAccum* weight_prod, long long mult_coeff,
@@ -1778,7 +1778,7 @@ static void solve_structure_with_row_orbit(const Graph* partial_graph, long long
 }
 
 static void solve_structure(const Graph* partial_graph, CanonState* canon_state,
-                            RowGraphCache* cache, RowGraphCache* raw_cache, NautyWorkspace* ws,
+                            RowGraphCache* cache, RowGraphCache* raw_cache, GraphCanonWorkspace* ws,
                             long long* local_canon_calls, long long* local_cache_hits,
                             long long* local_raw_cache_hits, const WeightAccum* weight_prod,
                             long long mult_coeff, ProfileStats* profile, ResultAccum* out_result) {
@@ -1790,7 +1790,7 @@ static void solve_structure(const Graph* partial_graph, CanonState* canon_state,
 
 void dfs(int depth, int min_idx, int* stack, CanonState* canon_state,
          PartialGraphState* partial_graph, RowGraphCache* cache,
-         RowGraphCache* raw_cache, NautyWorkspace* ws, ResultAccum* local_total,
+         RowGraphCache* raw_cache, GraphCanonWorkspace* ws, ResultAccum* local_total,
          long long* local_canon_calls, long long* local_cache_hits,
          long long* local_raw_cache_hits, const WeightAccum* weight_prod,
          long long mult_coeff, int run_len, ProfileStats* profile,
@@ -1798,7 +1798,7 @@ void dfs(int depth, int min_idx, int* stack, CanonState* canon_state,
 
 static void dfs_fast_orbit(int depth, int min_idx, int* stack, CanonState* canon_state,
                            PartialGraphState* partial_graph, RowGraphCache* cache,
-                           RowGraphCache* raw_cache, NautyWorkspace* ws, ResultAccum* local_total,
+                           RowGraphCache* raw_cache, GraphCanonWorkspace* ws, ResultAccum* local_total,
                            long long* local_canon_calls, long long* local_cache_hits,
                            long long* local_raw_cache_hits, const WeightAccum* weight_prod,
                            long long mult_coeff, int run_len, ProfileStats* profile,
@@ -1861,7 +1861,7 @@ static void dfs_fast_orbit(int depth, int min_idx, int* stack, CanonState* canon
 
 static void dfs_fast_rep(int depth, int min_idx, int* stack, CanonState* canon_state,
                          PartialGraphState* partial_graph, RowGraphCache* cache,
-                         RowGraphCache* raw_cache, NautyWorkspace* ws, ResultAccum* local_total,
+                         RowGraphCache* raw_cache, GraphCanonWorkspace* ws, ResultAccum* local_total,
                          long long* local_canon_calls, long long* local_cache_hits,
                          long long* local_raw_cache_hits, const WeightAccum* weight_prod,
                          long long mult_coeff, int run_len, ProfileStats* profile,
@@ -1920,7 +1920,7 @@ static void dfs_fast_rep(int depth, int min_idx, int* stack, CanonState* canon_s
 }
 
 void dfs(int depth, int min_idx, int* stack, CanonState* canon_state, PartialGraphState* partial_graph,
-         RowGraphCache* cache, RowGraphCache* raw_cache, NautyWorkspace* ws, ResultAccum* local_total,
+         RowGraphCache* cache, RowGraphCache* raw_cache, GraphCanonWorkspace* ws, ResultAccum* local_total,
          long long* local_canon_calls, long long* local_cache_hits,
          long long* local_raw_cache_hits, const WeightAccum* weight_prod, long long mult_coeff,
          int run_len, ProfileStats* profile, CanonScratch* canon_scratch) {
@@ -2047,7 +2047,7 @@ PolyCoeff poly_eval(Poly p, long long x) {
 }
 
 void execute_prefix2_fixed_batch(PrefixId i, const PrefixId* js, const long long* ps, int count,
-                                 RowGraphCache* cache, RowGraphCache* raw_cache, NautyWorkspace* ws,
+                                 RowGraphCache* cache, RowGraphCache* raw_cache, GraphCanonWorkspace* ws,
                                  CanonState* canon_state, CanonScratch* canon_scratch,
                                  PartialGraphState* partial_graph, int* stack, ResultAccum* local_total,
                                  long long* local_canon_calls, long long* local_cache_hits,
@@ -2380,7 +2380,7 @@ void execute_local_runtime_task(const LocalTask* task, WorkerCtx* ctx, ResultAcc
     int min_idx = 0;
     double subtask_t0 = PROFILE_BUILD ? omp_get_wtime() : 0.0;
     long long solve_graph_before = PROFILE_BUILD ? profile->solve_graph_calls : 0;
-    long long nauty_before = PROFILE_BUILD ? profile->nauty_calls : 0;
+    long long canon_key_before = PROFILE_BUILD ? profile->canon_key_calls : 0;
     long long adaptive_work_counter = 0;
     GraphHardStats subtask_hard = {0};
     GraphHardStats* prev_hard_stats = tls_hard_graph_stats;
@@ -2419,14 +2419,14 @@ void execute_local_runtime_task(const LocalTask* task, WorkerCtx* ctx, ResultAcc
     if (PROFILE_BUILD && queue_subtask_stats && task->depth <= MAX_COLS) {
         double elapsed = omp_get_wtime() - subtask_t0;
         long long solve_graph_delta = profile->solve_graph_calls - solve_graph_before;
-        long long nauty_delta = profile->nauty_calls - nauty_before;
+        long long canon_key_delta = profile->canon_key_calls - canon_key_before;
         queue_subtask_record(&queue_subtask_stats[task->depth], task, elapsed,
-                             solve_graph_delta, nauty_delta,
+                             solve_graph_delta, canon_key_delta,
                              subtask_hard.hard_graph_nodes, subtask_hard.max_n,
                              subtask_hard.max_degree);
         if (runtime_tasks) {
             runtime_task_system_record_profile(runtime_tasks, task, elapsed,
-                                               solve_graph_delta, nauty_delta,
+                                               solve_graph_delta, canon_key_delta,
                                                subtask_hard.hard_graph_nodes, subtask_hard.max_n,
                                                subtask_hard.max_degree);
         }

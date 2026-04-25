@@ -127,12 +127,6 @@ static int init_problem_and_run_config(const MainOptions* opts, RunConfig* cfg) 
         return 0;
     }
 
-    {
-        int max_n = MAXN_NAUTY;
-        int max_m = SETWORDSNEEDED(max_n);
-        nauty_check(WORDSIZE, max_m, max_n, NAUTYVERSIONID);
-    }
-
     factorial[0] = 1;
     for (int i = 1; i <= 19; i++) factorial[i] = factorial[i - 1] * i;
 
@@ -182,7 +176,7 @@ static int init_problem_and_run_config(const MainOptions* opts, RunConfig* cfg) 
 #else
     printf("Profiling build: disabled\n");
 #endif
-    printf("Graph canonical cache backend: nauty with optional WL/labelled prototypes\n");
+    printf("Graph canonical cache backend: WL key with labelled fallback\n");
 
     cfg->prefix_depth = choose_prefix_depth(opts->prefix_depth_override);
     if (cfg->prefix_depth != 0 && cfg->prefix_depth != 2 && cfg->prefix_depth != 3 &&
@@ -247,12 +241,6 @@ static int init_problem_and_run_config(const MainOptions* opts, RunConfig* cfg) 
             }
         }
         {
-            const char* disable_nauty_env = getenv("RECT_DISABLE_NAUTY");
-            if (disable_nauty_env && *disable_nauty_env) {
-                g_disable_nauty = (strcmp(disable_nauty_env, "0") != 0);
-            }
-        }
-        {
             const char* wl_min_n_env = getenv("RECT_WL_CANON_MIN_N");
             if (wl_min_n_env && *wl_min_n_env) {
                 g_wl_canon_min_n = (int)parse_ll_or_die(wl_min_n_env, "RECT_WL_CANON_MIN_N");
@@ -282,7 +270,6 @@ static int init_problem_and_run_config(const MainOptions* opts, RunConfig* cfg) 
         printf("WL canonical min n: %d, enum limit: %lld\n",
                g_wl_canon_min_n, g_wl_canon_enum_limit);
     }
-    printf("Nauty fallback: %s\n", g_disable_nauty ? "disabled" : "enabled");
     g_effective_prefix_depth = cfg->prefix_depth;
     cfg->graph_poly_len = RECT_COUNT_K4 ? 1 : (g_cols * (g_rows / 2) + 1);
 
@@ -630,14 +617,14 @@ static void execute_run_tasks(const RunConfig* run, double start_time, Execution
         int tid = omp_get_thread_num();
         RowGraphCache cache = {0};
         RowGraphCache raw_cache = {0};
-        NautyWorkspace ws;
+        GraphCanonWorkspace ws;
         memset(&ws, 0, sizeof(ws));
         cache.mask = CACHE_MASK;
         cache.probe = CACHE_PROBE;
         cache.poly_len = graph_poly_len;
         cache.keys = checked_aligned_alloc(64, sizeof(CacheKey) * CACHE_SIZE, "cache_keys");
         cache.stamps = checked_aligned_alloc(64, sizeof(uint64_t) * CACHE_SIZE, "cache_stamps");
-        cache.rows = checked_aligned_alloc(64, sizeof(AdjWord) * CACHE_SIZE * MAXN_NAUTY, "cache_rows");
+        cache.rows = checked_aligned_alloc(64, sizeof(AdjWord) * CACHE_SIZE * MAX_GRAPH_VERTICES, "cache_rows");
         cache.coeffs =
             checked_aligned_alloc(64,
                                   sizeof(GraphCacheValue) * CACHE_SIZE *
@@ -661,7 +648,7 @@ static void execute_run_tasks(const RunConfig* run, double start_time, Execution
         raw_cache.keys = checked_aligned_alloc(64, sizeof(CacheKey) * RAW_CACHE_SIZE, "raw_cache_keys");
         raw_cache.stamps = checked_aligned_alloc(64, sizeof(uint64_t) * RAW_CACHE_SIZE, "raw_cache_stamps");
         raw_cache.rows =
-            checked_aligned_alloc(64, sizeof(AdjWord) * RAW_CACHE_SIZE * MAXN_NAUTY, "raw_cache_rows");
+            checked_aligned_alloc(64, sizeof(AdjWord) * RAW_CACHE_SIZE * MAX_GRAPH_VERTICES, "raw_cache_rows");
         raw_cache.coeffs =
             checked_aligned_alloc(64,
                                   sizeof(GraphCacheValue) * RAW_CACHE_SIZE *
@@ -904,7 +891,7 @@ static void execute_run_tasks(const RunConfig* run, double start_time, Execution
 
         canon_state_free(&canon_state);
         canon_scratch_free(&canon_scratch);
-        nauty_workspace_free(&ws);
+        graph_canon_workspace_free(&ws);
         free(cache.keys);
         free(cache.stamps);
         free(cache.rows);
@@ -949,7 +936,7 @@ static void aggregate_execution_summary(const ExecutionState* exec, ExecutionSum
         summary->profile.partial_append_calls += src->partial_append_calls;
         summary->profile.solve_structure_calls += src->solve_structure_calls;
         summary->profile.solve_graph_calls += src->solve_graph_calls;
-        summary->profile.nauty_calls += src->nauty_calls;
+        summary->profile.canon_key_calls += src->canon_key_calls;
         summary->profile.wl_canon_attempts += src->wl_canon_attempts;
         summary->profile.wl_canon_successes += src->wl_canon_successes;
         summary->profile.wl_canon_discrete_successes += src->wl_canon_discrete_successes;
@@ -983,7 +970,6 @@ static void aggregate_execution_summary(const ExecutionState* exec, ExecutionSum
         summary->profile.solve_graph_time += src->solve_graph_time;
         summary->profile.get_canonical_graph_time += src->get_canonical_graph_time;
         summary->profile.get_canonical_graph_dense_rows_time += src->get_canonical_graph_dense_rows_time;
-        summary->profile.get_canonical_graph_build_input_time += src->get_canonical_graph_build_input_time;
         summary->profile.wl_canon_time += src->wl_canon_time;
         summary->profile.wl_canon_init_time += src->wl_canon_init_time;
         summary->profile.wl_canon_refine_time += src->wl_canon_refine_time;
@@ -991,8 +977,6 @@ static void aggregate_execution_summary(const ExecutionState* exec, ExecutionSum
         summary->profile.wl_canon_enum_budget_time += src->wl_canon_enum_budget_time;
         summary->profile.wl_canon_enum_search_time += src->wl_canon_enum_search_time;
         summary->profile.wl_canon_enum_rebuild_time += src->wl_canon_enum_rebuild_time;
-        summary->profile.nauty_time += src->nauty_time;
-        summary->profile.get_canonical_graph_rebuild_time += src->get_canonical_graph_rebuild_time;
         if (src->hard_graph_max_n > summary->profile.hard_graph_max_n) {
             summary->profile.hard_graph_max_n = src->hard_graph_max_n;
         }
@@ -1018,7 +1002,7 @@ static void aggregate_execution_summary(const ExecutionState* exec, ExecutionSum
             summary->profile.canon_prepare_order_rejects_by_depth[d] +=
                 src->canon_prepare_order_rejects_by_depth[d];
         }
-        for (int n = 0; n <= MAXN_NAUTY; n++) {
+        for (int n = 0; n <= MAX_GRAPH_VERTICES; n++) {
             summary->profile.solve_graph_calls_by_n[n] += src->solve_graph_calls_by_n[n];
             summary->profile.solve_graph_raw_hits_by_n[n] += src->solve_graph_raw_hits_by_n[n];
             summary->profile.solve_graph_canon_hits_by_n[n] += src->solve_graph_canon_hits_by_n[n];
@@ -1050,7 +1034,7 @@ static void aggregate_execution_summary(const ExecutionState* exec, ExecutionSum
                 src->solve_graph_hard_miss_contract_solve_time_by_n[n];
             summary->profile.solve_graph_hard_miss_store_time_by_n[n] +=
                 src->solve_graph_hard_miss_store_time_by_n[n];
-            for (int d = 0; d <= MAXN_NAUTY; d++) {
+            for (int d = 0; d <= MAX_GRAPH_VERTICES; d++) {
                 summary->profile.hard_graph_nodes_by_n_degree[n][d] +=
                     src->hard_graph_nodes_by_n_degree[n][d];
             }
@@ -1103,14 +1087,11 @@ static void print_execution_report(const RunConfig* run, const ExecutionState* e
                total_profile->solve_structure_calls, total_profile->build_weight_time);
         printf("  solve_graph_poly: %lld calls, %.3fs\n",
                total_profile->solve_graph_calls, total_profile->solve_graph_time);
-        long long canonical_graph_calls =
-            total_profile->nauty_calls + total_profile->wl_canon_successes;
+        long long canonical_graph_calls = total_profile->canon_key_calls;
         printf("  get_canonical_graph: %lld calls, %.3fs\n",
                canonical_graph_calls, total_profile->get_canonical_graph_time);
         printf("    dense rows: %.3fs\n",
                total_profile->get_canonical_graph_dense_rows_time);
-        printf("    build nauty input: %.3fs\n",
-               total_profile->get_canonical_graph_build_input_time);
         if (g_use_wl_canon || total_profile->wl_canon_attempts > 0) {
             printf("    WL canonical key: %lld/%lld successes, %.3fs\n",
                    total_profile->wl_canon_successes,
@@ -1194,16 +1175,12 @@ static void print_execution_report(const RunConfig* run, const ExecutionState* e
             if (!any_hist) printf(" empty");
             printf("\n");
         }
-        printf("    densenauty: %.3fs\n",
-               total_profile->nauty_time);
-        printf("    rebuild canon graph: %.3fs\n",
-               total_profile->get_canonical_graph_rebuild_time);
         printf("  hard graph nodes: %lld, max n %d, max degree %d\n",
                total_profile->hard_graph_nodes,
                total_profile->hard_graph_max_n,
                total_profile->hard_graph_max_degree);
         printf("  Graph solver by simplified n (inclusive time):\n");
-        for (int n = 0; n <= MAXN_NAUTY; n++) {
+        for (int n = 0; n <= MAX_GRAPH_VERTICES; n++) {
             long long calls = total_profile->solve_graph_calls_by_n[n];
             long long raw_hits = total_profile->solve_graph_raw_hits_by_n[n];
             long long canon_hits = total_profile->solve_graph_canon_hits_by_n[n];
@@ -1214,7 +1191,7 @@ static void print_execution_report(const RunConfig* run, const ExecutionState* e
                    n, calls, time_s, raw_hits, canon_hits, hard);
         }
         printf("  Graph solver outcomes by simplified n:\n");
-        for (int n = 0; n <= MAXN_NAUTY; n++) {
+        for (int n = 0; n <= MAX_GRAPH_VERTICES; n++) {
             long long lookup_calls = total_profile->solve_graph_lookup_calls_by_n[n];
             long long connected_lookup_calls = total_profile->solve_graph_connected_lookup_calls_by_n[n];
             long long raw_hits = total_profile->solve_graph_raw_hits_by_n[n];
@@ -1236,7 +1213,7 @@ static void print_execution_report(const RunConfig* run, const ExecutionState* e
                    hard_misses, total_profile->solve_graph_hard_miss_time_by_n[n]);
         }
         printf("  Hard-miss subphases by simplified n:\n");
-        for (int n = 0; n <= MAXN_NAUTY; n++) {
+        for (int n = 0; n <= MAX_GRAPH_VERTICES; n++) {
             long long hard_misses = total_profile->solve_graph_hard_misses_by_n[n];
             if (hard_misses == 0) continue;
             printf("    n=%d: separator %.3fs, pick %.3fs, delete %.3fs, contract-build %.3fs, contract-solve %.3fs, store %.3fs\n",
@@ -1250,7 +1227,7 @@ static void print_execution_report(const RunConfig* run, const ExecutionState* e
         }
         if (g_profile_separators) {
             printf("  Hard-miss separator detection by simplified n:\n");
-            for (int n = 0; n <= MAXN_NAUTY; n++) {
+            for (int n = 0; n <= MAX_GRAPH_VERTICES; n++) {
                 long long hard_misses = total_profile->solve_graph_hard_misses_by_n[n];
                 long long articulation = total_profile->hard_graph_articulation_by_n[n];
                 long long k2 = total_profile->hard_graph_k2_separator_by_n[n];
@@ -1263,11 +1240,11 @@ static void print_execution_report(const RunConfig* run, const ExecutionState* e
                    " (set RECT_PROFILE_SEPARATORS=1 to enable)\n");
         }
         printf("  Hard graph nodes by simplified n and max degree:\n");
-        for (int n = 10; n <= MAXN_NAUTY; n++) {
+        for (int n = 10; n <= MAX_GRAPH_VERTICES; n++) {
             long long total_n = total_profile->hard_graph_nodes_by_n[n];
             if (total_n == 0) continue;
             printf("    n=%d:", n);
-            for (int d = 0; d <= MAXN_NAUTY; d++) {
+            for (int d = 0; d <= MAX_GRAPH_VERTICES; d++) {
                 long long count = total_profile->hard_graph_nodes_by_n_degree[n][d];
                 if (count == 0) continue;
                 printf(" deg%d=%lld", d, count);
@@ -1348,10 +1325,10 @@ static void print_execution_report(const RunConfig* run, const ExecutionState* e
             for (int d = 0; d <= g_cols && d <= MAX_COLS; d++) {
                 const QueueSubtaskTimingStats* qs = &summary->queue_subtask_timing[d];
                 if (qs->task_count == 0) continue;
-                printf("    depth %d: %lld subtasks, avg %.6fs, max %.6fs, avg solve_graph %.1f, avg nauty %.1f, avg hard nodes %.1f, max hard n %d, max hard deg %d\n",
+                printf("    depth %d: %lld subtasks, avg %.6fs, max %.6fs, avg solve_graph %.1f, avg canon-key %.1f, avg hard nodes %.1f, max hard n %d, max hard deg %d\n",
                        d, qs->task_count, qs->task_time_sum / (double)qs->task_count, qs->task_time_max,
                        (double)qs->solve_graph_call_sum / (double)qs->task_count,
-                       (double)qs->nauty_call_sum / (double)qs->task_count,
+                       (double)qs->canon_key_call_sum / (double)qs->task_count,
                        (double)qs->hard_graph_node_sum / (double)qs->task_count,
                        qs->max_hard_graph_n, qs->max_hard_graph_degree);
                 for (int i = 0; i < TASK_PROFILE_TOPK; i++) {
@@ -1362,8 +1339,8 @@ static void print_execution_report(const RunConfig* run, const ExecutionState* e
                         if (p > 0) printf(",");
                         printf("%u", (unsigned)e->prefix[p]);
                     }
-                    printf("): %.6fs, solve_graph %lld, nauty %lld, hard_nodes %lld, max_hard_n %u, max_hard_deg %u\n",
-                           e->elapsed, e->solve_graph_calls, e->nauty_calls,
+                    printf("): %.6fs, solve_graph %lld, canon-key %lld, hard_nodes %lld, max_hard_n %u, max_hard_deg %u\n",
+                           e->elapsed, e->solve_graph_calls, e->canon_key_calls,
                            e->hard_graph_nodes,
                            (unsigned)e->max_hard_graph_n,
                            (unsigned)e->max_hard_graph_degree);

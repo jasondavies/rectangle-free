@@ -43,26 +43,24 @@
 #endif
 
 #define MAX_COMPLEX_PER_COL (MAX_ROWS / 2)
-#define MAXN_NAUTY (MAX_COLS * (MAX_COMPLEX_PER_COL > 0 ? MAX_COMPLEX_PER_COL : 1))
+#define MAX_GRAPH_VERTICES (MAX_COLS * (MAX_COMPLEX_PER_COL > 0 ? MAX_COMPLEX_PER_COL : 1))
 
-#if MAXN_NAUTY > 64
-#error "This 7x7-specialised build expects MAXN_NAUTY <= 64"
+#if MAX_GRAPH_VERTICES > 64
+#error "This 7x7-specialised build expects MAX_GRAPH_VERTICES <= 64"
 #endif
 
-#include "nauty.h"
-
-#if MAXN_NAUTY <= 16
+#if MAX_GRAPH_VERTICES <= 16
 typedef uint16_t AdjWord;
-#define ADJWORD_MASK ((uint64_t)((1ULL << MAXN_NAUTY) - 1ULL))
-#elif MAXN_NAUTY <= 32
+#define ADJWORD_MASK ((uint64_t)((1ULL << MAX_GRAPH_VERTICES) - 1ULL))
+#elif MAX_GRAPH_VERTICES <= 32
 typedef uint32_t AdjWord;
-#define ADJWORD_MASK ((uint64_t)((1ULL << MAXN_NAUTY) - 1ULL))
+#define ADJWORD_MASK ((uint64_t)((1ULL << MAX_GRAPH_VERTICES) - 1ULL))
 #else
 typedef uint64_t AdjWord;
-#if MAXN_NAUTY >= 64
+#if MAX_GRAPH_VERTICES >= 64
 #define ADJWORD_MASK (~0ULL)
 #else
-#define ADJWORD_MASK ((uint64_t)((1ULL << MAXN_NAUTY) - 1ULL))
+#define ADJWORD_MASK ((uint64_t)((1ULL << MAX_GRAPH_VERTICES) - 1ULL))
 #endif
 #endif
 
@@ -154,7 +152,7 @@ typedef struct {
 typedef struct {
     uint8_t x_pow;
     uint8_t deg;
-    PolyCoeff coeffs[MAXN_NAUTY + 1];
+    PolyCoeff coeffs[MAX_GRAPH_VERTICES + 1];
 } GraphPoly;
 
 #if RECT_COUNT_K4
@@ -178,10 +176,10 @@ typedef struct {
 typedef struct {
     uint8_t n;
     uint64_t vertex_mask;
-    AdjWord adj[MAXN_NAUTY];
+    AdjWord adj[MAX_GRAPH_VERTICES];
 } Graph;
 
-#define GRAPH_SIG_BITS ((MAXN_NAUTY * (MAXN_NAUTY - 1)) / 2)
+#define GRAPH_SIG_BITS ((MAX_GRAPH_VERTICES * (MAX_GRAPH_VERTICES - 1)) / 2)
 #define GRAPH_SIG_WORDS ((GRAPH_SIG_BITS + 63) / 64)
 
 typedef struct {
@@ -197,14 +195,8 @@ typedef struct {
 } PartialGraphState;
 
 typedef struct {
-    int nmax;
-    int mmax;
-    graph* ng;
-    graph* cg;
-    int* lab;
-    int* ptn;
-    int* orbits;
-} NautyWorkspace;
+    int unused;
+} GraphCanonWorkspace;
 
 typedef struct {
     uint64_t key_hash;
@@ -234,7 +226,7 @@ typedef struct {
     long long partial_append_calls;
     long long solve_structure_calls;
     long long solve_graph_calls;
-    long long nauty_calls;
+    long long canon_key_calls;
     long long wl_canon_attempts;
     long long wl_canon_successes;
     long long wl_canon_discrete_successes;
@@ -263,17 +255,17 @@ typedef struct {
     long long canon_prepare_equal_case_calls_by_depth[MAX_COLS + 1];
     long long canon_prepare_equal_case_rejects_by_depth[MAX_COLS + 1];
     long long canon_prepare_order_rejects_by_depth[MAX_COLS + 1];
-    long long solve_graph_calls_by_n[MAXN_NAUTY + 1];
-    long long solve_graph_raw_hits_by_n[MAXN_NAUTY + 1];
-    long long solve_graph_canon_hits_by_n[MAXN_NAUTY + 1];
-    long long hard_graph_nodes_by_n[MAXN_NAUTY + 1];
-    long long solve_graph_lookup_calls_by_n[MAXN_NAUTY + 1];
-    long long solve_graph_connected_lookup_calls_by_n[MAXN_NAUTY + 1];
-    long long solve_graph_component_calls_by_n[MAXN_NAUTY + 1];
-    long long solve_graph_hard_misses_by_n[MAXN_NAUTY + 1];
-    long long hard_graph_articulation_by_n[MAXN_NAUTY + 1];
-    long long hard_graph_k2_separator_by_n[MAXN_NAUTY + 1];
-    long long hard_graph_nodes_by_n_degree[MAXN_NAUTY + 1][MAXN_NAUTY + 1];
+    long long solve_graph_calls_by_n[MAX_GRAPH_VERTICES + 1];
+    long long solve_graph_raw_hits_by_n[MAX_GRAPH_VERTICES + 1];
+    long long solve_graph_canon_hits_by_n[MAX_GRAPH_VERTICES + 1];
+    long long hard_graph_nodes_by_n[MAX_GRAPH_VERTICES + 1];
+    long long solve_graph_lookup_calls_by_n[MAX_GRAPH_VERTICES + 1];
+    long long solve_graph_connected_lookup_calls_by_n[MAX_GRAPH_VERTICES + 1];
+    long long solve_graph_component_calls_by_n[MAX_GRAPH_VERTICES + 1];
+    long long solve_graph_hard_misses_by_n[MAX_GRAPH_VERTICES + 1];
+    long long hard_graph_articulation_by_n[MAX_GRAPH_VERTICES + 1];
+    long long hard_graph_k2_separator_by_n[MAX_GRAPH_VERTICES + 1];
+    long long hard_graph_nodes_by_n_degree[MAX_GRAPH_VERTICES + 1][MAX_GRAPH_VERTICES + 1];
     int hard_graph_max_n;
     int hard_graph_max_degree;
     double canon_prepare_time;
@@ -283,7 +275,6 @@ typedef struct {
     double solve_graph_time;
     double get_canonical_graph_time;
     double get_canonical_graph_dense_rows_time;
-    double get_canonical_graph_build_input_time;
     double wl_canon_time;
     double wl_canon_init_time;
     double wl_canon_refine_time;
@@ -291,21 +282,19 @@ typedef struct {
     double wl_canon_enum_budget_time;
     double wl_canon_enum_search_time;
     double wl_canon_enum_rebuild_time;
-    double nauty_time;
-    double get_canonical_graph_rebuild_time;
-    double solve_graph_time_by_n[MAXN_NAUTY + 1];
-    double solve_graph_lookup_time_by_n[MAXN_NAUTY + 1];
-    double solve_graph_connected_lookup_time_by_n[MAXN_NAUTY + 1];
-    double solve_graph_raw_hit_time_by_n[MAXN_NAUTY + 1];
-    double solve_graph_canon_hit_time_by_n[MAXN_NAUTY + 1];
-    double solve_graph_component_time_by_n[MAXN_NAUTY + 1];
-    double solve_graph_hard_miss_time_by_n[MAXN_NAUTY + 1];
-    double solve_graph_hard_miss_separator_time_by_n[MAXN_NAUTY + 1];
-    double solve_graph_hard_miss_pick_time_by_n[MAXN_NAUTY + 1];
-    double solve_graph_hard_miss_delete_time_by_n[MAXN_NAUTY + 1];
-    double solve_graph_hard_miss_contract_build_time_by_n[MAXN_NAUTY + 1];
-    double solve_graph_hard_miss_contract_solve_time_by_n[MAXN_NAUTY + 1];
-    double solve_graph_hard_miss_store_time_by_n[MAXN_NAUTY + 1];
+    double solve_graph_time_by_n[MAX_GRAPH_VERTICES + 1];
+    double solve_graph_lookup_time_by_n[MAX_GRAPH_VERTICES + 1];
+    double solve_graph_connected_lookup_time_by_n[MAX_GRAPH_VERTICES + 1];
+    double solve_graph_raw_hit_time_by_n[MAX_GRAPH_VERTICES + 1];
+    double solve_graph_canon_hit_time_by_n[MAX_GRAPH_VERTICES + 1];
+    double solve_graph_component_time_by_n[MAX_GRAPH_VERTICES + 1];
+    double solve_graph_hard_miss_time_by_n[MAX_GRAPH_VERTICES + 1];
+    double solve_graph_hard_miss_separator_time_by_n[MAX_GRAPH_VERTICES + 1];
+    double solve_graph_hard_miss_pick_time_by_n[MAX_GRAPH_VERTICES + 1];
+    double solve_graph_hard_miss_delete_time_by_n[MAX_GRAPH_VERTICES + 1];
+    double solve_graph_hard_miss_contract_build_time_by_n[MAX_GRAPH_VERTICES + 1];
+    double solve_graph_hard_miss_contract_solve_time_by_n[MAX_GRAPH_VERTICES + 1];
+    double solve_graph_hard_miss_store_time_by_n[MAX_GRAPH_VERTICES + 1];
 } ProfileStats;
 
 #define TASK_PROFILE_TOPK 8
@@ -324,7 +313,7 @@ typedef struct {
     PrefixId prefix[MAX_COLS];
     double elapsed;
     long long solve_graph_calls;
-    long long nauty_calls;
+    long long canon_key_calls;
     long long hard_graph_nodes;
     uint8_t max_hard_graph_n;
     uint8_t max_hard_graph_degree;
@@ -335,7 +324,7 @@ typedef struct {
     double task_time_sum;
     double task_time_max;
     long long solve_graph_call_sum;
-    long long nauty_call_sum;
+    long long canon_key_call_sum;
     long long hard_graph_node_sum;
     int max_hard_graph_n;
     int max_hard_graph_degree;
@@ -517,7 +506,6 @@ extern int g_cols;
 extern ProgressReporter progress_reporter;
 extern int g_use_raw_cache;
 extern int g_use_wl_canon;
-extern int g_disable_nauty;
 extern int g_wl_canon_min_n;
 extern long long g_wl_canon_enum_limit;
 extern long long progress_last_reported;
@@ -579,7 +567,7 @@ void* checked_aligned_alloc(size_t alignment, size_t size, const char* label);
 void task_timing_insert_topk(TaskTimingStats* stats, long long task_index, double elapsed);
 void queue_subtask_record(QueueSubtaskTimingStats* stats, const LocalTask* task,
                           double elapsed, long long solve_graph_calls,
-                          long long nauty_calls, long long hard_graph_nodes,
+                          long long canon_key_calls, long long hard_graph_nodes,
                           int max_hard_graph_n, int max_hard_graph_degree);
 void flush_completed_tasks(long long total_tasks, long long report_step,
                            double start_time, long long* pending_completed);
@@ -607,7 +595,7 @@ void runtime_task_system_finish_task(RuntimeTaskSystem* system, long long root_i
                                      TaskTimingStats* task_timing);
 void runtime_task_system_record_profile(RuntimeTaskSystem* system, const LocalTask* task,
                                         double elapsed, long long solve_graph_calls,
-                                        long long nauty_calls, long long hard_graph_nodes,
+                                        long long canon_key_calls, long long hard_graph_nodes,
                                         int max_hard_graph_n, int max_hard_graph_degree);
 void runtime_task_system_print_summary(RuntimeTaskSystem* system);
 long long repeated_combo_count(int values, int slots);
@@ -671,13 +659,14 @@ static inline uint64_t graph_row_mask(int n) {
     if (n <= 0) return 0;
     return (UINT64_C(1) << n) - UINT64_C(1);
 }
-void get_canonical_graph(Graph* g, Graph* canon, NautyWorkspace* ws, ProfileStats* profile);
+void get_canonical_graph(Graph* g, Graph* canon, GraphCanonWorkspace* ws,
+                         ProfileStats* profile);
 void get_canonical_graph_from_dense_rows(int n, const AdjWord* rows, Graph* canon,
-                                         NautyWorkspace* ws, ProfileStats* profile);
-uint64_t get_canonical_graph_hashed(Graph* g, Graph* canon, NautyWorkspace* ws,
+                                         GraphCanonWorkspace* ws, ProfileStats* profile);
+uint64_t get_canonical_graph_hashed(Graph* g, Graph* canon, GraphCanonWorkspace* ws,
                                     ProfileStats* profile, uint64_t* upper_mask_out);
 uint64_t get_canonical_graph_from_dense_rows_hashed(int n, const AdjWord* rows, Graph* canon,
-                                                    NautyWorkspace* ws,
+                                                    GraphCanonWorkspace* ws,
                                                     ProfileStats* profile,
                                                     uint64_t* upper_mask_out);
 uint32_t small_graph_pack_mask(const Graph* g);
@@ -709,8 +698,7 @@ int hard_graph_cache_init_from_env(void);
 int hard_graph_cache_lookup(uint64_t hash, const Graph* g, GraphResult* out);
 void hard_graph_cache_store(uint64_t hash, const Graph* g, const GraphResult* value);
 void hard_graph_cache_close(void);
-void nauty_workspace_init(NautyWorkspace* ws, int n);
-void nauty_workspace_free(NautyWorkspace* ws);
+void graph_canon_workspace_free(GraphCanonWorkspace* ws);
 void small_graph_lookup_init(void);
 void small_graph_lookup_free(void);
 void connected_canon_lookup_init(void);

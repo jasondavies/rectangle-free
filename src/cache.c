@@ -3,7 +3,7 @@
 // --- GRAPH CACHE HELPERS ---
 
 static inline AdjWord* row_graph_cache_row_slot(const RowGraphCache* cache, int slot) {
-    return cache->rows + (size_t)slot * MAXN_NAUTY;
+    return cache->rows + (size_t)slot * MAX_GRAPH_VERTICES;
 }
 
 static inline GraphCacheValue* row_graph_cache_coeff_slot(const RowGraphCache* cache, int slot) {

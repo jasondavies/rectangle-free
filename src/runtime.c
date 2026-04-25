@@ -16,7 +16,6 @@ int g_cols = DEFAULT_COLS;
 ProgressReporter progress_reporter;
 int g_use_raw_cache = 1;
 int g_use_wl_canon = 1;
-int g_disable_nauty = 1;
 int g_wl_canon_min_n = 8;
 long long g_wl_canon_enum_limit = 16;
 long long progress_last_reported = 0;
@@ -119,7 +118,7 @@ int hard_miss_log_init_from_env(void) {
 
     const unsigned char magic[8] = {'R', 'H', 'M', 'I', 'S', 'S', '1', 0};
     uint32_t version = 1;
-    uint32_t maxn = MAXN_NAUTY;
+    uint32_t maxn = MAX_GRAPH_VERTICES;
     uint32_t adjword_bits = (uint32_t)(8U * sizeof(AdjWord));
     uint32_t rows = (uint32_t)g_rows;
     uint32_t cols = (uint32_t)g_cols;
@@ -151,7 +150,7 @@ void hard_miss_log_record(const Graph* g, uint64_t hash, int max_degree) {
     checked_fwrite(&degree, sizeof(degree), 1, g_hard_miss_log_file, "record degree");
     checked_fwrite(&reserved, sizeof(reserved), 1, g_hard_miss_log_file, "record reserved");
     checked_fwrite(&hash, sizeof(hash), 1, g_hard_miss_log_file, "record hash");
-    for (int i = 0; i < MAXN_NAUTY; i++) {
+    for (int i = 0; i < MAX_GRAPH_VERTICES; i++) {
         uint64_t row = (i < g->n) ? (uint64_t)g->adj[i] : 0;
         checked_fwrite(&row, sizeof(row), 1, g_hard_miss_log_file, "record row");
     }
@@ -171,7 +170,7 @@ static int hard_graph_cache_write_file_header(FILE* f) {
     uint32_t count_k4 = RECT_COUNT_K4;
     uint32_t max_rows = MAX_ROWS;
     uint32_t max_cols = MAX_COLS;
-    uint32_t maxn = MAXN_NAUTY;
+    uint32_t maxn = MAX_GRAPH_VERTICES;
     uint32_t sig_words = GRAPH_SIG_WORDS;
     uint32_t result_size = sizeof(GraphResult);
     uint32_t coeff_size = sizeof(PolyCoeff);
@@ -218,7 +217,7 @@ static int hard_graph_cache_read_file_header_mapped(HardGraphCacheReader* reader
         count_k4 != RECT_COUNT_K4 ||
         max_rows != MAX_ROWS ||
         max_cols != MAX_COLS ||
-        maxn != MAXN_NAUTY ||
+        maxn != MAX_GRAPH_VERTICES ||
         sig_words != GRAPH_SIG_WORDS ||
         result_size != sizeof(GraphResult) ||
         coeff_size != sizeof(PolyCoeff)) {
@@ -237,7 +236,7 @@ static int hard_graph_cache_write_value(FILE* f, const GraphResult* value) {
     uint8_t deg = value->deg;
     uint16_t reserved = 0;
     uint32_t coeff_count = (uint32_t)value->deg + 1U;
-    if (value->deg > MAXN_NAUTY) {
+    if (value->deg > MAX_GRAPH_VERTICES) {
         fprintf(stderr, "Refusing to write invalid hard-cache GraphPoly degree %u\n",
                 (unsigned)value->deg);
         return 0;
@@ -270,7 +269,7 @@ static int hard_graph_cache_read_value_mapped(HardGraphCacheReader* reader,
                                      "hard-cache coeff count")) {
         return 0;
     }
-    if (reserved != 0 || deg > MAXN_NAUTY || coeff_count != (uint32_t)deg + 1U) {
+    if (reserved != 0 || deg > MAX_GRAPH_VERTICES || coeff_count != (uint32_t)deg + 1U) {
         fprintf(stderr, "Invalid hard-cache GraphPoly metadata\n");
         return 0;
     }
@@ -405,7 +404,7 @@ static int hard_graph_cache_insert_signature(uint64_t hash, int n,
 static int hard_graph_cache_write_record(FILE* f, uint64_t hash, int n,
                                          const uint64_t sig[GRAPH_SIG_WORDS],
                                          const GraphResult* value) {
-    if (n < 0 || n > MAXN_NAUTY) {
+    if (n < 0 || n > MAX_GRAPH_VERTICES) {
         fprintf(stderr, "Refusing to write invalid hard-cache record n=%d\n", n);
         return 0;
     }
@@ -444,7 +443,7 @@ static int hard_graph_cache_read_record_mapped(HardGraphCacheReader* reader,
                                      "hard-cache record hash")) {
         return 0;
     }
-    if (reserved != 0 || record_n > MAXN_NAUTY || sig_words > GRAPH_SIG_WORDS ||
+    if (reserved != 0 || record_n > MAX_GRAPH_VERTICES || sig_words > GRAPH_SIG_WORDS ||
         sig_words != hard_graph_cache_sig_words(record_n)) {
         fprintf(stderr, "Invalid hard-cache record metadata\n");
         return 0;
@@ -757,7 +756,7 @@ static void task_timing_record(TaskTimingStats* stats, long long task_index, dou
 
 static void queue_subtask_insert_topk(QueueSubtaskTimingStats* stats, const LocalTask* task,
                                       double elapsed, long long solve_graph_calls,
-                                      long long nauty_calls, long long hard_graph_nodes,
+                                      long long canon_key_calls, long long hard_graph_nodes,
                                       int max_hard_graph_n, int max_hard_graph_degree) {
     for (int i = 0; i < TASK_PROFILE_TOPK; i++) {
         if (elapsed > stats->top[i].elapsed) {
@@ -768,7 +767,7 @@ static void queue_subtask_insert_topk(QueueSubtaskTimingStats* stats, const Loca
             for (int d = 0; d < task->depth; d++) stats->top[i].prefix[d] = task->prefix[d];
             stats->top[i].elapsed = elapsed;
             stats->top[i].solve_graph_calls = solve_graph_calls;
-            stats->top[i].nauty_calls = nauty_calls;
+            stats->top[i].canon_key_calls = canon_key_calls;
             stats->top[i].hard_graph_nodes = hard_graph_nodes;
             stats->top[i].max_hard_graph_n = (uint8_t)max_hard_graph_n;
             stats->top[i].max_hard_graph_degree = (uint8_t)max_hard_graph_degree;
@@ -779,17 +778,17 @@ static void queue_subtask_insert_topk(QueueSubtaskTimingStats* stats, const Loca
 
 void queue_subtask_record(QueueSubtaskTimingStats* stats, const LocalTask* task,
                           double elapsed, long long solve_graph_calls,
-                          long long nauty_calls, long long hard_graph_nodes,
+                          long long canon_key_calls, long long hard_graph_nodes,
                           int max_hard_graph_n, int max_hard_graph_degree) {
     stats->task_count++;
     stats->task_time_sum += elapsed;
     if (elapsed > stats->task_time_max) stats->task_time_max = elapsed;
     stats->solve_graph_call_sum += solve_graph_calls;
-    stats->nauty_call_sum += nauty_calls;
+    stats->canon_key_call_sum += canon_key_calls;
     stats->hard_graph_node_sum += hard_graph_nodes;
     if (max_hard_graph_n > stats->max_hard_graph_n) stats->max_hard_graph_n = max_hard_graph_n;
     if (max_hard_graph_degree > stats->max_hard_graph_degree) stats->max_hard_graph_degree = max_hard_graph_degree;
-    queue_subtask_insert_topk(stats, task, elapsed, solve_graph_calls, nauty_calls,
+    queue_subtask_insert_topk(stats, task, elapsed, solve_graph_calls, canon_key_calls,
                               hard_graph_nodes, max_hard_graph_n, max_hard_graph_degree);
 }
 
@@ -798,14 +797,14 @@ void queue_subtask_merge(QueueSubtaskTimingStats* dst, const QueueSubtaskTimingS
     dst->task_time_sum += src->task_time_sum;
     if (src->task_time_max > dst->task_time_max) dst->task_time_max = src->task_time_max;
     dst->solve_graph_call_sum += src->solve_graph_call_sum;
-    dst->nauty_call_sum += src->nauty_call_sum;
+    dst->canon_key_call_sum += src->canon_key_call_sum;
     for (int i = 0; i < TASK_PROFILE_TOPK; i++) {
         if (src->top[i].elapsed <= 0.0) break;
         LocalTask task = {0};
         task.depth = src->top[i].depth;
         for (int d = 0; d < task.depth; d++) task.prefix[d] = src->top[i].prefix[d];
         queue_subtask_insert_topk(dst, &task, src->top[i].elapsed,
-                                  src->top[i].solve_graph_calls, src->top[i].nauty_calls,
+                                  src->top[i].solve_graph_calls, src->top[i].canon_key_calls,
                                   src->top[i].hard_graph_nodes,
                                   src->top[i].max_hard_graph_n,
                                   src->top[i].max_hard_graph_degree);
@@ -1137,12 +1136,12 @@ void local_queue_finish_item(LocalTaskQueue* queue, long long root_id,
 
 void local_queue_record_profile(LocalTaskQueue* queue, const LocalTask* task,
                                 double elapsed, long long solve_graph_calls,
-                                long long nauty_calls, long long hard_graph_nodes,
+                                long long canon_key_calls, long long hard_graph_nodes,
                                 int max_hard_graph_n, int max_hard_graph_degree) {
     if (g_queue_profile_report_step <= 0.0 || task->depth > MAX_COLS) return;
 
     pthread_mutex_lock(&queue->mutex);
-    queue_subtask_record(&queue->profile_stats[task->depth], task, elapsed, solve_graph_calls, nauty_calls,
+    queue_subtask_record(&queue->profile_stats[task->depth], task, elapsed, solve_graph_calls, canon_key_calls,
                          hard_graph_nodes, max_hard_graph_n, max_hard_graph_degree);
     double now = omp_get_wtime();
     if (queue->next_profile_report_at > 0.0 && now >= queue->next_profile_report_at) {
@@ -1162,10 +1161,10 @@ void local_queue_record_profile(LocalTaskQueue* queue, const LocalTask* task,
         for (int d = 0; d <= g_cols && d <= MAX_COLS; d++) {
             QueueSubtaskTimingStats* qs = &queue->profile_stats[d];
             if (qs->task_count == 0) continue;
-            printf("  depth %d: %lld subtasks, avg %.6fs, max %.6fs, avg solve_graph %.1f, avg nauty %.1f, avg hard nodes %.1f, max hard n %d, max hard deg %d",
+            printf("  depth %d: %lld subtasks, avg %.6fs, max %.6fs, avg solve_graph %.1f, avg canon-key %.1f, avg hard nodes %.1f, max hard n %d, max hard deg %d",
                    d, qs->task_count, qs->task_time_sum / (double)qs->task_count, qs->task_time_max,
                    (double)qs->solve_graph_call_sum / (double)qs->task_count,
-                   (double)qs->nauty_call_sum / (double)qs->task_count,
+                   (double)qs->canon_key_call_sum / (double)qs->task_count,
                    (double)qs->hard_graph_node_sum / (double)qs->task_count,
                    qs->max_hard_graph_n, qs->max_hard_graph_degree);
             if (qs->top[0].elapsed > 0.0) {
@@ -1260,10 +1259,10 @@ void runtime_task_system_finish_task(RuntimeTaskSystem* system, long long root_i
 
 void runtime_task_system_record_profile(RuntimeTaskSystem* system, const LocalTask* task,
                                         double elapsed, long long solve_graph_calls,
-                                        long long nauty_calls, long long hard_graph_nodes,
+                                        long long canon_key_calls, long long hard_graph_nodes,
                                         int max_hard_graph_n, int max_hard_graph_degree) {
     local_queue_record_profile(&system->shared_queue, task, elapsed, solve_graph_calls,
-                               nauty_calls, hard_graph_nodes,
+                               canon_key_calls, hard_graph_nodes,
                                max_hard_graph_n, max_hard_graph_degree);
 }
 

@@ -10,8 +10,8 @@ static void remove_vertex(Graph* g, int i) {
 static inline void record_hard_graph_node(ProfileStats* profile, int n, int max_degree) {
     if (PROFILE_BUILD && profile) {
         profile->hard_graph_nodes++;
-        if (n >= 0 && n <= MAXN_NAUTY) profile->hard_graph_nodes_by_n[n]++;
-        if (n >= 0 && n <= MAXN_NAUTY && max_degree >= 0 && max_degree <= MAXN_NAUTY) {
+        if (n >= 0 && n <= MAX_GRAPH_VERTICES) profile->hard_graph_nodes_by_n[n]++;
+        if (n >= 0 && n <= MAX_GRAPH_VERTICES && max_degree >= 0 && max_degree <= MAX_GRAPH_VERTICES) {
             profile->hard_graph_nodes_by_n_degree[n][max_degree]++;
         }
         if (n > profile->hard_graph_max_n) profile->hard_graph_max_n = n;
@@ -39,7 +39,7 @@ typedef enum {
 
 typedef struct {
     AdjWord row_mask;
-    AdjWord raw_rows[MAXN_NAUTY];
+    AdjWord raw_rows[MAX_GRAPH_VERTICES];
     uint64_t raw_hash;
     int has_raw_rows;
 } SolveGraphKeyRows;
@@ -58,7 +58,7 @@ static inline void finish_solve_graph_profile(ProfileStats* profile, double solv
 
     double dt = omp_get_wtime() - solve_t0;
     profile->solve_graph_time += dt;
-    if (profile_n < 0 || profile_n > MAXN_NAUTY) return;
+    if (profile_n < 0 || profile_n > MAX_GRAPH_VERTICES) return;
 
     profile->solve_graph_time_by_n[profile_n] += dt;
     switch (outcome) {
@@ -105,14 +105,14 @@ static int solve_graph_prepare_raw_cache(const Graph* g, RowGraphCache* raw_cach
     }
 
     (*local_raw_cache_hits)++;
-    if (PROFILE_BUILD && profile && g->n <= MAXN_NAUTY) {
+    if (PROFILE_BUILD && profile && g->n <= MAX_GRAPH_VERTICES) {
         profile->solve_graph_raw_hits_by_n[g->n]++;
     }
     return 1;
 }
 
 static uint64_t solve_graph_build_canon(Graph* g, const SolveGraphKeyRows* prep,
-                                        NautyWorkspace* ws, ProfileStats* profile,
+                                        GraphCanonWorkspace* ws, ProfileStats* profile,
                                         long long* local_canon_calls, Graph* canon,
                                         uint64_t* upper_mask_out) {
     uint64_t canon_hash;
@@ -178,19 +178,19 @@ static uint64_t count4_mul_div_x(uint64_t lhs, uint64_t rhs) {
 }
 
 static int solve_graph_try_biconnected_count4(const Graph* g, RowGraphCache* cache,
-                                              RowGraphCache* raw_cache, NautyWorkspace* ws,
+                                              RowGraphCache* raw_cache, GraphCanonWorkspace* ws,
                                               long long* local_canon_calls,
                                               long long* local_cache_hits,
                                               long long* local_raw_cache_hits,
                                               ProfileStats* profile,
                                               SolveGraphOutcome* outcome,
                                               GraphResult* out_result) {
-    uint64_t block_masks[MAXN_NAUTY];
+    uint64_t block_masks[MAX_GRAPH_VERTICES];
     uint64_t articulation_mask = 0;
     int block_count = graph_collect_biconnected_components(g, block_masks, &articulation_mask);
     if (block_count <= 1) return 0;
 
-    int order[MAXN_NAUTY];
+    int order[MAX_GRAPH_VERTICES];
     if (!graph_order_biconnected_blocks(block_count, block_masks, articulation_mask, order)) {
         fprintf(stderr, "Failed to order biconnected components\n");
         exit(1);
@@ -218,18 +218,18 @@ static int solve_graph_try_biconnected_count4(const Graph* g, RowGraphCache* cac
 }
 #else
 static int solve_graph_try_biconnected_poly(const Graph* g, RowGraphCache* cache,
-                                            RowGraphCache* raw_cache, NautyWorkspace* ws,
+                                            RowGraphCache* raw_cache, GraphCanonWorkspace* ws,
                                             long long* local_canon_calls,
                                             long long* local_cache_hits,
                                             long long* local_raw_cache_hits,
                                             ProfileStats* profile,
                                             SolveGraphOutcome* outcome, GraphPoly* out_result) {
-    uint64_t block_masks[MAXN_NAUTY];
+    uint64_t block_masks[MAX_GRAPH_VERTICES];
     uint64_t articulation_mask = 0;
     int block_count = graph_collect_biconnected_components(g, block_masks, &articulation_mask);
     if (block_count <= 1) return 0;
 
-    int order[MAXN_NAUTY];
+    int order[MAX_GRAPH_VERTICES];
     if (!graph_order_biconnected_blocks(block_count, block_masks, articulation_mask, order)) {
         fprintf(stderr, "Failed to order biconnected components\n");
         exit(1);
@@ -398,7 +398,7 @@ static void simplify_graph_poly_multiplier(Graph* g, GraphPoly* multiplier) {
 }
 
 void solve_graph_poly(const Graph* input_g, RowGraphCache* cache, RowGraphCache* raw_cache,
-                      NautyWorkspace* ws, long long* local_canon_calls,
+                      GraphCanonWorkspace* ws, long long* local_canon_calls,
                       long long* local_cache_hits, long long* local_raw_cache_hits,
                       ProfileStats* profile, GraphResult* out_result) {
 #if RECT_COUNT_K4
@@ -406,7 +406,7 @@ void solve_graph_poly(const Graph* input_g, RowGraphCache* cache, RowGraphCache*
     int profile_n = input_g->n;
     SolveGraphOutcome outcome = SG_OUTCOME_NONE;
     if (input_g->n <= SMALL_GRAPH_LOOKUP_MAX_N) {
-        if (PROFILE_BUILD && profile && profile_n >= 0 && profile_n <= MAXN_NAUTY) {
+        if (PROFILE_BUILD && profile && profile_n >= 0 && profile_n <= MAX_GRAPH_VERTICES) {
             profile->solve_graph_calls_by_n[profile_n]++;
         }
         uint64_t count4 = small_graph_lookup_load_count4(input_g->n, small_graph_pack_mask(input_g));
@@ -421,7 +421,7 @@ void solve_graph_poly(const Graph* input_g, RowGraphCache* cache, RowGraphCache*
     if (!simplify_graph_count4(&g, &multiplier, &outcome, out_result)) goto done;
 
     profile_n = g.n;
-    if (PROFILE_BUILD && profile && profile_n >= 0 && profile_n <= MAXN_NAUTY) {
+    if (PROFILE_BUILD && profile && profile_n >= 0 && profile_n <= MAX_GRAPH_VERTICES) {
         profile->solve_graph_calls_by_n[profile_n]++;
     }
 
@@ -447,7 +447,7 @@ void solve_graph_poly(const Graph* input_g, RowGraphCache* cache, RowGraphCache*
     }
 
     GraphResult res;
-    uint64_t component_masks[MAXN_NAUTY];
+    uint64_t component_masks[MAX_GRAPH_VERTICES];
     int component_count = graph_collect_components(&g, component_masks);
     if (component_count > 1) {
         uint64_t total = 1;
@@ -489,7 +489,7 @@ void solve_graph_poly(const Graph* input_g, RowGraphCache* cache, RowGraphCache*
                                         (AdjWord)ADJWORD_MASK, &res, 1)) {
             (*local_cache_hits)++;
             solve_graph_store_raw_cache(&g, raw_cache, &key_rows, &res);
-            if (PROFILE_BUILD && profile && canon.n <= MAXN_NAUTY) {
+            if (PROFILE_BUILD && profile && canon.n <= MAX_GRAPH_VERTICES) {
                 profile->solve_graph_canon_hits_by_n[canon.n]++;
             }
             graph_result_set_count4(multiplier * graph_result_get_count4(&res), out_result);
@@ -546,7 +546,7 @@ done:
     int profile_n = input_g->n;
     SolveGraphOutcome outcome = SG_OUTCOME_NONE;
     if (input_g->n <= SMALL_GRAPH_LOOKUP_MAX_N) {
-        if (PROFILE_BUILD && profile && profile_n >= 0 && profile_n <= MAXN_NAUTY) {
+        if (PROFILE_BUILD && profile && profile_n >= 0 && profile_n <= MAX_GRAPH_VERTICES) {
             profile->solve_graph_calls_by_n[profile_n]++;
         }
         small_graph_lookup_load_graph_poly(input_g->n, small_graph_pack_mask(input_g), out_result);
@@ -561,7 +561,7 @@ done:
     simplify_graph_poly_multiplier(&g, &multiplier);
 
     profile_n = g.n;
-    if (PROFILE_BUILD && profile && profile_n >= 0 && profile_n <= MAXN_NAUTY) {
+    if (PROFILE_BUILD && profile && profile_n >= 0 && profile_n <= MAX_GRAPH_VERTICES) {
         profile->solve_graph_calls_by_n[profile_n]++;
     }
     
@@ -588,7 +588,7 @@ done:
     }
 
     GraphPoly res;
-    uint64_t component_masks[MAXN_NAUTY];
+    uint64_t component_masks[MAX_GRAPH_VERTICES];
     int component_count = graph_collect_components(&g, component_masks);
     if (component_count > 1) {
         outcome = SG_OUTCOME_COMPONENTS;
@@ -629,7 +629,7 @@ done:
                                         (AdjWord)ADJWORD_MASK, &res, 1)) {
             (*local_cache_hits)++;
             solve_graph_store_raw_cache(&g, raw_cache, &key_rows, &res);
-            if (PROFILE_BUILD && profile && canon.n <= MAXN_NAUTY) {
+            if (PROFILE_BUILD && profile && canon.n <= MAX_GRAPH_VERTICES) {
                 profile->solve_graph_canon_hits_by_n[canon.n]++;
             }
             graph_poly_mul_ref(&multiplier, &res, out_result);
@@ -665,19 +665,19 @@ done:
         double hard_store_t = 0.0;
         const Graph* branch_g = &canon;
         double phase_t0 = 0.0;
-        if (PROFILE_BUILD && profile && branch_g->n >= 0 && branch_g->n <= MAXN_NAUTY) {
+        if (PROFILE_BUILD && profile && branch_g->n >= 0 && branch_g->n <= MAX_GRAPH_VERTICES) {
             phase_t0 = omp_get_wtime();
         }
         int max_deg = -1, u = -1, v = -1;
         graph_choose_branch_edge(branch_g, &u, &v, &max_deg);
-        if (PROFILE_BUILD && profile && branch_g->n >= 0 && branch_g->n <= MAXN_NAUTY) {
+        if (PROFILE_BUILD && profile && branch_g->n >= 0 && branch_g->n <= MAX_GRAPH_VERTICES) {
             hard_pick_t += omp_get_wtime() - phase_t0;
         }
         if (u != -1 && max_deg > 0) record_hard_graph_node(profile, branch_g->n, max_deg);
         if (u != -1 && max_deg > 0) hard_miss_log_record(branch_g, hash, max_deg);
         outcome = SG_OUTCOME_HARD_MISS;
         if (PROFILE_BUILD && g_profile_separators && profile &&
-            branch_g->n >= 10 && branch_g->n <= MAXN_NAUTY) {
+            branch_g->n >= 10 && branch_g->n <= MAX_GRAPH_VERTICES) {
             phase_t0 = omp_get_wtime();
             if (graph_has_articulation_point(branch_g)) {
                 profile->hard_graph_articulation_by_n[branch_g->n]++;
@@ -694,19 +694,19 @@ done:
             g_del.adj[u] &= ~(1ULL << v);
             g_del.adj[v] &= ~(1ULL << u);
             GraphPoly p_del;
-            if (PROFILE_BUILD && profile && branch_g->n >= 0 && branch_g->n <= MAXN_NAUTY) {
+            if (PROFILE_BUILD && profile && branch_g->n >= 0 && branch_g->n <= MAX_GRAPH_VERTICES) {
                 phase_t0 = omp_get_wtime();
             }
             solve_graph_poly(&g_del, cache, raw_cache, ws,
                              local_canon_calls, local_cache_hits, local_raw_cache_hits,
                              profile, &p_del);
-            if (PROFILE_BUILD && profile && branch_g->n >= 0 && branch_g->n <= MAXN_NAUTY) {
+            if (PROFILE_BUILD && profile && branch_g->n >= 0 && branch_g->n <= MAX_GRAPH_VERTICES) {
                 hard_del_t += omp_get_wtime() - phase_t0;
             }
 
             // Contraction: merge v into u
             Graph g_cont = *branch_g;
-            if (PROFILE_BUILD && profile && branch_g->n >= 0 && branch_g->n <= MAXN_NAUTY) {
+            if (PROFILE_BUILD && profile && branch_g->n >= 0 && branch_g->n <= MAX_GRAPH_VERTICES) {
                 phase_t0 = omp_get_wtime();
             }
             uint64_t merged_nbrs =
@@ -720,7 +720,7 @@ done:
                 nbrs &= nbrs - 1;
             }
             remove_vertex(&g_cont, v);
-            if (PROFILE_BUILD && profile && branch_g->n >= 0 && branch_g->n <= MAXN_NAUTY) {
+            if (PROFILE_BUILD && profile && branch_g->n >= 0 && branch_g->n <= MAX_GRAPH_VERTICES) {
                 hard_cont_build_t += omp_get_wtime() - phase_t0;
                 phase_t0 = omp_get_wtime();
             }
@@ -728,7 +728,7 @@ done:
             solve_graph_poly(&g_cont, cache, raw_cache, ws,
                              local_canon_calls, local_cache_hits, local_raw_cache_hits,
                              profile, &p_cont);
-            if (PROFILE_BUILD && profile && branch_g->n >= 0 && branch_g->n <= MAXN_NAUTY) {
+            if (PROFILE_BUILD && profile && branch_g->n >= 0 && branch_g->n <= MAX_GRAPH_VERTICES) {
                 hard_cont_solve_t += omp_get_wtime() - phase_t0;
             }
 
@@ -739,13 +739,13 @@ done:
         }
 
         hard_graph_cache_store(hash, &canon, &res);
-        if (PROFILE_BUILD && profile && branch_g->n >= 0 && branch_g->n <= MAXN_NAUTY) {
+        if (PROFILE_BUILD && profile && branch_g->n >= 0 && branch_g->n <= MAX_GRAPH_VERTICES) {
             phase_t0 = omp_get_wtime();
         }
         store_row_graph_cache_entry(cache, hash, (uint32_t)canon.n, &canon,
                                     (AdjWord)ADJWORD_MASK, &res);
         solve_graph_store_raw_cache(&g, raw_cache, &key_rows, &res);
-        if (PROFILE_BUILD && profile && branch_g->n >= 0 && branch_g->n <= MAXN_NAUTY) {
+        if (PROFILE_BUILD && profile && branch_g->n >= 0 && branch_g->n <= MAX_GRAPH_VERTICES) {
             hard_store_t += omp_get_wtime() - phase_t0;
             profile->solve_graph_hard_miss_separator_time_by_n[branch_g->n] += hard_sep_t;
             profile->solve_graph_hard_miss_pick_time_by_n[branch_g->n] += hard_pick_t;

@@ -107,7 +107,7 @@ void poly_mul_falling_ref(const Poly* p, int start, int count, Poly* out) {
 }
 
 static inline void graph_poly_degree_overflow(int deg) {
-    fprintf(stderr, "Graph polynomial degree %d exceeds MAXN_NAUTY=%d\n", deg, MAXN_NAUTY);
+    fprintf(stderr, "Graph polynomial degree %d exceeds MAX_GRAPH_VERTICES=%d\n", deg, MAX_GRAPH_VERTICES);
     exit(1);
 }
 
@@ -141,7 +141,7 @@ static inline void graph_poly_mul_monomial_ref(const GraphPoly* poly, const Grap
     if (out == poly || out == mono) r = &tmp;
     r->x_pow = (uint8_t)(poly->x_pow + mono->x_pow);
     r->deg = poly->deg;
-    if ((int)r->x_pow + (int)r->deg > MAXN_NAUTY) {
+    if ((int)r->x_pow + (int)r->deg > MAX_GRAPH_VERTICES) {
         graph_poly_degree_overflow((int)r->x_pow + (int)r->deg);
     }
 
@@ -169,7 +169,7 @@ void graph_poly_normalize_ref(GraphPoly* p) {
     }
 
     if (shift > 0) {
-        if ((int)p->x_pow + shift > MAXN_NAUTY) graph_poly_degree_overflow((int)p->x_pow + shift);
+        if ((int)p->x_pow + shift > MAX_GRAPH_VERTICES) graph_poly_degree_overflow((int)p->x_pow + shift);
         for (int i = 0; i <= p->deg - shift; i++) p->coeffs[i] = p->coeffs[i + shift];
         for (int i = p->deg - shift + 1; i <= p->deg; i++) p->coeffs[i] = 0;
         p->x_pow = (uint8_t)(p->x_pow + shift);
@@ -226,7 +226,7 @@ void graph_poly_mul_ref(const GraphPoly* a, const GraphPoly* b, GraphPoly* out) 
     if (out == a || out == b) r = &tmp;
     r->x_pow = (uint8_t)(a->x_pow + b->x_pow);
     r->deg = (uint8_t)(a->deg + b->deg);
-    if ((int)r->x_pow + (int)r->deg > MAXN_NAUTY) {
+    if ((int)r->x_pow + (int)r->deg > MAX_GRAPH_VERTICES) {
         graph_poly_degree_overflow((int)r->x_pow + (int)r->deg);
     }
     memset(r->coeffs, 0, (size_t)(r->deg + 1) * sizeof(r->coeffs[0]));
@@ -278,7 +278,7 @@ void graph_poly_mul_div_x_ref(const GraphPoly* a, const GraphPoly* b, GraphPoly*
 
     r->x_pow = (uint8_t)(combined_x_pow - 1);
     r->deg = (uint8_t)(a->deg + b->deg);
-    if ((int)r->x_pow + (int)r->deg > MAXN_NAUTY) {
+    if ((int)r->x_pow + (int)r->deg > MAX_GRAPH_VERTICES) {
         graph_poly_degree_overflow((int)r->x_pow + (int)r->deg);
     }
 
@@ -357,7 +357,7 @@ void graph_poly_mul_linear_ref(const GraphPoly* a, int c, GraphPoly* out) {
     GraphPoly* r = out;
     if (out == a) r = &tmp;
     if (c == 0) {
-        if ((int)a->x_pow + 1 > MAXN_NAUTY) graph_poly_degree_overflow((int)a->x_pow + 1);
+        if ((int)a->x_pow + 1 > MAX_GRAPH_VERTICES) graph_poly_degree_overflow((int)a->x_pow + 1);
         if (out == a) {
             out->x_pow++;
             return;
@@ -369,7 +369,7 @@ void graph_poly_mul_linear_ref(const GraphPoly* a, int c, GraphPoly* out) {
     } else {
         r->x_pow = a->x_pow;
         r->deg = (uint8_t)(a->deg + 1);
-        if ((int)r->x_pow + (int)r->deg > MAXN_NAUTY) {
+        if ((int)r->x_pow + (int)r->deg > MAX_GRAPH_VERTICES) {
             graph_poly_degree_overflow((int)r->x_pow + (int)r->deg);
         }
         r->coeffs[0] = -a->coeffs[0] * (PolyCoeff)c;
@@ -419,7 +419,7 @@ uint64_t connected_canon_lookup_load_count4_mask(uint64_t mask, int n) {
 static const uint64_t g_fall4[5] = {1, 4, 12, 24, 24};
 
 static uint64_t count_graph_4_rec(const Graph* g, AdjWord uncoloured,
-                                  uint8_t forbid[MAXN_NAUTY], int used) {
+                                  uint8_t forbid[MAX_GRAPH_VERTICES], int used) {
     if (!uncoloured) return g_fall4[used];
 
     int best = -1;
@@ -447,7 +447,7 @@ static uint64_t count_graph_4_rec(const Graph* g, AdjWord uncoloured,
         uint8_t bit = (uint8_t)(1u << c);
         if (fb & bit) continue;
 
-        int changed[MAXN_NAUTY];
+        int changed[MAX_GRAPH_VERTICES];
         int changed_count = 0;
         AdjWord nbrs = neigh;
         while (nbrs) {
@@ -470,7 +470,7 @@ static uint64_t count_graph_4_rec(const Graph* g, AdjWord uncoloured,
     if (used < 4) {
         uint8_t bit = (uint8_t)(1u << used);
         if (!(fb & bit)) {
-            int changed[MAXN_NAUTY];
+            int changed[MAX_GRAPH_VERTICES];
             int changed_count = 0;
             AdjWord nbrs = neigh;
             while (nbrs) {
@@ -495,7 +495,7 @@ static uint64_t count_graph_4_rec(const Graph* g, AdjWord uncoloured,
 }
 
 uint64_t count_graph_4_dsat(const Graph* g) {
-    uint8_t forbid[MAXN_NAUTY] = {0};
+    uint8_t forbid[MAX_GRAPH_VERTICES] = {0};
     return count_graph_4_rec(g, (AdjWord)g->vertex_mask, forbid, 0);
 }
 
