@@ -7853,4 +7853,16 @@
   - profile command: `/usr/bin/time -f 'time_wall=%e maxrss_kb=%M' env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 RECT_DISABLE_NAUTY=1 RECT_WL_CANON=1 RECT_WL_CANON_ENUM_LIMIT=100000 ./partition_poly_7_profile 7 5 --prefix-depth 2 --task-start 2 --task-end 3`
   - profile result: WL key time dropped from `11.346s` to `8.026s`; enumeration search dropped from `5.766s` to `2.516s`; refinement remained `3.662s`
   - interpretation: bounded enumeration was the biggest local CPU cost. Incremental `new_pos` plus lazy lexicographic comparison keeps the exact same key while removing most of the wasted dense-row rebuild work for rejected candidate orders. On this shard, no-nauty WL is now roughly at parity with the earlier nauty baseline (`24.96s` vs `24.87s`) while keeping the GPU-friendlier structure.
+- Follow-up refinement optimisation:
+  - specialised WL signature construction for one-word and two-word signatures
+  - the one-word path directly packs neighbour-colour counts without generic word/shift branching
+  - the two-word path avoids clearing/comparing all three fixed signature words and handles the single cross-word count explicitly
+  - signature comparison and equality now inspect only the active signature words for the current colour count
+  - verification:
+    - `make partition_poly_7 partition_poly_7_profile`
+    - `env OMP_NUM_THREADS=1 RECT_DISABLE_NAUTY=1 RECT_WL_CANON=1 RECT_WL_CANON_ENUM_LIMIT=100000 ./partition_poly_7 7 3 --prefix-depth 2 --task-end 2`
+    - output remained `P(4) = 3076516800`, `P(5) = 126873860400`
+  - benchmark result on the same `7x5` task-2 command: `24.96s -> 24.16s` wall, with unchanged graph counters and output
+  - profile result on the same profile command: WL key time dropped from `8.026s` to `7.273s`; refinement dropped from `3.662s` to `2.774s`; enumeration search remained about `2.54s`
+  - interpretation: the WL/no-nauty key is now slightly faster than the earlier nauty baseline on this shard (`24.16s` vs `24.87s`), while preserving the same merge shape observed before.
 - Outcome: kept as opt-in prototype for GPU-oriented follow-up, not enabled by default.

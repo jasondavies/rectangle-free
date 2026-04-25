@@ -143,24 +143,68 @@ typedef struct {
     uint64_t packed_counts[WL_CANON_SIG_WORDS];
 } WlColourSignature32;
 
-static inline void wl_colour_signature32_set_count(WlColourSignature32* sig, int colour,
-                                                   uint32_t count) {
-    int bit = colour * WL_CANON_COUNT_BITS;
-    int word = bit >> 6;
-    int shift = bit & 63;
-    uint64_t value = (uint64_t)(count & ((1U << WL_CANON_COUNT_BITS) - 1U));
-    sig->packed_counts[word] |= value << shift;
-    if (shift > 64 - WL_CANON_COUNT_BITS) {
-        sig->packed_counts[word + 1] |= value >> (64 - shift);
+static inline int wl_colour_signature32_active_words(int colour_count) {
+    return (colour_count * WL_CANON_COUNT_BITS + 63) >> 6;
+}
+
+static inline void wl_colour_signature32_fill(WlColourSignature32* sig, uint8_t vertex,
+                                              uint8_t old_colour, uint32_t row,
+                                              const uint32_t* colour_masks,
+                                              int colour_count, int active_words) {
+    sig->vertex = vertex;
+    sig->old_colour = old_colour;
+
+    if (active_words == 1) {
+        uint64_t packed = 0;
+        int shift = 0;
+        for (int c = 0; c < colour_count; c++, shift += WL_CANON_COUNT_BITS) {
+            uint64_t count = (uint64_t)__builtin_popcount(row & colour_masks[c]);
+            packed |= count << shift;
+        }
+        sig->packed_counts[0] = packed;
+        return;
+    }
+
+    if (active_words == 2) {
+        uint64_t w0 = 0;
+        uint64_t w1 = 0;
+        int shift = 0;
+        for (int c = 0; c < colour_count; c++, shift += WL_CANON_COUNT_BITS) {
+            uint64_t count = (uint64_t)__builtin_popcount(row & colour_masks[c]);
+            if (shift < 60) {
+                w0 |= count << shift;
+            } else if (shift == 60) {
+                w0 |= count << 60;
+                w1 |= count >> 4;
+            } else {
+                w1 |= count << (shift - 64);
+            }
+        }
+        sig->packed_counts[0] = w0;
+        sig->packed_counts[1] = w1;
+        return;
+    }
+
+    for (int i = 0; i < WL_CANON_SIG_WORDS; i++) sig->packed_counts[i] = 0;
+    for (int c = 0; c < colour_count; c++) {
+        int bit = c * WL_CANON_COUNT_BITS;
+        int word = bit >> 6;
+        int shift = bit & 63;
+        uint64_t count = (uint64_t)__builtin_popcount(row & colour_masks[c]);
+        sig->packed_counts[word] |= count << shift;
+        if (shift > 64 - WL_CANON_COUNT_BITS) {
+            sig->packed_counts[word + 1] |= count >> (64 - shift);
+        }
     }
 }
 
 static int wl_colour_signature32_cmp(const WlColourSignature32* a,
-                                     const WlColourSignature32* b) {
+                                     const WlColourSignature32* b,
+                                     int active_words) {
     if (a->old_colour != b->old_colour) {
         return (int)a->old_colour - (int)b->old_colour;
     }
-    for (int i = 0; i < WL_CANON_SIG_WORDS; i++) {
+    for (int i = 0; i < active_words; i++) {
         if (a->packed_counts[i] != b->packed_counts[i]) {
             return a->packed_counts[i] < b->packed_counts[i] ? -1 : 1;
         }
@@ -169,9 +213,10 @@ static int wl_colour_signature32_cmp(const WlColourSignature32* a,
 }
 
 static int wl_colour_signature32_same(const WlColourSignature32* a,
-                                      const WlColourSignature32* b) {
+                                      const WlColourSignature32* b,
+                                      int active_words) {
     if (a->old_colour != b->old_colour) return 0;
-    for (int i = 0; i < WL_CANON_SIG_WORDS; i++) {
+    for (int i = 0; i < active_words; i++) {
         if (a->packed_counts[i] != b->packed_counts[i]) return 0;
     }
     return 1;
@@ -506,21 +551,20 @@ static int graph_try_wl_canon(int n, const AdjWord* rows, Graph* canon,
             colour_masks[colours[v]] |= UINT32_C(1) << v;
         }
 
+        int active_words = wl_colour_signature32_active_words(colour_count);
         for (int v = 0; v < n; v++) {
-            sigs[v].vertex = (uint8_t)v;
-            sigs[v].old_colour = (uint8_t)colours[v];
-            for (int i = 0; i < WL_CANON_SIG_WORDS; i++) sigs[v].packed_counts[i] = 0;
             uint32_t row = (uint32_t)rows[v] & mask;
-            for (int c = 0; c < colour_count; c++) {
-                uint32_t count = (uint32_t)__builtin_popcount(row & colour_masks[c]);
-                wl_colour_signature32_set_count(&sigs[v], c, count);
-            }
+            wl_colour_signature32_fill(&sigs[v], (uint8_t)v,
+                                       (uint8_t)colours[v], row,
+                                       colour_masks, colour_count,
+                                       active_words);
         }
 
         for (int i = 1; i < n; i++) {
             WlColourSignature32 tmp = sigs[i];
             int j = i;
-            while (j > 0 && wl_colour_signature32_cmp(&tmp, &sigs[j - 1]) < 0) {
+            while (j > 0 &&
+                   wl_colour_signature32_cmp(&tmp, &sigs[j - 1], active_words) < 0) {
                 sigs[j] = sigs[j - 1];
                 j--;
             }
@@ -529,7 +573,8 @@ static int graph_try_wl_canon(int n, const AdjWord* rows, Graph* canon,
 
         int next_colour_count = 0;
         for (int i = 0; i < n; i++) {
-            if (i > 0 && !wl_colour_signature32_same(&sigs[i - 1], &sigs[i])) {
+            if (i > 0 &&
+                !wl_colour_signature32_same(&sigs[i - 1], &sigs[i], active_words)) {
                 next_colour_count++;
             }
             next_colours[sigs[i].vertex] = next_colour_count;
