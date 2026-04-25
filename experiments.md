@@ -7830,4 +7830,14 @@
     - WL32/no-nauty: `Canonicalisation calls 4051558`, `Canonical cache hits 2733951 (67.5%)`, `Raw cache hits 8855488`
     - nauty baseline: `Canonicalisation calls 4091945`, `Canonical cache hits 2769704 (67.7%)`, `Raw cache hits 8825316`
 - Interpretation: this is not a CPU performance win. It is about `14%` slower than nauty on this shard, and the 32-bit bitset rewrite did not materially improve the previous bounded-WL CPU timing. The useful result is that bounded WL can preserve almost the same recurrence/cache merge shape without calling nauty, using operations that are far closer to a GPU implementation: fixed-width rows, colour-class masks, popcounts, small sorts, and bounded within-cell enumeration.
+- Follow-up profile:
+  - added WL-specific profile counters for discrete successes, bounded-enumeration successes, failures, refinement rounds, popcount work, final colour-cell shape, and enumeration budgets
+  - command: `/usr/bin/time -f 'time_wall=%e maxrss_kb=%M' env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 RECT_DISABLE_NAUTY=1 RECT_WL_CANON=1 RECT_WL_CANON_ENUM_LIMIT=100000 ./partition_poly_7_profile 7 5 --prefix-depth 2 --task-start 2 --task-end 3`
+  - result: `33.01s` profiled wall, `632320 KiB` max RSS
+  - `get_canonical_graph`: `4050952` calls, `10.495s`; WL canonical key time was `10.247s`
+  - WL split: `3294479` discrete successes, `756473` bounded-enumeration successes, `606` failures
+  - refinement work: `8055216` rounds, `535750431` popcounts, averaging `1.99` rounds and `132.2` popcounts per attempt
+  - final cells: average `10.11` colours, average largest cell `1.21`, max largest cell `14`
+  - enumeration work: `757079` attempts, `606` budget-exceeded cases, average in-budget enumeration `79.79` permutations, max budget `80640`, about `60.4M` candidate orders enumerated
+  - conclusion: the slowdown is local key-generation cost, not a large loss of graph-cache merge power. The two concrete CPU costs are about `536M` refinement popcounts and about `60M` dense-row rebuild/compare candidates from bounded enumeration.
 - Outcome: kept as opt-in prototype for GPU-oriented follow-up, not enabled by default.

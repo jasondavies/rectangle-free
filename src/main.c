@@ -952,6 +952,25 @@ static void aggregate_execution_summary(const ExecutionState* exec, ExecutionSum
         summary->profile.nauty_calls += src->nauty_calls;
         summary->profile.wl_canon_attempts += src->wl_canon_attempts;
         summary->profile.wl_canon_successes += src->wl_canon_successes;
+        summary->profile.wl_canon_discrete_successes += src->wl_canon_discrete_successes;
+        summary->profile.wl_canon_enum_successes += src->wl_canon_enum_successes;
+        summary->profile.wl_canon_failures += src->wl_canon_failures;
+        summary->profile.wl_canon_refine_iterations += src->wl_canon_refine_iterations;
+        summary->profile.wl_canon_refine_popcounts += src->wl_canon_refine_popcounts;
+        summary->profile.wl_canon_final_colour_sum += src->wl_canon_final_colour_sum;
+        summary->profile.wl_canon_final_largest_cell_sum += src->wl_canon_final_largest_cell_sum;
+        if (src->wl_canon_final_largest_cell_max >
+            summary->profile.wl_canon_final_largest_cell_max) {
+            summary->profile.wl_canon_final_largest_cell_max =
+                src->wl_canon_final_largest_cell_max;
+        }
+        summary->profile.wl_canon_enum_attempts += src->wl_canon_enum_attempts;
+        summary->profile.wl_canon_enum_permutations += src->wl_canon_enum_permutations;
+        summary->profile.wl_canon_enum_budget_sum += src->wl_canon_enum_budget_sum;
+        if (src->wl_canon_enum_budget_max > summary->profile.wl_canon_enum_budget_max) {
+            summary->profile.wl_canon_enum_budget_max = src->wl_canon_enum_budget_max;
+        }
+        summary->profile.wl_canon_enum_budget_exceeded += src->wl_canon_enum_budget_exceeded;
         summary->profile.hard_graph_nodes += src->hard_graph_nodes;
         summary->profile.canon_prepare_time += src->canon_prepare_time;
         summary->profile.canon_commit_time += src->canon_commit_time;
@@ -1087,6 +1106,56 @@ static void print_execution_report(const RunConfig* run, const ExecutionState* e
                    total_profile->wl_canon_successes,
                    total_profile->wl_canon_attempts,
                    total_profile->wl_canon_time);
+            long long final_shape_count =
+                total_profile->wl_canon_discrete_successes +
+                total_profile->wl_canon_enum_attempts;
+            double avg_refine_iters = total_profile->wl_canon_attempts > 0
+                ? (double)total_profile->wl_canon_refine_iterations /
+                    (double)total_profile->wl_canon_attempts
+                : 0.0;
+            double avg_popcounts = total_profile->wl_canon_attempts > 0
+                ? (double)total_profile->wl_canon_refine_popcounts /
+                    (double)total_profile->wl_canon_attempts
+                : 0.0;
+            double avg_final_colours = final_shape_count > 0
+                ? (double)total_profile->wl_canon_final_colour_sum /
+                    (double)final_shape_count
+                : 0.0;
+            double avg_final_largest = final_shape_count > 0
+                ? (double)total_profile->wl_canon_final_largest_cell_sum /
+                    (double)final_shape_count
+                : 0.0;
+            long long enum_within_budget =
+                total_profile->wl_canon_enum_attempts -
+                total_profile->wl_canon_enum_budget_exceeded;
+            double avg_enum_budget = enum_within_budget > 0
+                ? (double)total_profile->wl_canon_enum_budget_sum /
+                    (double)enum_within_budget
+                : 0.0;
+            double avg_enum_perms = total_profile->wl_canon_enum_successes > 0
+                ? (double)total_profile->wl_canon_enum_permutations /
+                    (double)total_profile->wl_canon_enum_successes
+                : 0.0;
+            printf("      discrete=%lld enum=%lld failed=%lld\n",
+                   total_profile->wl_canon_discrete_successes,
+                   total_profile->wl_canon_enum_successes,
+                   total_profile->wl_canon_failures);
+            printf("      refinement: rounds=%lld avg %.2f/attempt, popcounts=%lld avg %.1f/attempt\n",
+                   total_profile->wl_canon_refine_iterations,
+                   avg_refine_iters,
+                   total_profile->wl_canon_refine_popcounts,
+                   avg_popcounts);
+            printf("      final cells: avg colours %.2f, avg largest %.2f, max largest %lld\n",
+                   avg_final_colours,
+                   avg_final_largest,
+                   total_profile->wl_canon_final_largest_cell_max);
+            printf("      enumeration: attempts=%lld exceeded=%lld, avg budget %.2f, max budget %lld, perms=%lld avg %.2f\n",
+                   total_profile->wl_canon_enum_attempts,
+                   total_profile->wl_canon_enum_budget_exceeded,
+                   avg_enum_budget,
+                   total_profile->wl_canon_enum_budget_max,
+                   total_profile->wl_canon_enum_permutations,
+                   avg_enum_perms);
         }
         printf("    densenauty: %.3fs\n",
                total_profile->nauty_time);
