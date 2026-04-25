@@ -7872,4 +7872,9 @@
   - task `1`: default nauty `4.26s`, WL/no-nauty `4.61s`, hybrid `4.63s`
   - task `2`: default nauty `24.36s`, WL/no-nauty `24.16s`, hybrid `24.23s`
   - interpretation: WL is now competitive or slightly faster on the hard sampled prefix, but not a universal default. Easy prefixes can lose enough merge power or pay enough WL overhead that nauty remains better. A future default should probably be selective, not simply `RECT_WL_CANON=1` for all graph-cache calls.
+- Enum-limit sensitivity:
+  - task `2`, WL/no-nauty: limit `100000` `24.16s`, `4096` `22.72s`, `1024` `22.52s`, `256` `22.50s`, `64` `22.36s`, `16` `22.26s`, `0` `24.58s`
+  - task `0`, WL/no-nauty with limit `16`: `3.34s`, matching default nauty `3.34s`
+  - task `1`, WL/no-nauty with limit `16`: `4.08s`, faster than default nauty `4.26s`
+  - interpretation: discrete-only WL is too weak, but a small bounded enumeration cap works better than the large exploratory cap. Set the opt-in WL default enum limit to `16`; `RECT_WL_CANON` itself remains disabled by default.
 - Outcome: kept as opt-in prototype for GPU-oriented follow-up, not enabled by default.
