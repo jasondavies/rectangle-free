@@ -971,6 +971,10 @@ static void aggregate_execution_summary(const ExecutionState* exec, ExecutionSum
             summary->profile.wl_canon_enum_budget_max = src->wl_canon_enum_budget_max;
         }
         summary->profile.wl_canon_enum_budget_exceeded += src->wl_canon_enum_budget_exceeded;
+        for (int b = 0; b < WL_CANON_ENUM_BUDGET_BUCKETS; b++) {
+            summary->profile.wl_canon_enum_budget_hist[b] +=
+                src->wl_canon_enum_budget_hist[b];
+        }
         summary->profile.hard_graph_nodes += src->hard_graph_nodes;
         summary->profile.canon_prepare_time += src->canon_prepare_time;
         summary->profile.canon_commit_time += src->canon_commit_time;
@@ -981,6 +985,12 @@ static void aggregate_execution_summary(const ExecutionState* exec, ExecutionSum
         summary->profile.get_canonical_graph_dense_rows_time += src->get_canonical_graph_dense_rows_time;
         summary->profile.get_canonical_graph_build_input_time += src->get_canonical_graph_build_input_time;
         summary->profile.wl_canon_time += src->wl_canon_time;
+        summary->profile.wl_canon_init_time += src->wl_canon_init_time;
+        summary->profile.wl_canon_refine_time += src->wl_canon_refine_time;
+        summary->profile.wl_canon_discrete_build_time += src->wl_canon_discrete_build_time;
+        summary->profile.wl_canon_enum_budget_time += src->wl_canon_enum_budget_time;
+        summary->profile.wl_canon_enum_search_time += src->wl_canon_enum_search_time;
+        summary->profile.wl_canon_enum_rebuild_time += src->wl_canon_enum_rebuild_time;
         summary->profile.nauty_time += src->nauty_time;
         summary->profile.get_canonical_graph_rebuild_time += src->get_canonical_graph_rebuild_time;
         if (src->hard_graph_max_n > summary->profile.hard_graph_max_n) {
@@ -1156,6 +1166,33 @@ static void print_execution_report(const RunConfig* run, const ExecutionState* e
                    total_profile->wl_canon_enum_budget_max,
                    total_profile->wl_canon_enum_permutations,
                    avg_enum_perms);
+            printf("      phases: init %.3fs, refine %.3fs, discrete-build %.3fs, enum-budget %.3fs, enum-search %.3fs, enum-rebuild %.3fs\n",
+                   total_profile->wl_canon_init_time,
+                   total_profile->wl_canon_refine_time,
+                   total_profile->wl_canon_discrete_build_time,
+                   total_profile->wl_canon_enum_budget_time,
+                   total_profile->wl_canon_enum_search_time,
+                   total_profile->wl_canon_enum_rebuild_time);
+            printf("      enum budget histogram:");
+            int any_hist = 0;
+            for (int b = 0; b < WL_CANON_ENUM_BUDGET_BUCKETS; b++) {
+                long long count = total_profile->wl_canon_enum_budget_hist[b];
+                if (count == 0) continue;
+                any_hist = 1;
+                if (b == 0) {
+                    printf(" 1:%lld", count);
+                } else {
+                    long long lo = (1LL << (b - 1)) + 1LL;
+                    if (b + 1 == WL_CANON_ENUM_BUDGET_BUCKETS) {
+                        printf(" >=%lld:%lld", lo, count);
+                    } else {
+                        long long hi = 1LL << b;
+                        printf(" %lld-%lld:%lld", lo, hi, count);
+                    }
+                }
+            }
+            if (!any_hist) printf(" empty");
+            printf("\n");
         }
         printf("    densenauty: %.3fs\n",
                total_profile->nauty_time);

@@ -7840,4 +7840,17 @@
   - final cells: average `10.11` colours, average largest cell `1.21`, max largest cell `14`
   - enumeration work: `757079` attempts, `606` budget-exceeded cases, average in-budget enumeration `79.79` permutations, max budget `80640`, about `60.4M` candidate orders enumerated
   - conclusion: the slowdown is local key-generation cost, not a large loss of graph-cache merge power. The two concrete CPU costs are about `536M` refinement popcounts and about `60M` dense-row rebuild/compare candidates from bounded enumeration.
+- Follow-up optimisation:
+  - added WL subphase timers and an in-budget enumeration histogram, then optimised bounded enumeration
+  - changed exact within-cell enumeration to maintain `new_pos` incrementally during permutation swaps instead of rebuilding it for every candidate order
+  - changed candidate comparison to build rows lazily and stop as soon as the candidate row sequence is lexicographically worse than the current best
+  - verification:
+    - `make partition_poly_7 partition_poly_7_profile`
+    - `env OMP_NUM_THREADS=1 RECT_DISABLE_NAUTY=1 RECT_WL_CANON=1 RECT_WL_CANON_ENUM_LIMIT=100000 ./partition_poly_7 7 3 --prefix-depth 2 --task-end 2`
+    - output remained `P(4) = 3076516800`, `P(5) = 126873860400`
+  - benchmark command: `/usr/bin/time -f 'time_wall=%e maxrss_kb=%M' env RECT_PROGRESS_STEP=1000000 RECT_DISABLE_NAUTY=1 RECT_WL_CANON=1 RECT_WL_CANON_ENUM_LIMIT=100000 OMP_NUM_THREADS=1 ./partition_poly_7 7 5 --prefix-depth 2 --task-start 2 --task-end 3`
+  - benchmark result: `28.41s -> 24.96s` wall for WL32/no-nauty on the same shard, with unchanged graph counters and output
+  - profile command: `/usr/bin/time -f 'time_wall=%e maxrss_kb=%M' env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 RECT_DISABLE_NAUTY=1 RECT_WL_CANON=1 RECT_WL_CANON_ENUM_LIMIT=100000 ./partition_poly_7_profile 7 5 --prefix-depth 2 --task-start 2 --task-end 3`
+  - profile result: WL key time dropped from `11.346s` to `8.026s`; enumeration search dropped from `5.766s` to `2.516s`; refinement remained `3.662s`
+  - interpretation: bounded enumeration was the biggest local CPU cost. Incremental `new_pos` plus lazy lexicographic comparison keeps the exact same key while removing most of the wasted dense-row rebuild work for rejected candidate orders. On this shard, no-nauty WL is now roughly at parity with the earlier nauty baseline (`24.96s` vs `24.87s`) while keeping the GPU-friendlier structure.
 - Outcome: kept as opt-in prototype for GPU-oriented follow-up, not enabled by default.

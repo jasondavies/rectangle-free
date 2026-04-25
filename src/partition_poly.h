@@ -225,6 +225,8 @@ typedef struct {
     uint64_t next_stamp;
 } RowGraphCache;
 
+#define WL_CANON_ENUM_BUDGET_BUCKETS 18
+
 typedef struct {
     long long canon_prepare_calls;
     long long canon_prepare_accepts;
@@ -248,6 +250,7 @@ typedef struct {
     long long wl_canon_enum_budget_sum;
     long long wl_canon_enum_budget_max;
     long long wl_canon_enum_budget_exceeded;
+    long long wl_canon_enum_budget_hist[WL_CANON_ENUM_BUDGET_BUCKETS];
     long long hard_graph_nodes;
     long long canon_prepare_calls_by_depth[MAX_COLS + 1];
     long long canon_prepare_accepts_by_depth[MAX_COLS + 1];
@@ -282,6 +285,12 @@ typedef struct {
     double get_canonical_graph_dense_rows_time;
     double get_canonical_graph_build_input_time;
     double wl_canon_time;
+    double wl_canon_init_time;
+    double wl_canon_refine_time;
+    double wl_canon_discrete_build_time;
+    double wl_canon_enum_budget_time;
+    double wl_canon_enum_search_time;
+    double wl_canon_enum_rebuild_time;
     double nauty_time;
     double get_canonical_graph_rebuild_time;
     double solve_graph_time_by_n[MAXN_NAUTY + 1];

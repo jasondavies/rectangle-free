@@ -220,54 +220,77 @@ static int graph_build_discrete_wl_canon(int n, const AdjWord* rows, const int* 
     return 1;
 }
 
+static int graph_build_discrete_wl_canon_profiled(int n, const AdjWord* rows,
+                                                  const int* colours, Graph* canon,
+                                                  uint64_t* hash_out,
+                                                  ProfileStats* profile) {
+    double t0 = 0.0;
+    if (PROFILE_BUILD && profile) t0 = omp_get_wtime();
+    int ok = graph_build_discrete_wl_canon(n, rows, colours, canon, hash_out);
+    if (PROFILE_BUILD && profile) {
+        profile->wl_canon_discrete_build_time += omp_get_wtime() - t0;
+    }
+    return ok;
+}
+
 typedef struct {
     int n;
     const AdjWord* rows;
     int cell_count;
     int cell_start[MAXN_NAUTY + 1];
     int order[MAXN_NAUTY];
+    int new_pos[MAXN_NAUTY];
     int have_best;
     long long permutation_count;
     AdjWord best_rows[MAXN_NAUTY];
 } WlCanonEnumState;
 
-static void graph_build_rows_for_order(int n, const AdjWord* rows, const int* order,
-                                       AdjWord* out_rows) {
-    int new_pos[MAXN_NAUTY];
+static AdjWord graph_build_row_for_new_pos(int n, const AdjWord* rows, int old_v,
+                                           const int* new_pos) {
     uint64_t mask = graph_row_mask(n);
-    for (int i = 0; i < n; i++) new_pos[order[i]] = i;
-    for (int pos = 0; pos < n; pos++) {
-        int old_v = order[pos];
-        uint64_t rem = (uint64_t)rows[old_v] & mask;
-        AdjWord row = 0;
-        while (rem) {
-            int old_u = __builtin_ctzll(rem);
-            row |= (AdjWord)(UINT64_C(1) << new_pos[old_u]);
-            rem &= rem - 1;
-        }
-        out_rows[pos] = row;
+    uint64_t rem = (uint64_t)rows[old_v] & mask;
+    AdjWord row = 0;
+    while (rem) {
+        int old_u = __builtin_ctzll(rem);
+        row |= (AdjWord)(UINT64_C(1) << new_pos[old_u]);
+        rem &= rem - 1;
     }
-}
-
-static int graph_rows_lex_less(int n, const AdjWord* lhs, const AdjWord* rhs) {
-    for (int i = 0; i < n; i++) {
-        if (lhs[i] != rhs[i]) return lhs[i] < rhs[i];
-    }
-    return 0;
+    return row;
 }
 
 static void wl_enum_consider_order(WlCanonEnumState* st) {
     AdjWord candidate[MAXN_NAUTY];
     st->permutation_count++;
-    graph_build_rows_for_order(st->n, st->rows, st->order, candidate);
-    if (!st->have_best || graph_rows_lex_less(st->n, candidate, st->best_rows)) {
+
+    if (!st->have_best) {
+        for (int pos = 0; pos < st->n; pos++) {
+            candidate[pos] = graph_build_row_for_new_pos(st->n, st->rows,
+                                                         st->order[pos],
+                                                         st->new_pos);
+        }
         memcpy(st->best_rows, candidate, (size_t)st->n * sizeof(st->best_rows[0]));
         st->have_best = 1;
+        return;
+    }
+
+    for (int pos = 0; pos < st->n; pos++) {
+        AdjWord row = graph_build_row_for_new_pos(st->n, st->rows, st->order[pos],
+                                                  st->new_pos);
+        candidate[pos] = row;
+        if (row > st->best_rows[pos]) return;
+        if (row < st->best_rows[pos]) {
+            for (int rest = pos + 1; rest < st->n; rest++) {
+                candidate[rest] =
+                    graph_build_row_for_new_pos(st->n, st->rows, st->order[rest],
+                                                st->new_pos);
+            }
+            memcpy(st->best_rows, candidate, (size_t)st->n * sizeof(st->best_rows[0]));
+            return;
+        }
     }
 }
 
 static void wl_enum_permute_cell(WlCanonEnumState* st, int cell_idx, int pos) {
-    int start = st->cell_start[cell_idx];
     int end = st->cell_start[cell_idx + 1];
     if (pos == end) {
         if (cell_idx + 1 == st->cell_count) {
@@ -278,15 +301,18 @@ static void wl_enum_permute_cell(WlCanonEnumState* st, int cell_idx, int pos) {
         return;
     }
     for (int i = pos; i < end; i++) {
-        int tmp = st->order[pos];
-        st->order[pos] = st->order[i];
-        st->order[i] = tmp;
+        int pos_vertex = st->order[pos];
+        int i_vertex = st->order[i];
+        st->order[pos] = i_vertex;
+        st->order[i] = pos_vertex;
+        st->new_pos[i_vertex] = pos;
+        st->new_pos[pos_vertex] = i;
         wl_enum_permute_cell(st, cell_idx, pos + 1);
-        tmp = st->order[pos];
-        st->order[pos] = st->order[i];
-        st->order[i] = tmp;
+        st->order[pos] = pos_vertex;
+        st->order[i] = i_vertex;
+        st->new_pos[pos_vertex] = pos;
+        st->new_pos[i_vertex] = i;
     }
-    (void)start;
 }
 
 static void graph_build_canon_from_rows(int n, const AdjWord* rows, Graph* canon,
@@ -324,6 +350,16 @@ static long long wl_enum_permutation_budget(int n, int colour_count, const int* 
     return total;
 }
 
+static int wl_enum_budget_bucket(long long budget) {
+    int bucket = 0;
+    long long high = 1;
+    while (bucket + 1 < WL_CANON_ENUM_BUDGET_BUCKETS && budget > high) {
+        bucket++;
+        high <<= 1;
+    }
+    return bucket;
+}
+
 static int wl_canon_largest_cell(int n, int colour_count, const int* colours) {
     int counts[WL_CANON_MAX_N] = {0};
     int largest = 0;
@@ -349,13 +385,19 @@ static int graph_build_bounded_wl_canon(int n, const AdjWord* rows, int colour_c
                                         const int* colours, Graph* canon,
                                         uint64_t* hash_out, long long enum_limit,
                                         ProfileStats* profile) {
+    double budget_t0 = 0.0;
+    if (PROFILE_BUILD && profile) budget_t0 = omp_get_wtime();
     long long budget = wl_enum_permutation_budget(n, colour_count, colours, enum_limit);
+    if (PROFILE_BUILD && profile) {
+        profile->wl_canon_enum_budget_time += omp_get_wtime() - budget_t0;
+    }
     if (PROFILE_BUILD && profile && colour_count != n) {
         profile->wl_canon_enum_attempts++;
         if (budget > enum_limit) {
             profile->wl_canon_enum_budget_exceeded++;
         } else {
             profile->wl_canon_enum_budget_sum += budget;
+            profile->wl_canon_enum_budget_hist[wl_enum_budget_bucket(budget)]++;
             if (budget > profile->wl_canon_enum_budget_max) {
                 profile->wl_canon_enum_budget_max = budget;
             }
@@ -364,7 +406,8 @@ static int graph_build_bounded_wl_canon(int n, const AdjWord* rows, int colour_c
     if (budget > enum_limit && colour_count != n) return 0;
     if (colour_count == n) {
         if (PROFILE_BUILD && profile) profile->wl_canon_discrete_successes++;
-        return graph_build_discrete_wl_canon(n, rows, colours, canon, hash_out);
+        return graph_build_discrete_wl_canon_profiled(n, rows, colours, canon,
+                                                      hash_out, profile);
     }
 
     WlCanonEnumState st;
@@ -386,14 +429,27 @@ static int graph_build_bounded_wl_canon(int n, const AdjWord* rows, int colour_c
     for (int v = 0; v < n; v++) {
         st.order[offsets[colours[v]]++] = v;
     }
+    for (int pos = 0; pos < n; pos++) {
+        st.new_pos[st.order[pos]] = pos;
+    }
 
+    double search_t0 = 0.0;
+    if (PROFILE_BUILD && profile) search_t0 = omp_get_wtime();
     wl_enum_permute_cell(&st, 0, st.cell_start[0]);
+    if (PROFILE_BUILD && profile) {
+        profile->wl_canon_enum_search_time += omp_get_wtime() - search_t0;
+    }
     if (!st.have_best) return 0;
     if (PROFILE_BUILD && profile) {
         profile->wl_canon_enum_successes++;
         profile->wl_canon_enum_permutations += st.permutation_count;
     }
+    double rebuild_t0 = 0.0;
+    if (PROFILE_BUILD && profile) rebuild_t0 = omp_get_wtime();
     graph_build_canon_from_rows(n, st.best_rows, canon, hash_out);
+    if (PROFILE_BUILD && profile) {
+        profile->wl_canon_enum_rebuild_time += omp_get_wtime() - rebuild_t0;
+    }
     return 1;
 }
 
@@ -401,6 +457,9 @@ static int graph_try_wl_canon(int n, const AdjWord* rows, Graph* canon,
                               uint64_t* hash_out, long long enum_limit,
                               ProfileStats* profile) {
     if (n > WL_CANON_MAX_N) return 0;
+
+    double init_t0 = 0.0;
+    if (PROFILE_BUILD && profile) init_t0 = omp_get_wtime();
 
     int colours[MAXN_NAUTY];
     int next_colours[MAXN_NAUTY];
@@ -423,18 +482,24 @@ static int graph_try_wl_canon(int n, const AdjWord* rows, Graph* canon,
         int degree = __builtin_popcount((uint32_t)rows[v] & mask);
         colours[v] = degree_colour[degree];
     }
+    if (PROFILE_BUILD && profile) {
+        profile->wl_canon_init_time += omp_get_wtime() - init_t0;
+    }
     if (colour_count == n) {
         if (PROFILE_BUILD && profile) {
             profile->wl_canon_discrete_successes++;
             wl_profile_record_final(profile, n, colour_count, colours);
         }
-        return graph_build_discrete_wl_canon(n, rows, colours, canon, hash_out);
+        return graph_build_discrete_wl_canon_profiled(n, rows, colours, canon,
+                                                      hash_out, profile);
     }
 
     for (int iter = 0; iter < n; iter++) {
+        double refine_t0 = 0.0;
         if (PROFILE_BUILD && profile) {
             profile->wl_canon_refine_iterations++;
             profile->wl_canon_refine_popcounts += (long long)n * (long long)colour_count;
+            refine_t0 = omp_get_wtime();
         }
         uint32_t colour_masks[WL_CANON_MAX_N] = {0};
         for (int v = 0; v < n; v++) {
@@ -477,12 +542,16 @@ static int graph_try_wl_canon(int n, const AdjWord* rows, Graph* canon,
             colours[v] = next_colours[v];
         }
         colour_count = next_colour_count;
+        if (PROFILE_BUILD && profile) {
+            profile->wl_canon_refine_time += omp_get_wtime() - refine_t0;
+        }
         if (colour_count == n) {
             if (PROFILE_BUILD && profile) {
                 profile->wl_canon_discrete_successes++;
                 wl_profile_record_final(profile, n, colour_count, colours);
             }
-            return graph_build_discrete_wl_canon(n, rows, colours, canon, hash_out);
+            return graph_build_discrete_wl_canon_profiled(n, rows, colours, canon,
+                                                          hash_out, profile);
         }
         if (!changed) break;
     }
