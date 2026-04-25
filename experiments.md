@@ -7865,4 +7865,11 @@
   - benchmark result on the same `7x5` task-2 command: `24.96s -> 24.16s` wall, with unchanged graph counters and output
   - profile result on the same profile command: WL key time dropped from `8.026s` to `7.273s`; refinement dropped from `3.662s` to `2.774s`; enumeration search remained about `2.54s`
   - interpretation: the WL/no-nauty key is now slightly faster than the earlier nauty baseline on this shard (`24.16s` vs `24.87s`), while preserving the same merge shape observed before.
+- Coverage sample after WL optimisation:
+  - sampled `7x5` tasks `0`, `1`, and `2`, sequentially with `OMP_NUM_THREADS=1`
+  - default nauty commands used no WL env vars; WL/no-nauty used `RECT_DISABLE_NAUTY=1 RECT_WL_CANON=1 RECT_WL_CANON_ENUM_LIMIT=100000`; hybrid used `RECT_WL_CANON=1 RECT_WL_CANON_ENUM_LIMIT=100000`
+  - task `0`: default nauty `3.34s`, WL/no-nauty `4.34s`, hybrid `4.24s`
+  - task `1`: default nauty `4.26s`, WL/no-nauty `4.61s`, hybrid `4.63s`
+  - task `2`: default nauty `24.36s`, WL/no-nauty `24.16s`, hybrid `24.23s`
+  - interpretation: WL is now competitive or slightly faster on the hard sampled prefix, but not a universal default. Easy prefixes can lose enough merge power or pay enough WL overhead that nauty remains better. A future default should probably be selective, not simply `RECT_WL_CANON=1` for all graph-cache calls.
 - Outcome: kept as opt-in prototype for GPU-oriented follow-up, not enabled by default.
