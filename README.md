@@ -201,9 +201,26 @@ Research probes are intentionally not part of `make gpu-production`.
   6x29.
 
 Exact recorded values are in [results.txt](results.txt); detailed performance
-claims and experiment provenance belong in
-[experiments.md](docs/experiments.md),
-not this overview.
+logs and experiment provenance are in
+[experiments.md](docs/experiments.md).
+
+## Selected completed computations
+
+These are measured campaign totals, not projections. Aggregate GPU time sums
+the time used by every GPU and is therefore distinct from elapsed wall time.
+
+| Computation | Hardware and parallelism | Aggregate compute | Elapsed time |
+| --- | --- | ---: | ---: |
+| Full 7x7 chromatic polynomial | Distributed CPU cluster | About 200,000 core-hours | Historical distributed run |
+| `T_4(7,7)` independent check | 1 L40S | 30.1 GPU-seconds | 35.6 seconds |
+| `T_4(8,8)` | 1,024 one-GPU shards; heterogeneous GPUs and variable concurrency | 335.3 GPU-hours | 19.6 GPU-minutes per shard on average |
+| `T_4(7,9)` independent check | 128 shards; up to 8 RTX PRO 6000 GPUs | 28.64 GPU-hours | About 5 hours |
+| `T_4(6,30)` | 8 RTX PRO 6000 GPUs | 0.79 GPU-hours | About 10 minutes |
+| `T_4(6,29)` | 8 RTX PRO 6000 GPUs; interrupted and resumed | 4.14 GPU-hours | About 39 minutes including setup |
+
+The exact integers are collected in [results.txt](results.txt), while the
+algorithms, validation checks, and detailed timing breakdowns are recorded in
+[experiments.md](docs/experiments.md).
 
 ## Acknowledgements and OEIS
 
