@@ -12855,3 +12855,36 @@
   two-cell case makes it unlikely to bridge the orders-of-magnitude gap.  An
   exact isomorphism quotient of contracted hypergraphs is the better next
   gate before enlarging separator width.
+
+### Experiment 395: Rectangle-closure Möbius lattice
+
+- Goal: group rectangle inclusion-exclusion terms by the cell-equivalence
+  partition they generate, then quotient those closed partitions under row
+  permutations, column permutations, transpose, and unlabeled block names.
+  Unlike the universal token state and labelled deletion-contraction probes,
+  this representation cancels and merges all rectangle subsets with the same
+  equality closure.
+- Exact implementation: represent partitions as restricted-growth byte
+  strings and generate their join-closure under all rectangles.  Encode each
+  partition as a nauty incidence graph with axis, cell, and block vertices.
+  On square grids the two axis classes are merged, whose incidence-graph
+  automorphisms give exactly `S_r x S_r semidirect C2`.
+- Validation:
+  - direct orbit closure agrees with independently canonicalising the complete
+    labelled lattice through `4x4`;
+  - labelled Möbius evaluation gives `3912`, `228984`, and `2545607472` for
+    `T_4(2,3)`, `T_4(3,3)`, and `T_4(4,4)`;
+  - all 5, 44, and 9,939 labelled states have nonzero Möbius coefficients.
+- Exact orbit counts: `2x3` has 3, `3x3` 6, `4x4` 58, and `5x5` 3,350.
+  The complete factor from four to five rows is `57.8x`.
+- Six-row lower bound: depth six completes with 367,613 orbits.  A 120.1s
+  run enters depth seven and reaches 587,213 orbits before its cap, already
+  more than `175x` the complete five-row count.  It processes 17,329,284
+  rectangle additions, invokes nauty 9,946,026 times, and peaks at 2,186,204
+  KiB RSS.  A raw-child cache supplies 7,383,259 hits but cannot reduce the
+  number of canonical states.
+- Outcome: reject explicit closure-lattice enumeration for `9x9`.  The
+  quotient is mathematically substantial—only 58 rather than 9,939 states at
+  `4x4`—but its own orbit count accelerates far too quickly.  GPU canonical
+  sort/reduce could improve the six-row wall time without changing the
+  already-fatal state lower bound.
