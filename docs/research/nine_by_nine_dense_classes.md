@@ -161,6 +161,60 @@ not the proposed `A,B` corpus followed by binary completions.  It needs a new
 compressed transfer or tensor representation; another faster disjointness
 kernel cannot remove the measured combinatorial expansion.
 
+## Hypergraph deletion-contraction gate
+
+For fixed `A`, let `H_A` have one vertex for every cell outside `A` and one
+four-vertex hyperedge for every rectangle wholly outside `A`.  Contracting the
+three remaining colours without selecting `B` is exactly the weak hypergraph
+colouring count
+
+\[
+P_{H_A}(3).
+\]
+
+It obeys the exact deletion-contraction recurrence
+
+\[
+P_H(3)=P_{H-e}(3)-P_{H/e}(3),
+\]
+
+where contraction identifies all four vertices of `e`.  This is genuinely
+colour-blind: one recursion state represents many trillions of possible
+second colour classes.  A full dense-class summation would additionally
+retain the three residual colour-class sizes, either to select one canonical
+largest class or to give each eligible distinguished dense class reciprocal
+multiplicity.
+
+The compiled feasibility probe applies edge subsumption, connected-component
+factorisation, articulation-vertex factorisation, and exact memoisation modulo
+`2^61-1`.  It passes exhaustive residual tests for every fixed first mask on
+`2x2` and `2x3`, plus disconnected and articulation-heavy synthetic tests.
+
+The unique 29-cell class gives a 52-vertex, 160-edge residual hypergraph.  The
+plain recurrence reaches 50,000,002 unique states without closing, taking
+69.63 solver seconds and 6.15 GiB RSS.  Adding articulation factorisation
+greatly changes the search but still reaches 10,000,000 states in 30.39s;
+5,221,121 of those states factor at an articulation cell.  A valid 28-cell
+subclass likewise reaches two million states without closing.
+
+A square-prefix scaling test is more decisive:
+
+| residual geometry | residual vertices | rectangles | result |
+|---:|---:|---:|---:|
+| `5x5` | 18 | 19 | 1,075 states, 0.007s |
+| `6x6` | 27 | 56 | 2,173,573 states, 4.17s |
+| `7x7` | 36 | 99 | exceeded 10,000,000 states |
+| `8x8` | 45 | 152 | exceeded 10,000,000 states |
+| `9x9` (`A29`) | 52 | 160 | exceeded 50,000,000 states |
+
+Only 14 of the first two million `A29` states are already pure graph states,
+so dispatching to a faster graph-only `#3` solver does not address the early
+growth.  The direct deletion-contraction DAG is therefore rejected as the
+missing compression.  A continuation would need separator-conditioned
+factorisation (at least two-cell separators) or a canonical batched quotient
+that reduces the number of states, not merely a GPU implementation of the
+same recurrence.
+
 ## Reproduction
 
 ```text
@@ -168,10 +222,15 @@ python3 -m unittest -v tests.research.test_dense_colour_class_probe
 python3 research/probes/dense_colour_class_probe.py degrees
 make dense_c4free_pair_probe
 make dense_c4free_mitm_probe
+make dense_residual_hypergraph_probe
 ./build/dense_c4free_pair_probe \
   --first 181,086,118,142,124,0c8,0b0,02b,055 \
   --minimum 18 --maximum 29 --state-cap 100000000
 python3 research/probes/dense_residual_completion_sample.py \
   --first 181,086,118,142,124,0c8,0b0,02b,055 \
   --samples-per-size 100 --minimum 18 --maximum 29
+./build/dense_residual_hypergraph_probe --self-test
+./build/dense_residual_hypergraph_probe \
+  --first 181,086,118,142,124,0c8,0b0,02b,055 \
+  --state-cap 10000000 --time-cap 120
 ```

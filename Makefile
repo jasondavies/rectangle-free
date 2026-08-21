@@ -104,6 +104,9 @@ $(BUILD_DIR)/c4free_zdd_probe: research/probes/c4free_zdd_probe.c
 $(BUILD_DIR)/dense_c4free_pair_probe: research/probes/dense_c4free_pair_probe.cpp
 	$(CXX) -O3 -march=native -std=c++17 -o $@ $<
 
+$(BUILD_DIR)/dense_residual_hypergraph_probe: research/probes/dense_residual_hypergraph_probe.cpp
+	$(CXX) -O3 -march=native -std=c++17 -o $@ $<
+
 $(BUILD_DIR)/dense_c4free_mitm_probe: research/gpu/dense_c4free_mitm_probe.cu
 	$(NVCC) $(NVCCFLAGS) -std=c++17 -o $@ $<
 
@@ -342,7 +345,7 @@ BUILD_TARGETS := 5xn_count4 partition_count4 partition_poly partition_poly_7 \
 	partition_poly_7_profile partition_poly_8_profile small_graph_lookup_gen \
 	right_prefix_overlap_census prefix_hierarchy_8x8_census \
 	pairmask_transfer_probe completion_oracle_probe c4free_zdd_probe \
-	dense_c4free_pair_probe \
+	dense_c4free_pair_probe dense_residual_hypergraph_probe \
 	dense_c4free_mitm_probe \
 	clique_pivoter_probe column_tensor_rank_probe twobit_decomposition_probe \
 	binary_prefix_orbit_probe twobit_orbit_contraction_probe \

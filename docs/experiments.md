@@ -12782,3 +12782,44 @@
   of this decomposition must contract all three residual colours together
   without materializing `B`, which is a new mathematical representation rather
   than a faster GPU set-disjointness join.
+
+### Experiment 393: Colour-blind residual hypergraph contraction
+
+- Goal: contract the three colours outside a fixed dense `C4`-free class `A`
+  without enumerating the trillions of admissible second classes.  The
+  residual cells are vertices of a hypergraph and each surviving rectangle is
+  a four-edge, so the exact completion count is its weak chromatic polynomial
+  at three.
+- Implementation: add a one-prime C++ deletion-contraction gate with exact
+  edge subsumption, component products, articulation-cell products, bounded
+  memoisation, and deterministic resource caps.  Contracting an edge merges
+  all four cells; an articulation split into `k` pieces divides the product by
+  `3^(k-1)`.
+- Validation: exhaustive comparison with direct ternary colourings passes for
+  every fixed first-class mask on `2x2` and `2x3`.  Disconnected graph edges,
+  graph paths, overlapping 3-edges, and mixed overlapping hyperedges also
+  match direct enumeration.
+- Unique `A29` residual: 52 vertices and 160 rectangle edges.
+  - Without articulation factorisation: 50,000,002 unique states, 48,547,778
+    memo hits, 69.63 solver seconds, and 6,450,860 KiB peak RSS; capped without
+    producing the root value.
+  - With articulation factorisation: 10,000,000 unique states, 11,316,452
+    memo hits, 5,221,121 articulation splits, 30.39 solver seconds, and
+    1,341,636 KiB peak RSS; still capped.
+  - At the earlier two-million-state point only 14 states are pure graphs, so
+    a better graph-tail solver cannot repair the dominant early expansion.
+- Scaling on square prefixes of the same structured class:
+  - `5x5`: 18 residual vertices, 19 edges, complete in 1,075 unique states and
+    0.0072s, residue `195898920` modulo `2^61-1`.
+  - `6x6`: 27 vertices, 56 edges, complete in 2,173,573 states and 4.17s,
+    residue `1067239905888`.
+  - `7x7`: 36 vertices and 99 edges; exceeds ten million states.
+  - `8x8`: 45 vertices and 152 edges; exceeds ten million states.
+  - a valid 28-cell first class also exceeds two million states.
+- Outcome: reject direct labelled hypergraph deletion-contraction as the
+  three-colour residual breakthrough.  It eliminates explicit `B` perfectly,
+  but its own exact state DAG shows exponential growth before reaching graph
+  tails.  GPU batching would improve state throughput without fixing this
+  census.  The only justified continuation is a representation that reduces
+  the DAG itself, such as two-/three-cell separator-conditioned factorisation
+  or exact canonical aggregation across many first classes.
