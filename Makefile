@@ -19,7 +19,7 @@ LDFLAGS ?= -lm $(OPENMP_LDFLAGS)
 PARTITION_POLY_7_CACHE_CFLAGS ?= -DRAW_CACHE_BITS=14 -DRAW_CACHE_PROBE=16 -DCACHE_PROBE=12 -DDEFAULT_HARD_CACHE_BITS=22 -DDEFAULT_HARD_CACHE_MAX_ENTRIES=2000000
 PARTITION_POLY_8_CACHE_CFLAGS ?= -DDEFAULT_HARD_CACHE_BITS=22 -DDEFAULT_HARD_CACHE_MAX_ENTRIES=2000000 -DDEFAULT_TREEWIDTH_LIMIT=5 -DDEFAULT_TREEWIDTH_MIN_N=18 -DDEFAULT_TERMINAL_AGGREGATE_BITS=12 -DDEFAULT_TERMINAL_AGGREGATE_MULTI_BITS=10
 PARTITION_POLY_8_PGO_DIR := $(CURDIR)/.partition_poly_8_pgo
-PARTITION_SHARED_SRCS := src/runtime.c src/partitions.c src/poly.c src/graph.c src/cache.c src/main.c src/solver.c src/treewidth.c src/aggregate.c src/canon.c
+PARTITION_SHARED_SRCS := src/partition/runtime.c src/partition/partitions.c src/partition/poly.c src/partition/graph.c src/partition/cache.c src/partition/main.c src/partition/solver.c src/partition/treewidth.c src/partition/aggregate.c src/partition/canon.c
 
 NVCC ?= nvcc
 PACKED_PREFETCH_MIB ?= 4608
@@ -35,8 +35,8 @@ gpu-code-dump:
 	python3 tools/make_gpu_code_dump.py
 
 gpu_result_checkpoint_test: tests/gpu/gpu_result_checkpoint_test.cpp \
-		gpu_result_checkpoint.hpp sha256.hpp
-	$(CXX) -O2 -std=c++17 -I. -o $@ $<
+		src/gpu/gpu_result_checkpoint.hpp src/common/sha256.hpp
+	$(CXX) -O2 -std=c++17 -Isrc/gpu -o $@ $<
 
 gpu-campaign-test:
 	python3 -m unittest -v tests.gpu.test_aggregate_gpu_v3
@@ -51,7 +51,7 @@ endif
 
 all: 5xn_count4 partition_count4 partition_poly partition_poly_7 partition_poly_8 partition_poly_profile partition_poly_7_profile partition_poly_8_profile small_graph_lookup_gen
 
-5xn_count4: 5xn_count4.c
+5xn_count4: src/small/5xn_count4.c
 	$(CC) $(CFLAGS_5XN) -o $@ $<
 
 partition_count4: $(PARTITION_SHARED_SRCS)
@@ -82,7 +82,7 @@ partition_poly_8_pgo: $(PARTITION_SHARED_SRCS)
 partition_poly_8_profile: $(PARTITION_SHARED_SRCS)
 	$(CC) $(PARTITION_CFLAGS) $(PARTITION_PROFILE_CFLAGS) $(PARTITION_POLY_DEFAULT_ADAPTIVE_CFLAGS) $(PARTITION_POLY_8_CACHE_CFLAGS) -DMAX_ROWS=8 -DMAX_COLS=8 -DDEFAULT_ROWS=8 -DDEFAULT_COLS=8 -DCACHE_BITS=18 -o $@ $(PARTITION_SHARED_SRCS) $(LDFLAGS)
 
-small_graph_lookup_gen: small_graph_lookup_gen.c
+small_graph_lookup_gen: tools/generators/small_graph_lookup_gen.c
 	$(CC) $(CFLAGS_5XN) -o $@ $<
 
 right_prefix_overlap_census: research/probes/right_prefix_overlap_census.cpp
@@ -125,26 +125,26 @@ binary_orbit_burnside_probe: research/probes/binary_orbit_burnside_probe.c
 	$(CC) $(CFLAGS_5XN) -o $@ $<
 
 twocolour_7x5_canonical_census: archive/gpu/twocolour_7x5_canonical_census.cu \
-		twocolour_7x7_gpu.cu twocolour_7x7_engine.cuh \
-		twocolour_gpu_common.cuh
+		src/gpu/twocolour_7x7_gpu.cu src/gpu/twocolour_7x7_engine.cuh \
+		src/gpu/twocolour_gpu_common.cuh
 	$(NVCC) -O3 -std=c++17 -arch=sm_89 -Xcompiler=-fopenmp -o $@ $<
 
-binary_orbit_augment: binary_orbit_augment.c
+binary_orbit_augment: tools/corpus/binary_orbit_augment.c
 	$(CC) $(CFLAGS_5XN) -o $@ $<
 
-binary_orbit_augment_6x9: binary_orbit_augment.c
+binary_orbit_augment_6x9: tools/corpus/binary_orbit_augment.c
 	$(CC) $(CFLAGS_5XN) -DORBIT_ROWS=6 -DORBIT_MAX_COLUMNS=9 \
 		-DORBIT_ROW_BITS=10 -DORBIT_MAGIC='"R6ORB01"' -o $@ $<
 
-binary_orbit_augment_7x8: binary_orbit_augment.c
+binary_orbit_augment_7x8: tools/corpus/binary_orbit_augment.c
 	$(CC) $(CFLAGS_5XN) -DORBIT_ROWS=7 -DORBIT_MAX_COLUMNS=8 \
 		-DORBIT_ROW_BITS=8 -DORBIT_MAGIC='"R7ORB01"' -o $@ $<
 
-binary_orbit_augment_7x9: binary_orbit_augment.c
+binary_orbit_augment_7x9: tools/corpus/binary_orbit_augment.c
 	$(CC) $(CFLAGS_5XN) -DORBIT_ROWS=7 -DORBIT_MAX_COLUMNS=9 \
 		-DORBIT_ROW_BITS=9 -DORBIT_MAGIC='"R7ORB09"' -o $@ $<
 
-binary_orbit_augment_8x8: binary_orbit_augment.c
+binary_orbit_augment_8x8: tools/corpus/binary_orbit_augment.c
 	$(CC) $(CFLAGS_5XN) $(OPENMP_CFLAGS) \
 		-DORBIT_ROWS=8 -DORBIT_MAX_COLUMNS=8 \
 		-DORBIT_ROW_BITS=8 -DORBIT_MAGIC='"R8ORB01"' \
@@ -172,18 +172,18 @@ token_plane_quotient_probe: research/probes/token_plane_quotient_probe.cpp
 six_by_thirty_matching_probe: research/probes/six_by_thirty_matching_probe.cpp
 	$(CXX) -O3 -march=native -std=c++17 $(OPENMP_CFLAGS) -o $@ $< $(OPENMP_LDFLAGS)
 
-six_by_thirty_hafnian: six_by_thirty_hafnian.cpp sha256.hpp
+six_by_thirty_hafnian: src/hafnian/six_by_thirty_hafnian.cpp src/common/sha256.hpp
 	$(CXX) -O3 -march=native -std=c++17 $(OPENMP_CFLAGS) -o $@ $< $(OPENMP_LDFLAGS)
 
-six_by_thirty_hafnian_gpu: six_by_thirty_hafnian_gpu.cu hafnian_gpu_core.cuh sha256.hpp
+six_by_thirty_hafnian_gpu: src/hafnian/six_by_thirty_hafnian_gpu.cu src/hafnian/hafnian_gpu_core.cuh src/common/sha256.hpp
 	$(NVCC) $(NVCCFLAGS) -std=c++17 -o $@ $<
 
-six_by_twenty_nine_hafnian_cpu: six_by_twenty_nine_hafnian_cpu.cpp \
-		six_by_twenty_nine_catalog.hpp sha256.hpp
+six_by_twenty_nine_hafnian_cpu: src/hafnian/six_by_twenty_nine_hafnian_cpu.cpp \
+		src/hafnian/six_by_twenty_nine_catalog.hpp src/common/sha256.hpp
 	$(CXX) -O3 -march=native -std=c++17 $(OPENMP_CFLAGS) -o $@ $< $(OPENMP_LDFLAGS)
 
-six_by_twenty_nine_hafnian_gpu: six_by_twenty_nine_hafnian_gpu.cu \
-		six_by_twenty_nine_catalog.hpp hafnian_gpu_core.cuh sha256.hpp
+six_by_twenty_nine_hafnian_gpu: src/hafnian/six_by_twenty_nine_hafnian_gpu.cu \
+		src/hafnian/six_by_twenty_nine_catalog.hpp src/hafnian/hafnian_gpu_core.cuh src/common/sha256.hpp
 	$(NVCC) $(NVCCFLAGS) -std=c++17 -o $@ $<
 
 .PHONY: six-by-twenty-nine-hafnian-test
@@ -203,25 +203,25 @@ twocolour_gpu_64.bin: twocolour_4x4_probe
 twocolour_gpu_bench: archive/gpu/twocolour_gpu_bench.cu
 	$(NVCC) -O3 -std=c++17 -arch=sm_89 -lineinfo -o $@ $<
 
-twocolour_7x7_solve_gpu: twocolour_7x7_gpu.cu twocolour_7x7_engine.cuh \
-		twocolour_gpu_common.cuh
+twocolour_7x7_solve_gpu: src/gpu/twocolour_7x7_gpu.cu src/gpu/twocolour_7x7_engine.cuh \
+		src/gpu/twocolour_gpu_common.cuh
 	$(NVCC) $(NVCCFLAGS) -Xcompiler=-fopenmp -o $@ $<
 
 twocolour_7x7_prefix_gpu: legacy/gpu/twocolour_prefix_legacy_main.cu \
 		legacy/gpu/twocolour_prefix_legacy_helpers.cuh \
 		legacy/gpu/twocolour_prefix_legacy_layout.cuh \
-		twocolour_prefix_core.cuh twocolour_prefix_algebra.cuh
+		src/gpu/twocolour_prefix_core.cuh src/gpu/twocolour_prefix_algebra.cuh
 	$(NVCC) -O3 -std=c++17 -arch=sm_89 -Xcompiler=-fopenmp \
 		-o $@ $<
 
-twocolour_6x9_gpu: twocolour_7x7_gpu.cu twocolour_7x7_engine.cuh \
-		twocolour_gpu_common.cuh
+twocolour_6x9_gpu: src/gpu/twocolour_7x7_gpu.cu src/gpu/twocolour_7x7_engine.cuh \
+		src/gpu/twocolour_gpu_common.cuh
 	$(NVCC) -O3 -std=c++17 -arch=sm_89 -Xcompiler=-fopenmp \
 		-DGRID_ROWS=6 -DGRID_COLUMNS=9 -DLEFT_COLUMNS=4 -DRIGHT_COLUMNS=5 \
 		-DORBIT_ROW_BITS=10 -DORBIT_MAGIC='"R6ORB01"' -o $@ $<
 
-twocolour_7x8_gpu: twocolour_7x7_gpu.cu twocolour_7x7_engine.cuh \
-		twocolour_gpu_common.cuh
+twocolour_7x8_gpu: src/gpu/twocolour_7x7_gpu.cu src/gpu/twocolour_7x7_engine.cuh \
+		src/gpu/twocolour_gpu_common.cuh
 	$(NVCC) -O3 -std=c++17 -arch=sm_89 -Xcompiler=-fopenmp \
 		-DGRID_ROWS=7 -DGRID_COLUMNS=8 -DLEFT_COLUMNS=4 -DRIGHT_COLUMNS=4 \
 		-DORBIT_ROW_BITS=8 -DORBIT_MAGIC='"R7ORB01"' -o $@ $<
@@ -229,7 +229,7 @@ twocolour_7x8_gpu: twocolour_7x7_gpu.cu twocolour_7x7_engine.cuh \
 twocolour_7x8_prefix_gpu: legacy/gpu/twocolour_prefix_legacy_main.cu \
 		legacy/gpu/twocolour_prefix_legacy_helpers.cuh \
 		legacy/gpu/twocolour_prefix_legacy_layout.cuh \
-		twocolour_prefix_core.cuh twocolour_prefix_algebra.cuh
+		src/gpu/twocolour_prefix_core.cuh src/gpu/twocolour_prefix_algebra.cuh
 	$(NVCC) -O3 -std=c++17 -arch=sm_89 -Xcompiler=-fopenmp \
 		-DGRID_ROWS=7 -DGRID_COLUMNS=8 -DLEFT_COLUMNS=4 -DRIGHT_COLUMNS=4 \
 		-DORBIT_ROW_BITS=8 -DORBIT_MAGIC='"R7ORB01"' -o $@ $<
@@ -237,44 +237,44 @@ twocolour_7x8_prefix_gpu: legacy/gpu/twocolour_prefix_legacy_main.cu \
 twocolour_7x9_prefix_gpu: legacy/gpu/twocolour_prefix_legacy_main.cu \
 		legacy/gpu/twocolour_prefix_legacy_helpers.cuh \
 		legacy/gpu/twocolour_prefix_legacy_layout.cuh \
-		twocolour_prefix_core.cuh twocolour_prefix_algebra.cuh
+		src/gpu/twocolour_prefix_core.cuh src/gpu/twocolour_prefix_algebra.cuh
 	$(NVCC) -O3 -std=c++17 -arch=sm_89 -Xcompiler=-fopenmp \
 		-DGPU_PREFIX_BUILDER \
 		-DSTREAMED_RIGHT_PREFIX_PROBE \
 		-DGRID_ROWS=7 -DGRID_COLUMNS=9 -DLEFT_COLUMNS=4 -DRIGHT_COLUMNS=5 \
 		-DORBIT_ROW_BITS=9 -DORBIT_MAGIC='"R7ORB09"' -o $@ $<
 
-twocolour_7x9_solve_gpu: twocolour_7x9_packed_solve.cu \
-		twocolour_7x9_engine.cuh \
-		twocolour_canonical_device.cuh \
-		twocolour_weight_class_bmma.cuh gpu_cuda_utils.cuh \
-		twocolour_prefix_core.cuh twocolour_prefix_algebra.cuh \
-		twocolour_gpu_common.cuh gpu_memory_policy.hpp \
-		gpu_result_checkpoint.hpp sha256.hpp
+twocolour_7x9_solve_gpu: src/gpu/twocolour_7x9_packed_solve.cu \
+		src/gpu/twocolour_7x9_engine.cuh \
+		src/gpu/twocolour_canonical_device.cuh \
+		src/gpu/twocolour_weight_class_bmma.cuh src/gpu/gpu_cuda_utils.cuh \
+		src/gpu/twocolour_prefix_core.cuh src/gpu/twocolour_prefix_algebra.cuh \
+		src/gpu/twocolour_gpu_common.cuh src/gpu/gpu_memory_policy.hpp \
+		src/gpu/gpu_result_checkpoint.hpp src/common/sha256.hpp
 	$(NVCC) $(NVCCFLAGS) -Xcompiler=-fopenmp \
 		'-DPACKED_PREFETCH_BYTES=(UINT64_C($(PACKED_PREFETCH_MIB))<<20)' \
 		-o $@ $<
 
-twocolour_7x9_cache_build: twocolour_7x9_cache_build.cu \
-		twocolour_prefix_core.cuh twocolour_prefix_algebra.cuh \
-		twocolour_gpu_common.cuh gpu_cuda_utils.cuh gpu_memory_policy.hpp sha256.hpp
+twocolour_7x9_cache_build: src/gpu/twocolour_7x9_cache_build.cu \
+		src/gpu/twocolour_prefix_core.cuh src/gpu/twocolour_prefix_algebra.cuh \
+		src/gpu/twocolour_gpu_common.cuh src/gpu/gpu_cuda_utils.cuh src/gpu/gpu_memory_policy.hpp src/common/sha256.hpp
 	$(NVCC) $(NVCCFLAGS) -Xcompiler=-fopenmp -o $@ $<
 
-twocolour_7x9_four_owner_gpu: twocolour_7x9_four_owner_solve.cu \
-		twocolour_7x9_engine.cuh twocolour_canonical_device.cuh \
-		twocolour_weight_class_bmma.cuh \
-		gpu_cuda_utils.cuh twocolour_prefix_core.cuh \
-		twocolour_prefix_algebra.cuh twocolour_gpu_common.cuh \
-		gpu_memory_policy.hpp gpu_result_checkpoint.hpp sha256.hpp
+twocolour_7x9_four_owner_gpu: src/gpu/twocolour_7x9_four_owner_solve.cu \
+		src/gpu/twocolour_7x9_engine.cuh src/gpu/twocolour_canonical_device.cuh \
+		src/gpu/twocolour_weight_class_bmma.cuh \
+		src/gpu/gpu_cuda_utils.cuh src/gpu/twocolour_prefix_core.cuh \
+		src/gpu/twocolour_prefix_algebra.cuh src/gpu/twocolour_gpu_common.cuh \
+		src/gpu/gpu_memory_policy.hpp src/gpu/gpu_result_checkpoint.hpp src/common/sha256.hpp
 	$(NVCC) $(NVCCFLAGS) -Xcompiler=-fopenmp \
 		'-DPACKED_PREFETCH_BYTES=(UINT64_C($(PACKED_PREFETCH_MIB))<<20)' \
 		-o $@ $<
 
-twocolour_8x8_solve_gpu: twocolour_8x8_prefix_solve.cu \
-		twocolour_weight_class_bmma.cuh twocolour_canonical_device.cuh \
-		gpu_cuda_utils.cuh \
-		twocolour_prefix_algebra.cuh twocolour_gpu_common.cuh \
-		gpu_memory_policy.hpp gpu_result_checkpoint.hpp sha256.hpp
+twocolour_8x8_solve_gpu: src/gpu/twocolour_8x8_prefix_solve.cu \
+		src/gpu/twocolour_weight_class_bmma.cuh src/gpu/twocolour_canonical_device.cuh \
+		src/gpu/gpu_cuda_utils.cuh \
+		src/gpu/twocolour_prefix_algebra.cuh src/gpu/twocolour_gpu_common.cuh \
+		src/gpu/gpu_memory_policy.hpp src/gpu/gpu_result_checkpoint.hpp src/common/sha256.hpp
 	$(NVCC) $(NVCCFLAGS) -Xcompiler=-fopenmp -o $@ $<
 
 prefix_portfolio_8x8_oracle: research/probes/prefix_portfolio_8x8_oracle.cpp \
@@ -319,7 +319,7 @@ behavioral_distribution_8x8_census: research/probes/behavioral_distribution_8x8_
 twocolour_3x4_probe: research/probes/twocolour_3x4_probe.c
 	$(CC) $(CFLAGS_5XN) -o $@ $<
 
-twocolour_7x7_solve: twocolour_7x7_solve.c
+twocolour_7x7_solve: src/gpu/twocolour_7x7_solve.c
 	$(CC) $(CFLAGS_5XN) -o $@ $<
 
 CLEAN_BINS := 5xn_count4 partition_count4 partition_poly partition_poly_7 \

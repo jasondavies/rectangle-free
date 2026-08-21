@@ -17,7 +17,7 @@
 #include <unistd.h>
 
 #include "hafnian_gpu_core.cuh"
-#include "sha256.hpp"
+#include "../common/sha256.hpp"
 #include "six_by_twenty_nine_catalog.hpp"
 
 namespace {

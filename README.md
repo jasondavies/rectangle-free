@@ -29,9 +29,9 @@ A token `(colour, row pair)` records that two rows have the same colour in a
 column. Reusing the token in another column creates exactly one monochromatic
 rectangle, so a colouring is a sequence of columns with disjoint token sets.
 
-- `count4.py`: closed forms for two and three rows.
-- `4xn_count4.py`: weighted set-packing DP for four rows.
-- `5xn_count4.c`: canonical state-space DP for five rows.
+- `src/small/count4.py`: closed forms for two and three rows.
+- `src/small/4xn_count4.py`: weighted set-packing DP for four rows.
+- `src/small/5xn_count4.c`: canonical state-space DP for five rows.
 
 ### 2. Partition and structure-graph search
 
@@ -116,8 +116,8 @@ architecture.
 Small-row solvers:
 
 ```bash
-python3 count4.py 2
-python3 4xn_count4.py
+python3 src/small/count4.py 2
+python3 src/small/4xn_count4.py
 make 5xn_count4
 ./5xn_count4
 ```

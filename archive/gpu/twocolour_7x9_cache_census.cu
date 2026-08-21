@@ -1,4 +1,4 @@
-#include "../../twocolour_7x9_engine.cuh"
+#include "../../src/gpu/twocolour_7x9_engine.cuh"
 
 struct StagingCensus {
     uint64_t chunks = 0;

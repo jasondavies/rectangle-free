@@ -7,22 +7,22 @@ import sys
 
 
 FILES = [
-    "gpu_cuda_utils.cuh",
-    "gpu_memory_policy.hpp",
-    "twocolour_gpu_common.cuh",
-    "twocolour_7x7_engine.cuh",
-    "twocolour_prefix_algebra.cuh",
-    "twocolour_prefix_core.cuh",
-    "twocolour_weight_class_bmma.cuh",
-    "twocolour_canonical_device.cuh",
-    "gpu_result_checkpoint.hpp",
-    "sha256.hpp",
-    "twocolour_7x7_gpu.cu",
-    "twocolour_7x9_engine.cuh",
-    "twocolour_7x9_cache_build.cu",
-    "twocolour_7x9_packed_solve.cu",
-    "twocolour_7x9_four_owner_solve.cu",
-    "twocolour_8x8_prefix_solve.cu",
+    "src/gpu/gpu_cuda_utils.cuh",
+    "src/gpu/gpu_memory_policy.hpp",
+    "src/gpu/twocolour_gpu_common.cuh",
+    "src/gpu/twocolour_7x7_engine.cuh",
+    "src/gpu/twocolour_prefix_algebra.cuh",
+    "src/gpu/twocolour_prefix_core.cuh",
+    "src/gpu/twocolour_weight_class_bmma.cuh",
+    "src/gpu/twocolour_canonical_device.cuh",
+    "src/gpu/gpu_result_checkpoint.hpp",
+    "src/common/sha256.hpp",
+    "src/gpu/twocolour_7x7_gpu.cu",
+    "src/gpu/twocolour_7x9_engine.cuh",
+    "src/gpu/twocolour_7x9_cache_build.cu",
+    "src/gpu/twocolour_7x9_packed_solve.cu",
+    "src/gpu/twocolour_7x9_four_owner_solve.cu",
+    "src/gpu/twocolour_8x8_prefix_solve.cu",
 ]
 
 

@@ -21,7 +21,7 @@
 #include <sys/file.h>
 #include <unistd.h>
 
-#include "sha256.hpp"
+#include "../common/sha256.hpp"
 
 namespace gpu_checkpoint {
 

@@ -346,9 +346,9 @@ This weighted-disjointness contraction is therefore the clean mathematical
 target for further analysis.
 
 The production entry points are
-[`twocolour_7x9_packed_solve.cu`](twocolour_7x9_packed_solve.cu) and
-[`twocolour_8x8_prefix_solve.cu`](twocolour_8x8_prefix_solve.cu); their shared
+[`twocolour_7x9_packed_solve.cu`](../src/gpu/twocolour_7x9_packed_solve.cu) and
+[`twocolour_8x8_prefix_solve.cu`](../src/gpu/twocolour_8x8_prefix_solve.cu); their shared
 mathematical primitives live in
-[`twocolour_gpu_common.cuh`](twocolour_gpu_common.cuh),
-[`twocolour_prefix_core.cuh`](twocolour_prefix_core.cuh), and
-[`twocolour_weight_class_bmma.cuh`](twocolour_weight_class_bmma.cuh).
+[`twocolour_gpu_common.cuh`](../src/gpu/twocolour_gpu_common.cuh),
+[`twocolour_prefix_core.cuh`](../src/gpu/twocolour_prefix_core.cuh), and
+[`twocolour_weight_class_bmma.cuh`](../src/gpu/twocolour_weight_class_bmma.cuh).

@@ -1,5 +1,5 @@
 #define PREFIX_PRODUCTION_NO_MAIN
-#include "../../twocolour_8x8_prefix_solve.cu"
+#include "../../src/gpu/twocolour_8x8_prefix_solve.cu"
 
 #include <array>
 #include <climits>

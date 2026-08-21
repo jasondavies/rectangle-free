@@ -12,7 +12,7 @@
 #include <utility>
 #include <vector>
 
-#include "sha256.hpp"
+#include "../common/sha256.hpp"
 
 namespace six_by_twenty_nine {
 

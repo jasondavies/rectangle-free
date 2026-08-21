@@ -53,7 +53,7 @@ Build CUDA on a target architecture, for example Blackwell:
 
 ```bash
 nvcc -O3 -std=c++17 -arch=sm_120 -lineinfo \
-  -o six_by_thirty_hafnian_gpu six_by_thirty_hafnian_gpu.cu
+  -o six_by_thirty_hafnian_gpu src/hafnian/six_by_thirty_hafnian_gpu.cu
 ./six_by_thirty_hafnian_gpu --self-test
 ```
 

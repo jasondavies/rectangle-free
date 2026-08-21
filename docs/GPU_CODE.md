@@ -2,35 +2,35 @@
 
 The active exact GPU implementation is intentionally split by responsibility:
 
-- `twocolour_gpu_common.cuh`: orbit input, distribution recurrence,
+- `src/gpu/twocolour_gpu_common.cuh`: orbit input, distribution recurrence,
   canonicalisation, and geometry-independent exact primitives.
-- `twocolour_7x7_engine.cuh`: scalar full-mask expansion and join machinery
+- `src/gpu/twocolour_7x7_engine.cuh`: scalar full-mask expansion and join machinery
   used only by the complete known-result 7x7 regression solver.
-- `twocolour_prefix_algebra.cuh`: fixed production prefix/suffix coordinates,
+- `src/gpu/twocolour_prefix_algebra.cuh`: fixed production prefix/suffix coordinates,
   mask transformations, and shared layout descriptors.
-- `twocolour_prefix_core.cuh`: seven-row packed 7x5 cache construction and
+- `src/gpu/twocolour_prefix_core.cuh`: seven-row packed 7x5 cache construction and
   prefetch pipeline.
-- `twocolour_weight_class_bmma.cuh`: direct weight-grouped layouts and
+- `src/gpu/twocolour_weight_class_bmma.cuh`: direct weight-grouped layouts and
   the BMMA join shared by 7x9 and 8x8.
-- `twocolour_canonical_device.cuh`: geometry-neutral canonical device cache
+- `src/gpu/twocolour_canonical_device.cuh`: geometry-neutral canonical device cache
   and direct grouped-layout adapter shared by 7x9 and 8x8.
-- `twocolour_8x8_prefix_solve.cu`: production 8x8 orchestration.
-- `twocolour_7x9_engine.cuh`: reusable production 7x9 orchestration, resident and
+- `src/gpu/twocolour_8x8_prefix_solve.cu`: production 8x8 orchestration.
+- `src/gpu/twocolour_7x9_engine.cuh`: reusable production 7x9 orchestration, resident and
   streamed cache operation, and the producer/join pipeline.
-- `twocolour_7x9_cache_build.cu`: one-time construction and publication of the
+- `src/gpu/twocolour_7x9_cache_build.cu`: one-time construction and publication of the
   versioned, checksummed, memory-mapped 7x5 cache artifact.
-- `twocolour_7x9_packed_solve.cu`: one-line executable wrapper around the 7x9
+- `src/gpu/twocolour_7x9_packed_solve.cu`: one-line executable wrapper around the 7x9
   engine.
-- `twocolour_7x9_four_owner_solve.cu`: optional production 7x9 scheduler that
+- `src/gpu/twocolour_7x9_four_owner_solve.cu`: optional production 7x9 scheduler that
   keeps four left layouts resident and shares each union right layout.
-- `gpu_result_checkpoint.hpp`: geometry-neutral manifest, provenance,
+- `src/gpu/gpu_result_checkpoint.hpp`: geometry-neutral manifest, provenance,
   validation, work-claim, and immutable checkpoint publication support shared
   by the 7x9 and 8x8 production solvers.
 - `tools/aggregate_gpu_v3.py`: provider-neutral validation and exact reduction for
   new manifest-driven 7x9 and 8x8 v3 campaigns.
-- `gpu_cuda_utils.cuh`: move-only device, pinned-host, stream, and event
+- `src/gpu/gpu_cuda_utils.cuh`: move-only device, pinned-host, stream, and event
   ownership utilities.
-- `gpu_memory_policy.hpp`: shared automatic residency/batch policy and the
+- `src/gpu/gpu_memory_policy.hpp`: shared automatic residency/batch policy and the
   `RECT_GPU_MEMORY_RESERVE_MIB` safety-reserve override.
 
 The complete physical review surface is 3,069 lines for 8x8 and 4,626 lines

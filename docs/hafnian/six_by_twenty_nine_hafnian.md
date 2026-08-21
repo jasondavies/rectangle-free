@@ -52,7 +52,7 @@ give a 279-bit CRT modulus and therefore determine the integer uniquely.
 make six-by-twenty-nine-hafnian-test
 
 nvcc -O3 -std=c++17 -arch=sm_120 -lineinfo \
-  -o six_by_twenty_nine_hafnian_gpu six_by_twenty_nine_hafnian_gpu.cu
+  -o six_by_twenty_nine_hafnian_gpu src/hafnian/six_by_twenty_nine_hafnian_gpu.cu
 ```
 
 The CPU and GPU range evaluators must agree for representatives of all four

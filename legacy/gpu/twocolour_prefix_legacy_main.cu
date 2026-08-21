@@ -7,7 +7,7 @@
 #define ORBIT_MAGIC "R7SQT01"
 #endif
 
-#include "../../twocolour_prefix_core.cuh"
+#include "../../src/gpu/twocolour_prefix_core.cuh"
 #include "twocolour_prefix_legacy_helpers.cuh"
 
 #ifdef HIERARCHICAL_PREFIX

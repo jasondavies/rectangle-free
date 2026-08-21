@@ -6,7 +6,7 @@
 #define ORBIT_ROW_BITS 8
 
 #define main twocolour_census_hidden_main
-#include "../../twocolour_7x7_gpu.cu"
+#include "../../src/gpu/twocolour_7x7_gpu.cu"
 #undef main
 
 static PrefixKey compact_five_column_key(uint64_t orbit_key) {

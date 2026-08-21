@@ -16,7 +16,7 @@
 #include <immintrin.h>
 #endif
 
-#include "../progress_util.h"
+#include "progress_util.h"
 
 #ifndef RECT_PROFILE
 #define RECT_PROFILE 0

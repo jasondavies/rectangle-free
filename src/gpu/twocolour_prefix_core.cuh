@@ -6,7 +6,7 @@
 #include "twocolour_prefix_algebra.cuh"
 
 #include "gpu_memory_policy.hpp"
-#include "sha256.hpp"
+#include "../common/sha256.hpp"
 
 #include <cerrno>
 #include <fcntl.h>
