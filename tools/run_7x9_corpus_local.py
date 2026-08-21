@@ -133,7 +133,9 @@ def main() -> int:
     parser.add_argument(
         "--parent", type=Path, default=Path("/tmp/rect7x8-build/rect7x8-full.orbits")
     )
-    parser.add_argument("--binary", type=Path, default=Path("./binary_orbit_augment_7x9"))
+    parser.add_argument(
+        "--binary", type=Path, default=Path("./build/binary_orbit_augment_7x9")
+    )
     parser.add_argument(
         "--campaign", type=Path, default=Path("../rectangle-free-data-v2/7x9-corpus")
     )

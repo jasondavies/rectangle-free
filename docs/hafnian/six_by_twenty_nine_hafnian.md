@@ -51,8 +51,8 @@ give a 279-bit CRT modulus and therefore determine the integer uniquely.
 ```bash
 make six-by-twenty-nine-hafnian-test
 
-nvcc -O3 -std=c++17 -arch=sm_120 -lineinfo \
-  -o six_by_twenty_nine_hafnian_gpu src/hafnian/six_by_twenty_nine_hafnian_gpu.cu
+make NVCCFLAGS='-O3 -std=c++17 -arch=sm_120 -lineinfo' \
+  six_by_twenty_nine_hafnian_gpu
 ```
 
 The CPU and GPU range evaluators must agree for representatives of all four
@@ -63,7 +63,7 @@ order 60.
 
 ```bash
 python3 tools/run_six_by_twenty_nine_hafnian_gpu.py \
-  --binary ./six_by_twenty_nine_hafnian_gpu \
+  --binary ./build/six_by_twenty_nine_hafnian_gpu \
   --gpus 0,1,2,3,4,5,6,7 \
   --output hafnian-6x29-results
 ```

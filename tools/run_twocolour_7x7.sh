@@ -15,14 +15,14 @@ make binary_orbit_augment twocolour_7x7_solve
 
 full_orbits="$campaign_dir/7x7.orbits"
 if [[ ! -s "$full_orbits" ]]; then
-    ./binary_orbit_augment build 7 "$full_orbits" \
+    ./build/binary_orbit_augment build 7 "$full_orbits" \
         >"$campaign_dir/logs/augment.log" 2>&1
 fi
 
 last_bucket=$(printf '%03d' $((buckets - 1)))
 if [[ ! -s "$campaign_dir/buckets/orbits.b000.orbits" ||
       ! -s "$campaign_dir/buckets/orbits.b${last_bucket}.orbits" ]]; then
-    ./binary_orbit_augment partition "$full_orbits" "$buckets" \
+    ./build/binary_orbit_augment partition "$full_orbits" "$buckets" \
         "$campaign_dir/buckets/orbits" \
         >"$campaign_dir/logs/partition.log" 2>&1
 fi
@@ -34,7 +34,7 @@ for ((bucket = 0; bucket < buckets; bucket++)); do
     if [[ -s "$result" ]] && grep -q '^end$' "$result"; then
         continue
     fi
-    ./twocolour_7x7_solve solve "$result" \
+    ./build/twocolour_7x7_solve solve "$result" \
         "$campaign_dir/buckets/orbits.b${tag}.orbits" \
         >"$campaign_dir/logs/solve.${tag}.log" 2>&1 &
     active=$((active + 1))
@@ -50,4 +50,4 @@ if ((${#results[@]} != buckets)); then
     echo "Expected $buckets result files, found ${#results[@]}" >&2
     exit 1
 fi
-./twocolour_7x7_solve aggregate "${results[@]}"
+./build/twocolour_7x7_solve aggregate "${results[@]}"

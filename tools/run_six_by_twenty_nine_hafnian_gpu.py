@@ -51,7 +51,9 @@ def completed_prefix(directory: Path, prime: int, query: int) -> tuple[int, list
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--binary", type=Path, default=Path("./six_by_twenty_nine_hafnian_gpu"))
+    parser.add_argument(
+        "--binary", type=Path, default=Path("./build/six_by_twenty_nine_hafnian_gpu")
+    )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--gpus", default="0")
     parser.add_argument("--chunk-terms", type=int, default=1 << 20)

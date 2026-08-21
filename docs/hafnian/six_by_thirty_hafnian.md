@@ -45,16 +45,15 @@ file can therefore be retained and the uncovered suffix launched separately.
 
 ```bash
 make six_by_thirty_hafnian
-./six_by_thirty_hafnian --self-test
+./build/six_by_thirty_hafnian --self-test
 python3 -m unittest -v tests.hafnian.test_six_by_thirty_hafnian
 ```
 
 Build CUDA on a target architecture, for example Blackwell:
 
 ```bash
-nvcc -O3 -std=c++17 -arch=sm_120 -lineinfo \
-  -o six_by_thirty_hafnian_gpu src/hafnian/six_by_thirty_hafnian_gpu.cu
-./six_by_thirty_hafnian_gpu --self-test
+make NVCCFLAGS='-O3 -std=c++17 -arch=sm_120 -lineinfo' six_by_thirty_hafnian_gpu
+./build/six_by_thirty_hafnian_gpu --self-test
 ```
 
 The self-tests verify the graph census and compare the formula with brute-force
@@ -68,14 +67,14 @@ sizes.
 One CPU range:
 
 ```bash
-./six_by_thirty_hafnian --run --prime 2147483647 \
+./build/six_by_thirty_hafnian --run --prime 2147483647 \
   --begin 0 --end 1048576 --threads 16 --output results/p0-r0.result
 ```
 
 One GPU range:
 
 ```bash
-./six_by_thirty_hafnian_gpu --run --prime 2147483647 \
+./build/six_by_thirty_hafnian_gpu --run --prime 2147483647 \
   --begin 0 --end 536870912 --threads 256 --chunk-terms 1048576 \
   --output results/p0.result
 ```
@@ -96,7 +95,7 @@ atomically published prefix:
 
 ```bash
 python3 tools/run_six_by_thirty_hafnian_gpu.py \
-  --binary ./six_by_thirty_hafnian_gpu \
+  --binary ./build/six_by_thirty_hafnian_gpu \
   --gpus 0,1,2,3 --output hafnian-6x30-results
 ```
 

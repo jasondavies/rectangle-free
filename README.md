@@ -99,6 +99,9 @@ The CPU solvers require a C/C++ compiler and OpenMP:
 make -j all
 ```
 
+Executables and generated review artifacts are written to `build/`. Override
+that location with `BUILD_DIR=/path/to/output` when needed.
+
 On macOS, the Makefile expects Homebrew `libomp` under
 `/opt/homebrew/opt/libomp` by default.
 
@@ -119,22 +122,22 @@ Small-row solvers:
 python3 src/small/count4.py 2
 python3 src/small/4xn_count4.py
 make 5xn_count4
-./5xn_count4
+./build/5xn_count4
 ```
 
 Direct four-colour and polynomial calculations:
 
 ```bash
-./partition_count4 6 8
-./partition_poly 6 8
-./partition_poly_8 8 5 --prefix-depth 2 --task-end 1
+./build/partition_count4 6 8
+./build/partition_poly 6 8
+./build/partition_poly_8 8 5 --prefix-depth 2 --task-end 1
 ```
 
 The partition solvers support deterministic sharding:
 
 ```bash
-./partition_poly 6 8 --task-start 0 --task-end 100 --poly-out a.poly
-./partition_poly 6 8 --task-start 100 --task-end 200 --poly-out b.poly
+./build/partition_poly 6 8 --task-start 0 --task-end 100 --poly-out a.poly
+./build/partition_poly 6 8 --task-start 100 --task-end 200 --poly-out b.poly
 ./merge_poly.py --poly-out merged.poly a.poly b.poly
 ```
 
@@ -158,7 +161,7 @@ Run the non-CUDA regression suites with:
 
 ```bash
 make gpu_result_checkpoint_test
-./gpu_result_checkpoint_test
+./build/gpu_result_checkpoint_test
 make gpu-campaign-test
 python3 -m unittest -v \
   tests.research.test_reachable_distribution_rank_probe \

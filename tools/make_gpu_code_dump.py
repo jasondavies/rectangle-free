@@ -28,7 +28,7 @@ FILES = [
 
 def main() -> None:
     root = Path(__file__).resolve().parents[1]
-    output = Path(sys.argv[1]) if len(sys.argv) > 1 else root / "code-dump.txt"
+    output = Path(sys.argv[1]) if len(sys.argv) > 1 else root / "build" / "code-dump.txt"
     if not output.is_absolute():
         output = root / output
     revision = subprocess.check_output(
@@ -49,6 +49,7 @@ def main() -> None:
         sections.extend(
             [separator, f"FILE: {name}", separator, "", path.read_text(), ""]
         )
+    output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text("\n".join(sections))
     print(f"WROTE {output} files={len(FILES)}")
 

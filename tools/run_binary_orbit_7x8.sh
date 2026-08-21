@@ -28,7 +28,7 @@ for ((shard = 0; shard < workers; shard++)); do
     start=$((parent_count * shard / workers))
     end=$((parent_count * (shard + 1) / workers))
     (
-        ./binary_orbit_augment_7x8 extend "$parent" "$start" "$end" "$buckets" \
+        ./build/binary_orbit_augment_7x8 extend "$parent" "$start" "$end" "$buckets" \
             "$workdir/local/s$tag" >"$workdir/logs/extend.$tag.log" 2>&1
         touch "$workdir/done/extend.$tag"
     ) &
@@ -49,7 +49,7 @@ for ((bucket = 0; bucket < buckets; bucket++)); do
         inputs+=("$workdir/local/s$shard_tag.b$tag")
     done
     (
-        ./binary_orbit_augment_7x8 reduce 8 "$workdir/reduced/b$tag.orbits" \
+        ./build/binary_orbit_augment_7x8 reduce 8 "$workdir/reduced/b$tag.orbits" \
             "${inputs[@]}" >"$workdir/logs/reduce.$tag.log" 2>&1
         touch "$workdir/done/reduce.$tag"
     ) &
@@ -69,7 +69,7 @@ for ((bucket = 0; bucket < buckets; bucket++)); do
     reduced+=("$workdir/reduced/b$tag.orbits")
 done
 output="$workdir/rect7x8-full.orbits"
-./binary_orbit_augment_7x8 combine "$output" "${reduced[@]}" \
+./build/binary_orbit_augment_7x8 combine "$output" "${reduced[@]}" \
     >"$workdir/logs/combine.log" 2>&1
-./binary_orbit_augment_7x8 check "$output" | tee "$workdir/logs/check.log"
+./build/binary_orbit_augment_7x8 check "$output" | tee "$workdir/logs/check.log"
 sha256sum "$output" | tee "$workdir/logs/sha256.log"

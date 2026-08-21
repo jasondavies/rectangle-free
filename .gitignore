@@ -14,6 +14,7 @@ partition_poly_8_profile
 *.o
 __pycache__/
 *.pyc
+/build/
 coordinator/
 gcloud/
 aws/

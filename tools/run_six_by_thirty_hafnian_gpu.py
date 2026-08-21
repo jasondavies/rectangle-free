@@ -53,7 +53,9 @@ def completed_prefix(directory: Path, prime: int) -> tuple[int, list[Path]]:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--binary", type=Path, default=Path("./six_by_thirty_hafnian_gpu"))
+    parser.add_argument(
+        "--binary", type=Path, default=Path("./build/six_by_thirty_hafnian_gpu")
+    )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--gpus", default="0")
     parser.add_argument("--prime-count", type=int, default=len(PRIMES))

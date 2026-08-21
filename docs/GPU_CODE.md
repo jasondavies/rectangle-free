@@ -110,7 +110,7 @@ without reconstructing or uploading the canonical cache.
 The 8x8 invocation is:
 
 ```text
-twocolour_8x8_solve_gpu CANONICAL_SEED.orbits WORK.tsv RESULTS_DIR \
+build/twocolour_8x8_solve_gpu CANONICAL_SEED.orbits WORK.tsv RESULTS_DIR \
     [BATCH_EDGES=auto] [VERIFY_JOINS=4]
 ```
 
@@ -140,7 +140,7 @@ gates:
 python3 tools/aggregate_gpu_v3.py 8x8 WORK.tsv RESULTS_DIR \
     --corpus-root CORPUS_DIR --full --verify-input-sha256 \
     --canonical-cache CANONICAL_SEED.orbits \
-    --solver-binary twocolour_8x8_solve_gpu \
+    --solver-binary build/twocolour_8x8_solve_gpu \
     --write-json campaign.json
 ```
 
@@ -160,13 +160,13 @@ The current 8x8 solver accepts only the versioned transpose-quotient magic
 filter and is accompanied by a 1,024-entry SHA-256 list and provider-neutral
 work manifest under `../rectangle-free-data-v2/8x8-transpose/`. Its legacy
 `R8ORB01` predecessor is retained separately; legacy files must never be
-relabelled. `binary_orbit_augment_8x8 solve-check` validates shards in parallel
+relabelled. `build/binary_orbit_augment_8x8 solve-check` validates shards in parallel
 and performs a deterministic exact reduction; set `OMP_NUM_THREADS` to the
 desired checker concurrency. `tools/aggregate_8x8_results.py` remains solely for the
 historical pre-transpose provider-result inventory. Run `make gpu-campaign-test`
 for the non-CUDA campaign regression suite.
 
-`make gpu-code-dump` regenerates `code-dump.txt` from the current maintained
+`make gpu-code-dump` regenerates `build/code-dump.txt` from the current maintained
 surface for external review; the generated file is intentionally untracked.
 
 Historical and regression targets are not dependencies of `gpu-production`.
