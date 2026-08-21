@@ -75,6 +75,13 @@ uint64_t pow_mod(uint64_t base, uint64_t exponent, uint64_t prime) {
     return output;
 }
 
+uint64_t checked_inverse(uint64_t value, uint64_t prime) {
+    if (prime <= 3 || prime % 2 == 0 || prime % 3 == 0) {
+        throw std::runtime_error("prime must be coprime to six");
+    }
+    return pow_mod(value, prime - 2, prime);
+}
+
 struct EdgeVectorHash {
     size_t operator()(const Edges& edges) const noexcept {
         uint64_t hash = 0x9e3779b97f4a7c15ULL ^ edges.size();
@@ -104,6 +111,7 @@ struct Statistics {
     uint64_t graph_only_states = 0;
     uint64_t component_splits = 0;
     uint64_t articulation_splits = 0;
+    uint64_t two_separator_splits = 0;
     uint64_t removed_supersets = 0;
     uint64_t maximum_edges = 0;
     uint64_t maximum_vertices = 0;
@@ -113,7 +121,9 @@ class Solver {
 public:
     Solver(uint64_t prime, uint64_t state_cap, double time_cap, bool overlap_heuristic = true)
         : prime_(prime), state_cap_(state_cap), time_cap_(time_cap),
-          started_(std::chrono::steady_clock::now()), overlap_heuristic_(overlap_heuristic) {
+          started_(std::chrono::steady_clock::now()), overlap_heuristic_(overlap_heuristic),
+          inverse_three_(checked_inverse(3, prime)),
+          inverse_six_(checked_inverse(6, prime)) {
         memo_.reserve(static_cast<size_t>(std::min<uint64_t>(state_cap, 4'000'000)));
     }
 
@@ -142,6 +152,33 @@ private:
         unsigned next = 0;
         for (unsigned bit = 0; bit < 64; ++bit) {
             if (used & (Mask{1} << bit)) image[bit] = next++;
+        }
+        for (Mask& edge : edges) {
+            Mask mapped = 0;
+            while (edge) {
+                unsigned source = static_cast<unsigned>(__builtin_ctzll(edge));
+                mapped |= Mask{1} << image[source];
+                edge &= edge - 1;
+            }
+            edge = mapped;
+        }
+        return solve(next, std::move(edges));
+    }
+
+    uint64_t solve_sparse_with_boundary(Edges edges, Mask boundary, bool merge_boundary) {
+        Mask used = boundary;
+        for (Mask edge : edges) used |= edge;
+        std::array<unsigned, 64> image{};
+        unsigned next = 0;
+        unsigned merged_image = std::numeric_limits<unsigned>::max();
+        for (unsigned bit = 0; bit < 64; ++bit) {
+            if (!(used & (Mask{1} << bit))) continue;
+            if (merge_boundary && (boundary & (Mask{1} << bit))) {
+                if (merged_image == std::numeric_limits<unsigned>::max()) merged_image = next++;
+                image[bit] = merged_image;
+            } else {
+                image[bit] = next++;
+            }
         }
         for (Mask& edge : edges) {
             Mask mapped = 0;
@@ -263,6 +300,12 @@ private:
         std::vector<Edges> edges;
     };
 
+    struct TwoSeparatorPieces {
+        Mask boundary = 0;
+        bool forbids_same = false;
+        std::vector<Edges> edges;
+    };
+
     ArticulationPieces articulation_pieces(unsigned vertices, const Edges& edges) {
         ArticulationPieces best;
         for (unsigned removed = 0; removed < vertices; ++removed) {
@@ -315,6 +358,91 @@ private:
             if (valid) {
                 best.piece_count = count;
                 best.edges = std::move(pieces);
+            }
+        }
+        return best;
+    }
+
+    TwoSeparatorPieces two_separator_pieces(unsigned vertices, const Edges& edges) {
+        TwoSeparatorPieces best;
+        // The quadratic separator census is a tail reduction.  Larger states
+        // are cheaper to branch once and revisit after contraction.
+        if (vertices > 24) return best;
+
+        std::array<Mask, 64> adjacency{};
+        for (Mask edge : edges) {
+            Mask members = edge;
+            while (members) {
+                unsigned vertex = static_cast<unsigned>(__builtin_ctzll(members));
+                adjacency[vertex] |= edge & ~(Mask{1} << vertex);
+                members &= members - 1;
+            }
+        }
+        const Mask all = vertices == 64 ? ~Mask{0} : (Mask{1} << vertices) - 1;
+        unsigned best_score = 0;
+        for (unsigned first = 0; first < vertices; ++first) {
+            for (unsigned second = first + 1; second < vertices; ++second) {
+                Mask boundary = (Mask{1} << first) | (Mask{1} << second);
+                Mask unseen = all & ~boundary;
+                std::vector<Mask> components;
+                while (unseen) {
+                    Mask component = unseen & -unseen;
+                    Mask frontier = component;
+                    unseen &= ~component;
+                    while (frontier) {
+                        Mask neighbours = 0;
+                        Mask scan = frontier;
+                        while (scan) {
+                            unsigned vertex = static_cast<unsigned>(__builtin_ctzll(scan));
+                            neighbours |= adjacency[vertex];
+                            scan &= scan - 1;
+                        }
+                        frontier = neighbours & unseen;
+                        component |= frontier;
+                        unseen &= ~frontier;
+                    }
+                    components.push_back(component);
+                }
+                if (components.size() <= 1) continue;
+
+                unsigned largest = 0;
+                for (Mask component : components) {
+                    largest = std::max(largest, static_cast<unsigned>(__builtin_popcountll(component)));
+                }
+                unsigned score = static_cast<unsigned>(components.size()) * 64 + (vertices - 2 - largest);
+                if (score <= best_score) continue;
+
+                std::vector<Edges> pieces(components.size());
+                bool forbids_same = false;
+                bool valid = true;
+                for (Mask edge : edges) {
+                    Mask interior = edge & ~boundary;
+                    if (!interior) {
+                        // A minimal state can contain only the boundary 2-edge
+                        // here; it rules out the equal boundary sector.
+                        forbids_same = true;
+                        continue;
+                    }
+                    size_t owner = components.size();
+                    for (size_t index = 0; index < components.size(); ++index) {
+                        if (interior & components[index]) {
+                            if ((interior & ~components[index]) != 0) valid = false;
+                            owner = index;
+                            break;
+                        }
+                    }
+                    if (!valid || owner == components.size()) {
+                        valid = false;
+                        break;
+                    }
+                    pieces[owner].push_back(edge);
+                }
+                if (valid) {
+                    best_score = score;
+                    best.boundary = boundary;
+                    best.forbids_same = forbids_same;
+                    best.edges = std::move(pieces);
+                }
             }
         }
         return best;
@@ -409,8 +537,32 @@ private:
             for (Edges& piece : articulation.edges) {
                 result = mul_mod(result, solve_sparse(std::move(piece)), prime_);
             }
-            uint64_t divisor = pow_mod(3, articulation.piece_count - 1, prime_);
-            result = mul_mod(result, pow_mod(divisor, prime_ - 2, prime_), prime_);
+            result = mul_mod(result, pow_mod(inverse_three_, articulation.piece_count - 1, prime_), prime_);
+            memo_.emplace(edges, result);
+            return result;
+        }
+
+        TwoSeparatorPieces separator = two_separator_pieces(vertices, edges);
+        if (!separator.edges.empty()) {
+            ++stats_.two_separator_splits;
+            uint64_t same_product = 1;
+            uint64_t different_product = 1;
+            for (const Edges& piece : separator.edges) {
+                uint64_t total = solve_sparse_with_boundary(piece, separator.boundary, false);
+                uint64_t same = solve_sparse_with_boundary(piece, separator.boundary, true);
+                same_product = mul_mod(same_product, same, prime_);
+                different_product = mul_mod(
+                    different_product, sub_mod(total, same, prime_), prime_);
+            }
+            const unsigned joins = static_cast<unsigned>(separator.edges.size() - 1);
+            uint64_t result = mul_mod(
+                different_product, pow_mod(inverse_six_, joins, prime_), prime_);
+            if (!separator.forbids_same) {
+                uint64_t same_result = mul_mod(
+                    same_product, pow_mod(inverse_three_, joins, prime_), prime_);
+                result = static_cast<uint64_t>(
+                    (static_cast<__uint128_t>(result) + same_result) % prime_);
+            }
             memo_.emplace(edges, result);
             return result;
         }
@@ -433,6 +585,8 @@ private:
     double time_cap_;
     std::chrono::steady_clock::time_point started_;
     bool overlap_heuristic_;
+    uint64_t inverse_three_;
+    uint64_t inverse_six_;
     Statistics stats_;
     std::unordered_map<Edges, uint64_t, EdgeVectorHash> memo_;
 };
@@ -510,17 +664,27 @@ uint64_t brute_force(unsigned vertices, const Edges& edges, uint64_t prime) {
 }
 
 void self_test() {
-    const std::vector<std::pair<unsigned, Edges>> structural_cases = {
-        {4, {0b0011, 0b1100}},
-        {5, {0b00011, 0b00110, 0b01100, 0b11000}},
-        {5, {0b00111, 0b11100}},
-        {6, {0b001111, 0b111100, 0b110011}},
+    struct StructuralCase {
+        unsigned vertices;
+        Edges edges;
+        bool requires_two_separator;
     };
-    for (const auto& [vertices, edges] : structural_cases) {
+    const std::vector<StructuralCase> structural_cases = {
+        {4, {0b0011, 0b1100}, false},
+        {5, {0b00011, 0b00110, 0b01100, 0b11000}, false},
+        {5, {0b00111, 0b11100}, false},
+        {6, {0b001111, 0b111100, 0b110011}, false},
+        {4, {0b0011, 0b0110, 0b1100, 0b1001}, true},
+        {4, {0b0111, 0b1011}, true},
+    };
+    for (const StructuralCase& test : structural_cases) {
         Solver solver(kDefaultPrime, 1'000'000, 0);
-        uint64_t actual = solver.solve(vertices, edges);
-        uint64_t expected = brute_force(vertices, edges, kDefaultPrime);
+        uint64_t actual = solver.solve(test.vertices, test.edges);
+        uint64_t expected = brute_force(test.vertices, test.edges, kDefaultPrime);
         if (actual != expected) throw std::runtime_error("structural self-test mismatch");
+        if (test.requires_two_separator && !solver.statistics().two_separator_splits) {
+            throw std::runtime_error("two-separator self-test did not exercise factorisation");
+        }
     }
     for (unsigned columns = 2; columns <= 3; ++columns) {
         const unsigned rows = 2;
@@ -607,6 +771,7 @@ int main(int argc, char** argv) try {
               << " graph_only_states=" << stats.graph_only_states
               << " component_splits=" << stats.component_splits
               << " articulation_splits=" << stats.articulation_splits
+              << " two_separator_splits=" << stats.two_separator_splits
               << " removed_supersets=" << stats.removed_supersets
               << " max_vertices=" << stats.maximum_vertices
               << " max_edges=" << stats.maximum_edges << '\n';

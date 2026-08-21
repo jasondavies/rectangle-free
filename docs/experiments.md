@@ -12823,3 +12823,35 @@
   census.  The only justified continuation is a representation that reduces
   the DAG itself, such as two-/three-cell separator-conditioned factorisation
   or exact canonical aggregation across many first classes.
+
+### Experiment 394: Two-cell-separator residual factorisation
+
+- Goal: strengthen Experiment 393's successful articulation products by
+  conditioning exactly on a two-cell separator `{u,v}`, reducing the number
+  of deletion-contraction states rather than accelerating their processing.
+- Exact identity: for `k` pieces, let `S_i` count piece colourings with
+  `u=v`, and `D_i` those with `u!=v`.  Simultaneous colour symmetry gives
+  `product(S_i)/3^(k-1) + product(D_i)/6^(k-1)`.  If `{u,v}` is a two-edge,
+  the equal sector is omitted.  `S_i` is computed by contracting the boundary
+  pair and `D_i=P_i-S_i`, all modulo the existing 61-bit prime.
+- Validation: add explicit four-cycle and shared-boundary 3-edge fixtures that
+  assert the new path was exercised and compare against direct ternary
+  enumeration.  All previous exhaustive `2x2`, `2x3`, component, and
+  articulation tests still pass.
+- Measurements:
+  - `5x5`: exact residue unchanged; 1,081 states and 0.0069s versus 1,075 and
+    0.0072s.
+  - `6x6`: exact residue unchanged; 1,939,905 states and 5.71s versus
+    2,173,573 and 4.17s.  This is a `10.7%` state reduction but a `37%`
+    runtime increase from separator discovery and extra boundary sectors.
+  - `7x7`: still exceeds ten million states after 5,561,314 two-separator
+    splits; runtime rises from 25.30s to 38.95s.
+  - unique `A29`: still exceeds two million states after 1,279,288
+    two-separator splits; runtime rises from 5.32s to 8.64s.
+- Outcome: reject two-cell separators as the required residual compression.
+  They are abundant and exact, but remove only a modest fraction of states
+  while adding work.  A three-cell boundary has five equality sectors and is
+  still implementable, but the measured ten-percent gain from the cheaper
+  two-cell case makes it unlikely to bridge the orders-of-magnitude gap.  An
+  exact isomorphism quotient of contracted hypergraphs is the better next
+  gate before enlarging separator width.

@@ -215,6 +215,27 @@ factorisation (at least two-cell separators) or a canonical batched quotient
 that reduces the number of states, not merely a GPU implementation of the
 same recurrence.
 
+The exact two-cell-separator continuation was also tested.  If removing
+`{u,v}` leaves `k` pieces, let `S_i` and `D_i` count colourings of piece `i`
+with equal and distinct boundary colours.  Colour symmetry gives
+
+\[
+P_H(3)=
+\frac{\prod_i S_i}{3^{k-1}}+
+\frac{\prod_i D_i}{6^{k-1}},
+\]
+
+omitting the first term when `{u,v}` is itself a two-edge.  Each `S_i` is an
+ordinary contracted query and `D_i=P_i-S_i`, so the factorisation is exact
+and requires no new state value type.
+
+This reduction is active but insufficient.  On `6x6` it lowers unique states
+from 2,173,573 to 1,939,905 (`10.7%`) while increasing runtime from 4.17s to
+5.71s.  The `7x7` prefix still exceeds ten million states despite 5,561,314
+two-separator splits, and takes 38.95s instead of 25.30s.  `A29` still exceeds
+two million states and slows from 5.32s to 8.64s.  Two-cell separators are
+therefore rejected as the missing asymptotic compression.
+
 ## Reproduction
 
 ```text
