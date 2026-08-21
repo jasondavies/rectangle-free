@@ -164,6 +164,7 @@ make gpu_result_checkpoint_test
 ./build/gpu_result_checkpoint_test
 make gpu-campaign-test
 python3 -m unittest -v \
+  tests.research.test_dense_colour_class_probe \
   tests.research.test_reachable_distribution_rank_probe \
   tests.hafnian.test_six_by_thirty_matching_probe \
   tests.research.test_universal_state_dd_probe \

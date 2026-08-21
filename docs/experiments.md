@@ -12731,3 +12731,34 @@
   trillions of weighted subset queries. A continuation requires a new sparse,
   symmetry-aware query circuit that aggregates unions collectively without
   enumerating alignments or constructing `F6`.
+
+### Experiment 392: Densest-two-colour gate for `9x9`
+
+- Goal: replace the binary outer-mask corpus by the two densest direct-colour
+  classes. Order the four disjoint `C4`-free class masks by cardinality and
+  mask. The largest has at least 21 cells; conditional on size `a`, the second
+  has at least `ceil((81-a)/3)` cells. The remaining two classes form a
+  filtered exact binary completion of the residual mask.
+- Exact identity: if `N(A,B)` counts ordered binary residual splits `C,D` with
+  both classes no larger than `B`, then `T_4(9,9)=12 sum_{A>B} N(A,B)`.
+  Exhaustive independent checks reproduce the direct `2x2`, `2x3`, and `3x3`
+  counts 252, 3,912, and 228,984.
+- Degree gate: the `C4`-free two-path inequality leaves 198 possible one-side
+  degree sequences at 21 edges, falling to 8 at 29 and one necessary sequence
+  at 30. Exact nauty `genbg -Z1` generation shows the 30-edge sequence is not
+  realizable and gives only 2,036,791 `S9 x S9` dense-class orbits in total:
+  908,041, 640,970, 334,631, 120,986, 28,052, 3,794, 302, 14, and 1 at sizes
+  21 through 29. Thus the sharp production gates are 21--29 and 18+, rather
+  than the elementary 21--30 and 17+ bounds.
+- Fixed-first-class DP: represent a partial second class by its 36-bit set of
+  used column pairs. On the unique 29-edge first class, the exact labelled DP
+  grows through 28, 717, 26,486, 780,533, and 18,909,760 states after rows one
+  through five, then exceeds a 100-million-state cap on row six. Its complete
+  graph automorphism group has size only 24, bounding any stabilizer rescue.
+- Outcome: accept the high-level formulation, reject a monolithic CPU row DP.
+  The first stage is unexpectedly compact and removes the outer-mask corpus.
+  The next decisive gate is a GPU `4+5` row meet-in-the-middle disjointness
+  join for the 29- and 28-edge first classes, followed by a census of complete
+  second-class and residual-completion signature reuse. This directly reuses
+  the project's strongest GPU primitive rather than constructing another
+  general decision diagram.
