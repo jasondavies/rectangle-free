@@ -1,6 +1,6 @@
 import unittest
 
-import universal_state_dd_probe as probe
+from research.probes import universal_state_dd_probe as probe
 
 
 class UniversalStateDecisionDiagramTest(unittest.TestCase):

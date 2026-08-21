@@ -27,7 +27,7 @@ FILES = [
 
 
 def main() -> None:
-    root = Path(__file__).resolve().parent
+    root = Path(__file__).resolve().parents[1]
     output = Path(sys.argv[1]) if len(sys.argv) > 1 else root / "code-dump.txt"
     if not output.is_absolute():
         output = root / output
@@ -37,7 +37,7 @@ def main() -> None:
     sections = [
         "PRODUCTION GPU CODE DUMP",
         f"Repository base snapshot: {revision}",
-        "Generated from the current working tree by make_gpu_code_dump.py.",
+        "Generated from the current working tree by tools/make_gpu_code_dump.py.",
         "",
         "Included files:",
         *(f"  - {name}" for name in FILES),

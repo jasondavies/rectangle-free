@@ -1,7 +1,7 @@
 import unittest
 from math import comb, factorial
 
-import reachable_distribution_rank_probe as probe
+from research.probes import reachable_distribution_rank_probe as probe
 
 
 class ReachableRankTest(unittest.TestCase):

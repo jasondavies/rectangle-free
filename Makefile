@@ -32,14 +32,14 @@ gpu-production: twocolour_7x7_solve_gpu twocolour_7x9_solve_gpu \
 
 .PHONY: gpu-code-dump
 gpu-code-dump:
-	python3 make_gpu_code_dump.py
+	python3 tools/make_gpu_code_dump.py
 
-gpu_result_checkpoint_test: gpu_result_checkpoint_test.cpp \
+gpu_result_checkpoint_test: tests/gpu/gpu_result_checkpoint_test.cpp \
 		gpu_result_checkpoint.hpp sha256.hpp
-	$(CXX) -O2 -std=c++17 -o $@ $<
+	$(CXX) -O2 -std=c++17 -I. -o $@ $<
 
 gpu-campaign-test:
-	python3 -m unittest -v test_aggregate_gpu_v3.py
+	python3 -m unittest -v tests.gpu.test_aggregate_gpu_v3
 
 CFLAGS_5XN ?= -O3 -march=native -std=c11
 
@@ -85,43 +85,43 @@ partition_poly_8_profile: $(PARTITION_SHARED_SRCS)
 small_graph_lookup_gen: small_graph_lookup_gen.c
 	$(CC) $(CFLAGS_5XN) -o $@ $<
 
-right_prefix_overlap_census: right_prefix_overlap_census.cpp
+right_prefix_overlap_census: research/probes/right_prefix_overlap_census.cpp
 	$(CXX) -O3 -march=native -std=c++17 $(OPENMP_CFLAGS) -o $@ $<
 
-prefix_hierarchy_8x8_census: prefix_hierarchy_8x8_census.cpp
+prefix_hierarchy_8x8_census: research/probes/prefix_hierarchy_8x8_census.cpp
 	$(CXX) -O3 -march=native -std=c++17 $(OPENMP_CFLAGS) -o $@ $<
 
-pairmask_transfer_probe: pairmask_transfer_probe.c
+pairmask_transfer_probe: research/probes/pairmask_transfer_probe.c
 	$(CC) $(CFLAGS_5XN) -o $@ $<
 
-completion_oracle_probe: completion_oracle_probe.c
+completion_oracle_probe: research/probes/completion_oracle_probe.c
 	$(CC) $(CFLAGS_5XN) -o $@ $<
 
-c4free_zdd_probe: c4free_zdd_probe.c
+c4free_zdd_probe: research/probes/c4free_zdd_probe.c
 	$(CC) $(CFLAGS_5XN) -o $@ $<
 
-clique_pivoter_probe: clique_pivoter_probe.c
+clique_pivoter_probe: research/probes/clique_pivoter_probe.c
 	$(CC) $(CFLAGS_5XN) $(OPENMP_CFLAGS) -o $@ $< $(OPENMP_LDFLAGS)
 
-column_tensor_rank_probe: column_tensor_rank_probe.c
+column_tensor_rank_probe: research/probes/column_tensor_rank_probe.c
 	$(CC) $(CFLAGS_5XN) -o $@ $<
 
-twobit_decomposition_probe: twobit_decomposition_probe.c
+twobit_decomposition_probe: research/probes/twobit_decomposition_probe.c
 	$(CC) $(CFLAGS_5XN) -o $@ $<
 
-binary_prefix_orbit_probe: binary_prefix_orbit_probe.c
+binary_prefix_orbit_probe: research/probes/binary_prefix_orbit_probe.c
 	$(CC) $(CFLAGS_5XN) -o $@ $<
 
-twobit_orbit_contraction_probe: twobit_orbit_contraction_probe.c
+twobit_orbit_contraction_probe: research/probes/twobit_orbit_contraction_probe.c
 	$(CC) $(CFLAGS_5XN) -o $@ $<
 
-twobit_full_orbit_probe: twobit_full_orbit_probe.c
+twobit_full_orbit_probe: research/probes/twobit_full_orbit_probe.c
 	$(CC) $(CFLAGS_5XN) -o $@ $<
 
-twocolour_prefix_distribution_probe: twocolour_prefix_distribution_probe.c
+twocolour_prefix_distribution_probe: research/probes/twocolour_prefix_distribution_probe.c
 	$(CC) $(CFLAGS_5XN) -o $@ $<
 
-binary_orbit_burnside_probe: binary_orbit_burnside_probe.c
+binary_orbit_burnside_probe: research/probes/binary_orbit_burnside_probe.c
 	$(CC) $(CFLAGS_5XN) -o $@ $<
 
 twocolour_7x5_canonical_census: archive/gpu/twocolour_7x5_canonical_census.cu \
@@ -150,26 +150,26 @@ binary_orbit_augment_8x8: binary_orbit_augment.c
 		-DORBIT_ROW_BITS=8 -DORBIT_MAGIC='"R8ORB01"' \
 		-o $@ $< $(OPENMP_LDFLAGS)
 
-s8_prefix_module_probe: s8_prefix_module_probe.c
+s8_prefix_module_probe: research/probes/s8_prefix_module_probe.c
 	$(CC) $(CFLAGS_5XN) -o $@ $<
 
-symmetric_kernel_rank_probe: symmetric_kernel_rank_probe.c
+symmetric_kernel_rank_probe: research/probes/symmetric_kernel_rank_probe.c
 	$(CC) $(CFLAGS_5XN) -o $@ $<
 
-twocolour_3x3_sampler: twocolour_3x3_sampler.c
+twocolour_3x3_sampler: research/probes/twocolour_3x3_sampler.c
 	$(CC) $(CFLAGS_5XN) -o $@ $<
 
-twocolour_4x4_probe: twocolour_4x4_probe.c
+twocolour_4x4_probe: research/probes/twocolour_4x4_probe.c
 	$(CC) $(CFLAGS_5XN) -o $@ $<
 
-canonical_query_circuit_probe: canonical_query_circuit_probe.c \
-		twocolour_4x4_probe.c
+canonical_query_circuit_probe: research/probes/canonical_query_circuit_probe.c \
+		research/probes/twocolour_4x4_probe.c
 	$(CC) $(CFLAGS_5XN) -o $@ $<
 
-token_plane_quotient_probe: token_plane_quotient_probe.cpp
+token_plane_quotient_probe: research/probes/token_plane_quotient_probe.cpp
 	$(CXX) -O3 -march=native -std=c++17 -o $@ $<
 
-six_by_thirty_matching_probe: six_by_thirty_matching_probe.cpp
+six_by_thirty_matching_probe: research/probes/six_by_thirty_matching_probe.cpp
 	$(CXX) -O3 -march=native -std=c++17 $(OPENMP_CFLAGS) -o $@ $< $(OPENMP_LDFLAGS)
 
 six_by_thirty_hafnian: six_by_thirty_hafnian.cpp sha256.hpp
@@ -190,12 +190,12 @@ six_by_twenty_nine_hafnian_gpu: six_by_twenty_nine_hafnian_gpu.cu \
 six-by-twenty-nine-hafnian-test: six_by_twenty_nine_hafnian_cpu
 	./six_by_twenty_nine_hafnian_cpu --query 0 --prime 2147483647 --begin 0 --end 16 --threads 1 | \
 		grep -q 'residue=791700040.*exact=OK'
-	python3 -m unittest -v test_six_by_twenty_nine_hafnian.py
+	python3 -m unittest -v tests.hafnian.test_six_by_twenty_nine_hafnian
 
 .PHONY: six-by-thirty-hafnian-test
 six-by-thirty-hafnian-test: six_by_thirty_hafnian
 	./six_by_thirty_hafnian --self-test
-	python3 -m unittest -v test_six_by_thirty_hafnian.py
+	python3 -m unittest -v tests.hafnian.test_six_by_thirty_hafnian
 
 twocolour_gpu_64.bin: twocolour_4x4_probe
 	./twocolour_4x4_probe 1024 0 64 -1 0 $@
@@ -277,46 +277,46 @@ twocolour_8x8_solve_gpu: twocolour_8x8_prefix_solve.cu \
 		gpu_memory_policy.hpp gpu_result_checkpoint.hpp sha256.hpp
 	$(NVCC) $(NVCCFLAGS) -Xcompiler=-fopenmp -o $@ $<
 
-prefix_portfolio_8x8_oracle: prefix_portfolio_8x8_oracle.cpp \
-		prefix_hierarchy_8x8_census.cpp
+prefix_portfolio_8x8_oracle: research/probes/prefix_portfolio_8x8_oracle.cpp \
+		research/probes/prefix_hierarchy_8x8_census.cpp
 	$(CXX) -O3 -std=c++17 -fopenmp -march=native -o $@ $<
 
-prefix_bucket_tt_rank_census: prefix_bucket_tt_rank_census.cpp \
-		prefix_hierarchy_8x8_census.cpp
+prefix_bucket_tt_rank_census: research/probes/prefix_bucket_tt_rank_census.cpp \
+		research/probes/prefix_hierarchy_8x8_census.cpp
 	$(CXX) -O3 -std=c++17 -fopenmp -march=native -o $@ $<
 
-prefix_bmma_cost_census: prefix_bmma_cost_census.cpp \
-		prefix_bucket_tt_rank_census.cpp prefix_hierarchy_8x8_census.cpp
+prefix_bmma_cost_census: research/probes/prefix_bmma_cost_census.cpp \
+		research/probes/prefix_bucket_tt_rank_census.cpp research/probes/prefix_hierarchy_8x8_census.cpp
 	$(CXX) -O3 -std=c++17 -fopenmp -march=native -o $@ $<
 
-prefix_bmma_portfolio_8x8_oracle: prefix_bmma_portfolio_8x8_oracle.cpp \
-		prefix_bmma_cost_census.cpp prefix_bucket_tt_rank_census.cpp \
-		prefix_hierarchy_8x8_census.cpp
+prefix_bmma_portfolio_8x8_oracle: research/probes/prefix_bmma_portfolio_8x8_oracle.cpp \
+		research/probes/prefix_bmma_cost_census.cpp research/probes/prefix_bucket_tt_rank_census.cpp \
+		research/probes/prefix_hierarchy_8x8_census.cpp
 	$(CXX) -O3 -std=c++17 -fopenmp -march=native -o $@ $<
 
-column_split_8x8_oracle: column_split_8x8_oracle.cpp \
-		prefix_bmma_cost_census.cpp prefix_bucket_tt_rank_census.cpp \
-		prefix_hierarchy_8x8_census.cpp
+column_split_8x8_oracle: research/probes/column_split_8x8_oracle.cpp \
+		research/probes/prefix_bmma_cost_census.cpp research/probes/prefix_bucket_tt_rank_census.cpp \
+		research/probes/prefix_hierarchy_8x8_census.cpp
 	$(CXX) -O3 -std=c++17 -fopenmp -march=native -o $@ $<
 
-column_split_8x8_transform: column_split_8x8_transform.cpp
+column_split_8x8_transform: research/probes/column_split_8x8_transform.cpp
 	$(CXX) -O3 -std=c++17 -o $@ $<
 
-column_split_8x8_selector: column_split_8x8_selector.cpp \
-		prefix_hierarchy_8x8_census.cpp
+column_split_8x8_selector: research/probes/column_split_8x8_selector.cpp \
+		research/probes/prefix_hierarchy_8x8_census.cpp
 	$(CXX) -O3 -std=c++17 -fopenmp -march=native -o $@ $<
 
-pair_projection_8x8_census: pair_projection_8x8_census.cpp \
-		prefix_bmma_cost_census.cpp prefix_bucket_tt_rank_census.cpp \
-		prefix_hierarchy_8x8_census.cpp
+pair_projection_8x8_census: research/probes/pair_projection_8x8_census.cpp \
+		research/probes/prefix_bmma_cost_census.cpp research/probes/prefix_bucket_tt_rank_census.cpp \
+		research/probes/prefix_hierarchy_8x8_census.cpp
 	$(CXX) -O3 -std=c++17 -fopenmp -march=native -o $@ $<
 
-behavioral_distribution_8x8_census: behavioral_distribution_8x8_census.cpp \
-		prefix_bmma_cost_census.cpp prefix_bucket_tt_rank_census.cpp \
-		prefix_hierarchy_8x8_census.cpp
+behavioral_distribution_8x8_census: research/probes/behavioral_distribution_8x8_census.cpp \
+		research/probes/prefix_bmma_cost_census.cpp research/probes/prefix_bucket_tt_rank_census.cpp \
+		research/probes/prefix_hierarchy_8x8_census.cpp
 	$(CXX) -O3 -std=c++17 -fopenmp -march=native -o $@ $<
 
-twocolour_3x4_probe: twocolour_3x4_probe.c
+twocolour_3x4_probe: research/probes/twocolour_3x4_probe.c
 	$(CC) $(CFLAGS_5XN) -o $@ $<
 
 twocolour_7x7_solve: twocolour_7x7_solve.c

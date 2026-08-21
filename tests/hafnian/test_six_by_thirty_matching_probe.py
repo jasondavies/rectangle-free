@@ -2,7 +2,7 @@ import math
 import random
 import unittest
 
-from six_by_thirty_matching_probe import (
+from research.probes.six_by_thirty_matching_probe import (
     PairTokenGeometry,
     SymmetryMatchingCounter,
     colour_sector_count,

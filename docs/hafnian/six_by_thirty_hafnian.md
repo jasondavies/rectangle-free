@@ -46,7 +46,7 @@ file can therefore be retained and the uncovered suffix launched separately.
 ```bash
 make six_by_thirty_hafnian
 ./six_by_thirty_hafnian --self-test
-python3 -m unittest -v test_six_by_thirty_hafnian.py
+python3 -m unittest -v tests.hafnian.test_six_by_thirty_hafnian
 ```
 
 Build CUDA on a target architecture, for example Blackwell:
@@ -84,7 +84,7 @@ Ranges for each prime must form an exact, nonoverlapping cover of `[0,2^29)`.
 The reducer checks geometry, algorithm version, payload digest, and coverage:
 
 ```bash
-python3 reduce_six_by_thirty_hafnian.py results/*.result
+python3 tools/reduce_six_by_thirty_hafnian.py results/*.result
 ```
 
 It first reconstructs the Glynn sum modulo each prime, converts it to the
@@ -95,7 +95,7 @@ The multi-GPU driver assigns primes dynamically and resumes from every
 atomically published prefix:
 
 ```bash
-python3 run_six_by_thirty_hafnian_gpu.py \
+python3 tools/run_six_by_thirty_hafnian_gpu.py \
   --binary ./six_by_thirty_hafnian_gpu \
   --gpus 0,1,2,3 --output hafnian-6x30-results
 ```

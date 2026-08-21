@@ -62,7 +62,7 @@ order 60.
 ## Run
 
 ```bash
-python3 run_six_by_twenty_nine_hafnian_gpu.py \
+python3 tools/run_six_by_twenty_nine_hafnian_gpu.py \
   --binary ./six_by_twenty_nine_hafnian_gpu \
   --gpus 0,1,2,3,4,5,6,7 \
   --output hafnian-6x29-results

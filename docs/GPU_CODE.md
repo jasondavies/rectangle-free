@@ -26,7 +26,7 @@ The active exact GPU implementation is intentionally split by responsibility:
 - `gpu_result_checkpoint.hpp`: geometry-neutral manifest, provenance,
   validation, work-claim, and immutable checkpoint publication support shared
   by the 7x9 and 8x8 production solvers.
-- `aggregate_gpu_v3.py`: provider-neutral validation and exact reduction for
+- `tools/aggregate_gpu_v3.py`: provider-neutral validation and exact reduction for
   new manifest-driven 7x9 and 8x8 v3 campaigns.
 - `gpu_cuda_utils.cuh`: move-only device, pinned-host, stream, and event
   ownership utilities.
@@ -38,7 +38,7 @@ for the single-owner 7x9 path. The optional four-owner entry point gives a
 5,213-line 7x9 surface; the independent 7x7 surface is 1,265 lines. Shared
 checkpoint and SHA-256 support are counted in
 each figure. This is distinct from the historical standalone CLIs in `legacy/gpu/`
-and isolated research programs in `archive/gpu/` or `gpu_experiments/`.
+and isolated research programs in `archive/gpu/` or `research/gpu/`.
 
 Token-plane quotienting is the sole representation in every maintained
 production distribution join. It stores one support representative under
@@ -122,7 +122,7 @@ The explicit seed replaces the historical `PREFIX_CANONICAL_SEED` environment
 variable and need not itself be a work item. The 8x8 result magic is
 `RECT8X8_PREFIX_RESULT 3`; 7x9 retains `RECT7X9_PACKED_RESULT 3`. Version-2
 7x9 files from the completed historical campaign remain readable by
-`aggregate_packed_7x9.py`, but production solvers will not treat them as
+`tools/aggregate_packed_7x9.py`, but production solvers will not treat them as
 restart checkpoints because they lack provenance. `make
 gpu_result_checkpoint_test` exercises the shared non-CUDA contract.
 
@@ -130,14 +130,14 @@ Use the same manifest that was supplied to a provider to inspect a partial v3
 campaign:
 
 ```text
-python3 aggregate_gpu_v3.py 8x8 WORK.tsv RESULTS_DIR
+python3 tools/aggregate_gpu_v3.py 8x8 WORK.tsv RESULTS_DIR
 ```
 
 For final acceptance, make the corpus locally accessible and enable all exact
 gates:
 
 ```text
-python3 aggregate_gpu_v3.py 8x8 WORK.tsv RESULTS_DIR \
+python3 tools/aggregate_gpu_v3.py 8x8 WORK.tsv RESULTS_DIR \
     --corpus-root CORPUS_DIR --full --verify-input-sha256 \
     --canonical-cache CANONICAL_SEED.orbits \
     --solver-binary twocolour_8x8_solve_gpu \
@@ -162,7 +162,7 @@ work manifest under `../rectangle-free-data-v2/8x8-transpose/`. Its legacy
 `R8ORB01` predecessor is retained separately; legacy files must never be
 relabelled. `binary_orbit_augment_8x8 solve-check` validates shards in parallel
 and performs a deterministic exact reduction; set `OMP_NUM_THREADS` to the
-desired checker concurrency. `aggregate_8x8_results.py` remains solely for the
+desired checker concurrency. `tools/aggregate_8x8_results.py` remains solely for the
 historical pre-transpose provider-result inventory. Run `make gpu-campaign-test`
 for the non-CUDA campaign regression suite.
 
@@ -174,7 +174,7 @@ Production code must not include files from `archive/gpu/` or `legacy/gpu/`.
 The historical two-level hierarchy layout and kernel are wholly contained in
 `legacy/gpu/twocolour_prefix_hierarchy.cuh`; the production prefix core has no
 hierarchy feature gates, types, fields, builders, or kernels.
-Conditionally compiled research hooks live under `gpu_experiments/`; ordinary
+Conditionally compiled research hooks live under `research/gpu/`; ordinary
 production preprocessing does not open them.  In particular, the rejected
 Patricia/ZDD suffix-query implementation is isolated there behind
 `PROFILE_SUFFIX_STRUCTURES`; the rejected suffix-bitplane kernels and index

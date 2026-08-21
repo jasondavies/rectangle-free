@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from reduce_six_by_twenty_nine_hafnian import (
+from tools.reduce_six_by_twenty_nine_hafnian import (
     ALGORITHM,
     CATALOG_SHA256,
     FORMAT,
@@ -105,7 +105,11 @@ class TwentyNineReductionTests(unittest.TestCase):
                     path = Path(directory) / f"p{prime}-q{query}.result"
                     path.write_text(result_text(prime, query, signed_sum))
                     paths.append(path)
-            reducer = Path(__file__).with_name("reduce_six_by_twenty_nine_hafnian.py")
+            reducer = (
+                Path(__file__).parents[2]
+                / "tools"
+                / "reduce_six_by_twenty_nine_hafnian.py"
+            )
             completed = subprocess.run(
                 [sys.executable, str(reducer), *map(str, paths)],
                 check=True, capture_output=True, text=True,

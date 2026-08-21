@@ -89,10 +89,10 @@ through four additional rows.
 ## Reproduction
 
 ```text
-python3 -m unittest -v test_universal_state_dd_probe.py
-python3 universal_state_dd_probe.py 5 3 --order lex --mode bundled
-python3 universal_state_dd_probe.py 5 3 --order lex --mode colour-major
-python3 universal_state_dd_probe.py 6 3 --order lex --mode bundled
-python3 universal_state_dd_probe.py 7 2 --order lex --mode bundled
-python3 universal_state_dd_probe.py 4 9 --strategy three-block
+python3 -m unittest -v tests.research.test_universal_state_dd_probe
+python3 research/probes/universal_state_dd_probe.py 5 3 --order lex --mode bundled
+python3 research/probes/universal_state_dd_probe.py 5 3 --order lex --mode colour-major
+python3 research/probes/universal_state_dd_probe.py 6 3 --order lex --mode bundled
+python3 research/probes/universal_state_dd_probe.py 7 2 --order lex --mode bundled
+python3 research/probes/universal_state_dd_probe.py 4 9 --strategy three-block
 ```

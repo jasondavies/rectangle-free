@@ -123,9 +123,9 @@ block-diagonalisation are insufficient.
 ## Reproduction
 
 ```text
-python3 reachable_distribution_rank_probe.py rank 9 2 --prime 1000003
-python3 reachable_distribution_rank_probe.py rank 9 2 --prime 1000033
-python3 reachable_distribution_rank_probe.py rank 7 3 --prime 1000003 --allow-large
-python3 reachable_distribution_rank_probe.py forecast 9 5
-python3 -m unittest -v test_reachable_distribution_rank_probe.py
+python3 research/probes/reachable_distribution_rank_probe.py rank 9 2 --prime 1000003
+python3 research/probes/reachable_distribution_rank_probe.py rank 9 2 --prime 1000033
+python3 research/probes/reachable_distribution_rank_probe.py rank 7 3 --prime 1000003 --allow-large
+python3 research/probes/reachable_distribution_rank_probe.py forecast 9 5
+python3 -m unittest -v tests.research.test_reachable_distribution_rank_probe
 ```

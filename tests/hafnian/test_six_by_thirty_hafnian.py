@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from reduce_six_by_thirty_hafnian import (
+from tools.reduce_six_by_thirty_hafnian import (
     ALGORITHMS,
     FORMAT,
     GRAPH_SHA256,
@@ -74,7 +74,7 @@ class HafnianReductionTests(unittest.TestCase):
                 signed_sum = perfect_matchings * pow(2, 29, prime) % prime
                 path.write_text(result_text(prime=prime, partial_glynn_sum=signed_sum))
                 paths.append(path)
-            reducer = Path(__file__).with_name("reduce_six_by_thirty_hafnian.py")
+            reducer = Path(__file__).parents[2] / "tools" / "reduce_six_by_thirty_hafnian.py"
             completed = subprocess.run(
                 [sys.executable, str(reducer), *map(str, paths)],
                 check=True, capture_output=True, text=True,

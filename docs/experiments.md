@@ -10014,7 +10014,7 @@
 
 ### Experiment 280: Provider-neutral production-result ledger
 - Goal: combine auto-pulled Scaleway/Vast outputs with the completed Modal shards in one durable local tree, while rejecting corrupt, incomplete, wrongly assigned, or conflicting shard results before final summation.
-- Add `aggregate_8x8_results.py` with four responsibilities:
+- Add `tools/aggregate_8x8_results.py` with four responsibilities:
   - export each Modal checkpoint result as `results/modal/sNNNN.log` plus `sNNNN.status.json`, and retain a normalized `results/modal/campaign-checkpoint.json` provenance snapshot
   - export all 1,024 independently checked shard expectations to `results/expected.tsv`, allowing later checks without the repository-local Modal checkpoint
   - verify status state and identity, whole-log SHA-256, exact `RESULT`/`TIMING` lines, checked record/weight counters, four direct validations, solve-file header, and solve-file length
@@ -10025,7 +10025,7 @@
   - a second verification using only `results/expected.tsv` accepted `49/1024`, because one more Scaleway status arrived between scans; this confirms that an in-progress pull can be re-snapshotted without relying on the Modal checkpoint
   - no duplicate IDs, conflicting results, checksum failures, metadata mismatches, or solve-corpus mismatches were found
 - Snapshot semantics: workers publish provider files independently while the aggregator writes the combined manifest by atomic rename. Re-running the command advances the manifest to all complete status/log pairs visible in that scan; no partial aggregate is treated as the final `T_4(8,8)` value.
-- Command: `python3 aggregate_8x8_results.py ../rectangle-free-data-v2 --export-modal --write-manifest`. Subsequent refreshes can omit `--export-modal`; if the local checkpoint is absent, pass a nonexistent `--checkpoint` path and validation uses the portable expected table.
+- Command: `python3 tools/aggregate_8x8_results.py ../rectangle-free-data-v2 --export-modal --write-manifest`. Subsequent refreshes can omit `--export-modal`; if the local checkpoint is absent, pass a nonexistent `--checkpoint` path and validation uses the portable expected table.
 - Outcome: store Modal results under the same `results/` root. Provider subdirectories preserve provenance, while one strict manifest supplies the provider-independent campaign state and eventual exact sum.
 
 ### Experiment 281: Three high-end Modal shards alongside external campaigns
@@ -10061,7 +10061,7 @@
   - validate IBM auxiliary source-status identity, exit code, log hash, input/solver provenance, and source-status checksum when those fields exist
   - retain all agreeing provider sources for a shard, reject any result-field conflict, and report source counts, duplicate counts, provider counts, warnings, validation coverage, and creation time
   - publish schema version 2 by atomic rename; the manifest stores `artifact` rather than assuming every provider calls it a log
-- Live full-integrity command: `python3 aggregate_8x8_results.py ../rectangle-free-data-v2 --checkpoint /tmp/no-such-rectangle-free-checkpoint --verify-input-sha256 --write-manifest`.
+- Live full-integrity command: `python3 tools/aggregate_8x8_results.py ../rectangle-free-data-v2 --checkpoint /tmp/no-such-rectangle-free-checkpoint --verify-input-sha256 --write-manifest`.
 - Snapshot at `2026-08-14T23:25:40Z`:
   - `635` valid source results reduce to `631/1024` unique shards, leaving `393`; provider sources are 46 Beam, 184 IBM, 40 Lightning, 12 Modal, 120 Scaleway, and 233 Vast
   - four duplicate sources agree exactly: IBM/Modal shard 8 and Beam/IBM shards 86, 117, and 145; no conflict exists
@@ -10406,7 +10406,7 @@
   - accumulate `factor * orbit_weight * selected_join * complement_join` in 128 bits and independently accumulate labelled weight, complement-covered weight, retained kernel count, baseline direct comparisons, prefix counts, and timings
   - atomically publish a versioned `${ID}.result` only after the complete item succeeds; on restart, validate the result version plus ID, path, range, and filter identity before skipping it
   - a deliberate manifest change reusing `sample16` with a different range fails closed before loading the cache
-  - add `aggregate_packed_7x9.py` to validate every manifest/result identity, report missing work and exact partial totals, and optionally enforce the complete global gates: `7,216,495,370` records, `3,608,247,685` complement representatives, and labelled/covered weight `2^63`
+  - add `tools/aggregate_packed_7x9.py` to validate every manifest/result identity, report missing work and exact partial totals, and optionally enforce the complete global gates: `7,216,495,370` records, `3,608,247,685` complement representatives, and labelled/covered weight `2^63`
 - Independent ordinary-kernel references:
   - 16-parent sample: `947` kernels, `246,628,143,783` direct comparisons, contribution `50,261,481,439,442,205,327,360,000`
   - 128-parent sample: `7,585` kernels, `3,747,583,374,374` direct comparisons, contribution `856,339,768,734,961,571,794,944,000`
@@ -11653,8 +11653,8 @@
 ### Experiment 357: Isolate rejected `7x9` suffix-query prototypes
 - Goal: remove the adaptive Patricia/ZDD suffix-query experiment from the production 7x9 orchestration without losing the exact negative experiment or its historical profiling build.
 - Change:
-  - move the 160-line host Patricia/ZDD definitions into `gpu_experiments/twocolour_7x9_suffix_structures.cuh`
-  - move the 235-line heavy-bucket census, exact query checks, and timing report into the statement-level `gpu_experiments/twocolour_7x9_suffix_structure_profile.inc`
+  - move the 160-line host Patricia/ZDD definitions into `research/gpu/twocolour_7x9_suffix_structures.cuh`
+  - move the 235-line heavy-bucket census, exact query checks, and timing report into the statement-level `research/gpu/twocolour_7x9_suffix_structure_profile.inc`
   - leave two small includes behind `PROFILE_SUFFIX_STRUCTURES`; ordinary production preprocessing never opens either experiment module
   - reduce `twocolour_7x9_packed_solve.cu` from 2,037 to 1,644 lines and the current 7x9 production review surface to 7,391 physical lines
 - Validation on the live IBM Ubuntu L40S worker:
@@ -11667,8 +11667,8 @@
 ### Experiment 358: Isolate the rejected suffix-bitplane implementation
 - Goal: remove another self-contained rejected join implementation from the prefix core while retaining the exact historical control.
 - Change:
-  - move 212 lines of bitplane construction and disjoint-join CUDA kernels to `gpu_experiments/twocolour_suffix_bitplane_kernels.cuh`
-  - move the 65-line device index type, builder, and destructor to `gpu_experiments/twocolour_suffix_bitplane_layout.cuh`
+  - move 212 lines of bitplane construction and disjoint-join CUDA kernels to `research/gpu/twocolour_suffix_bitplane_kernels.cuh`
+  - move the 65-line device index type, builder, and destructor to `research/gpu/twocolour_suffix_bitplane_layout.cuh`
   - leave two includes behind `PROTOTYPE_SUFFIX_BITPLANES`; production preprocessing does not open either module
   - reduce `twocolour_prefix_core.cuh` from 3,362 to 3,087 lines. The current physical review surfaces become 6,436 lines for 8x8 and 7,116 for 7x9
 - Validation on the live IBM Ubuntu L40S worker:
@@ -11693,7 +11693,7 @@
 - Exact IBM L40S runtime gates:
   - 8x8 shard-0 records `[0,1000)` execute `574,188,477,862` comparisons, reproduce contribution `771497379010863056240640000`, and pass four independent joins
   - 7x9 shard-0 records `[0,10000)` execute `3,790,178,168,461` comparisons, reproduce contribution `6965240699339373171164774400`, and pass four independent joins
-  - the 7x9 smoke manifest is retained under `gpu_experiments/` for future structural refactors
+  - the 7x9 smoke manifest is retained under `research/gpu/` for future structural refactors
 - Scope: this is consolidation, not a performance optimization. Kernel bodies, source order, class ordering, scan widths, launch geometry, and result arithmetic are unchanged; no speedup is claimed.
 - Outcome: accept. There is now one direct grouped-layout construction pipeline shared by both production geometries, with only the representation-specific source planning and three decoder launches remaining in their wrappers.
 
@@ -12052,7 +12052,7 @@
   - all 256 deterministic stratified scalar joins pass and reproduce `T_4(7,7) = 701672004810879255876925440`
   - `44,115,784,634,360` representative comparisons take `29.013240s` on the GPU; validation takes `7.258778s` and total wall time is `41.250107s`
 - Validation-cost observation: the deliberately broad 32/256-check regression settings add visible CPU time. Keep the production default of four exact checks; use the larger counts for release gates rather than throughput runs.
-- Reproduction and artifacts: tracked manifests are `gpu_experiments/regression374_range_filter.manifest` and `gpu_experiments/regression374_four_owner.manifest`; results and the pre-restart fourth-owner checkpoint are retained under `../rectangle-free-data-v2/profiles/ibm-l40s-regression374-20260819/`.
+- Reproduction and artifacts: tracked manifests are `research/gpu/regression374_range_filter.manifest` and `research/gpu/regression374_four_owner.manifest`; results and the pre-restart fourth-owner checkpoint are retained under `../rectangle-free-data-v2/profiles/ibm-l40s-regression374-20260819/`.
 - Resource cleanup: the temporary instance, boot volume, floating IPs, subnet, public gateway, security groups, SSH key, and VPC were deleted. IBM resource search finds no `rect-regression-374*` resources, and a read-only audit reports zero instances in all 13 VPC regions.
 - Outcome: pass. The hardened production binaries preserve exact results on all maintained geometries, the corrected work intersection is exercised directly, and v3 checkpoints detect tampering and resume safely after partial four-owner publication.
 
@@ -12128,7 +12128,7 @@
 
 - Goal: close the gap between restart-safe per-work checkpoints and acceptance
   of a complete independently hosted `7x9` or `8x8` calculation.
-- Implementation: add `aggregate_gpu_v3.py`, a geometry-aware reader for the
+- Implementation: add `tools/aggregate_gpu_v3.py`, a geometry-aware reader for the
   exact v3 result formats. It validates payload checksums, manifest identity,
   mandatory token-plane/transposition representations, and SHA-256 provenance;
   rejects unmanifested results and mixed configuration/cache identities; and
@@ -12256,7 +12256,7 @@
   size, not correctness: the full disjointness matrix need not be low rank,
   while the method succeeds only if the generated `V_4` and `V_5` are highly
   linearly dependent.
-- Probe: add `reachable_distribution_rank_probe.py`, which constructs exact
+- Probe: add `research/probes/reachable_distribution_rank_probe.py`, which constructs exact
   one-column squarefree distributions, streams degree-one through degree-three
   commutative products through sparse modular Gaussian elimination, and
   reports the symmetric-power ceiling. Add a separate exact `S_r` character
@@ -12462,7 +12462,7 @@
   after Experiment 381 rejected explicit ambient reachable-space bases. Build
   only the single state `P^k`, and in particular `F_3=P^3`, then attempt the
   balanced identity `T_4(9,9)=tau(F_3 star F_3 star F_3)`.
-- Probe: add `universal_state_dd_probe.py`, an exact modular reduced
+- Probe: add `research/probes/universal_state_dd_probe.py`, an exact modular reduced
   edge-weighted MDD with memoized squarefree convolution, hard resource caps,
   and lexicographic, reverse, and balanced pair-site orders. Compare one
   16-valued site per row pair with a colour-major binary-site baseline. Add

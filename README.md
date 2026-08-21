@@ -70,8 +70,8 @@ Every maintained distribution uses the global inner-bit token-plane quotient.
 The 7x9 and 8x8 solvers share the grouped-layout builder, BMMA join,
 checkpoint format, and provider-neutral reducer.
 
-See [gpu_algorithm.md](gpu_algorithm.md) for the mathematics and
-[GPU_CODE.md](GPU_CODE.md) for the maintained implementation surface and
+See [gpu_algorithm.md](docs/gpu_algorithm.md) for the mathematics and
+[GPU_CODE.md](docs/GPU_CODE.md) for the maintained implementation surface and
 campaign interface.
 
 ### 4. Six-row endpoint hafnians
@@ -88,8 +88,8 @@ The implementation evaluates the hafnian modulo several primes on GPU and
 uses CRT for the exact integer. For 6x29, a defect expansion reduces the
 calculation to 29 related residual hafnians.
 
-See [six_by_thirty_hafnian.md](six_by_thirty_hafnian.md) and
-[six_by_twenty_nine_hafnian.md](six_by_twenty_nine_hafnian.md).
+See [six_by_thirty_hafnian.md](docs/hafnian/six_by_thirty_hafnian.md) and
+[six_by_twenty_nine_hafnian.md](docs/hafnian/six_by_twenty_nine_hafnian.md).
 
 ## Building
 
@@ -150,7 +150,7 @@ make six-by-twenty-nine-hafnian-test
 ```
 
 The full GPU campaign commands, manifests, cache formats, checkpointing, and
-validation procedure are documented in [GPU_CODE.md](GPU_CODE.md).
+validation procedure are documented in [GPU_CODE.md](docs/GPU_CODE.md).
 
 ## Validation
 
@@ -161,28 +161,28 @@ make gpu_result_checkpoint_test
 ./gpu_result_checkpoint_test
 make gpu-campaign-test
 python3 -m unittest -v \
-  test_reachable_distribution_rank_probe.py \
-  test_six_by_thirty_matching_probe.py \
-  test_universal_state_dd_probe.py
+  tests.research.test_reachable_distribution_rank_probe \
+  tests.hafnian.test_six_by_thirty_matching_probe \
+  tests.research.test_universal_state_dd_probe
 ```
 
 Production GPU results use self-identifying, checksummed checkpoints bound to
 the solver, algorithm configuration, cache, input corpus, and exact work
-range. `aggregate_gpu_v3.py` verifies and reduces complete 7x9 and 8x8
+range. `tools/aggregate_gpu_v3.py` verifies and reduces complete 7x9 and 8x8
 campaigns.
 
 ## Repository map
 
-- `src/`: shared partition/structure-graph implementation.
-- `twocolour_*`, `gpu_*`: maintained CUDA distribution-contraction code.
-- `hafnian_gpu_core.cuh`, `six_by_*`: six-row endpoint solvers.
+- `src/`: production solvers and their shared implementation.
+- `tools/`: provider-neutral corpus, reduction, and campaign utilities.
+- `tests/`: non-CUDA regression suites and exact solver fixtures.
+- `research/probes/`: falsifiable algorithm and performance experiments.
+- `research/gpu/`: rejected or profiling-only GPU prototypes.
+- `docs/`: algorithm notes, implementation maps, and experiment history.
 - `archive/gpu/`: isolated historical experiments.
 - `legacy/gpu/`: exact regression implementations outside production.
-- `gpu_experiments/`: rejected or profiling-only GPU prototypes.
 - `results.txt`: recorded exact values.
-- `experiments.md`: chronological experiments, measurements, and rejected
-  approaches.
-- `nine_by_nine_*.md`: feasibility gates for proposed 9x9 algorithms.
+- `docs/research/`: feasibility gates for proposed larger-grid algorithms.
 - `lean/`: formalisation notes.
 
 Research probes are intentionally not part of `make gpu-production`.
@@ -198,7 +198,8 @@ Research probes are intentionally not part of `make gpu-production`.
   6x29.
 
 Exact recorded values are in [results.txt](results.txt); detailed performance
-claims and experiment provenance belong in [experiments.md](experiments.md),
+claims and experiment provenance belong in
+[experiments.md](docs/experiments.md),
 not this overview.
 
 ## Acknowledgements and OEIS

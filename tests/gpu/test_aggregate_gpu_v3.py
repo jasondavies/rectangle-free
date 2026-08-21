@@ -6,7 +6,7 @@ import struct
 import tempfile
 import unittest
 
-from aggregate_gpu_v3 import (
+from tools.aggregate_gpu_v3 import (
     GEOMETRIES,
     Geometry,
     ValidationError,
