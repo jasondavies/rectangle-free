@@ -12588,3 +12588,49 @@
 - Outcome: accept. The low-defect endpoint expansion makes 6x29 a modest
   multi-GPU calculation and validates exact spot-resume across heterogeneous
   residual hafnians.
+
+### Experiment 388: Global colour-cut quotient gate for 8x8
+
+- Goal: test whether the part of global `S_4` colour symmetry that changes the
+  chosen outer bit can materially reduce the `8x8` outer sum while retaining
+  the two-bit distribution architecture. Choosing an unordered `2+2` colour
+  cut has an order-eight stabilizer in `S_4`, so the remaining ideal quotient
+  is threefold, not sixfold.
+- Exact quotient: for a colouring encoded by bit masks `x,y`, the three cuts
+  are `x`, `y`, and `x xor y`. Let `b(m)=min(|m|,N-|m|)`, let `q` be the number
+  of these cuts attaining the minimum balance, and retain the current `x` cut
+  with weight `1/q` exactly when it is a minimizer. The order-three colour
+  action cyclically permutes the cuts, so the retained weights sum to one on
+  every free orbit and the labelled answer is three times their sum. Brute
+  force verifies the integer-scaled identity on `2x2`, `2x3`, and `3x3`, with
+  respectively 252, 3,912, and 228,984 valid colourings.
+- Compact refinement: deciding the balance rule does not require retaining the
+  complete alternative cell masks. Refine each binary half-distribution entry
+  by the number of inner one-bits. Token-plane exchange maps `(U,k)` to
+  `(swap(U),active-k)`, so the mandatory support quotient remains exact and the
+  count fits in the eight otherwise unused high bits of the 64-bit `8x4`
+  support word.
+- Complete cache census: add `colour_cut_cardinality_census` and evaluate all
+  25,207 canonical `8x4` masks, selected and complement. The ordinary quotient
+  contains 565,318,500 entries; cardinality refinement contains 585,249,892,
+  only `1.03525692508x` as many. All refined distributions preserve total
+  weight and token-plane equivariance exactly. Only 98 of 50,414 distributions
+  exceed the ideal threefold state-growth gate, with maximum ratio four.
+- Optimistic work census: sample 2,048 records from each of legacy solve shards
+  0, 256, 512, 768, and 1,023. Counting raw support Cartesian pairs and charging
+  nothing for extra count classes, metadata, prefix fragmentation, or rounded
+  BMMA tiles gives 6,630,388,603,287 baseline pairs and 5,554,255,281,471 pairs
+  whose count sectors can participate in a minimum-balance cut. The retained
+  fraction is `0.837696794833`, only a `16.23%` optimistic join-work reduction.
+- Weight dependence explains the low total: weight-32 records retain about
+  `19.8%` and weight-31 records about `38.7%`, but weight 30 retains about
+  `80.2%`, weight 29 about `88.7%`, and weights at most 28 retain essentially
+  all support work. The corpus contains enough lower-weight representatives to
+  dominate the aggregate ceiling.
+- Outcome: reject integration into the current GPU solver. The cardinality
+  state itself is unexpectedly compact, but even a free implementation saves
+  at most about 16% of raw join work on the stratified sample and less
+  end-to-end; real weight/count classes would add construction, metadata, and
+  BMMA tile fragmentation. Preserve the exact probe and the three-cut identity
+  for a future direct four-colour algorithm, where full `S_4` symmetry may act
+  without passing through the outer-bit factorisation.

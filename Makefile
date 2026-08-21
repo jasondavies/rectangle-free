@@ -317,6 +317,11 @@ $(BUILD_DIR)/behavioral_distribution_8x8_census: research/probes/behavioral_dist
 		research/probes/prefix_hierarchy_8x8_census.cpp
 	$(CXX) -O3 -std=c++17 -fopenmp -march=native -o $@ $<
 
+$(BUILD_DIR)/colour_cut_cardinality_census: research/probes/colour_cut_cardinality_census.cpp \
+		research/probes/prefix_bucket_tt_rank_census.cpp \
+		research/probes/prefix_hierarchy_8x8_census.cpp
+	$(CXX) -O3 -std=c++17 -fopenmp -march=native -o $@ $<
+
 $(BUILD_DIR)/twocolour_3x4_probe: research/probes/twocolour_3x4_probe.c
 	$(CC) $(CFLAGS_5XN) -o $@ $<
 
@@ -348,6 +353,7 @@ BUILD_TARGETS := 5xn_count4 partition_count4 partition_poly partition_poly_7 \
 	twocolour_7x9_cache_build \
 	twocolour_8x8_solve_gpu prefix_portfolio_8x8_oracle \
 	prefix_bucket_tt_rank_census prefix_bmma_cost_census \
+	colour_cut_cardinality_census \
 	prefix_bmma_portfolio_8x8_oracle column_split_8x8_oracle \
 	column_split_8x8_transform column_split_8x8_selector \
 	pair_projection_8x8_census behavioral_distribution_8x8_census \
