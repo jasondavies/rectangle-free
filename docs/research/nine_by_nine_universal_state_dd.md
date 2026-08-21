@@ -86,6 +86,11 @@ coefficient tensor.  The DD result sets a high bar: such a method must compress
 tens of thousands of distinct five-row residual functions and then scale
 through four additional rows.
 
+That follow-up was performed in
+[the tensor-rank gate](nine_by_nine_tensor_rank.md).  Natural separator ranks
+are already at least 2,759 at five rows, so an ordinary exact tensor train or
+hierarchical tensor network was also rejected as a credible `9x9` route.
+
 ## Reproduction
 
 ```text

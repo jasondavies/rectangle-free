@@ -12634,3 +12634,32 @@
   BMMA tile fragmentation. Preserve the exact probe and the three-cut identity
   for a future direct four-colour algorithm, where full `S_4` symmetry may act
   without passing through the outer-bit factorisation.
+
+### Experiment 389: Exact tensor-rank gate for the universal three-column state
+
+- Goal: test the remaining balanced `3+3+3` proposal for `9x9` after the
+  explicit reachable-space and weighted-DD failures. The target is the one
+  aggregate state `F3=P^3`, not its ambient linear span.
+- Method: at each cut of the exact weighted MDD for `F3`, reachable normalized
+  nodes are residual coefficient functions. Evaluate a deterministic literal
+  submatrix of those functions on accepted suffix assignments and compute its
+  exact modular rank. Modular submatrix rank is a certified lower bound on the
+  rational tensor flattening rank; complete rows and columns give an exact
+  rank. Primes 1,000,003 and 1,000,033 agree on all principal 1,024-rank-cap
+  measurements.
+- Balanced bundled separators: the natural internal-edge/cross-edge cuts have
+  rank 15 exactly at three rows, at least 219 at four rows, and at least 2,759
+  at five rows. The latter is a `4096 x 4096` sampled submatrix of 7,869
+  residual functions, so it is a lower bound rather than a rank estimate.
+- Alternative cuts: bundled balanced and lexicographic five-row orders both
+  exceed rank 1,000 at other cuts. A colour-major midpoint has exact ranks 4
+  and 114 at three and four rows and rank at least 885 at five rows.
+- Scaling: the balanced bundled `F3` has 4,258 reachable MDD nodes at four
+  rows and 304,833 at five; its six-row construction already exceeds the
+  one-million-node cap. Linear dependence is present but does not approach the
+  compression needed to bridge four more rows.
+- Outcome: reject ordinary exact tensor trains and hierarchical tensor
+  networks on the proposed row-pair or colour-major site trees as a credible
+  `9x9` method. This does not rule out every symmetry-adapted circuit, but a
+  viable continuation must analytically avoid the certified separator ranks,
+  not merely choose a different implementation or pair ordering.

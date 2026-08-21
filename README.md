@@ -166,7 +166,8 @@ make gpu-campaign-test
 python3 -m unittest -v \
   tests.research.test_reachable_distribution_rank_probe \
   tests.hafnian.test_six_by_thirty_matching_probe \
-  tests.research.test_universal_state_dd_probe
+  tests.research.test_universal_state_dd_probe \
+  tests.research.test_universal_state_tensor_rank_probe
 ```
 
 Production GPU results use self-identifying, checksummed checkpoints bound to
