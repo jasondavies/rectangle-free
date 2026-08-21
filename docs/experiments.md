@@ -12755,10 +12755,30 @@
   grows through 28, 717, 26,486, 780,533, and 18,909,760 states after rows one
   through five, then exceeds a 100-million-state cap on row six. Its complete
   graph automorphism group has size only 24, bounding any stabilizer rescue.
-- Outcome: accept the high-level formulation, reject a monolithic CPU row DP.
-  The first stage is unexpectedly compact and removes the outer-mask corpus.
-  The next decisive gate is a GPU `4+5` row meet-in-the-middle disjointness
-  join for the 29- and 28-edge first classes, followed by a census of complete
-  second-class and residual-completion signature reuse. This directly reuses
-  the project's strongest GPU primitive rather than constructing another
-  general decision diagram.
+- GPU fixed-`A` result: a `4+5` row meet-in-the-middle probe constructs exact
+  weighted 36-bit column-pair states and joins them on one spot RTX PRO 6000.
+  For the unique 29-cell `A`, it finds 22,708,949,741,198 labelled `B` classes
+  at sizes 18--29. The kernel screens 26.638 trillion pairs in 8.393s, or
+  3.174 Tpair/s. Even the optimistic full automorphism divisor 24 leaves at
+  least about 946 billion second-class orbits for this one `A`.
+- Extremal census: all fourteen 28-cell first classes contain between 29.949
+  trillion and 34.899 trillion labelled `B` classes, mean 32.635 trillion.
+  Together they require 582.054 trillion half-state comparisons and 178.842
+  GPU seconds at 3.255 Tpair/s. The extremal 29-cell graph is therefore not an
+  anomalously difficult representative.
+- Exact validation: the independent monolithic CPU DP and GPU join agree in
+  every `|B|=0..8` bin for the 29-cell class, including total 876,001,660.
+  A stratified heuristic sample of 100 valid `B` classes at each size 18--29
+  finds exact binary completions for all 1,200 residuals; residual rejection
+  is nowhere near the many-orders-of-magnitude rate needed for rescue.
+- Cost/artifacts: the focused spot VM and storage consumed approximately
+  $0.52 during provisioning, compilation, validation, and the fifteen exact
+  joins. Logs and the residual sample are mirrored under
+  `../rectangle-free-data-v2/verda-9x9-dense/`; the VM and its OS volume were
+  then deleted.
+- Revised outcome: reject explicit enumeration of `(A,B)` followed by a
+  binary completion. The first-class orbit census is compact, but the second
+  class recreates a corpus of trillions for each `A`. The only surviving use
+  of this decomposition must contract all three residual colours together
+  without materializing `B`, which is a new mathematical representation rather
+  than a faster GPU set-disjointness join.

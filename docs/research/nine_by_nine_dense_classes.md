@@ -105,31 +105,61 @@ automorphism group of this extremal graph has size 24, so quotienting by its
 colour-preserving stabilizer cannot provide more than a factor 24 on complete
 second classes.
 
-This does **not** reject the dense-first algorithm.  It rejects a conventional
-single-table row DP for the second class.  A balanced row split produces two
-sparse families of 36-bit pair-resource masks; counting compatible halves is
-again a weighted set-disjointness join, which is directly suitable for the
-existing GPU/BMMA machinery.  The remaining feasibility questions are:
+The balanced row split produces two sparse families of 36-bit pair-resource
+masks.  Their exact weighted-disjointness join is directly suitable for the
+existing GPU machinery.
 
-1. How many complete `B` orbits survive for representative first classes?
-2. How much reuse exists among residual masks `R` and their binary completion
-   signatures?
-3. Can second-class construction and residual completion be fused so that
-   individual `B` masks are not written as a huge intermediate corpus?
+## GPU meet-in-the-middle result
+
+On one RTX PRO 6000, the exact `4+5`-row join for the unique 29-cell `A`
+returns
+
+\[
+22{,}708{,}949{,}741{,}198
+\]
+
+labelled `B` classes of sizes 18--29.  It screens 26.638 trillion half-state
+pairs in 8.393 GPU seconds, or 3.174 trillion pairs/s.  Dividing by the full
+automorphism-group order 24 still leaves at least about 946 billion complete
+second-class orbits.  The actual colour-preserving stabilizer can only be
+smaller.
+
+The fourteen 28-cell first-class orbits are no better:
+
+```text
+labelled B per A:  29,948,575,180,670 .. 34,898,523,900,958
+mean:              32,634,520,100,208.5
+sum over 14 A:    456,883,281,402,919
+GPU comparisons: 582,054,016,767,646
+GPU join time:                    178.842 s
+aggregate rate:                    3.255 T/s
+```
+
+An independent monolithic CPU DP and the GPU meet-in-the-middle join agree in
+every cardinality bin from zero through eight for the 29-cell class, including
+the exact total `876,001,660`.
+
+Residual infeasibility also fails as a possible filter.  A stratified,
+nonuniform sample of 100 exact `B` classes at every size 18 through 29 gives
+1,200/1,200 residuals with an exact binary completion.  The residual
+NAE-rectangle solver needs only about 22 search nodes on average.  This is not
+a statistical estimate for a uniform orbit sample, but it decisively rules
+out the extraordinary near-zero completion rate required to offset trillions
+of second classes.
 
 ## Verdict and next gate
 
-Accept the dense-first formulation as the strongest surviving `9x9`
-candidate.  The first stage is decisively tractable: only 2.04 million
-canonical dense classes.  The straightforward second stage is decisively not
-tractable on CPU, even for the most symmetric/densest first class.
+Reject explicit enumeration of the two densest classes.  The first stage is
+decisively tractable, but one first-class representative already expands to
+tens of trillions of admissible labelled second classes, and the residual is
+usually easy rather than impossible.
 
-The next experiment should implement a GPU `4+5`-row meet-in-the-middle join
-for fixed `A`, beginning with the unique 29-edge class and the 14 28-edge
-classes.  It must report complete `B` counts by cardinality and materialized
-residual-signature uniqueness.  Continue toward all 2.04 million first
-classes only if the measured pair/residual reuse projects below the existing
-outer-corpus scale by at least two orders of magnitude.
+The dense-first identity remains useful only if all three remaining colours
+are contracted together for each canonical `A`, without materializing `B`.
+That is a direct three-colour completion operator on the complement of `A`,
+not the proposed `A,B` corpus followed by binary completions.  It needs a new
+compressed transfer or tensor representation; another faster disjointness
+kernel cannot remove the measured combinatorial expansion.
 
 ## Reproduction
 
@@ -137,7 +167,11 @@ outer-corpus scale by at least two orders of magnitude.
 python3 -m unittest -v tests.research.test_dense_colour_class_probe
 python3 research/probes/dense_colour_class_probe.py degrees
 make dense_c4free_pair_probe
+make dense_c4free_mitm_probe
 ./build/dense_c4free_pair_probe \
   --first 181,086,118,142,124,0c8,0b0,02b,055 \
   --minimum 18 --maximum 29 --state-cap 100000000
+python3 research/probes/dense_residual_completion_sample.py \
+  --first 181,086,118,142,124,0c8,0b0,02b,055 \
+  --samples-per-size 100 --minimum 18 --maximum 29
 ```
