@@ -7,10 +7,12 @@
 #include <iostream>
 #include <limits>
 #include <numeric>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <sys/resource.h>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -24,6 +26,9 @@ struct Options {
     uint64_t max_states = 5'000'000;
     uint64_t max_cache = 10'000'000;
     uint64_t max_transitions = 5'000'000'000ULL;
+    uint64_t alignment_samples = 0;
+    bool stabilizer_census = false;
+    bool direct_cube = false;
     bool self_test = false;
 };
 
@@ -71,12 +76,21 @@ Options parse_options(int argc, char **argv) {
     if (argc < 3) {
         throw std::runtime_error(
             "usage: universal_state_symmetry_probe ROWS COLUMNS "
-            "[--max-states N] [--max-cache N] [--max-transitions N]");
+            "[--max-states N] [--max-cache N] [--max-transitions N] "
+            "[--stabilizer-census] [--alignment-samples N] [--direct-cube]");
     }
     options.rows = parse_u64(argv[1], "row count");
     options.columns = parse_u64(argv[2], "column count");
     for (int index = 3; index < argc; ++index) {
         const std::string argument = argv[index];
+        if (argument == "--stabilizer-census") {
+            options.stabilizer_census = true;
+            continue;
+        }
+        if (argument == "--direct-cube") {
+            options.direct_cube = true;
+            continue;
+        }
         if (index + 1 == argc) {
             throw std::runtime_error("missing value after " + argument);
         }
@@ -85,6 +99,8 @@ Options parse_options(int argc, char **argv) {
         else if (argument == "--max-cache") options.max_cache = value;
         else if (argument == "--max-transitions") {
             options.max_transitions = value;
+        } else if (argument == "--alignment-samples") {
+            options.alignment_samples = value;
         } else {
             throw std::runtime_error("unknown option " + argument);
         }
@@ -197,6 +213,49 @@ public:
     size_t permutation_count() const { return permutation_count_; }
     size_t image_bytes() const { return images_.size() * sizeof(uint16_t); }
 
+    uint64_t stabilizer_size(const uint64_t canonical_state) const {
+        const auto original = unpack(canonical_state);
+        uint64_t colour_multiplicity = 1;
+        for (unsigned begin = 0; begin < 4;) {
+            unsigned end = begin + 1;
+            while (end < 4 && original[end] == original[begin]) ++end;
+            for (unsigned factor = 2; factor <= end - begin; ++factor) {
+                colour_multiplicity *= factor;
+            }
+            begin = end;
+        }
+        uint64_t preserving_rows = 0;
+        for (size_t permutation = 0; permutation < permutation_count_;
+             ++permutation) {
+            const size_t base = permutation * domain_;
+            std::array<uint16_t, 4> transformed{
+                images_[base + original[0]], images_[base + original[1]],
+                images_[base + original[2]], images_[base + original[3]],
+            };
+            std::sort(transformed.begin(), transformed.end());
+            if (transformed == original) ++preserving_rows;
+        }
+        return preserving_rows * colour_multiplicity;
+    }
+
+    uint64_t transform(const uint64_t state, const size_t row_permutation,
+                       const std::array<unsigned, 4> &colour_permutation) const {
+        const auto source = unpack(state);
+        const size_t base = row_permutation * domain_;
+        std::array<uint16_t, 4> row_transformed{
+            images_[base + source[0]], images_[base + source[1]],
+            images_[base + source[2]], images_[base + source[3]],
+        };
+        std::array<uint16_t, 4> result{};
+        for (unsigned colour = 0; colour < 4; ++colour) {
+            result[colour_permutation[colour]] = row_transformed[colour];
+        }
+        return uint64_t(result[0])
+            | uint64_t(result[1]) << 16
+            | uint64_t(result[2]) << 32
+            | uint64_t(result[3]) << 48;
+    }
+
 private:
     unsigned rows_;
     unsigned pair_count_;
@@ -262,6 +321,207 @@ struct TransferRecord {
     uint64_t states;
     U128 coefficient_sum;
 };
+
+uint64_t factorial(const unsigned value) {
+    uint64_t result = 1;
+    for (unsigned factor = 2; factor <= value; ++factor) result *= factor;
+    return result;
+}
+
+void print_stabilizer_census(
+    const Options &options,
+    const Canonicalizer &canonicalize,
+    const std::unordered_map<uint64_t, U128> &states) {
+    std::unordered_map<uint64_t, uint64_t> histogram;
+    uint64_t labelled_supports = 0;
+    const uint64_t group_order = factorial(options.rows) * 24;
+    for (const auto &[state, mass] : states) {
+        (void)mass;
+        const uint64_t stabilizer = canonicalize.stabilizer_size(state);
+        if (!stabilizer || group_order % stabilizer) {
+            throw std::runtime_error("invalid stabilizer size");
+        }
+        ++histogram[stabilizer];
+        labelled_supports += group_order / stabilizer;
+    }
+
+    U128 double_coset_lower_bound = 0;
+    for (const auto &[left_stabilizer, left_count] : histogram) {
+        for (const auto &[right_stabilizer, right_count] : histogram) {
+            const uint64_t product = left_stabilizer * right_stabilizer;
+            const uint64_t lower = (group_order + product - 1) / product;
+            double_coset_lower_bound += U128(left_count) * right_count * lower;
+        }
+    }
+
+    std::cout << "{\"kind\":\"symmetry_stabilizer_census\",\"rows\":"
+              << options.rows << ",\"columns\":" << options.columns
+              << ",\"orbit_states\":" << states.size()
+              << ",\"group_order\":" << group_order
+              << ",\"labelled_supports\":" << labelled_supports
+              << ",\"trivial_stabilizer_states\":" << histogram[1]
+              << ",\"double_coset_task_lower_bound\":\""
+              << decimal(double_coset_lower_bound)
+              << "\",\"stabilizer_histogram\":{\"";
+    std::vector<std::pair<uint64_t, uint64_t>> sorted(
+        histogram.begin(), histogram.end());
+    std::sort(sorted.begin(), sorted.end());
+    for (size_t index = 0; index < sorted.size(); ++index) {
+        if (index) std::cout << ",\"";
+        std::cout << sorted[index].first << "\":" << sorted[index].second;
+    }
+    std::cout << "}}\n";
+
+    if (!options.alignment_samples || states.empty()) return;
+    std::vector<uint64_t> representatives;
+    representatives.reserve(states.size());
+    for (const auto &[state, mass] : states) {
+        (void)mass;
+        representatives.push_back(state);
+    }
+    std::mt19937_64 generator(0x9368E53C2F6AF274ULL);
+    std::uniform_int_distribution<size_t> state_distribution(
+        0, representatives.size() - 1);
+    std::uniform_int_distribution<size_t> row_distribution(
+        0, canonicalize.permutation_count() - 1);
+    uint64_t compatible = 0;
+    uint64_t total_union_tokens = 0;
+    for (uint64_t sample = 0; sample < options.alignment_samples; ++sample) {
+        const uint64_t left = representatives[state_distribution(generator)];
+        const uint64_t right = representatives[state_distribution(generator)];
+        std::array<unsigned, 4> colours{0, 1, 2, 3};
+        std::shuffle(colours.begin(), colours.end(), generator);
+        const uint64_t aligned = canonicalize.transform(
+            right, row_distribution(generator), colours);
+        if (disjoint(left, aligned)) {
+            ++compatible;
+            total_union_tokens += __builtin_popcountll(left | aligned);
+        }
+    }
+    std::cout << "{\"kind\":\"symmetry_alignment_sample\",\"rows\":"
+              << options.rows << ",\"columns\":" << options.columns
+              << ",\"samples\":" << options.alignment_samples
+              << ",\"compatible\":" << compatible
+              << ",\"compatible_fraction\":"
+              << double(compatible) / options.alignment_samples
+              << ",\"mean_compatible_union_tokens\":"
+              << (compatible ? double(total_union_tokens) / compatible : 0.0)
+              << "}\n";
+}
+
+uint32_t compact_state(const uint64_t packed_state, const unsigned pair_count) {
+    const auto planes = unpack(packed_state);
+    uint32_t result = 0;
+    for (unsigned colour = 0; colour < 4; ++colour) {
+        result |= uint32_t(planes[colour]) << (colour * pair_count);
+    }
+    return result;
+}
+
+void direct_cube_contraction(
+    const Options &options,
+    const Canonicalizer &canonicalize,
+    const std::unordered_map<uint64_t, U128> &states) {
+    const unsigned pair_count = options.rows * (options.rows - 1) / 2;
+    const unsigned token_count = 4 * pair_count;
+    if (token_count > 24) {
+        throw std::runtime_error(
+            "direct dense subset oracle is restricted to at most 24 tokens");
+    }
+    const auto started = std::chrono::steady_clock::now();
+    const uint64_t group_order = factorial(options.rows) * 24;
+    std::vector<std::array<unsigned, 4>> colour_permutations;
+    std::array<unsigned, 4> colours{0, 1, 2, 3};
+    do {
+        colour_permutations.push_back(colours);
+    } while (std::next_permutation(colours.begin(), colours.end()));
+
+    std::unordered_map<uint32_t, uint64_t> labelled;
+    uint64_t expanded_states = 0;
+    for (const auto &[representative, orbit_mass] : states) {
+        const uint64_t stabilizer = canonicalize.stabilizer_size(representative);
+        const uint64_t orbit_size = group_order / stabilizer;
+        if (orbit_mass % orbit_size) {
+            throw std::runtime_error("orbit mass is not divisible by orbit size");
+        }
+        const U128 wide_weight = orbit_mass / orbit_size;
+        if (wide_weight > std::numeric_limits<uint64_t>::max()) {
+            throw std::runtime_error("per-state weight exceeds uint64_t");
+        }
+        const uint64_t weight = uint64_t(wide_weight);
+        std::unordered_set<uint32_t> orbit;
+        orbit.reserve(orbit_size);
+        for (size_t row_permutation = 0;
+             row_permutation < canonicalize.permutation_count();
+             ++row_permutation) {
+            for (const auto &colour_permutation : colour_permutations) {
+                orbit.insert(compact_state(canonicalize.transform(
+                    representative, row_permutation, colour_permutation),
+                    pair_count));
+            }
+        }
+        if (orbit.size() != orbit_size) {
+            throw std::runtime_error("expanded orbit has incorrect size");
+        }
+        expanded_states += orbit.size();
+        for (const uint32_t state : orbit) {
+            const auto [position, inserted] = labelled.emplace(state, weight);
+            if (!inserted && position->second != weight) {
+                throw std::runtime_error("inconsistent expanded state weight");
+            }
+        }
+    }
+    if (labelled.size() != expanded_states) {
+        throw std::runtime_error("distinct canonical orbits overlap");
+    }
+
+    const uint32_t domain = uint32_t(1) << token_count;
+    std::vector<uint64_t> subset_sum(domain);
+    for (const auto &[state, weight] : labelled) subset_sum[state] = weight;
+    for (unsigned bit = 0; bit < token_count; ++bit) {
+        const uint32_t flag = uint32_t(1) << bit;
+        for (uint32_t mask = 0; mask < domain; ++mask) {
+            if (mask & flag) subset_sum[mask] += subset_sum[mask ^ flag];
+        }
+    }
+
+    const uint32_t complete = domain - 1;
+    U128 answer = 0;
+    uint64_t pair_tests = 0;
+    uint64_t compatible_pairs = 0;
+    for (const auto &[representative, orbit_mass] : states) {
+        const uint64_t stabilizer = canonicalize.stabilizer_size(representative);
+        const uint64_t orbit_size = group_order / stabilizer;
+        const uint64_t left_weight = uint64_t(orbit_mass / orbit_size);
+        const uint32_t left = compact_state(representative, pair_count);
+        for (const auto &[right, right_weight] : labelled) {
+            ++pair_tests;
+            if (left & right) continue;
+            ++compatible_pairs;
+            const uint32_t allowed = complete ^ (left | right);
+            answer += U128(orbit_size) * left_weight * right_weight
+                * subset_sum[allowed];
+        }
+    }
+    std::cout << "{\"kind\":\"symmetry_direct_cube\",\"rows\":"
+              << options.rows << ",\"block_columns\":" << options.columns
+              << ",\"orbit_states\":" << states.size()
+              << ",\"labelled_states\":" << labelled.size()
+              << ",\"pair_tests\":" << pair_tests
+              << ",\"compatible_pairs\":" << compatible_pairs
+              << ",\"subset_domain\":" << domain
+              << ",\"answer\":\"" << decimal(answer)
+              << "\",\"seconds\":" << seconds_since(started)
+              << ",\"peak_rss_kib\":" << peak_rss_kib() << "}\n";
+    if (options.rows == 3 && options.columns == 3
+            && decimal(answer) != "4287132405909504") {
+        throw std::runtime_error("3x9 direct-cube fixture mismatch");
+    }
+    if (options.rows == 4 && options.columns == 3
+            && decimal(answer) != "257910839431786879488") {
+        throw std::runtime_error("4x9 direct-cube fixture mismatch");
+    }
+}
 
 std::vector<TransferRecord> run_transfer(const Options &options) {
     const auto overall_start = std::chrono::steady_clock::now();
@@ -345,6 +605,12 @@ std::vector<TransferRecord> run_transfer(const Options &options) {
                   << ",\"peak_rss_kib\":" << peak_rss_kib()
                   << "}\n" << std::flush;
     }
+    if (options.stabilizer_census) {
+        print_stabilizer_census(options, canonicalize, states);
+    }
+    if (options.direct_cube) {
+        direct_cube_contraction(options, canonicalize, states);
+    }
     return records;
 }
 
@@ -352,6 +618,7 @@ void self_test() {
     Options three;
     three.rows = 3;
     three.columns = 3;
+    three.direct_cube = true;
     const auto first = run_transfer(three);
     if (first.back().states != 18
             || decimal(first.back().coefficient_sum) != "228984") {

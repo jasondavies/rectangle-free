@@ -129,6 +129,62 @@ must avoid materializing `F4`, `F5`, or `F6` orbit states.  Merely replacing
 the row-permutation loop with a faster graph canonicalizer changes the
 five-minute timing, not the state-count obstruction.
 
+## Stabilizer-aware implicit contraction gate
+
+The remaining proposal is to retain only canonical `F3` states and sum their
+relative row/colour alignments through stabilizers or double cosets.  Exact
+stabilizer censuses give:
+
+| rows | `F3` orbits | labelled supports | trivial stabilizer | double-coset task lower bound |
+|---:|---:|---:|---:|---:|
+| 4 | 190 | 45,171 | 33 | 3,543,311 |
+| 5 | 2,679 | 5,057,864 | 1,209 | 8,882,640,126 |
+| 6 | 50,497 | 676,487,532 | 30,883 | 26,483,529,060,705 |
+
+For stabilizers `H` and `K` in a group `G`, a double coset contains at most
+`|H||K|` elements.  Summing
+
+\[
+\left\lceil\frac{|G|}{|H||K|}\right\rceil
+\]
+
+over all ordered orbit pairs gives the rigorous final column.  It counts
+alignment tasks before compatibility screening.  Uniform orbit-pair/random-
+alignment samples remain compatible 17.29% of the time at five rows and
+12.95% at six rows; compatibility is not rare enough to change the scale.
+The lower bound grows by about 2,981 times from five to six rows.
+
+An exact direct `F3 cubed` contraction validates the formulation at four rows.
+Expand only the second operand, fix the first by orbit, and answer the third
+operand with the dense subset sum
+
+\[
+Q(X)=\sum_{C\subseteq X}F_3(C).
+\]
+
+The calculation performs 8,582,490 orbit/labelled pair tests, of which
+1,957,976 are compatible, and returns
+
+\[
+T_4(4,9)=257910839431786879488
+\]
+
+in 0.263 seconds on CPU.  Its key primitive is a `2^24` table.  At five rows
+the same exact oracle has `2^40` entries and needs 8 TiB at 64 bits; at nine
+rows its domain is `2^144`.
+
+This closes the straightforward stabilizer/BMMA proposal.  A GPU could screen
+the bit-mask alignments rapidly, but screening is followed by billions to
+trillions of weighted subset queries, and the dense query primitive disappears
+after four rows.  At five rows the double-coset lower bound is already more
+than eleven times the 765.5 million source/support tests used by the explicit
+transfer, rather than the required 100-fold improvement.
+
+The only surviving version would require a new sparse, symmetry-aware subset
+oracle that evaluates many unions collectively without enumerating double
+cosets or materializing `F6`.  That is a new mathematical data structure, not
+a missing GPU implementation.
+
 ## Reproduction
 
 ```text
@@ -145,4 +201,10 @@ make universal_state_symmetry_probe
   --max-cache 20000000 --max-transitions 1000000000
 ./build/universal_state_symmetry_probe 6 4 --max-states 30000000 \
   --max-cache 20000000 --max-transitions 200000000
+./build/universal_state_symmetry_probe 5 3 --stabilizer-census \
+  --alignment-samples 1000000 --max-states 10000
+./build/universal_state_symmetry_probe 6 3 --stabilizer-census \
+  --alignment-samples 1000000 --max-states 100000
+./build/universal_state_symmetry_probe 4 3 --direct-cube \
+  --stabilizer-census --max-states 1000
 ```

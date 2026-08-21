@@ -12703,3 +12703,31 @@
   scale, but multiplication fills the orbit algebra far too rapidly. Any
   continuation must contract canonical `F3` states implicitly using
   stabilizers or another analytic device, without materializing `F4`--`F6`.
+
+### Experiment 391: Stabilizer-aware implicit `F3` cube gate
+
+- Goal: test whether the compact canonical `F3` table can be contracted three
+  times without materializing the exploding `F4`--`F6` invariant algebra, and
+  whether the remaining work has a credible BMMA/GPU formulation.
+- Stabilizer census: at rows four, five, and six, `F3` has respectively 190,
+  2,679, and 50,497 orbits. Trivial stabilizers occur for 33, 1,209, and 30,883
+  of them; full symmetry therefore becomes progressively less useful on the
+  generic states.
+- Relative-alignment lower bound: summing
+  `ceil(|G|/(|H_i||H_j|))` over ordered orbit pairs proves at least 3,543,311,
+  8,882,640,126, and 26,483,529,060,705 double-coset tasks at rows four, five,
+  and six before compatibility pruning. Uniform orbit-pair/random-alignment
+  samples are still compatible 17.29% at five rows and 12.95% at six.
+- Exact direct contraction: expand only one `F3` operand and answer the third
+  through a dense subset-sum table. At four rows this uses 190 canonical and
+  45,171 labelled states, screens 8,582,490 pairs, and reproduces
+  `T_4(4,9)=257910839431786879488` in 0.263s on CPU.
+- Scaling obstruction: the successful query table has `2^24` entries. Five
+  rows require `2^40`, or 8 TiB at 64 bits, and nine rows require `2^144`.
+  The five-row double-coset lower bound is already more than eleven times the
+  complete explicit-transfer test count, rather than 100 times smaller.
+- Outcome: reject straightforward stabilizer enumeration plus BMMA. GPU mask
+  screening is not the missing primitive; the obstruction is billions to
+  trillions of weighted subset queries. A continuation requires a new sparse,
+  symmetry-aware query circuit that aggregates unions collectively without
+  enumerating alignments or constructing `F6`.
