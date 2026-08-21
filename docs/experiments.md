@@ -12663,3 +12663,30 @@
   `9x9` method. This does not rule out every symmetry-adapted circuit, but a
   viable continuation must analytically avoid the certified separator ranks,
   not merely choose a different implementation or pair ordering.
+
+### Experiment 390: Full row/colour quotient of the universal state
+
+- Goal: test a materially different representation left open by Experiment
+  389: quotient the complete universal state under simultaneous `S_r x S_4`
+  row and direct-colour permutations, rather than retaining labelled token
+  coordinates in an ordered DD or tensor network.
+- Exact transfer: represent a state as four graph masks on the row set and
+  retain one canonical orbit representative with its total coefficient mass.
+  Because the one-column element is invariant, transition counts from any
+  member of a source orbit into a target orbit agree. Applying the transfer to
+  one representative and multiplying by source-orbit mass is therefore exact.
+- Small-row census: quotient `P^3` has 18, 190, and 2,679 states at rows three,
+  four, and five. At four rows, `P^6` has only 15,945 states and `P^9` 34,744;
+  this succeeds where the ordered `P^3 star P^3` MDD exceeded its million-node
+  cap. At five rows, `P^4` has 84,349 states. Aggregate masses independently
+  reproduce `T_4(3,3)=228984` and `T_4(4,4)=2545607472`.
+- Nine-row upper census: after row quotienting, valid three-column grids are
+  compatible subsets of 64 row words. Burnside under global colour and
+  internal block-column permutations gives 56,763,377 orbits at nine rows,
+  from 8,169,452,832 compatible row sets. Multiple word-set orbits may give
+  the same token support, so this is an upper bound on actual `F3` orbits.
+- Outcome: keep open. Full symmetry is a real compression unavailable to the
+  failed ordered representations, and tens of millions of compact `F3`
+  records could be stored. The next decisive gate is a compiled orbit transfer
+  through `P^6`: a compact `F3` is insufficient if convolution fills an
+  enormous invariant algebra.

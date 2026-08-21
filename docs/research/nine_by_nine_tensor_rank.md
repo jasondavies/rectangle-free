@@ -73,9 +73,11 @@ magnitude of additional structure, not a better implementation of these
 factorizations.
 
 This verdict is deliberately narrow.  It does not prove that every possible
-symmetry-adapted circuit for the universal identity is large.  A future method
-would need a new quotient or analytic contraction that avoids these certified
-separator ranks, rather than a different site ordering alone.
+symmetry-adapted circuit for the universal identity is large.  In particular,
+the subsequent [full-symmetry gate](nine_by_nine_full_symmetry.md) quotients
+the state under `S_r x S_4`, an identification unavailable to every ordered
+site representation tested here.  Its initial results are sufficiently
+compact to keep that distinct route open.
 
 ## Reproduction
 
