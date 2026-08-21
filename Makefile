@@ -322,6 +322,9 @@ $(BUILD_DIR)/colour_cut_cardinality_census: research/probes/colour_cut_cardinali
 		research/probes/prefix_hierarchy_8x8_census.cpp
 	$(CXX) -O3 -std=c++17 -fopenmp -march=native -o $@ $<
 
+$(BUILD_DIR)/universal_state_symmetry_probe: research/probes/universal_state_symmetry_probe.cpp
+	$(CXX) -O3 -std=c++17 -march=native -o $@ $<
+
 $(BUILD_DIR)/twocolour_3x4_probe: research/probes/twocolour_3x4_probe.c
 	$(CC) $(CFLAGS_5XN) -o $@ $<
 
@@ -357,7 +360,8 @@ BUILD_TARGETS := 5xn_count4 partition_count4 partition_poly partition_poly_7 \
 	prefix_bmma_portfolio_8x8_oracle column_split_8x8_oracle \
 	column_split_8x8_transform column_split_8x8_selector \
 	pair_projection_8x8_census behavioral_distribution_8x8_census \
-	twocolour_3x4_probe twocolour_7x7_solve gpu_result_checkpoint_test
+	universal_state_symmetry_probe twocolour_3x4_probe twocolour_7x7_solve \
+	gpu_result_checkpoint_test
 
 .PHONY: $(BUILD_TARGETS)
 $(BUILD_TARGETS): %: $(BUILD_DIR)/%

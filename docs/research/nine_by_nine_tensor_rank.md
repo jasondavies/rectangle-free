@@ -76,8 +76,10 @@ This verdict is deliberately narrow.  It does not prove that every possible
 symmetry-adapted circuit for the universal identity is large.  In particular,
 the subsequent [full-symmetry gate](nine_by_nine_full_symmetry.md) quotients
 the state under `S_r x S_4`, an identification unavailable to every ordered
-site representation tested here.  Its initial results are sufficiently
-compact to keep that distinct route open.
+site representation tested here.  That quotient is dramatically more compact,
+but its compiled follow-up still grows to 21,037,687 states at five-row `P^6`
+and 8,863,353 states already at six-row `P^4`; explicit closure of the
+invariant algebra was therefore also rejected for `9x9`.
 
 ## Reproduction
 

@@ -169,6 +169,8 @@ python3 -m unittest -v \
   tests.research.test_universal_state_dd_probe \
   tests.research.test_universal_state_tensor_rank_probe \
   tests.research.test_universal_state_symmetry_probe
+make universal_state_symmetry_probe
+./build/universal_state_symmetry_probe --self-test
 ```
 
 Production GPU results use self-identifying, checksummed checkpoints bound to

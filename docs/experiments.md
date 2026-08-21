@@ -12685,8 +12685,21 @@
   internal block-column permutations gives 56,763,377 orbits at nine rows,
   from 8,169,452,832 compatible row sets. Multiple word-set orbits may give
   the same token support, so this is an upper bound on actual `F3` orbits.
-- Outcome: keep open. Full symmetry is a real compression unavailable to the
-  failed ordered representations, and tens of millions of compact `F3`
-  records could be stored. The next decisive gate is a compiled orbit transfer
-  through `P^6`: a compact `F3` is insufficient if convolution fills an
-  enormous invariant algebra.
+- Compiled follow-up: add a packed four-graph state, precomputed row-mask
+  images, exact 128-bit orbit masses, bounded canonical cache, explicit
+  resource caps, and an independent self-test. It matches every Python count
+  through `4x9`.
+- Five-row result: `P^5` has 1,807,714 orbits; `P^6` has 21,037,687. The final
+  step performs 730,316,456 source/support tests in 307.8s and peaks at about
+  2.49 GiB on one Ryzen 7 9700X core. Its coefficient sum is the recorded
+  `T_4(5,6)=140221383170146560`.
+- Six-row result: `P^3` has 50,497 orbits and `P^4` already has 8,863,353, a
+  `175.5x` increase in one column. The latter step takes 309.3s and 1.55 GiB;
+  its sum `79102304162784` agrees by transposition with `T_4(4,6)`. Advancing
+  merely to `P^5` starts from about 18.5 billion source/support tests.
+- Revised outcome: reject explicit closure of the full invariant support
+  algebra for `9x9`. The quotient is a genuine breakthrough relative to
+  labelled coordinates and may keep a nine-row `F3` cache within storage
+  scale, but multiplication fills the orbit algebra far too rapidly. Any
+  continuation must contract canonical `F3` states implicitly using
+  stabilizers or another analytic device, without materializing `F4`--`F6`.
