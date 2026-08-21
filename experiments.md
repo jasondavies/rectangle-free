@@ -7890,3 +7890,4701 @@
   - benchmark command: `/usr/bin/time -f 'time_wall=%e maxrss_kb=%M' env RECT_PROGRESS_STEP=1000000 OMP_NUM_THREADS=1 ./partition_poly_7 7 5 --prefix-depth 2 --task-start 2 --task-end 3`
   - benchmark result after restoring the gate: `22.30s` wall, `649216 KiB` max RSS, matching output; this is effectively neutral against the previous accepted WL default (`22.26s`) and still faster than the earlier nauty baseline for this shard (`24.87s`)
 - Outcome: accepted as the default graph canonical key path; nauty has been removed from the production build.
+
+## 2026-08-11
+
+### Experiment 191: Hybrid min-fill addition-contraction for 8-row polynomial runs
+- Goal: exploit the low fill width observed in hard residual conflict graphs before attempting a full tree-decomposition solver, and establish a representative smaller `8xn` benchmark for work toward `8x8`.
+- Baseline benchmark selection:
+  - generic `partition_poly` supports 8 rows and generates `4140` column partitions
+  - command: `OMP_NUM_THREADS=1 ./partition_poly 8 5 --prefix-depth 2 --task-start 0 --task-end 1`
+  - the depth-2 prefix filter reduces `8,571,870` nominal pairs to `1,586` live tasks
+  - three baseline worker times were `14.80s`, `15.27s`, and `15.38s`, mean `15.15s`
+  - baseline counters: `3,272,766` canonicalisation calls and `32,529,585` raw-cache hits
+- Change:
+  - add the exact missing-edge recurrence `P(G) = P(G + uv) + P(G / uv)` alongside the existing deletion-contraction recurrence
+  - find a minimum-fill pivot and select a missing edge in its neighbourhood
+  - use addition-contraction only when the pivot needs at most a configured number of fill edges; otherwise retain the existing edge deletion-contraction heuristic
+  - stop the fill scan immediately at fill `1` and abandon candidate pivots once they exceed the configured limit
+  - add `RECT_ADDITION_CONTRACTION_FILL_LIMIT=N`; `0` disables the path
+  - default the limit to `2` only for polynomial runs with `g_rows >= 8`; fixed-4 and 7-row builds retain the previous path unless explicitly overridden
+- Fill-limit sweep on `8x5` task 0 before the final early-stop refinement:
+  - limit `1`: worker `13.93s`, canonicalisation calls `2,651,150`
+  - limit `2`: worker `13.71s`, canonicalisation calls `2,486,527`
+  - limit `3`: worker `13.76s`, canonicalisation calls `2,547,410`
+  - limit `4`: worker `13.81s`, canonicalisation calls `2,567,399`
+  - limit `2` was the best tested threshold
+- Final `8x5` task-0 result:
+  - worker `13.44s` versus the `15.15s` baseline mean, about an `11.3%` reduction
+  - canonicalisation calls `2,499,638`, down about `23.6%`
+  - profile hard nodes `824,355`, down from `1,154,916` (`28.6%`)
+  - profiled worker `19.32s` versus `20.65s`
+- Harder-prefix check:
+  - command used task range `[1,2)` instead of `[0,1)`
+  - baseline worker `117.45s`, canonicalisation calls `50,562,954`
+  - final hybrid worker `114.67s`, canonicalisation calls `48,292,821`
+  - improvement about `2.4%`; the benefit is smaller but remains positive on the much heavier prefix
+- Regression guard:
+  - forced fill limit `2` on `partition_poly_7 7 5 --task-start 2 --task-end 3`
+  - wall time regressed from `7.54s` to `7.84s`, so the new default is deliberately restricted to 8-row polynomial runs
+  - `partition_count4 4 4 --prefix-depth 2` remained `2545607472` and keeps the feature disabled by default
+- Correctness:
+  - all `8x5` task-0 variants produced `P(4) = 4206252739472179200` and `P(5) = 81067546619730819086400`
+  - baseline and hybrid task 1 both produced `P(4) = 78456786107545036800` and `P(5) = 1429396986741754633747200`
+  - the `8x4` task-0 polynomial matched exactly with the feature disabled and enabled
+  - `7x3 --task-end 2` retained `P(4) = 3076516800` and `P(5) = 126873860400`
+- Verification:
+  - `make partition_poly partition_poly_profile partition_poly_7 partition_count4`
+  - exact polynomial-output comparisons on the `8x4`, `8x5`, and `7x3` shards above
+- Interpretation: low-fill addition-contraction materially reduces hard recursion on the selected 8-row workload, but is not universally better. A small hybrid threshold captures the 8-row win while preserving the tuned 7-row default.
+- Outcome: accepted with an 8-row polynomial default fill limit of `2` and an environment override.
+
+### Experiment 192: Compact graph-result caches and a specialised 8x8 build
+- Goal: reduce the memory bandwidth and cache footprint of graph-polynomial memoisation while retaining exact 128-bit arithmetic for a future `8x8` computation.
+- Correctness design:
+  - keep `GraphPoly` and all solver arithmetic in signed 128-bit coefficients
+  - store row-cache and in-memory hard-cache coefficients as signed 64-bit values only after checking every live coefficient
+  - skip caching a result that does not fit; the wide result is still returned and used normally, so compact storage cannot change the answer
+  - report hard-cache `wide skips` explicitly
+  - preserve the existing persistent-cache file format with 128-bit coefficients; legacy files are converted with the same checked path when loaded
+  - copy only live coefficients and live upper-triangle signature words into hard-cache entries
+- Build consolidation:
+  - add `partition_poly_8` and `partition_poly_8_profile` targets with `MAX_ROWS=8`, `MAX_COLS=8`, and `MAX_GRAPH_VERTICES=32`
+  - the general `partition_poly` keeps `MAX_COLS=16` and therefore a 64-vertex graph representation even when invoked on `8x8`
+  - add the new targets to `make all`, `make clean`, and the README
+  - enable the same bounded shared hard-cache policy used for the 7-row specialised build: `2^22` buckets and at most `2,000,000` entries; `RECT_HARD_CACHE_BITS=0` remains an opt-out
+- Primary `8x5` task-0 comparisons, all with identical graph counters and polynomial:
+  - pre-change generic build, no hard cache: worker `13.44s`, wall `15.57s`, RSS `1,300,268 KiB`
+  - compact generic build, no hard cache: worker `13.31s`, wall `15.47s`, RSS `1,255,332 KiB`
+  - compact specialised build, no hard cache: worker `13.31s`, wall `15.47s`, RSS `1,149,360 KiB`
+  - specialised default hard cache: worker `13.30s`, wall `15.47s`, RSS `1,428,512 KiB`, hit rate `73,336/772,612` (`9.5%`)
+  - the specialised layout removes about `147 MiB` from the no-hard-cache process; the default hard cache is effectively time-neutral on this low-reuse prefix
+- Hard-cache representation comparison on the same task with `699,276` stored entries:
+  - original generic wide cache: worker `13.70s`, RSS `2,226,016 KiB`
+  - compact generic cache: worker `13.65s`, RSS `1,815,480 KiB`
+  - compact 32-vertex specialised cache: worker `13.45s`, RSS `1,404,060 KiB`
+  - total RSS is about `802 MiB` lower than the original wide/generic layout
+  - all compact runs reported `wide skips=0`
+- Harder `8x5` task-1 check:
+  - specialised build without hard cache: worker `113.49s`, versus `114.67s` before compact storage
+  - specialised build with the two-million-entry hard cache: worker `101.71s`, wall `103.89s`, RSS `1,885,564 KiB`
+  - hard-cache hits `2,989,258/9,936,628` (`30.1%`); the cap was reached and `4,947,370` later stores were skipped
+  - the hard cache improves this high-reuse single-thread prefix by about `10.4%`
+- Eight-thread task-1 check:
+  - no hard cache: worker `21.22s`, wall `23.38s`, RSS `1,757,320 KiB`, canonicalisation calls `63,963,860`
+  - default hard cache: worker `18.03s`, wall `20.23s`, RSS `2,493,648 KiB`, canonicalisation calls `37,630,548`
+  - the shared hard cache improves wall time by about `13.5%` while adding about `719 MiB` RSS
+- 7-row regression and persistence checks:
+  - `7x5` task 2 remained effectively flat in time (`7.54s` before, `7.60s` compact) while RSS dropped from `648,876 KiB` to `427,252 KiB`
+  - a pre-change persistent cache containing `994,527` wide entries loaded completely into the compact cache with `wide skips=0`; the exact-preload worker was `5.18s`
+  - a new `4x4` save/load round trip produced a `100%` hard-cache hit and identical polynomial output
+- Correctness:
+  - all `8x5` task-0 runs produced `P(4) = 4206252739472179200` and `P(5) = 81067546619730819086400`
+  - all task-1 runs produced `P(4) = 78456786107545036800` and `P(5) = 1429396986741754633747200`
+  - `partition_count4` retains its native `uint64_t` cache representation
+- Interpretation: compact checked storage is primarily a memory-capacity win, with a small locality improvement even when the hard cache is disabled. The specialised 32-vertex build is important for `8x8`: it avoids paying for the general binary's unused 64-vertex rows and signatures, and makes a beneficial shared hard cache affordable.
+- Outcome: accepted; `partition_poly_8` is now the preferred executable for 8-row polynomial work.
+
+### Experiment 193: Exact bounded-treewidth polynomial solver
+- Goal: replace deletion-contraction on the low-width tail of hard 8-row residual graphs with a solver whose state count is controlled by treewidth.
+- Residual-graph measurement:
+  - logged `830,528` hard misses from `8x5` task 0 with the hard cache disabled
+  - sampled every 41st record, `20,257` graphs total
+  - greedy min-fill width was usually `5` or `6`: medians were `5` at `n=8`, `6` at `n=10..13`, and `5` at `n=14..18`
+  - the 90th percentile was generally `6` or `7`; the sampled maximum was `10` apart from one `n=20` graph at width `12`
+  - mean fill-edge counts rose from `2.85` at `n=8` to roughly `14..20` at `n=14..19`, so a full fill recurrence would still branch heavily
+- Algorithm:
+  - compute a greedy min-fill chordal completion and its elimination-tree decomposition
+  - represent a bag colouring by its restricted-growth equality pattern, quotienting concrete colour names
+  - for each subtree, store the conditional polynomial for a fixed concrete assignment realizing each bag pattern
+  - when forgetting a singleton colour block, multiply by `x - b`, where `b` is the number of colours still represented in the separator; merging into an existing block has multiplicity one
+  - multiply child-subtree tables at joins and multiply root states by the appropriate falling factorial
+  - precompute partition catalogues through bag size 7: at width 5 the largest catalogue has `Bell(6) = 203` states; width 6 has `Bell(7) = 877`
+  - use checked 128-bit polynomial arithmetic; on an unsupported width, allocation failure, or arithmetic overflow, return to the existing exact deletion-contraction path
+- Controls and profiling:
+  - add `RECT_TREEWIDTH_LIMIT` in `[0,6]` and `RECT_TREEWIDTH_MIN_N`
+  - add per-`n` profile counters for attempts, successes, and total treewidth-solver time
+  - the specialised `partition_poly_8` default is width limit `5`, minimum `n=18`; other builds default to disabled
+- Broad-dispatch result on `8x5` task 0 with the hard cache disabled:
+  - baseline compact/specialised worker was about `13.31s`
+  - width `5`, minimum `n=14`: worker `16.72s`, a clear regression despite reducing canonicalisation calls from `2,499,638` to `2,106,650`
+  - profiled run attempted `395,967` high-`n` residuals and solved `178,686`; treewidth DP itself used about `3.88s`
+  - successful dispatch rates ranged from `38.0%` at `n=14`, `48.3%` at `n=15`, and `51.7%` at `n=16`, but most replaced deletion-contraction subtrees were already cheap cache-rich solves
+  - width `4`, minimum `n=14`: worker `13.54s`, also slightly worse
+  - width `5`, minimum `n=16`: worker `14.22s`, still worse
+- Conservative high-`n` dispatch:
+  - width `5`, minimum `n=18`, task 0 without hard cache: worker `13.46s`; essentially neutral within run variation
+  - width `6`, minimum `n=18`: worker `13.43s`; the 877-state bags did not improve on width 5
+  - final default task 0 with the hard cache and width-5 dispatch: worker `13.38s`, wall `15.54s`, RSS `1,427,424 KiB`, exact output
+- Hard-prefix result on `8x5` task 1:
+  - without hard cache: `113.49s` baseline versus `112.32s` with width `5`, minimum `n=18`, about `1.0%` faster
+  - with the default hard cache: `101.71s` baseline versus `100.71s`, about `1.0%` faster
+  - width `6` with the hard cache was slightly worse at `100.83s`
+  - this confirms that the DP pays only on the largest residuals; a broad size gate overwhelms its recursion savings
+- Independent correctness checks:
+  - exhaustively compared the DP against brute-force colour counts for every connected labelled graph through `n=5`, at every integer colour count from `0` through `n`
+  - also checked 100 deterministic random 7-vertex graphs in the same way
+  - all checks passed
+  - `8x4` task 0 matched the baseline polynomial with a forced width-5, minimum-`n=8` dispatch
+  - every `8x5` threshold variant produced the baseline task-0 and task-1 values
+- Verification:
+  - `make partition_poly_8 partition_poly_8_profile partition_poly_7 partition_count4`
+  - `src/treewidth.c` compiled cleanly with `-Wall -Wextra -Werror`
+  - fixed-4 retains its direct DSAT path; the treewidth implementation currently dispatches polynomial mode only
+- Interpretation: the low-width observation is real, but width alone is not a sufficient dispatch signal because deletion-contraction plus caches already solves most medium residuals very cheaply. The conservative `n>=18`, width-5 gate gives a small measured win and is more likely to become useful as 8-row column count increases.
+- Outcome: accepted for `partition_poly_8` with conservative defaults and runtime overrides.
+
+### Experiment 194: Aggregate repeated terminal graphs
+- Goal: avoid solving the same terminal conflict graph repeatedly when many row-partition paths produce it with different weight polynomials.
+- Algorithm:
+  - defer terminal graph-polynomial evaluation into a thread-local open-addressed table keyed by the exact labelled graph
+  - add the path weight polynomial to an existing entry when the graph repeats
+  - at 75% table occupancy, solve each unique graph once, multiply by its accumulated weight, and add the contribution directly to the thread total
+  - keep all weights and final arithmetic in checked signed 128-bit coefficients; aggregation changes only the order of exact additions
+  - flush before an adaptive worker context is destroyed and again when each worker finishes
+- Controls and defaults:
+  - add `RECT_TERMINAL_AGGREGATE_BITS` in `[0,18]`; `0` disables the feature and a positive value selects `2^bits` slots per worker
+  - `partition_poly_8` defaults to 12 bits (4096 slots) for one thread and 10 bits (1024 slots per worker) when OpenMP uses more than one thread
+  - other targets remain disabled by default
+- Single-thread `8x5` task-0 sweep without the hard cache:
+  - previous compact/treewidth baseline: worker about `13.38s`
+  - 10 bits: worker `10.06s`, wall `12.22s`, RSS `1,151,300 KiB`
+  - 12 bits: worker `9.88s`, wall `12.04s`, RSS `1,155,204 KiB`
+  - 13 bits: worker `10.01s`; 14 bits: worker `10.52s`
+  - larger batches group slightly more work but lose enough cache locality to regress, making 12 bits the single-thread choice
+- Profile of the 12-bit task-0 run:
+  - `33,559,959` terminal inputs became `5,599,786` unique table entries, with `27,960,173` grouped hits (`83.3%` of inputs)
+  - `1,823` flushes; the inclusive aggregation/solve phase used `5.774s`
+  - `solve_graph_poly` calls were `7,638,588`; canonicalisation calls were `2,494,369`, with `4,743,468` raw-cache hits
+- Hard-prefix result on single-thread `8x5` task 1:
+  - previous hard-cache/treewidth worker: `100.71s`
+  - 12-bit aggregation: worker `84.66s`, wall `86.84s`, RSS `1,891,224 KiB`
+  - canonicalisation calls fell to `32,727,156`; the hard cache hit `2,989,507/9,926,170`
+  - worker time improved by about `15.9%`
+- Eight-thread task-1 sizing:
+  - previous hard-cache/treewidth baseline: worker `18.03s`, wall `20.23s`, RSS `2,493,648 KiB`
+  - 12 bits per worker was effectively flat at worker `18.26s`, wall `20.44s`
+  - 11 bits improved to worker `17.24s`, wall `19.42s`
+  - 10 bits improved to worker `16.27s`, wall `18.46s`, about `9.8%` worker and `8.7%` wall reduction
+  - this motivates the smaller automatic multi-thread default
+- Additional checks:
+  - after restricting graph and polynomial copies to their live fields, the final default task-0 run produced worker `9.95s`, wall `12.11s`, RSS `1,432,744 KiB`
+  - forced aggregation on `partition_poly_7 7 5` task 2 improved worker time from roughly `7.55s` to `6.99s`, but the default remains restricted to the 8-row target while 8-row tuning is the priority
+  - an eight-thread `8x4` task-0 run selected the 10-bit default and retained the exact polynomial
+- Correctness:
+  - every `8x5` task-0 run retained `P(4) = 4206252739472179200` and `P(5) = 81067546619730819086400`
+  - task 1 retained `P(4) = 78456786107545036800` and `P(5) = 1429396986741754633747200`
+  - `8x4` task 0 retained `P(4) = 138897830756160` and `P(5) = 257644175101588800`
+- Interpretation: the dominant duplication was above the graph solver and therefore invisible to both raw and canonical graph caches. Combining the algebraic weights first removes most of those repeated entries while preserving exactness. Moderate tables work best because they retain locality and bound per-thread memory.
+- Outcome: accepted for `partition_poly_8`, with separate single-thread and multi-thread defaults plus an environment override.
+
+### Experiment 195: Profile-guided 8-row production build
+- Goal: improve branch layout, inlining, and hot-path code placement without adding runtime work or changing the solver algorithm.
+- Build workflow:
+  - add optional `make partition_poly_8_pgo`, outside `make all`
+  - compile an instrumented binary with GCC `-fprofile-generate`
+  - train it on single-thread `8x5` task 0 with the normal 8-row defaults
+  - rebuild the same binary with `-fprofile-use -fprofile-correction`
+  - keep the generated profiles and binary out of Git, and remove both through `make clean`
+- Repeated single-thread `8x5` task-0 comparison:
+  - ordinary worker times: `9.95s`, `9.97s`, `10.35s`; mean `10.09s`
+  - PGO worker times: `9.47s`, `9.51s`, `9.54s`; mean `9.51s`
+  - ordinary wall times: `12.11s`, `12.14s`, `12.48s`; mean `12.24s`
+  - PGO wall times: `11.65s`, `11.67s`, `11.72s`; mean `11.68s`
+  - mean improvement was about `5.7%` in worker time and `4.6%` wall time
+- Generalisation beyond the training shard:
+  - single-thread `8x5` task 1 improved from worker `84.66s` to `80.88s` and wall `86.84s` to `83.06s`, about `4.5%`
+  - eight-thread task 1 improved from worker `16.27s` to `15.16s` and wall `18.46s` to `17.35s`, about `6.8%` worker and `6.0%` wall time
+  - graph counters were unchanged, confirming that the gain comes from generated code rather than a different search tree
+- Correctness:
+  - all task-0 runs retained `P(4) = 4206252739472179200` and `P(5) = 81067546619730819086400`
+  - both task-1 checks retained `P(4) = 78456786107545036800` and `P(5) = 1429396986741754633747200`
+  - the checked-in PGO target completed without missing-profile warnings and reproduced the task-0 result
+- Trade-off: building includes the instrumented training run and therefore takes about a minute on the benchmark host and uses the normal large 8-row caches. It is suitable for a production `8xn` campaign, but too expensive to make part of every ordinary build.
+- Outcome: accepted as an optional host- and compiler-specific `partition_poly_8_pgo` target.
+
+### Experiment 196: Diagnose the 8x5 to 8x6 growth
+- Goal: determine whether the next-column growth is caused by local implementation overhead or by the high-level column-partition recurrence that must also be faced at `8x8`.
+- Scope:
+  - keep eight rows fixed even though `T_k(8,6) = T_k(6,8)`, because the purpose is to exercise the Bell(8) partition space and 8-row conflict graphs used by the eventual square computation
+  - use the PGO build and the accepted 8-row defaults
+- Coarse result:
+  - `8x5` task 0 completes in roughly `9.5s` worker / `11.7s` wall on one thread
+  - the corresponding depth-2 `8x6` task 0 did not complete within a `180s` wall-time cap on 16 threads
+  - this is consistent with the expected order-of-magnitude-per-column growth and rules out extrapolating the recent constant-factor wins into `8x8` feasibility
+- Exact depth-3 probe:
+  - command: `OMP_NUM_THREADS=1 ./partition_poly_8_profile 8 6 --prefix-depth 3 --no-adaptive-subdivide --task-start 0 --task-end 1`
+  - worker `20.26s`, wall `22.39s`, RSS `1,864,100 KiB`
+  - exact values: `P(4) = 9598839395501260800`, `P(5) = 1830913848615752312832000`
+- Where the work grows:
+  - the one fixed three-column prefix generated `35,029,738` candidate pushes in the remaining recurrence
+  - at the terminal depth, `34,993,312` candidates produced `33,560,598` accepted structures: a `95.9%` acceptance rate
+  - terminal aggregation reduced `33,560,598` inputs to `5,599,786` batch-unique graphs, grouping `83.3%` before graph solving
+  - graph solving still made `9,796,757` recursive calls and `1,899,395` hard misses; inclusive graph-solver time was `61.01s` across recursion
+  - canonical prefix preparation itself used only `1.63s`, and partial graph append used `2.63s`
+  - the hard-cache limit was not yet the cause on this shard: it stored `1,899,395` entries without skipped stores
+- Structural implication:
+  - almost every final partition candidate survives row-canonical filtering, so another faster canonical-state implementation cannot change the growth factor
+  - terminal batching removes repeated graph work but still has to enumerate every candidate and still leaves millions of distinct graph evaluations
+  - the next algorithm needs to combine all possible next columns before materialising a separate terminal conflict graph for each column multiset
+- Proposed direction: transfer over colour histories. For each colour, retain the 28-bit set of row pairs that have already appeared together in a column. A new column is legal exactly when every colour's new within-column pair mask is disjoint from its history. Colours are interchangeable, so the state is a row-symmetric multiset of pair masks; inactive/singleton-only colours can be represented symbolically. This formulation merges column-partition and graph-colouring work into one recurrence and is the first candidate in this sequence capable of changing the per-column exponent.
+- Outcome: no local solver change accepted; use this profile as the baseline and pivot to a row-pair-history transfer prototype.
+
+### Experiment 197: Row-pair-history transfer prototype
+- Goal: test a fundamentally different recurrence that combines equivalent column histories before constructing millions of terminal conflict graphs.
+- Mathematical state:
+  - for each of four colours, store the bit set of row pairs that have already appeared together in a column
+  - a new column is legal exactly when its per-colour clique masks are disjoint from those history masks
+  - merge states under colour permutations and all row permutations
+  - this condition is necessary and sufficient: a monochromatic rectangle is precisely a repeated `(colour, row pair)` token in two columns
+- Prototype implementation:
+  - add the optional `pairmask_transfer_probe` target for two through eight rows
+  - compress all `4^r` labelled columns into distinct four-mask increments with multiplicities
+  - use a coloured row/pair/colour incidence refinement as a fast canonical path
+  - when refinement is not discrete, exhaust all `r!` row permutations for an exact fallback; cache every result
+  - retain exact unsigned 128-bit counts for probes with at most 64 cells
+- Exact validation:
+  - `4xn` state counts after columns 1 through 4 were `5`, `30`, `190`, `1,182`
+  - the corresponding totals were `256`, `59,928`, `12,870,096`, and `2,545,607,472`, matching `results.txt`
+  - `5xn` matched through column 5, including `T_4(5,4) = 465659203104` and `T_4(5,5) = 272454472598400`
+  - `8x2` produced `T_4(8,2) = 2949156864`, agreeing with transposition and the recorded `2x8` value
+- Eight-row state growth:
+  - `4^8 = 65,536` labelled columns compress to `50,016` distinct aligned increments
+  - after row and colour symmetry, the first column has only `15` history states
+  - the second column evaluates `448,579` legal compressed transitions and merges them into `3,823` exact history states
+  - the unoptimised exact-canonical run used `113.06s` and about `41 MiB`; `35,808` cache-miss states refined discretely while `232,489` required the factorial fallback
+- Interpretation:
+  - the representation is exact and demonstrates the desired high-level merge: an entire column is absorbed into thousands of history states rather than millions of conflict-graph leaves
+  - the current implementation is not yet competitive because canonicalisation, not the recurrence, dominates the two-column probe
+  - a third column has an upper bound of roughly `3,823 * 50,016 = 191 million` compressed state/increment pairs before compatibility pruning, so a production attempt needs transition indexing as well as a true individualize/refine canonicalizer
+  - this fixed-four prototype does not itself produce the full chromatic polynomial. Generalising it requires a variable multiset of active nonzero colour histories; inactive and singleton-only colours can be represented symbolically with falling-factorial transition factors
+- Outcome: retain the exact probe as research infrastructure, but do not replace the partition-polynomial solver yet. The next serious implementation should combine individualize/refine state canonicalisation, compatibility-indexed transitions, and symbolic inactive colours rather than further tuning deletion-contraction.
+
+### Experiment 198: Individualize/refine transfer-state canonicalisation
+- Goal: remove the transfer prototype's immediate factorial bottleneck and determine whether the third eight-row column is reachable with the same state formulation.
+- Change:
+  - refine a coloured incidence graph containing row, row-pair, and colour vertices
+  - when row cells remain non-discrete, individualize a row in the smallest cell, refine again, and recursively compare the resulting row orders
+  - every emitted representative is obtained by an actual row permutation and colour-mask sort, so merges are safe; the deliberately simple search may leave some equivalent states separate
+  - cache raw-to-representative results as before
+- Correctness:
+  - `4x1..4` and `5x1..4` retained all recorded exact values
+  - `8x2` retained `T_4(8,2) = 2949156864`
+- Eight-row result:
+  - previous exhaustive-permutation canonicalisation: `113.92s`, `3,823` fully canonical states after column 2
+  - individualize/refine: `9.79s`, `7,336` safe representatives after column 2
+  - this is an `11.6x` runtime improvement at the cost of retaining about `1.9x` as many equivalent representatives
+  - the two-column pass considered `516,421` legal compressed transitions; `39,602` cache-miss states refined immediately and `279,055` invoked individualize/refine, visiting `4,516,585` search nodes
+- Third-column boundary:
+  - scanning all `50,016` compressed increments from each representative gives a raw upper bound of about `367 million` pairs
+  - that run did not finish within a `180s` cap
+  - a second prototype generated only legal labelled columns by row-wise compatibility backtracking; it still had not completed after `107.68s` and had reached about `1.97 GiB` RSS
+  - labelled backtracking discarded illegal assignments but lost the existing increment multiplicity compression, so it was reverted
+- Interpretation: state canonicalisation was a real, removable bottleneck, but the experiment exposes the next exponent one column earlier than needed. A viable transition engine must return compressed compatible increments directly, for example from a memoized decision trie or bitset index, and stronger canonical refinement would reduce the input state set further.
+- Outcome: accept individualize/refine in the research probe; reject and revert labelled compatibility backtracking. The transfer route remains mathematically promising but is not yet an `8x8` polynomial algorithm.
+
+### Experiment 199: Exact-depth pair-token packing recurrences
+- Goal: avoid breadth-first materialisation of every intermediate transfer state when only the fixed value `T_4(8,n)` is required.
+- Set-packing formulation:
+  - regard each `(colour, row pair)` as one of 112 resources and each compressed column increment as a weighted set of resources
+  - an `n`-column rectangle-free colouring is exactly an ordered packing of `n` pairwise-disjoint increments
+  - first solve an unordered exact-size packing recurrence, choosing a scarce available token for the include/exclude branch, then multiply by `n!`
+  - prune whenever the number of available tokens is below `n` times the minimum per-column token count; for eight rows that minimum is four
+- Set-packing results:
+  - `5x5` completed in `0.351s` with `72,704` memo states and retained `T_4(5,5) = 272454472598400`
+  - `8x2` completed in `7.558s` with `46,294` states and about `89.5 MiB` RSS, retaining `T_4(8,2) = 2949156864`
+  - `8x3` did not complete within `180s`; it had reached about `3.02 million` states after `175s`
+  - an earlier recurrence that computed all packing sizes simultaneously was substantially worse: `8x2` required `6,206,329` states, `85.526s`, and about `4.9 GiB`
+  - an additional per-colour clique-capacity upper bound did not measurably change the probes and was reverted
+- Ordered recurrence:
+  - columns in the grid are already ordered, so replace include/exclude set packing by `F(U,k) = sum_M weight(M) F(U \\ M,k-1)`, where the sum is over compressed column masks `M` contained in the available-token state `U`
+  - this removes the exclude-token branch and counts labelled grid columns directly; canonical row/colour symmetry remains confined to the memo key
+  - `5x5` completed in `1.220s` and retained the recorded exact value
+  - `8x2` completed in `2.515s` with only `18` memo states
+  - `8x3` completed in `12.726s` with `6,494` memo states and about `58.5 MiB` RSS, producing `T_4(8,3) = 90068239391616`
+  - the unoptimised `8x4` run exceeded a `240s` cap; at `235.7s` it had `2,185,116` memo states, `14,733,547` memo hits, and `16,057,294` canonicalisation-cache entries
+- Interpretation: the ordered recurrence is the first exact eight-row method here that changes the high-level enumeration enough to make three columns cheap. The `8x4` profile shows that scanning all `50,016` compressed increments at terminal states is now the immediate bottleneck; the exact final-column total should instead be counted by a constrained row-colouring recursion.
+- Outcome: retain both research modes and make `--ordered` the preferred fixed-four path. Optimise terminal compatible-column counting before judging its `8x8` feasibility.
+
+### Experiment 200: Row-wise terminal-column counting
+- Goal: replace the ordered recurrence's scan of all `50,016` compressed increments at `k = 1` with direct enumeration of only compatible labelled columns.
+- Change tested:
+  - recursively colour the eight rows, rejecting a colour as soon as it would reuse an unavailable `(colour, row pair)` token
+  - choose the next row with the fewest currently legal colours
+  - combine branches for colours whose available masks and current row sets are identical, multiplying by their exact labelled multiplicity
+- Correctness: retained `T_4(5,5)`, `T_4(8,2)`, and `T_4(8,3)` exactly.
+- Performance:
+  - `8x3` regressed from `12.832s` for the compressed scan to `14.505s` for row-wise counting
+  - on `8x4`, after about `85s` the recursive version had processed `196,273` memo states, versus roughly `414,000` states at the same point in the scan baseline
+  - the run was stopped at `88.13s` and about `483 MiB` RSS once the regression was clear
+- Interpretation: after three columns the terminal constraints are still loose enough that row recursion visits much of the `4^8 = 65,536` assignment tree. The compressed scan's tight flat loop is cheaper. A bulk bitset intersection over all labelled columns is a better way to exploit the same terminal-query structure.
+- Outcome: rejected and reverted. Retain the `50,016`-increment terminal scan as the baseline for the next experiment.
+
+### Experiment 201: Bit-parallel terminal-column counting
+- Goal: answer the same exact terminal compatible-column query in bulk without the loose-constraint traversal cost of Experiment 200.
+- Change:
+  - precompute one bitset over all `4^r` labelled columns for each `(colour, row pair)` token
+  - for a terminal state, start with every labelled column and intersect away the bitset for each unavailable token
+  - population-count the survivors; this directly includes the multiplicities represented by the compressed-increment weights
+  - the eight-row tables occupy only about `0.9 MiB` (`112 * 65,536` bits)
+- Correctness: retained exact `T_4(5,5) = 272454472598400`, `T_4(8,2) = 2949156864`, and `T_4(8,3) = 90068239391616`.
+- Performance:
+  - `8x3` was effectively unchanged at `12.751s` versus the `12.832s` scan baseline, because generation and canonicalisation of the preceding level dominate this small case
+  - in matched `8x4` runs, the bitset version reached `2,874,932` memo states by `236.3s`, versus `2,185,116` for the scan at `235.7s`, about `31.6%` more search progress
+  - neither version completed within the `240s` cap
+- Interpretation: terminal subset queries are faster, but they are no longer the only dominant cost. The bitset run made more than 25 million memo hits and accumulated more than 26 million raw-to-canonical cache entries; canonicalising every child before discovering that it is memoised is now both the main repeated work and the memory risk.
+- Outcome: accepted as the terminal implementation. Next bound or redesign the raw canonicalisation cache before attempting a longer exact `8x4` run.
+
+### Experiment 202: Bounded raw canonicalisation cache
+- Goal: remove the ordered solver's largest avoidable memory growth without giving back the progress from Experiment 201.
+- Change:
+  - use a fixed `2^20`-entry direct-mapped raw-to-canonical cache in ordered mode
+  - overwrite on hash collision, preserving recent/local reuse without rehashing or retaining every one-off raw child
+  - leave the original growing exact-key cache in place for the breadth-first and set-packing research modes
+- Correctness: cache replacement can only cause recomputation, not a wrong merge; `8x3` again produced `T_4(8,3) = 90068239391616`.
+- Performance:
+  - `8x3` took `12.941s`, a small `1.5%` regression from the unbounded bitset run
+  - at the matched `8x4` cap, the bounded version reached `2,879,073` memo states by `236.0s`, essentially identical to the unbounded version's `2,874,932` states by `236.3s`
+  - the cache filled at `1,048,576` slots and had served `1,806,790` hits by that point; the unbounded version had retained more than 26 million entries
+  - for reference, the fixed table is about `36 MiB` at the current `CanonEntry` layout, whereas an open-addressed table holding 26 million entries requires a capacity of at least `2^26` slots and roughly `2.25 GiB`
+- Interpretation: almost all late raw child states are seen once. A small replacement cache captures the useful locality, bounds memory, and also removes large rehash spikes. The remaining large structure is the canonical ordered memo itself, which stores values that genuinely recur.
+- Outcome: accepted. Use the bounded cache for a longer exact `8x4` run, then use that completed growth curve to decide whether `8x5` or a stronger canonical form is the next sensible target.
+
+### Experiment 203: Long bounded-cache `T_4(8,4)` feasibility run
+- Goal: determine whether the accepted ordered recurrence completes `8x4` on one process once raw canonicalisation memory is bounded.
+- Command: `/usr/bin/time timeout 900s ./pairmask_transfer_probe 8 4 --ordered`.
+- Result at the cap:
+  - `9,494,274` canonical memo states and `9,494,277` hard calls
+  - `106,061,639` memo hits, an `11.2:1` hit-to-state ratio
+  - `4,457,780` raw-canonical cache hits from the fixed `1,048,576` slots
+  - `1,219,840 KiB` peak RSS
+  - the run remained healthy but did not finish, so no new exact value was emitted
+- Growth shape: the state count advances in waves because the recurrence is depth first. Long intervals dominated by memo hits are followed by new terminal-state families, so a short plateau is not evidence that completion is imminent.
+- Interpretation:
+  - fixed `T_4(8,4)` is operationally feasible as a longer or checkpointed campaign: the process stayed near `1.2 GiB` rather than growing with every raw child
+  - it is not yet a practical stepping stone to `8x8`; even before adding a fifth column, the current single-process traversal exceeds 15 minutes and ten million canonical states are plausible
+  - the next high-level target is symmetry completeness and campaign decomposition. The current individualize/refine key deliberately retains equivalent representatives (`7,336` rather than the known exact `3,823` at two columns), so a true canonical form could plausibly reduce both the value memo and the next-column fanout by a material factor
+- Outcome: do not spend the next experiment on `8x5`. Instrument completed subproblems and decompose the first column into its 15 exact row/colour orbits so `8x4` can be checkpointed and the cost of each orbit measured independently.
+
+### Experiment 204: Exact first-column orbit decomposition
+- Goal: replace redundant first-column enumeration with a mathematically complete decomposition that also makes long computations independently checkpointable.
+- Change:
+  - enumerate the integer partitions of the row count into at most four positive parts; for eight rows these are the 15 exact row/colour orbits of one column
+  - construct one representative available-token state per partition
+  - weight a shape with block sizes `s_i` by `8! / (product(s_i!) product(m_j!)) * 4! / (4-b)!`, where `m_j` are repeated-size multiplicities and `b` is the number of blocks
+  - allow `--ordered ORBIT` to compute one weighted first-column contribution independently
+  - report completed memo entries at remaining depths one through three so future caps reveal real traversal progress
+- Validation:
+  - the 15 eight-row multiplicities sum to `65,536 = 4^8`
+  - the decomposed recurrence retained `T_4(8,1) = 65536`, `T_4(8,2) = 2949156864`, and `T_4(8,3) = 90068239391616`
+  - orbit 0 (`8`, all rows initially the same colour) completed independently for `8x4` with weighted contribution `9510841967616`
+- Performance:
+  - `8x2` fell from `2.485s` to `0.191s` because the initial 50,016-increment scan and its duplicate canonical calls disappeared
+  - `8x3` fell from `12.941s` to `9.324s`, a `28.0%` improvement, while the memo count changed from `6,494` to `6,488`
+  - the easy `8x4` orbit 0 took `6.769s`, `2,584` memo states, and about `48.7 MiB` RSS
+- Interpretation: this is both a real symmetry reduction and a campaign-control improvement. It does not change the worst descendant exponent, but it removes the known incomplete canonical split at the root and permits exact contributions to be run, verified, and committed separately.
+- Outcome: accepted. Attempt the complete 15-orbit `8x4` sum with shared memo, using the per-orbit completion output to identify the dominant shapes; split into separate processes only where wall time or recovery requires it.
+
+### Experiment 205: Complete orbit campaign for `T_4(8,4)`
+- Goal: finish and independently validate the first nontrivial eight-row target with the ordered pair-token recurrence.
+- Shared-memo run:
+  - a `900s` run completed orbits 0 through 12, ending just after the `3+3+1+1` contribution
+  - at the cap it had about `8.58 million` memo states, `104.9 million` memo hits, and `1,220,060 KiB` peak RSS
+- Remaining independent runs:
+  - orbit 13 (`3+2+2+1`) took `370.19s`, `7,675,986` isolated memo states, and `1,220,144 KiB` RSS; contribution `725392141118023680`
+  - orbit 14 (`2+2+2+2`) took `118.77s`, `1,520,840` isolated memo states, and `335,576 KiB` RSS; contribution `104907632792296320`
+- Exact weighted contributions by first-column shape:
+  - `8`: `9510841967616`
+  - `7+1`: `492063098241024`
+  - `6+2`: `2895201787935744`
+  - `6+1+1`: `6934067041241088`
+  - `5+3`: `7801464718268928`
+  - `5+2+1`: `64793994715634688`
+  - `5+1+1+1`: `25978047065220096`
+  - `4+4`: `5372445867102720`
+  - `4+3+1`: `133693379907333120`
+  - `4+2+2`: `115707987172592640`
+  - `4+2+1+1`: `279148456023413760`
+  - `3+3+2`: `173199752301219840`
+  - `3+3+1+1`: `209131078408519680`
+  - `3+2+2+1`: `725392141118023680`
+  - `2+2+2+2`: `104907632792296320`
+- Result: the sum is `T_4(8,4) = 1855457222859010944`, exactly matching the recorded transposed `T_4(4,8)` value.
+- Scaling implication: the accepted implementation moves from `9.3s` for `8x3` to roughly 15 minutes for most of a shared `8x4` run, with additional isolated work needed after the cap. This supports the user's estimate of an approximately `100x` per-column step. Straight extrapolation makes `8x5` a day-scale computation and makes `8x8` infeasible by many orders of magnitude, before considering memory growth.
+- Structural observation: balanced first columns are the hard cases, but symmetry can also create high hit rates; `3+2+2+1` used about `7.68 million` isolated states, while `2+2+2+2` used only `1.52 million` states but made `14.3 million` memo hits.
+- Outcome: exact `8x4` feasibility is demonstrated and the orbit result is checkpointed. Do not launch `8x5` with this state representation unchanged; first repair or strengthen canonicalisation, whose known `7,336` versus `3,823` two-column over-splitting can amplify both state count and fanout at every later level.
+
+### Experiment 206: Invariant individualize/refine cell selection
+- Goal: explain and remove the canonicalizer's known split of the exact `3,823` two-column symmetry orbits into `7,336` safe representatives.
+- Cause: when several non-singleton row cells had the same minimum size, the individualize/refine search selected the cell containing the lowest original row label. That choice is not invariant under a row relabelling, so isomorphic inputs could follow different search trees and emit different representatives.
+- Change: scan refined colour-cell identifiers in their canonical signature order and choose the first minimum-size row cell, independent of original vertex labels. Continue branching over every row within that invariantly chosen cell and take the least leaf representative.
+- Validation:
+  - the forward `8x2` transfer now has exactly `15` states after column 1 and `3,823` after column 2, matching the exhaustive `8!` canonicalizer
+  - `T_4(8,2) = 2949156864` and `T_4(8,3) = 90068239391616` remain exact
+- Performance:
+  - forward `8x2` took `9.37s` and about `39.4 MiB`, slightly better than the previous `9.79s` despite the stronger merge
+  - ordered `8x3` memo states fell from `6,488` to `3,838` (`40.8%`), although runtime was effectively flat (`9.343s` versus `9.324s`) because transition scanning dominates
+  - hard `8x4` orbit 13 retained contribution `725392141118023680` and fell from `370.19s` to `310.06s`
+  - on that orbit, total memo states fell only `1.9%`, from `7,675,986` to `7,533,693`, but memo hits fell `18.2%`, from `44,831,870` to `36,659,140`
+- Interpretation: the shallow symmetry defect was real and compounded fanout, but nearly all dense three-column terminal histories are already distinguished by refinement. Exact canonicalisation is therefore an important constant-factor correction, not the high-level exponent change needed for `8x8`.
+- Outcome: accepted. The next mathematical target is to contract the last two columns together—evaluate `F(U,2)` without materialising and canonicalising millions of intermediate `F(U-M,1)` states—because that terminal layer now accounts for almost all memo entries.
+
+### Experiment 207: Exact two-column subset contraction
+- Goal: evaluate `F(U,2)` directly, eliminating the millions of materialised `F(U-M,1)` history states that dominate `8x4`.
+- Mathematics:
+  - for each colour `c`, choose its row set `A_c` in the penultimate column and `B_c` in the final column
+  - both `A_c` and `B_c` must be cliques in the colour's available row-pair graph
+  - their increments are disjoint exactly when `|A_c intersect B_c| <= 1`; an intersection of two rows would repeat that colour/row-pair token in both columns
+  - encode `(A_c,B_c)` as a subset of two copies of the eight rows, yielding at most `2^16 = 65,536` pair states per colour
+  - subset-convolve colours 0/1 and 2/3 separately, then join complementary coverage masks; the result partitions every row in both ordered columns among all four colours exactly once
+- Implementation:
+  - add `--contracted [ORBIT]` to the transfer probe
+  - use sparse direct subset convolution over legal colour-pair families
+  - memoise the contracted result at depth two under the exact row/colour canonical key
+  - retain `--ordered` as the uncontracted comparison path
+- Exact validation:
+  - `T_4(5,5) = 272454472598400`
+  - `T_4(8,3) = 90068239391616`
+  - all 15 `8x4` first-column contributions match Experiment 205
+  - `T_4(8,4) = 1855457222859010944`
+- Performance:
+  - `8x3`: `0.485s`, 15 memo states and 15 contractions, versus `9.301s` and 3,838 states for the exact uncontracted path (`19.2x` faster)
+  - `5x5`: `0.179s`, 2,783 memo states and 2,679 contractions
+  - complete `8x4`: `70.703s`, 3,838 memo states, 3,823 contractions, and `53,744 KiB` RSS
+  - the previous `8x4` shared run exceeded `900s` and reached about `1.2 GiB`; contraction is therefore more than `12.7x` faster at the old cap and uses about `22.7x` less peak memory
+- Interpretation: this removes an entire state-space level rather than making the old level cheaper. The active boundary for `8x5` is now the number of distinct histories after three explicit columns, with each history paying one two-column convolution. That workload is naturally shardable by the 15 first-column orbits and by deeper prefixes.
+- Outcome: accepted as the preferred fixed-four algorithm. Optimise the convolution kernel and measure capped `8x5` orbit shards before estimating cluster requirements for `8x8`.
+
+### Experiment 208: Work-ordered colour-pair convolution
+- Goal: reduce the direct contraction cost when the four colour-history graphs have unequal constraint densities.
+- Change:
+  - build all four legal `(A_c,B_c)` families before convolving
+  - compute the exact number of submask iterations each family would cause, `sum_x 2^(16-popcount(x))`
+  - use the two cheapest families as the enumerated sides of the two convolutions and pair them with the remaining families
+  - report total submask visits for later throughput and cluster estimates
+- Correctness: retained exact `T_4(8,3)` and `T_4(8,4)`, including every first-column orbit contribution.
+- Performance:
+  - `8x3` improved from `0.485s` to `0.452s`
+  - complete `8x4` improved from `70.703s` to `60.075s`, a further `15.0%`
+  - the `8x4` computation performed `109,839,601,664` submask visits across 3,823 contractions and used `54,380 KiB` RSS
+- Interpretation: colour histories are asymmetric enough that pairing order matters, but the kernel still averages about 28.7 million submask visits per contracted state. For later columns, stronger history constraints should make families sparser; capped `8x5` orbit probes are needed rather than extrapolating the `8x4` per-state cost directly.
+- Outcome: accepted. Use work-ordered contraction for the first `8x5` shard measurements.
+
+### Experiment 209: Capped `8x5` orbit probes
+- Goal: measure the new active frontier and determine the shard depth needed for a future cluster campaign.
+- Easy orbit 0 (`8`):
+  - completed in `14.938s` with 1,621 memo states and 1,606 contractions
+  - used `47,108 KiB` RSS
+  - exact weighted contribution: `36860152538926080`
+- Hard orbit 13 (`3+2+2+1`):
+  - a `300s` cap completed 6 of the 1,728 canonical depth-3 parents
+  - reached 29,399 completed depth-2 contractions, 118,166 memo hits, and `85,872 KiB` RSS
+  - raw-canonical cache reuse was negligible at this early frontier, with only 21 hits, while the value memo already provided substantial reuse
+- Projection: six sampled parents in roughly 295 seconds imply about 49 seconds per parent and approximately 23.5 hours for all 1,728 on one core if the sample is representative. Parent costs vary, so this is a capacity estimate rather than a completion prediction.
+- Interpretation:
+  - two-column contraction has moved `8x5` from an OOM-scale terminal-state computation to a plausible CPU campaign
+  - first-column orbits alone are too coarse for robust scheduling: easy and balanced orbits differ by orders of magnitude
+  - canonical states after the second explicit column are the appropriate cluster work units, typically tens of seconds each on this host; they also allow retry/checkpoint without retaining a process-sized memo
+  - splitting loses value-memo reuse across parents, so production scheduling should support bundles of nearby shards when memory permits
+- Outcome: add deterministic second-column canonical shard enumeration and selection. Use it to benchmark isolated hard shards and to define a manifest suitable for array jobs or a cluster queue.
+
+### Experiment 210: Deterministic second-column shards
+- Goal: expose the tens-of-seconds work units identified by Experiment 209 so `8xn` campaigns can be checkpointed, retried, and distributed.
+- Change:
+  - add `--contracted ROOT CHILD`
+  - for the selected first-column orbit, enumerate every compatible compressed second column, canonicalise the resulting history, and aggregate transition multiplicities by canonical state
+  - sort the canonical `State` keys bytewise to assign deterministic child indices
+  - compute `root_multiplicity * child_transition_weight * F(child,n-2)`, so emitted shard contributions can be summed directly
+  - discard children that fail the remaining-column token-capacity lower bound
+- Validation:
+  - root orbit 0 has 14 child shards for `8x3`
+  - summing all 14 emitted contributions gives `1301640192`, exactly the unsharded orbit-0 contribution
+  - root orbit 13 exposes 1,752 child shards; sampled `8x5` shards emitted exact weighted contributions
+- Root-13 `8x5` samples:
+  - child 0: `4.068s`, 535 contractions, `7,291,514,880` submask visits, about `42.8 MiB` RSS
+  - child 350: `81.47s`, 6,683 contractions, `178,425,427,968` submask visits, about `60.6 MiB` RSS
+  - child 700: exceeded a `120s` cap after 11,178 contractions, about `69.7 MiB` RSS
+  - child 1050: `76.653s`, 6,920 contractions, `167,427,993,600` submask visits, about `61.2 MiB` RSS
+- Scheduling implication: child shards vary by more than `30x`, but their memory footprint is small and their identifiers are deterministic. Use a dynamic work queue or job array with retries rather than statically assigning equal index ranges. Very small shards can later be bundled to amortise process and queue overhead.
+- Outcome: accepted as initial cluster-campaign infrastructure. The next prerequisite for a real campaign is a manifest/result format with versioned state hashes, duplicate detection, and exact aggregation; the next algorithmic optimisation remains reducing the roughly 25–30 million submask visits per contracted state.
+
+### Experiment 211: Fuse one convolution with the complementary join
+- Goal: remove one 65,536-entry count table and its writes from the two-column contraction.
+- Change tested: build the colour-2/3 convolution table, then enumerate disjoint colour-0/1 family pairs and add the complementary table entry directly instead of building a second table and taking a final dot product.
+- Correctness: retained exact `T_4(8,3)` and `T_4(8,4)`.
+- Performance: `8x3` was `0.448s`, but complete `8x4` was `60.132s` versus `60.075s` for the two-table baseline. Submask visits are identical, and the small memory reduction is irrelevant beside the memo/cache allocations.
+- Outcome: rejected and reverted. Optimisations that only rearrange the same 109.8 billion `8x4` submask visits are unlikely to matter; future kernel experiments must avoid visits using a sparse index, decision diagram, or a different convolution algorithm.
+
+### Experiment 212: Sparse legal-subset convolution indexes
+- Goal: avoid enumerating submasks that cannot be legal row sets for the second colour in a pair.
+- Variant A:
+  - precompute the legal clique-subsets of every eight-row mask for each colour
+  - enumerate Cartesian products of legal `A` and `B` subsets and test `|A intersect B| <= 1`
+  - choose the cheapest orientation among all three pairings of the four colours
+  - this reduced complete `8x4` candidates from `109.84` billion to `64.47` billion (`41.3%`), but runtime regressed from `60.075s` to `74.848s`; `8x3` regressed from `0.452s` to `0.773s`
+- Variant B:
+  - replace the innermost intersection test with 256-bit indexes of legal, intersection-compatible `B` subsets and enumerate only set bits
+  - `8x3` still regressed to `1.097s`
+  - at 30 seconds the `8x4` run had completed only about 900 contracted states versus about 2,080 for the direct baseline; it was stopped at `34.24s`
+- Interpretation: the direct `(submask - 1) & mask` loop is exceptionally cheap and predictable. Saving candidates does not compensate for nested lists, index construction, popcounts, and set-bit extraction when every index is rebuilt for a new history state. A useful sparse method must reuse a compiled decision structure across many states or reduce asymptotic work without substantial per-state setup.
+- Outcome: both variants rejected and reverted. Retain work-ordered direct submask convolution as the production kernel.
+
+### Experiment 213: Direct comparison with `partition_count4`
+- Goal: correct the earlier comparison against `partition_poly` by benchmarking the fixed-four partition solver, which is the actual alternative for computing only `T_4(8,n)`.
+- Setup: current checked-in binaries on the same host; wall time and peak RSS from `/usr/bin/time`; `partition_count4` used `OMP_NUM_THREADS=1` unless stated otherwise.
+- Complete exact comparisons:
+  - `8x3`: `partition_count4` used `0.24s` worker time, `1.74s` wall time including allocation, and `700,652 KiB`; contracted transfer used `0.59s` and `4,724 KiB`. Both returned `90068239391616`.
+  - `8x4`: `partition_count4` used `16.60s` worker time, `18.11s` wall time, and `832,288 KiB`; contracted transfer used `85.48s` and `54,132 KiB`. Both returned `1855457222859010944`.
+  - Thus the fixed-four partition solver is `4.7x` faster by wall time on the complete one-core `8x4` comparison, while contracted transfer uses about `15.4x` less peak memory.
+  - `partition_count4` with four threads completed `8x4` in `6.29s` wall time (`4.79s` worker interval) at `1,251,456 KiB` RSS. Its parallel implementation therefore strengthens its throughput advantage without multiplying resident memory by four on this case.
+- `partition_count4 8x5` shard observations:
+  - merely selecting no tasks at prefix depth two costs about `1.50s` and `622,080 KiB`; a populated one-thread process typically reaches about `0.8 GiB`
+  - isolated depth-two task 0 took `5.47s` worker time, task 64 took `165.40s`, task 376 took `1.63s`, and sampled tasks 128, 256, 384, 512, 640, 704, and 752 took between `0.15s` and `1.96s`
+  - the extreme task-64 outlier shows that the current depth-two partition shards also have serious skew; the hardness ordering is not a reliable cost ordering at this size
+  - full four-thread fixed-batch and adaptive-subdivision attempts both reached a `300s` cap at about `1.21 GiB` RSS without completing; their root-prefix progress reporting is too coarse to compare useful work before completion
+  - explicit prefix depth three exposes `3,643,008,590` nominal IDs. On-demand unranking makes startup cheap, but this space is far too sparse and large to use directly as a cluster manifest without canonical live-prefix compaction.
+- Comparison with contracted `8x5`: the transfer samples from Experiments 209-210 use different mathematical shards, so their `4s` to greater-than-`120s` child times cannot be compared one for one with partition prefix IDs. They do demonstrate much lower per-process memory (`43-70 MiB`) and deterministic fine-grained result units.
+- Interpretation:
+  - it is not established that contracted transfer is the more feasible route to `T_4(8,8)`; the only complete apples-to-apples nontrivial benchmark currently favors `partition_count4` decisively on CPU time
+  - contracted transfer remains valuable as a low-memory independent algorithm, exact cross-check, and source of already usable fine-grained cluster shards
+  - the next primary optimisation target should be `partition_count4`: reduce its per-worker cache footprint and turn adaptive depth-three/four descendants into compact, externally enumerable live shards, then measure an unbiased `8x5` core-hour total
+- Outcome: supersede Experiment 207's designation of contracted transfer as the preferred fixed-four path. Keep both implementations, but use `partition_count4` as the throughput baseline until an `8x5` campaign establishes their scaling curves.
+
+### Experiment 214: Hybrid partition-prefix/two-column contraction
+- Goal: test whether the two-column pairmask contraction can improve the leading fixed-four partition algorithm rather than merely compete with it.
+- Mathematics tested:
+  - stop the partition search after the first `n-2` columns, retaining its row and prefix-column symmetry reduction
+  - enumerate proper colourings of the prefix conflict graph up to global colour permutation
+  - reconstruct the used row-pair mask for each colour from the complex-block vertices; singleton blocks consume no row-pair tokens and retain the existing `partition_weight4` factor
+  - aggregate identical colour-history masks, multiply each unlabelled graph colouring by the appropriate falling factorial of four, and count the two distinguished final columns with the subset-convolution kernel
+  - multiply by the existing prefix row-orbit and column-multiset factors; distinguishing the final two positions means those prefix factors remain valid without involving the terminal column shapes
+- Correctness:
+  - reproduced the exact `mx4` results for every `m` from 4 through 8
+  - in particular, retained `T_4(8,4) = 1855457222859010944`
+  - exact row/colour canonicalisation reduced `8x4` from 4,840 actual contractions to 3,823, exactly the pairmask orbit count, and retained the same `109,839,601,664` submask visits
+- Complete `8x4` performance:
+  - hybrid: `50.93s` worker time, `52.43s` wall time, and `690,748 KiB` RSS
+  - ordinary one-thread `partition_count4`: `16.60s` worker time and `18.11s` wall time
+  - contracted pairmask transfer: `85.48s` wall time and `54,132 KiB` RSS
+  - the hybrid improves the current pairmask executable but is `2.9x` slower than the algorithm it was intended to improve, while retaining most of the partition solver's large fixed table footprint
+- Matched one-thread `8x5` depth-two shard worker times:
+  - task 0: hybrid `9.13s`, ordinary `partition_count4` `5.47s`
+  - task 64: hybrid `183.89s`, ordinary `165.40s`
+  - task 128: hybrid `16.56s`, ordinary `1.46s`
+  - task 376: hybrid `55.95s`, ordinary `1.63s`
+  - row/colour aggregation helped task 0 substantially, reducing its contractions from 1,509 to 603, but tasks whose terminal histories were mostly unique remained dominated by tens of billions of submask visits
+- Interpretation:
+  - the contraction is mathematically portable to the partition formulation, but applying it independently to each terminal history is not a high-level win
+  - `partition_count4`'s scalar graph solver and graph cache dispose of most terminal structures much more cheaply than a fresh 16-bit subset convolution; the hybrid replaces variable, often easy graph work with a large mandatory kernel
+  - a future contraction approach must aggregate a whole campaign's weighted history distribution and answer disjointness queries in bulk, for example with a reusable decision diagram or sparse multi-query transform. Per-history contraction cannot move `8x8` toward feasibility.
+- Outcome: rejected and reverted. Retain the mathematical identity as a possible basis for a global batched algorithm, but do not add a hybrid production path.
+
+### Experiment 215: Compile the two-column distribution as a weighted ZDD
+- Goal: replace every per-history subset convolution with a reusable exact oracle `C_2(A) = sum_{X disjoint A} Q_2(X)`.
+- Probe:
+  - exhaustively construct the labelled two-column token-set distribution `Q_2` through six rows
+  - merge equal token sets with their exact multiplicities
+  - compile the resulting weighted family into a reduced zero-suppressed decision diagram
+  - compare colour-major and row-pair-major token orders and query histories of depths one through four
+- Exact distribution growth:
+  - rows 2: support `11`, colour-major ZDD nodes `11`
+  - rows 3: support `125`, nodes `58`
+  - rows 4: support `2,643`, nodes `743`
+  - rows 5: support `63,696`, nodes `10,034`
+  - rows 6: support `1,679,194`, nodes `136,944`
+  - every empty-forbidden-set query reproduced the total number of compatible ordered column pairs; at six rows this is `13,571,712`
+- Ordering: colour-major was consistently superior. At six rows it used `136,944` nodes versus `360,886` for pair-major and answered the sampled queries about `2.0-2.5x` faster.
+- Six-row colour-major query cost over 1,000 deterministic valid histories:
+  - depth 1: `0.989s`, averaging `118,998` visited nodes per query
+  - depth 2: `0.880s`, averaging `98,964` nodes
+  - depth 3: `0.752s`, averaging `80,359` nodes
+  - depth 4: `0.622s`, averaging `63,648` nodes
+- Direct-kernel comparison: contracted pairmask `6x4` completed 366 contractions in `0.233s`, or about `0.64ms` per contraction including surrounding solver overhead. The compiled ZDD therefore already takes roughly the same or more time per query at six rows, rather than the required `50-100x` less.
+- Scaling interpretation:
+  - the weighted family compresses well relative to raw support, but absolute ZDD size grew by about `13.6x` from five to six rows
+  - queries traverse a large fraction of the diagram even for deeper forbidden histories
+  - this growth is worse than the direct kernel's basic `2^(2m)` state-space factor, so extrapolating the present ordering to eight rows is not credible
+- Outcome: rejected as the reusable `C_2` oracle. Retain `completion_oracle_probe.c` because its exact support and decision-diagram measurements are useful for testing Idea 3; do not extend this weighted ZDD implementation to eight rows.
+
+### Experiment 216: Exact `F_d` support and decision-diagram growth
+- Goal: test the `ideas.md` kill criterion for representing the labelled half-grid distribution `F_4` as an exact ZDD before attempting a `4+4` join.
+- Change: generalised `completion_oracle_probe` to construct exact weighted `F_d` distributions for depths one through four by repeatedly adjoining compatible distinct token increments, merging equal labelled histories, and compiling the result with both token orders.
+- Four-row growth:
+  - `F_1`: support `81`, colour-major ZDD nodes `91`
+  - `F_2`: support `2,643`, nodes `743`
+  - `F_3`: support `45,171`, nodes `4,410`
+  - `F_4`: support `437,899`, nodes `23,070`
+  - the exact `F_4` total was `2,545,607,472`, matching `T_4(4,4)`
+- Five-row growth:
+  - `F_1`: support `404`, colour-major nodes `373`
+  - `F_2`: support `63,696`, nodes `10,034`
+  - `F_3`: support `5,057,864`, nodes `215,275`, using about `359 MiB`
+  - materialising `F_4` exceeded a `120s` cap after reaching `19,072,516 KiB` RSS; its transition step must consider roughly two billion support/increment pairs
+- Cross-row evidence at depth two: colour-major ZDD nodes grow from `743` at four rows to `10,034` at five and `136,944` at six, factors of about `13.5` per added row.
+- Interpretation:
+  - colour-major ZDD reduction is real and improves relative to raw support, but the absolute labelled distribution grows much too quickly in both row count and depth
+  - a symbolic ZDD product could avoid the 19 GiB intermediate support table and may make `5x4` finish, but the measured node-growth factors project far beyond a credible distributed representation at `8x4`
+  - independently canonicalised histories cannot be substituted into the `4+4` join because relative row and colour permutations affect disjointness; retaining labels is precisely what causes this explosion
+- Outcome: reject the present exact labelled-ZDD route to `F_4` under the stated early kill criterion. Do not implement the `4+4` join on top of this representation; a viable meet-in-the-middle method would first need an orbit/stabiliser or invariant-basis treatment of relative permutations.
+
+### Experiment 217: ZDD for one `C_4`-free colour class
+- Goal: falsify or support the proposed decomposition of `K_8,8` into four disjoint `C_4`-free edge sets before implementing a four-family exact-cover product.
+- Probe:
+  - build a labelled row-major ZDD for all `C_4`-free binary matrices with eight columns
+  - memoise suffixes by the sorted multiset of preceding row masks, which is an exact residual state because a future row is legal precisely when its intersection with every preceding row has size at most one
+  - retain labelled row variables in the ZDD while sharing identical residual suffixes
+- Growth with eight columns:
+  - 2 rows: `24,057` matrices, `851` ZDD nodes, `257` residual states
+  - 3 rows: `1,622,016` matrices, `37,272` nodes, `12,290` residual states
+  - 4 rows: `89,984,625` matrices, `864,983` nodes, `283,782` residual states
+  - 5 rows: `4,339,995,264` matrices, `11,820,935` nodes, `4,088,055` residual states, `8.24s`, about `730 MiB`
+  - 6 rows: `187,518,432,969` matrices, `103,421,787` nodes, `41,510,473` residual states, `101.3s`, about `5.17 GiB`
+  - 7 rows did not finish at a `120s` cap and reached about `5.17 GiB`; the 8-row probe was stopped after the kill criterion was already decisive
+- Interpretation:
+  - residual row-multiset sharing is substantial, but a single labelled colour-class family already exceeds one hundred million ZDD nodes at `6x8`
+  - the proposed algorithm would still need four weighted disjoint-union products and joint row/column symmetry handling; those operations are harder than constructing this first family
+  - degree-sequence sharding could organise an isomorph-free generator, but it cannot repair the observed labelled family size by the orders of magnitude required for exact `8x8` counting
+- Outcome: reject the labelled `C_4`-free-family ZDD and fourfold exact-cover route. Isomorph-free generation may remain useful for existence/classification questions, but this probe gives no credible path to the fully labelled count.
+
+### Experiment 218: Weighted Pivoter on the column compatibility graph
+- Goal: test the independent formulation `T_4(8,n) = n!` times the weighted `n`-clique count in the compatibility graph, using the succinct clique tree rather than ordinary clique enumeration.
+- Implementation:
+  - merge the 65,536 labelled columns into 50,016 distinct nonempty token increments with vertex weights
+  - construct the exact 50,016-vertex compatibility bit matrix by subtracting precomputed per-token vertex bitsets; the matrix is `298.4 MiB`
+  - implement the Jain-Seshadhri SCT recurrence with maximum-induced-degree pivots
+  - carry `product(1 + w_p x)` along optional pivot links and multiply mandatory hold-vertex weights, so leaf coefficients give exact weighted clique counts
+- Setup result: with eight threads the full dense adjacency matrix takes about `0.02s` to construct after replacing an initially rejected quadratic pair scan with token bitsets.
+- `K_5` kill probe:
+  - restrict the root loop to only the first of 50,016 weighted vertices
+  - a one-million-node cap was reached in `0.55s` without completing that root
+  - a 100-million-node cap was reached in `64.52s`, after 66,018,712 leaf paths, still without completing the same single root
+  - the partial weighted count is not a shard result because stopping truncates the SCT; the relevant measurement is that one root already exceeds one hundred million recursion nodes
+- Interpretation: the compatibility graph is dense, but its overlapping clique structure does not yield a small SCT. Maximum-degree pivot selection still creates an enormous number of non-neighbour hold branches. With 50,016 root vertices, failure to finish even one root comfortably violates the `8x5` kill criterion and is drastically worse than partition-prefix shards.
+- Outcome: reject succinct-clique-tree counting for this graph. Retain the weighted probe as an independent reproducible falsification, but do not invest in degeneracy ordering, root stabilisers, or distributed clique shards.
+
+### Experiment 219: Token-count-stratified packing and exact `F_2` join
+- Goal: test whether the faster-than-meet-in-the-middle packing formulation can exploit thin token-count strata, and benchmark its necessary weighted disjoint-union operation before considering fast-matrix-multiplication machinery.
+- Implementation:
+  - extend `completion_oracle_probe` with exact support and sequence-weight histograms by token count
+  - measure the fraction of ordered `F_2` pairs rejected solely because their sizes exceed the token universe
+  - evaluate the exact weighted `F_2`-with-`F_2` disjoint join through the colour-major ZDD; this independently recovers `T_4(m,4)`
+- Results:
+  - 4 rows: `2,643` `F_2` states, `6,985,449 / 6,985,449` cardinality-compatible support pairs, exact join `2,545,607,472` in `0.005s`
+  - 5 rows: `63,696` states, `4,057,180,416 / 4,057,180,416` cardinality-compatible pairs, exact join `465,659,203,104` in `2.906s`
+  - 6 rows: `1,679,194` states, `2,819,692,489,636 / 2,819,692,489,636` cardinality-compatible pairs; the exact join exceeded a `120s` cap after building its `136,944`-node ZDD
+  - the existing partition solver obtains the same 5-row answer in `0.15s` and computes the 6-row answer `79,102,304,162,784` in `0.17s` on one thread
+- Why size stratification gives no pruning: for each row pair, two compatible columns can occupy at most two of its four colour tokens. Every `F_2` state therefore has size at most half of the full token universe, so every pair of token-count strata passes the necessary size test. The measured kept fraction is exactly `100%` at every tested row count.
+- Applicability of the cited packing algorithm:
+  - its set-packing corollary first forms fixed-size `t/3`-tuple unions and then evaluates weighted disjoint triples using fast matrix multiplication
+  - here the input columns have varying token sizes, eight columns do not split into three equal groups, and stratification creates many shape combinations without removing any `F_2` join work
+  - the exact join's greater-than-`41x` slowdown from five to six rows, versus essentially flat partition-solver time for these transposed small cases, leaves no practical algebraic kernel to scale toward the 112-token instance
+- Outcome: reject token-count/shape-stratified packing and the faster-than-MITM machinery for this representation. It improves a worst-case exponent for a different parameter regime but does not address the measured support bottleneck here.
+
+### Experiment 220: Tensor-rank bounds and subset-channel invariant basis
+- Goal: apply the rank gate for a representation-theoretic/partition-algebra formulation, then quantify the smallest concrete invariant channel space suggested by a successful rank test.
+- Exact finite-field rank probes:
+  - regard `F_d` as a matrix across colour-token blocks `{0,1} | {2,3}` and divide all entries by their scalar content gcd, which does not affect rational rank
+  - on four rows the middle ranks for depths 1 through 4 are respectively `8`, `36`, `114`, and `282` modulo each of `3,5,7,11,13`; characteristic two gives smaller ranks after depth one
+  - the depth-four matrix is `4096 x 4096` with `437,899` nonzero entries, so the rigorous rational-rank lower bound `282` (and symmetric-power upper bound `330`) shows substantial compression rather than the near-full-rank kill anticipated in `ideas.md`
+- One-column structure through eight rows:
+  - a column factors by the subset `S` of rows assigned colours `{0,1}`: its left and right binary-colour token distributions are independent conditional on `S`
+  - singleton subsets give the same empty left token pattern, and full/co-singleton subsets give the corresponding right-side relations; eliminating these supplies an explicit `2^m - 2m`-term factorisation for `m >= 3`
+  - direct matrix ranks modulo `2,3,5,7,11,13` attain that upper bound: `2, 8, 22, 52, 114, 240` for 3 through 8 rows, proving the rational one-column ranks are exactly `2^m - 2m`
+  - at eight rows the original one-column matrix has 50,016 nonzeros on a `4,569 x 4,569` active domain but exact rank only `240`
+- What the rank alone buys:
+  - commutativity of disjoint-union convolution bounds the fourth symmetric power by `binom(240+3,4) = 141,722,460` rank terms
+  - this is an orders-of-magnitude algebraic reduction, but a direct factor list of 142 million components followed by a quadratic disjointness join is not yet a feasible solver
+- Invariant-basis probe:
+  - use the unreduced subset channels, quotient four-channel multisets simultaneously by `S_8` row permutations and permutation of the four prefix columns, and enumerate them as 16-entry binary-row-pattern histograms
+  - the eight-row fourth-power channel space has only `25,207` such orbits
+  - exact two-colour packing feasibility leaves `25,152` left-feasible and `25,097` jointly left/right-feasible orbits, so rectangle constraints do not materially prune this basis
+- Interpretation:
+  - the tensor-rank gate passes: there is real hidden low-rank/invariant structure, and this is the only high-level idea in this series that survives its falsification probe
+  - the remaining missing object is an exact orbit/stabiliser or partition-algebra kernel that contracts two orbit-summed four-column halves while retaining relative row permutations; treating the 25,207 representatives as ordinary canonical states would be incorrect
+  - a credible next prototype is therefore a modular-arithmetic double-coset contraction on the subset-channel orbits, not another labelled ZDD or sparse-support join
+- Outcome: retain the subset-channel/partition-algebra route as a research lead. Do not claim an `8x8` solver yet, but promote construction of the relative-orbit contraction kernel above further low-level optimisation of `partition_count4`.
+
+### Experiment 221: Exact two-bit decomposition
+- Goal: establish and independently validate the algebraic identity underlying the subset-channel approach before introducing orbit or stabiliser bookkeeping.
+- Identity: encode a four-colour cell as `(group bit, inner bit)`. For a fixed binary cell mask `G` recording the group bit, a monochromatic rectangle must lie wholly in `G` or wholly in its complement. The inner-bit choices on the two masks are independent, hence
+  `T_4(m,n) = sum_G C_2(G) C_2(complement(G))`,
+  where `C_2(G)` counts binary assignments on the selected cells with no monochromatic rectangle contained in `G`.
+- Implementation:
+  - enumerate each cell in a column as absent, inner colour zero, or inner colour one
+  - enforce the two-colour rectangle condition with two row-pair token masks
+  - accumulate every `C_2(G)` simultaneously, then perform the complement dot product
+  - compare with an independent direct four-colour pair-token transfer wherever its dense state space is small
+- Exact validations:
+  - `2x2`: `252`
+  - `2x4`: `59,928`
+  - `3x3`: `228,984`
+  - `3x4`: `12,870,096`
+  - `3x5`: `696,448,224`
+  - `4x4`: `2,545,607,472`, also matching the previously established value
+- The largest validation enumerated `21,051,753` legal ternary histories and completed in `0.031s`; all comparisons passed exactly.
+- Outcome: accept the two-bit identity as the foundation of the relative-orbit algorithm. The next experiment must compress the sum over `G`; this experiment does not by itself avoid its `2^(mn)` masks.
+
+### Experiment 222: Binary-prefix orbits and exact stabiliser weights
+- Goal: replace the labelled binary masks in Experiment 221 by exact `8xd` prefix orbits while retaining all multiplicities needed for a later relative-row join.
+- Representation: quotient row permutations by recording the multiplicities of the `2^d` binary row patterns, then choose the lexicographically least histogram under `S_d` column permutations.
+- For every representative the probe computes:
+  - the within-pattern row factor `product_p histogram[p]!`
+  - its column stabiliser and the kernel of column permutations acting trivially on occupied patterns
+  - the full `S_8 x S_d` stabiliser, labelled orbit size, and projected row-stabiliser order relevant to gluing two prefixes
+  - its pairing under global bit complement
+- Exact weighted checksums:
+  - `d=1`: 9 orbits with total weight `256 = 2^8`
+  - `d=2`: 95 orbits with total weight `65,536 = 2^16`
+  - `d=3`: 1,324 orbits with total weight `16,777,216 = 2^24`
+  - `d=4`: 25,207 orbits with total weight `4,294,967,296 = 2^32`
+- Complement symmetry reduces the `d=4` representatives to 12,791, including 375 self-complementary orbits.
+- At `d=4` the projected row-stabiliser order averages `41.818` and ranges up to `40,320`. Thus most prefixes retain useful row symmetry, but the stabilisers vary enough that orbit sizes alone cannot determine the join; actual subgroup actions or double cosets are required.
+- Runtime is `0.05s` for all 25,207 four-column representatives.
+- Outcome: accept the histogram orbit layer. Its weights exhaust the labelled space exactly, and it reproduces the 25,207 count from Experiment 220 with the stabiliser information needed for the next contraction prototype.
+
+### Experiment 223: Exact `2+2` relative-orbit contraction for `8x4`
+- Goal: turn the two-bit identity and prefix stabilisers into the first exact contraction, preserving relative row alignments rather than incorrectly joining independently canonicalised halves.
+- Double-coset simplification:
+  - retain the two column labels within each half; an `8x2` prefix is then a histogram of four row patterns and its row stabiliser is a Young subgroup
+  - a relative alignment of two such prefixes is exactly a `4x4` nonnegative contingency table whose row and column sums are the two prefix histograms
+  - the table multiplicity is the corresponding Young-subgroup double-coset weight; over all margins there are `binom(23,15) = 490,314` tables
+- Kernel:
+  - interpret each table as the 16-pattern histogram of the joined four-column binary mask
+  - canonicalise it under `S_4`, leaving 25,207 distinct `C_2(G) C_2(complement(G))` kernels
+  - compute each masked two-colour count by a sparse 12-token transfer across the eight rows
+- Independent exact sums:
+  - the labelled-column contingency-table contraction gives `1,855,457,222,859,010,944`
+  - a second sum directly over the 25,207 `S_8 x S_4` orbits with full orbit-stabiliser weights gives the same result
+  - both equal the independently computed `partition_count4` value for `T_4(8,4)`
+- Performance on one core:
+  - relative-orbit probe: `0.45s`, about `4.5 MiB`, `84,283,243` inner DP transitions
+  - current `partition_count4 8 4`: `18.12s`, about `813 MiB`
+  - this is about a `40x` wall-time reduction and over `180x` lower peak memory at the first `8xn` target
+- Outcome: accept the relative-orbit contraction. This is the first high-level method tested here that is both exact and substantially faster than `partition_count4`; proceed to the `2+3`/`8x5` scaling test before investing in the full `4+4` kernel.
+
+### Experiment 224: Full relative-orbit contraction for `8x5`
+- Goal: measure the next `8xn` scale point and determine whether the successful `8x4` symmetry reduction survives an additional column.
+- Orbit growth:
+  - the optimised histogram generator extends to `S_8 x S_5` without materialising labelled masks
+  - there are `613,894` binary `8x5` mask orbits, with exact labelled weight `1,099,511,627,776 = 2^40`
+  - global complement reduces these to 307,390 paired representatives, including 886 self-complementary orbits
+  - orbit enumeration alone takes `2.09s` and negligible memory
+- Exact contraction:
+  - for every orbit, compute `C_2(G) C_2(complement(G))` with a sparse row transfer on the 20 two-colour column-pair tokens
+  - multiply by the exact `S_8 x S_5` orbit-stabiliser weight and sum in 128-bit arithmetic
+  - result: `T_4(8,5) = 25,752,339,627,806,158,940,160`
+  - this exactly matches the independently computed transposed `5x8` value from `5xn_count4`
+- Performance on one core:
+  - `613,894` kernels, `34,671,692,540` DP transitions, maximum sparse support `399,693`
+  - `148.16s` wall time and about `20 MiB` peak RSS
+  - previous four-thread `partition_count4 8 5` full attempts exceeded `300s` at about `1.21 GiB` without completing
+- Scaling warning:
+  - in the same generic probe, `8x4` takes `0.254s` and `84,283,243` transitions
+  - adding the fifth column therefore multiplies transitions by about `411x` and wall time by about `583x`, despite the orbit count growing only `24.4x`
+  - a direct six-column transfer would require 30 token bits and its dense arrays alone would be impractical; the inner masked-two-colour kernel, rather than binary-mask orbit enumeration, is now the dominant problem
+- Outcome: accept the orbit method as a major exact `8x5` improvement, but do not extrapolate the direct full-orbit kernel to `8x6`. The next experiment must find a `3+3` factorisation of `C_2(G)` or otherwise compress its cross-half token state.
+
+### Experiment 225: `3+3` prefix distributions and outer-orbit growth
+- Goal: test both layers required for a six-column split: the exact two-colour distribution of each three-column prefix and the number of relative mask orbits those distributions would have to join.
+- Prefix factorisation: for a binary `8x3` mask `A`, build the weighted distribution `D_A(U)` of used `(inner colour, row pair)` tokens. Then `C_2([A|B])` is the weighted disjoint join of `D_A` with the appropriately row-permuted `D_B`.
+- Exact distribution measurements over all 1,324 `S_8 x S_3` prefix orbits and their complements:
+  - 2,648 distributions built in `0.28s` using `11,348,699` transitions
+  - support minimum `0`, median `1,568`, mean `3,669.8`, 90th percentile `9,984`, 99th percentile `22,527`, maximum `30,110`
+  - the aggregate support is about 9.72 million entries, so materialising every prefix distribution is credible on one machine
+  - the maximum-support prefix has only 72 states in its complement; their direct cross join tests 2,167,920 pairs in `0.002s`, demonstrating a useful density/complement tradeoff
+- Exact Burnside counts for binary masks modulo row and column permutations:
+  - `8x4`: 25,207
+  - `8x5`: 613,894
+  - `8x6`: 17,256,831
+  - `8x7`: 508,147,108
+  - `8x8`: 14,685,630,688
+  - the counts for one through five columns agree exactly with the constructive orbit generator and its labelled-weight checksums
+- Interpretation:
+  - the inner three-column distributions are much smaller than the failed labelled four-colour histories and are cheap enough to precompute
+  - nevertheless, evaluating one independent `C_2(G) C_2(complement(G))` kernel per full mask orbit would require 17.3 million kernels already at `8x6` and 14.7 billion at `8x8`
+  - the `3+3` method therefore needs a batched invariant bilinear form over the 1,324 prefix objects; ordinary full-mask orbit enumeration cannot be the final algorithm
+- Outcome: accept the three-column distributions as the next reusable representation, but reject a direct loop over full binary-mask orbits. The next mathematical target is compression/rank of the relative-row disjointness kernel between these prefix distributions.
+
+### Experiment 226: Rank gate for the aligned `3+3` kernel
+- Goal: test whether the batched prefix contraction admits an ordinary low-rank factorisation before implementing the substantially more complicated `S_8` representation/Fourier blocks.
+- Kernel sampled: for evenly spaced viable three-column orbit representatives `A_i`, form the exact symmetric matrix
+  `K(i,j) = J(D_Ai,D_Aj) J(D_complement(Ai),D_complement(Aj))`,
+  where `J` is the weighted disjointness join. This is the complete two-bit six-column kernel for aligned representative rows.
+- Preliminary filtering: 8 of the 1,324 binary prefix orbits have an empty selected or complementary two-colour distribution and can never contribute.
+- Exact 24-representative sample:
+  - selected-side aggregate support `126,063`; complementary-side support `75,379`
+  - `11,789,616,876` direct support-pair tests in `2.855s`
+  - matrix rank `24/24` modulo both `1,000,000,007` and `1,000,000,009`
+- Interpretation:
+  - even a small well-spread viable minor is nonsingular, ruling out a global scalar-feature factorisation of rank in the tens (and strongly arguing against a generally small ordinary rank)
+  - canonical prefix type alone is therefore not a compressed linear coordinate system for this contraction
+  - this result does not rule out symmetry blocks: the relative-row kernel is `S_8`-equivariant, and a Fourier/partition-algebra formulation can be block diagonal while the matrix on orbit representatives remains full rank
+- Outcome: reject ordinary low-rank factorisation of the 1,324-type aligned kernel. If the `3+3` route is continued, implement the actual `S_8` double-coset/irreducible blocks; otherwise an exact `8x6` campaign can use the 17.3-million full-mask orbits, but that approach cannot scale to `8x8`.
+
+### Experiment 227: Exact `S_8` module-size gate
+- Goal: quantify the actual multiplicity blocks of a row-Fourier/partition-algebra implementation before building representation matrices or kernel transforms.
+- Method:
+  - let `X_d` be the set of labelled-row binary `8xd` masks modulo `S_d` column permutations
+  - compute the `S_8` permutation character on `X_d` by Burnside averaging over column permutations
+  - decompose it into all 22 irreducible `S_8` characters, generated exactly by the Murnaghan-Nakayama rule
+  - verify both the total module dimension and the trivial multiplicity, which must equal the constructive binary-mask orbit count
+- Three-column module:
+  - dimension `2,829,056`, exact checksum
+  - trivial multiplicity `1,324`, matching the prefix-orbit generator
+  - largest irreducible multiplicity block `8,632`
+  - commutant dimension `sum_lambda multiplicity(lambda)^2 = 314,169,977`
+- Four-column module:
+  - dimension `183,181,376`, exact checksum
+  - trivial multiplicity `25,207`, again matching the constructive generator
+  - largest multiplicity block `431,552`
+  - commutant dimension `943,245,971,216`
+- Interpretation:
+  - row Fourier transform does block-diagonalise an equivariant kernel, but the multiplicity spaces—not the small irreducible dimensions—control storage and arithmetic
+  - a generic three-column commutant already needs about 2.5 GB per 64-bit modular coefficient if stored densely
+  - the generic four-column commutant would need about 7.5 TB per modular image, before matrix products or CRT reconstruction
+  - therefore “use representation theory” is not by itself a compression; the specific two-colour disjointness kernel must have additional factorisation or low block ranks
+- Outcome: reject a generic `S_8` Fourier/partition-algebra implementation for `4+4`. Retain representation theory only as a way to express a future kernel-specific factorisation; do not construct the full commutant or generic irreducible blocks.
+
+### Experiment 228: Exact `3+3` double-coset kernel sampler for `8x6`
+- Goal: measure the complete six-column two-bit kernel after the generic Fourier route failed, including relative row alignments, full column canonicalisation, duplicate rates, and the heavy tail of the disjoint joins.
+- Exact construction:
+  - enumerate the 1,324 binary `8x3` prefix orbits and retain the 1,316 for which both selected and complementary two-colour distributions are nonempty
+  - for a pair of prefix histograms, enumerate every Young-subgroup double coset as an `8x8` contingency table with the prescribed margins
+  - attach multiplicity `product_p a_p! product_q b_q! / product_pq n_pq!`; for every sampled prefix pair these multiplicities sum exactly to `8! = 40,320`
+  - join the selected distributions and the complementary distributions independently, multiply their exact counts, and canonicalise the resulting 64-pattern histogram under all `6!` column permutations
+- Correctness gates:
+  - prefix counts reproduce the independently established `1,324` total and `1,316` viable orbits
+  - an AddressSanitizer/UndefinedBehaviorSanitizer run over 100 unique kernels completed without an error
+  - 32 candidates that collided after full `S_6` canonicalisation were independently re-evaluated and produced identical exact kernel values
+- Deterministic 10,000-unique-kernel sample on one core:
+  - 55 uniformly sampled viable prefix-orbit pairs generated 19,996 double cosets; 19,780 candidates were visited before reaching the target
+  - 9,780 candidates were duplicate full `S_8 x S_6` mask orbits, a `49.44%` duplicate rate
+  - exact support-pair tests per unique kernel: median `16,563,456`, 90th percentile `73,908,224`, 99th percentile `73,908,224`, maximum `90,071,041`, mean `26,329,987`
+  - total kernel time `134.444s`, or `0.013444s` per distinct kernel; peak RSS including the cache was about `9.1 MiB`
+  - multiplying this sampled rate by the exact `17,256,831` binary `8x6` orbit count gives about `64.4` core-hours for the inner kernels
+- Sampling caveat: selecting prefix-orbit pairs uniformly and then visiting all their double cosets does not sample full six-column orbits uniformly. The 64.4-core-hour figure is an engineering estimate, not an unbiased estimator or a bound. Its agreement in scale with the 1,000-kernel result (`92.2` core-hours), together with the explicit quantiles, is enough to show that the kernel is no longer the prohibitive part of `8x6`.
+- Remaining outer-layer problem:
+  - the existing exact full-orbit probe has the required stabiliser formula, but its terminal-only histogram generator would inspect `binom(71,8) = 10,639,563,135` row histograms before column quotienting
+  - enumerating every pair of three-column prefix orbits and then deduplicating their double cosets would likewise create hundreds of millions of candidates
+  - the appropriate next implementation is canonical augmentation from the 613,894 weighted `8x5` orbits: add a sixth binary column modulo each parent's stabiliser, canonicalise/deduplicate children, and verify both `17,256,831` children and labelled weight `2^48`
+  - the augmentation naturally supplies deterministic parent ranges for cluster shards; after this gate, attach the exact `3+3` kernel and sum `orbit_size C_2(G) C_2(complement(G))`
+- Outcome: accept the `3+3` factorisation as a practical `T_4(8,6)` kernel. It changes the immediate bottleneck from exponential inner state storage to a finite, shardable outer-orbit generation problem. Do not extrapolate its timing directly to `8x8`, whose corresponding `4+4` kernel has not yet been measured.
+
+### Experiment 229: Direct `4+4` kernel feasibility gate for `T_4(8,8)`
+- Goal: test the eight-column version of the exact two-bit contraction directly, rather than building a production `8x6` orbit enumerator for a value already known by transposition from `6x8`.
+- Probe construction:
+  - enumerate all `25,207` binary `8x4` prefix orbits under row and within-half column permutations
+  - take a deterministic pseudorandom sample of 1,024 prefix types and build the exact selected and complementary four-column two-colour token distributions
+  - for each sampled prefix pair, predict direct-join work exactly as `|D_A||D_B| + |D_complement(A)||D_complement(B)|`
+  - classify the row-pattern multiplicities by integer-partition shape and weight each prefix pair by its exact number of Young-subgroup double cosets; all sampled double-coset multiplicities retain the `8! = 40,320` checksum
+  - execute complete exact joins at the double-coset-weighted minimum, median, 90th percentile, 99th percentile, and maximum work points
+- Correctness gates:
+  - the prefix enumerator reproduces the independent `25,207` count
+  - 1,019 of the 1,024 sampled prefix types have both distributions nonempty; the five rejected types are consistent with the independently known small dead-prefix population
+  - every benchmarked relative-row table preserves both distribution support sizes
+  - AddressSanitizer and UndefinedBehaviorSanitizer complete a 16-prefix run without an error
+- Four-column support sizes in the 1,019 viable samples:
+  - selected side: minimum `9`, median `12,320`, p90 `65,216`, p99 `129,360`, maximum `192,072`
+  - complementary side: minimum `4`, median `12,960`, p90 `62,552`, p99 `126,816`, maximum `165,136`
+  - constructing both sides for all 1,024 sampled prefixes takes `1.781s`; distribution construction is small beside the joins
+- Pair-work distribution:
+  - the unweighted 519,690 unordered sample pairs have median `587,237,376`, p90 `2,663,313,408`, p99 `8,222,692,352`, maximum `36,891,984,960`, and ordered-pair mean `1,122,318,702` primitive comparisons
+  - weighting by the exact contingency-table count raises the median to `950,966,272`, p90 to `3,315,506,688`, p99 to `8,776,233,984`, and mean to `1,495,582,449`; generic low-stabiliser prefixes correctly receive more relative alignments
+  - the 1,019-prefix sample contains 18 distinct row-multiplicity shapes and total ordered double-coset weight `2,153,670,861`
+- Exact join timings on one core:
+  - minimum `32,256` tests in `0.000023s`
+  - weighted median `950,966,272` tests in `0.376116s`
+  - weighted p90 `3,315,506,688` tests in `0.833308s`
+  - weighted p99 `8,776,233,984` tests in `1.834800s`
+  - maximum `36,891,984,960` tests in `7.018724s`
+  - aggregate measured throughput is about `4.962` billion mask comparisons per second; all five joins return exact nonzero `C_2(G) C_2(complement(G))` values
+- Feasibility projection:
+  - sampled mean construction plus weighted join time is `0.304873s` per kernel
+  - pairing global binary complements leaves approximately `14,685,630,688 / 2 = 7,342,815,344` kernel evaluations; ignoring the small self-complement correction is slightly optimistic
+  - the resulting estimate is about `621,840` core-hours, versus the `200,000`-core-hour comparison budget and its `0.09813s` mean-kernel threshold
+  - the direct kernel therefore misses the gate by about `3.1x` before outer-orbit generation, sharding, and aggregation overhead
+- Sampling caveat: uniform prefix-orbit sampling, even after exact double-coset weighting, is not a uniform sample of full `S_8 x S_8` binary-mask orbits because the full column group can mix the two chosen halves. The core-hour figure is a scale estimate, not an unbiased estimator or bound. The direct comparison counts and quantile timings themselves are exact.
+- Interpretation:
+  - `4+4` does not suffer another hundredfold kernel explosion: it lands within a small constant factor of the historical cluster budget
+  - rebuilding distributions costs only about `0.0035s` of the `0.305s` mean, so precomputation alone cannot close the gap
+  - the flat nested loop already sustains roughly five billion comparisons per second; the next useful win must avoid comparisons across many queries rather than merely tune this loop
+  - the most targeted follow-up is a per-prefix weighted subset-query structure (compressed binary trie, ADD, or ZDD) for `sum_{V disjoint U} D_B(V)`, reused across all `U` and relative row alignments; unlike the rejected global two-column ZDD, each measured family has at most about 192,000 support masks
+  - any replacement should demonstrate at least `4x` end-to-end reduction on the same weighted quantiles to leave room for the outer layer; otherwise the direct two-bit route remains above budget
+- Outcome: reject independent quadratic `4+4` joins as the final `T_4(8,8)` kernel, but retain the representation. It is close enough that a genuinely batched disjointness oracle, or equivalent GPU-wide comparison kernel combined with strong outer pruning, could make the fixed-four cluster calculation plausible.
+
+### Experiment 230: Exact `3+4` kernel feasibility gate for `T_4(7,7)`
+- Goal: determine whether the two-bit method can cheaply reproduce the already computed `7x7` result at `k=4`, providing an independent validation of the cluster polynomial calculation and a production test bed for the `8x8` machinery.
+- Exact outer counts from Burnside's lemma:
+  - binary `7x7` masks have `33,642,660` orbits under `S_7 x S_7`
+  - no orbit is self-complementary: complement changes the number of selected cells from `w` to `49-w`, which cannot be equal on an odd cell set
+  - global complement therefore leaves exactly `16,821,330` kernel evaluations
+  - `binary_orbit_burnside_probe` now computes both the ordinary and complement-twisted Burnside averages and reproduces these values
+- Complete asymmetric prefix census:
+  - all `734` binary `7x3` prefix orbits and all `9,343` binary `7x4` prefix orbits are enumerated, rather than sampled
+  - `732` left prefixes and `9,327` right prefixes have both selected and complementary distributions nonempty
+  - all 15 integer partitions of seven occur as row-pattern multiplicity shapes
+  - every relative alignment count is exact: deduplicate the contingency tables induced by all `7! = 5,040` row permutations for each pair of margin shapes
+  - the `6,827,364` viable prefix-type pairs represent `1,499,808,062` exact double cosets under the fixed `3+4` split
+- Distribution support sizes:
+  - three-column selected and complementary families have identical aggregate distributions: minimum `1`, median `640`, p90 `3,872`, p99 `8,632`, maximum `10,446`
+  - four-column selected and complementary families likewise match: minimum `1`, median `3,568`, p90 `20,484`, p99 `41,952`, maximum `68,256`
+  - constructing both sides for every prefix takes `0.074s` for the three-column side and `4.642s` for the four-column side, using `171,806,189` sparse transitions
+- Exact double-coset-weighted join work:
+  - minimum `135` primitive comparisons
+  - median `13,634,720`
+  - p90 `58,323,056`
+  - p99 `175,089,408`
+  - maximum `713,002,905`
+  - mean `25,215,829`
+- Exact representative timings on one core:
+  - minimum completes below timer resolution
+  - median takes `0.006971s`
+  - p90 takes `0.014417s`
+  - p99 takes `0.034367s`
+  - maximum takes `0.132943s`
+  - the five joins perform `960,050,224` comparisons in `0.188699s`, about `5.088` billion comparisons per second, and all return exact nonzero `C_2(G) C_2(complement(G))` values
+- Feasibility projection:
+  - mean distribution construction plus weighted join time is `0.005554s` per full-mask kernel
+  - multiplying by the exact `16,821,330` complement-paired orbit count gives about `26.0` core-hours of inner work
+  - under ideal independent-kernel scaling this is about `1.6` hours on 16 cores, versus roughly `200,000-250,000` core-hours for the full chromatic-polynomial cluster calculation
+  - this computes only `T_4(7,7) = P_{7x7}(4)`, so it independently validates the polynomial at one important evaluation rather than reconstructing all coefficients
+- Correctness and sampling caveat:
+  - AddressSanitizer and UndefinedBehaviorSanitizer complete the entire prefix census and all 6.8 million pair records without an error
+  - prefix types and fixed-split double cosets are exhaustive, but their weighting is not identical to uniform full `S_7 x S_7` mask orbits because full column permutations can mix the chosen three- and four-column halves
+  - the 26-core-hour result is therefore a strong scale estimate, not an exact runtime prediction
+- Production implication:
+  - direct enumeration of the 1.5 billion fixed-split double cosets would discard most of the gain
+  - instead, canonically augment the `2,141,733` binary `7x6` orbits to the `33,642,660` weighted `7x7` orbits, verify total labelled weight `2^49`, pair complements, and stream deterministic shards into the already measured `3+4` kernel
+  - outer-orbit generation and canonicalisation may dominate the 26 core-hours, but the state count is small enough for this to be a practical validation campaign
+- Outcome: accept the direct `3+4` kernel for a fixed-four `7x7` validation run. It needs no new disjointness oracle; reserve that research effort for closing the `3.1x` `8x8` gap.
+
+### Experiment 231: Weighted `7x7` orbit augmentation and multiprocess campaign
+- Goal: turn Experiment 230's kernel estimate into a restartable exact computation, with deterministic orbit weights, low-memory distributed generation, independent solve shards, and hard aggregation checks against the existing polynomial.
+- Canonical augmentation:
+  - represent a binary `7xd` matrix by seven row bytes in an exact canonical bipartite labeling
+  - order row degree classes invariantly, enumerate permutations only within equal-degree classes, and deterministically order columns by degree and their vectors in the candidate row order
+  - append each of the 128 possible labelled binary columns to every parent representative and merge equal canonical children
+  - propagate the parent's labelled orbit weight to every appended column; because deleting the distinguished final labelled column is unique, merged child weights are the exact labelled orbit sizes without a stabilizer calculation
+- Exact constructive checks at every depth:
+  - orbit counts for `d=0..7`: `1, 8, 70, 734, 9,343, 136,758, 2,141,733, 33,642,660`
+  - labelled-weight sums at every depth equal `2^(7d)`
+  - in particular, the full `7x7` pass merges `274,141,824` augmentations into `33,642,660` orbits with total weight `562,949,953,421,312 = 2^49`
+  - the seventh-column stage takes `307.159s`; the complete build and sorted 514 MiB orbit-file write take `5m31s` and about `2.0 GiB` peak RSS on one core
+- Distributed outer generation:
+  - `binary_orbit_augment extend` accepts a half-open parent-record range and writes locally deduplicated child `(canonical key, labelled weight)` records into stable hash buckets
+  - a 10,000-parent `7x6 -> 7x7` shard processes 1,280,000 candidates into 1,002,453 local keys in `1.382s` at about 182 MiB RSS
+  - `binary_orbit_augment reduce` merges all files for one hash bucket by adding duplicate weights; buckets are independent reducers and therefore work across unrelated processes or cluster nodes
+  - for a large-memory single host, `build 7` followed by `partition` is simpler: partitioning the full file into 16 solve files takes `0.54s`, preserves weight `2^49`, and yields between 2,100,775 and 2,104,903 records per bucket
+- Sharded exact solver:
+  - `twocolour_7x7_solve` reads weighted orbit files and evaluates the exact `3+4` kernel
+  - global complements require no lookup: odd area implies exactly one member of each pair has at most 24 selected cells; evaluate that representative and multiply its contribution by two
+  - every solve shard writes a versioned result containing orbit count, total labelled weight, complement-representative count and weight, and its 128-bit contribution
+  - the aggregator requires `33,642,660` orbits, labelled weight `2^49`, `16,821,330` kernels, selected weight `2^48`, and exact agreement with the existing polynomial value `P(4) = 701672004810879255876925440`
+  - AddressSanitizer and UndefinedBehaviorSanitizer pass both the augmentation path and a solver range
+- Multicore behavior on this host:
+  - the machine exposes 16 logical CPUs backed by 8 physical cores
+  - 16 solver processes sustain about 99.5% of one logical CPU each; the first 10,000 records take roughly `119-132s` per process
+  - with only 8 processes, a fully physical-core 10,000-record interval improves to roughly `86-99s` per process, but aggregate throughput falls to about 65% of the SMT run
+  - use all 16 logical CPUs for minimum wall time on this workload; set `RECT7_WORKERS=8` when measuring physical core-hours or sharing the host
+- Reproducible driver:
+  - `run_twocolour_7x7.sh` builds the binaries and full orbit file, hash-partitions it, runs a bounded number of ordinary solver processes, skips completed versioned result files on restart, and performs exact final aggregation
+  - `RECT7_WORKDIR` selects campaign storage, `RECT7_BUCKETS` controls restart granularity, and `RECT7_WORKERS` controls simultaneous processes
+  - the current 16-logical-CPU, 16-bucket validation campaign is running from the fully checked orbit file; its final numerical result will be recorded separately when aggregation completes
+- Outcome: accept the weighted canonical augmentation and process-sharded solver as the production `T_4(7,7)` validation path. The outer layer is exact and inexpensive; measured SMT contention raises the kernel wall-time projection, but the campaign remains a small computation compared with the original full-polynomial run.
+
+### Experiment 232: Completed independent `T_4(7,7)` validation
+- Goal: complete the process-sharded campaign from Experiment 231 and compare its exact fixed-four result with evaluation of the independently computed full `7x7` chromatic polynomial.
+- Global aggregation checks over all 16 result shards:
+  - binary row/column orbits: `33,642,660`
+  - total labelled orbit weight: `562,949,953,421,312 = 2^49`
+  - complement representatives evaluated: `16,821,330`
+  - representative labelled weight: `281,474,976,710,656 = 2^48`
+  - every checksum passes exactly
+- Exact result:
+  - two-bit orbit computation: `T_4(7,7) = 701672004810879255876925440`
+  - existing full polynomial evaluated at four: `P_{7x7}(4) = 701672004810879255876925440`
+  - the values agree exactly
+- Completed kernel work:
+  - `476,700,004,112` sparse distribution transitions
+  - `339,070,632,838,049` primitive support-pair tests
+  - sum of the 16 completed process times: `265,801.370s`, or `73.834` logical CPU-hours
+  - individual shard times range from `16,461.481s` to `16,859.845s`, a spread of only `2.4%`; stable hash partitioning successfully avoids serious stragglers
+- Wall time on the 8-core/16-thread host:
+  - the solve ran from approximately `23:20:48` to `04:08:15` UTC, about `4h47m27s`, including the deliberate 16-process to 8-process and back scaling experiment
+  - this corresponds to about `38.3` physical-core-hours of occupied machine capacity; the completed-process accounting is `73.8` logical thread-hours, plus a small amount of discarded work from the eight deliberately stopped and restarted buckets
+  - the one-core outer-orbit build adds only `5m31s`, so it is negligible beside the kernels
+- Scaling interpretation:
+  - the original isolated feasibility probe projected `26.0` core-hours; the production run used about `2.84x` that logical CPU time because its prefix/double-coset weighting was not a uniform full-orbit runtime estimator and because 16 SMT workers contend for eight physical cores
+  - nevertheless, the new fixed-four validation is roughly four orders of magnitude cheaper than the approximately `200,000-250,000` core-hours spent computing the full polynomial
+  - this validates one polynomial evaluation, not its other coefficients, but does so with a different outer enumeration and a different exact counting identity
+- Outcome: accept the existing `7x7` polynomial's value at `k=4` as independently reproduced. The weighted augmentation, complement pairing, multiprocess sharding, exact aggregation, and asymmetric `3+4` kernel are all validated at production scale and can serve as trusted infrastructure for subsequent `8x8` work.
+
+### Experiment 233: Batched disjointness oracle for the `8x8` `4+4` kernel
+- Goal: replace the quadratic support-pair scan from Experiment 229 with a genuinely batched exact join and test whether it closes the approximately `3.1x` gap to the 200,000-core-hour target.
+- Weighted reduced-ZDD construction:
+  - encode the 56 possible `(colour,row-pair)` tokens in a reduced zero-suppressed decision diagram, with terminal weights equal to distribution multiplicities
+  - store each subtree's total weight, union mask, and common mask; the union proves that an entire subtree is disjoint and the common mask rejects an entire subtree on a collision
+  - ordering is decisive: a preliminary p90-shaped kernel generated `84,946,431` memo states with colour-major ordering, versus `4,476,223` with pair-major ordering, and drove peak RSS to about 3 GiB; pair-major is therefore the only retained campaign ordering
+- Batched Apply recurrence:
+  - for diagram nodes `a,b` at the next token, compute `J(a,b) = J(a0,b0) + J(a1,b0) + J(a0,b1)`; the omitted high/high branch is precisely the forbidden shared token
+  - memoise node pairs so all left masks reuse common subproblems, return `sum(a) sum(b)` when the subtree unions are disjoint, and return zero when the subtree common masks collide
+  - every result is exact and weighted; there is no Booleanisation or floating-point count
+- A deployable hybrid avoids choosing the fastest implementation after timing it:
+  - use the direct scan below one million support-pair tests
+  - use pair-major Apply when the two diagrams contain at most 50,000 nodes
+  - cap Apply at two million memo states and fall back exactly to a one-sided disjointness traversal if it exceeds the budget
+  - otherwise query the smaller of the two diagrams from every mask in the other distribution
+  - the cap is necessary: apparently compact input diagrams can still induce a much larger Apply product and an unsafe memory tail
+- Exact full-sample representative timings on one core, including oracle construction:
+  - weighted minimum: hybrid `0.000023s`, direct `0.000022s`
+  - weighted median: hybrid `0.0497s`, direct `0.3709s`, about `7.5x` faster
+  - weighted p90: hybrid `0.4488s`, direct `0.8573s`, about `1.9x` faster
+  - weighted p99: hybrid `0.2772s`, direct `1.7584s`, about `6.3x` faster
+  - maximum: hybrid `0.5780s`, direct `7.0360s`, about `12.2x` faster
+  - the non-monotone oracle times are genuine: diagram product complexity is not determined by the raw Cartesian support size
+- Stratified feasibility estimate:
+  - divide the exact double-coset-weighted pair-work distribution from all 1,019 viable sampled prefixes into 64 equal-weight strata and select one deterministic pseudorandom pair and relative row table per stratum
+  - compare the hybrid and direct kernels on the identical 64 cases; all selected and complementary counts agree exactly
+  - hybrid mean `0.237280s`, direct same-sample mean `0.514699s`, a `2.17x` same-kernel speedup
+  - the 128 constituent joins select direct 6 times, complete bounded Apply 73 times, and use the one-sided oracle 49 times; 14 of the latter are bounded-Apply fallbacks
+  - multiplying the hybrid mean by the exact `7,343,033,248` complement-paired binary orbits gives approximately `483,987` core-hours
+  - as in Experiment 229, fixed-split double-coset weighting is not a uniform sample of full `S_8 x S_8` binary-mask orbits, so this is a scale estimate rather than a bound; it nevertheless misses the `0.09805s`/kernel 200,000-core-hour gate by about `2.4x`
+- Correctness and robustness gates:
+  - both Apply orderings, both one-sided orientations, the hybrid, and the direct scan agree on every full-sample quantile representative
+  - the hybrid agrees independently with the direct selected and complementary joins throughout all 64 stratified cases
+  - AddressSanitizer and UndefinedBehaviorSanitizer complete a 16-prefix, eight-stratum run without an error
+  - the bounded memo table removes the unbounded memory failure mode; the largest retained full-sample diagnostic uses about 477 MiB
+- Outcome: retain pair-major Apply and the bounded hybrid as useful exact kernels, but reject the batched oracle as the missing `8x8` breakthrough. It substantially improves the median and heavy tail, yet the broad p90 regime and fallback cases hold the estimated campaign near 484,000 core-hours. Further low-level tuning of the same oracle is unlikely to supply the remaining factor safely; the next serious attempt should again target a mathematical reduction in the number or dimension of kernel states.
+
+### Experiment 234: Relative-row orbit-pair aggregate
+- Goal: test whether summing all relative row alignments for a pair of half-grid prefix orbits can replace the `7,343,033,248` individual `8x8` complement-paired full-mask kernels with at most `binom(25,207+1,2) = 317,709,028` prefix-orbit aggregates.
+- Exact aggregate:
+  - for prefix representatives `A,B`, evaluate `sum_pi C_2(A | pi B) C_2(complement(A) | pi complement(B))` over `S_m`
+  - quotient the row permutations by the two Young-subgroup row stabilisers; each relative alignment is the contingency table between the occupied row patterns of `A` and `B`, with exact multiplicity `product a_i! product b_j! / product n_ij!`
+  - a complete pair aggregate is the multiplicity-weighted sum over these double cosets
+- `7x7` correctness gate:
+  - extend the asymmetric `3+4` probe to compute both all `7! = 5,040` row permutations and the double-coset-reduced sum independently
+  - on the minimum representative, all 5,040 permutations equal the two-double-coset sum exactly; the quotient reduces work by `2,520x` and measured time by about `825x`
+  - the weighted-median representative has 250 double cosets, a `20.16x` reduction from 5,040; its exact reduced aggregate is `8,872,927,351,431,168` and takes `1.987s` with the direct validation kernel
+  - over the complete `7x7` prefix-type census, the average is 219.7 double cosets per pair, so the expected symmetry reduction is about `22.9x`; this confirms the mathematics but does not reveal an additional quotient beyond ordinary Young-subgroup double cosets
+- Cross-alignment sharing tested at `8x8`:
+  - build the selected and complementary pair-major ZDDs once for each four-column prefix
+  - transform every right-distribution token mask under each relative row alignment, cache complete forbidden-mask queries across alignments, and additionally memoise partial queries by `(diagram node, remaining forbidden-token mask)`
+  - cap the cross-query memo at 200,000 entries and fall back to the exact per-query traversal after saturation, preventing a new memory tail
+  - every sampled result is independently checked against a rebuilt direct join for its first relative table
+- Measured sharing:
+  - for the weighted-median prefix pair, eight of 10,440 relative tables issue 319,580 distinct complete queries; only 41,892 repeat, about `11.6%`
+  - the stronger partial-state memo changes the eight-table time only from `5.464s` to `5.346s`, about a `2.2%` improvement, and saturates on the hard complementary distribution
+  - thus row permutations mostly move queries into different labelled token coordinates; ordinary diagram memoisation does not identify their group orbit
+- One-table timings for the full 1,024-prefix quantile representatives:
+  - minimum: `0.00379s`, 8 total double cosets
+  - weighted median: `0.751s`, 10,440 double cosets
+  - p90: `5.145s`, 20,160 double cosets
+  - p99: `0.924s`, 10,440 double cosets
+  - maximum: `0.485s`, 2,892 double cosets
+  - as in Experiment 233, structural diagram complexity is strongly non-monotone in raw support-pair count
+- Feasibility consequence:
+  - the 1,019-prefix sample averages about 2,074 double cosets per ordered pair, only a `19.4x` quotient of `8!`
+  - extrapolating even the median measured per-table time gives about `6,976s` for that one complete prefix-pair aggregate
+  - a 200,000-core-hour campaign over 317,709,028 unordered prefix pairs allows only `2.266s` per pair, so the median estimate misses the aggregate target by about `3,078x`
+  - enumerating all double cosets across all prefix pairs would be on the order of `1.3 trillion` alignment kernels; the proposed 23-fold reduction in outer pair count is overwhelmed by thousands of relative alignments per pair
+- Outcome: reject direct cross-alignment shared Apply and the prefix-orbit aggregate as an `8x8` route. The double-coset identity is exact and useful bookkeeping, but the only substantial sharing is the already known row-stabiliser quotient. Any revival would require a genuinely group-equivariant convolution that evaluates all row correlations simultaneously, with orders-of-magnitude compression beyond the generic `S_8` blocks rejected in Experiment 227; caches over labelled diagram states do not provide it.
+
+### Experiment 235: Kernel-specific `S_m`-equivariant block-rank gate
+- Goal: test the one remaining possible rescue for Experiment 234: although the generic `S_8` commutant is enormous, the particular two-bit `4+4` kernel might have very low rank inside each irreducible multiplicity block.
+- Exact finite model:
+  - choose deterministic binary half-grid prefixes and close every sample under all row permutations, retaining complete row orbits rather than independent canonical representatives
+  - for orbit states `x,y`, form the exact specialized kernel `K(x,y) = C_2(x|y) C_2(complement(x)|complement(y))`
+  - evaluate only one kernel for every seed-pair/relative-permutation triple, then populate the full row-equivariant matrix using `K(sigma x,tau y) = K(x,sigma^-1 tau y)`
+  - generate every partition of `m`, compute the exact `S_m` characters by Murnaghan-Nakayama, and construct the central projector `P_lambda = sum_g chi_lambda(g) R(g)`
+  - compare `rank(P_lambda)` with `rank(K P_lambda)` modulo `1,000,000,007`; the omitted scalar `dim(lambda)/m!` does not affect rank
+- Correctness gates:
+  - the generated group sizes are exactly `4! = 24` and `5! = 120`
+  - every complete kernel matrix is symmetric and passes simultaneous-row-permutation invariance checks
+  - projector component dimensions sum to the total sampled row-module dimension
+  - all rank calculations use exact finite-field elimination; in particular, equality of kernel rank and component dimension modulo the prime proves full rational rank, rather than being a numerical estimate
+- Four-row, four-column-half growth:
+  - 8 seed orbits, 156 states: retained ranks by partitions `[4]`, `[3,1]`, `[2,2]`, `[2,1,1]`, `[1,1,1,1]` are respectively `8/8`, `54/63`, `24/26`, `42/54`, and `4/5`
+  - 16 seeds, 324 states: `15/16`, `105/129`, `46/54`, `84/114`, and `8/11`
+  - 32 seeds, 672 states: `29/32`, `213/264`, `94/112`, `180/240`, and `18/24`
+  - even where exact dependencies appear, the retained fractions remain `75-91%`; rank grows with the sampled module instead of stabilising at a small kernel-specific value
+- Five-row target-depth gate:
+  - 8 seed orbits, 590 states: all seven nonzero component ranks are exactly full, namely `8`, `100`, `135`, `174`, `110`, `60`, and `3`
+  - 12 seeds, 1,010 states: every component is again full, namely `12`, `160`, `225`, `300`, `195`, `112`, and `6`
+  - 16 seeds, 1,310 states: retained ranks for `[5]`, `[4,1]`, `[3,2]`, `[3,1,1]`, `[2,2,1]`, `[2,1,1,1]`, and `[1^5]` are `16/16`, `204/212`, `280/295`, `360/390`, `230/250`, `124/140`, and `6/7`
+  - thus the larger components retain `92-100%` and even the smallest retains `86%`; the 12-seed full-rank minors alone rigorously rule out bounded ranks below those already substantial component dimensions
+- Depth comparison:
+  - at five rows and two-column halves, the eight-seed sampled components are all full wherever the sampled row module contains them
+  - three-column halves begin to show dependencies at four seeds, retaining roughly `50-86%` in nontrivial components
+  - the actual four-column half reverses that apparent compression and is full through 12 seeds, showing that the target kernel becomes more generic, not more factorable, with depth
+- Cost of the strongest probe: the 16-seed `S_5` run constructs a 1,310-state exact kernel using `28,149,944,280` primitive support-pair comparisons, finishes in `19.15s`, and uses about 29 MiB.
+- Interpretation:
+  - Schur decomposition still block-diagonalises the operator, but it does not make the multiplicity matrices low-rank
+  - combined with Experiment 227's four-column `S_8` multiplicity maximum of 431,552 and commutant dimension `943,245,971,216`, retaining even a large constant fraction leaves an intractable transform/storage problem
+  - the observed dependencies offer at most a modest constant factor and cannot supply the thousands-fold simultaneous-correlation reduction required after Experiment 234
+- Outcome: reject kernel-specific low-rank `S_8` factorisation for the two-bit `4+4` kernel. This was the last untested mathematical escape hatch within the relative-orbit formulation: the generic symmetry blocks are huge, and the exact specialized kernel acts at or near full rank inside their smaller-row analogues. Do not implement full `S_8` representation matrices or Fourier transforms for this kernel.
+
+### Experiment 236: Batched exact `4+4` joins on a Modal L40S
+- Goal: determine whether a commodity GPU can turn Experiment 233's close-but-too-expensive `8x8` kernel into a plausible cluster campaign even though the remaining mathematical factorisations failed.
+- Reproducible corpus:
+  - extend `twocolour_4x4_probe` with a versioned binary exporter containing the same 64 deterministic equal-weight strata used by the CPU hybrid feasibility estimate
+  - store all four weighted distributions per kernel, plus independent exact selected and complementary join values
+  - corpus checksum `SHA256 26a000a0b7222b28c15a23356c75271c5dc3715a30fb99fa3a94c7f6452ff016`
+  - 64 kernels, 128 joins, 7,047,735 weighted support entries, 112,763,760 bytes, and `95,589,959,440` exact mask comparisons
+  - mean comparison count `1,493,593,116` per kernel, within `0.14%` of Experiment 229's full weighted-prefix estimate `1,495,582,449`
+- CUDA kernel:
+  - assign one left support entry to each thread and load right entries in shared-memory tiles, reusing every right mask and weight across an entire block
+  - split large right distributions across a bounded second grid dimension to expose enough blocks for small-left joins
+  - accumulate weighted products in 64-bit thread and block sums and issue one 64-bit atomic addition per block
+  - batch the 128 heterogeneous joins with configurable CUDA-stream concurrency; test 128-, 256-, and 512-thread blocks with 1, 4, and 16 streams
+  - validate every selected and complementary result after warm-up and again after the timed repetitions; all configurations reproduce all 128 CPU values exactly
+- Modal environment:
+  - `gpu="L40S"` using an NVIDIA CUDA 12.8.1 development image and `sm_89` compilation
+  - allocated NVIDIA L40S: compute capability 8.9, 142 SMs, reported 46,068 MiB, driver 580.95.05
+  - successful benchmark runs: `<redacted-modal-app-id>` and transfer-instrumented `<redacted-modal-app-id>`
+- Kernel throughput:
+  - all nine launch configurations lie in the narrow range `2.75-3.01 trillion` comparisons/s, demonstrating that the result is not a fragile launch-parameter accident
+  - best observed: 256 threads and four streams, `0.031784s` for the complete corpus, `3.0075 trillion` comparisons/s, or `0.0004966s/kernel`
+  - repeated transfer-instrumented run: the same configuration gives `0.032606s`, `2.9316 trillion` comparisons/s, or `0.0005095s/kernel`
+  - 512 threads and 16 streams are similarly stable at `0.0005054s/kernel`; stream concurrency gives only a small benefit because the tiled kernels already saturate the device
+- Exact same-corpus CPU comparison:
+  - regenerated direct CPU joins average `0.594523s/kernel`, making the L40S about `1,167x` faster using the conservative transfer-instrumented GPU timing
+  - the CPU hybrid averages `0.238267s/kernel`, so the simple tiled GPU scan is about `468x` faster than the accepted CPU oracle
+  - this is the expected architecture reversal: avoiding comparisons matters on a CPU, while the L40S evaluates the regular Cartesian scan far faster than it could traverse irregular decision diagrams
+- Streaming cost:
+  - the corpus averages 110,121 entries or 1,761,934 bytes per kernel
+  - repeated pageable host-to-device copies sustain roughly `9-12 GiB/s`, costing `0.00014-0.00019s/kernel`
+  - serialising copy and compute would project roughly `1,310-1,400` L40S-hours; ordinary double buffering can hide transfer beneath the `0.00051s` compute time and retain roughly `1,030-1,040` L40S-hours
+  - Experiment 233's `0.0034s` CPU distribution-construction rate requires approximately seven physical producer cores per continuously occupied L40S, so an eight-core producer/GPU worker is the appropriate next end-to-end prototype
+- `8x8` projection:
+  - multiply the conservative `0.0005095s` sampled mean by the exact `7,343,033,248` complement-paired binary-orbit kernels: approximately `1,039` L40S-hours for the joins
+  - at Modal's checked 2026-08-12 L40S rate `$0.000542/s = $1.9512/hour`, kernel GPU cost is about `$2,028`
+  - provisioning eight Modal physical CPU cores for all 1,039 GPU-hours at `$0.0000131/core/s` adds about `$392`, for roughly `$2,420` before memory, outer generation, retries, storage, and aggregation
+  - ten concurrent L40S workers imply about 104 hours of ideal join wall time; 100 imply about 10.4 hours, subject to account concurrency and allocation availability
+- Caveats:
+  - as before, the fixed-split double-coset-weighted prefix sample is not a uniform sample of full `S_8 x S_8` binary-mask orbits, so the projection is an engineering estimate rather than a bound
+
+  - this benchmark starts from materialised distributions; it does not yet implement the 14,685,630,688-orbit weighted augmentation, exact complement/self-complement pairing, streaming backpressure, checkpointing, or final aggregation
+  - the campaign would stream on the order of 13 PB of transient support data through GPU memory, but only about 3.5 GiB/s per occupied GPU; this is a local PCIe traffic requirement, not persistent storage
+- Outcome: accept the L40S direct join as the first kernel comfortably below the feasibility threshold. The inner arithmetic is no longer the obstacle: projected join work falls from roughly 484,000 CPU core-hours to about 1,039 L40S-hours. The next experiment should combine an eight-core CPU producer, double-buffered GPU consumer, exact orbit weights, and restartable shards on Modal; its gate is sustained end-to-end throughput close to this resident-corpus result rather than peak kernel speed alone.
+
+### Experiment 237: Fused and prefix-cached `3+4` L40S pipeline for `T_4(7,7)`
+- Goal: turn the Experiment 236 throughput result into a production-shaped `7x7` validation path, eliminating the two costs hidden by the large-join microbenchmark: millions of CUDA launches and repeated construction/transfer of identical split-prefix distributions.
+- Prefix reuse census over the complete selected half of the existing `33,642,660`-record weighted orbit file:
+  - `16,821,330` complement-paired kernels contain only `45,646` distinct labelled three-column left prefixes, an average reuse of `368.5x`
+  - they contain only `744,067` distinct labelled four-column right prefixes, an average reuse of `22.61x`
+  - sort kernels by right prefix, retain every small left distribution, and build/transfer each right distribution once; this reduces the number of selected/complement distribution-pair builds from `33,642,660` to `789,713`, about `42.6x`
+- Fused CUDA kernel:
+  - launch one block per heterogeneous join rather than one CUDA kernel per join
+  - within each block, keep one left support entry per thread and scan shared-memory tiles of the right distribution; reduce to the exact 64-bit weighted join result once per block
+  - batching tens of thousands of joins supplies device-wide parallelism, so the thousands of blocks per join used by the sparse Experiment 236 corpus are unnecessary
+- Independent correctness gates:
+  - the first Modal run validates 16 selected/complement joins against direct CPU scans
+  - on orbit records `[0,20000)`, the GPU and existing CPU solver agree exactly on all checksums and on contribution `134221509242240716800`
+  - that CPU slice performs the identical `349,538,972,798` primitive comparisons in `79.30s`; the new GPU pipeline completes load, cached construction, transfers, joins, validation, and aggregation in `3.13s`
+- Steady-state Modal L40S run on records `[0,1000000)`:
+  - `936,204` kernels, `46,707` unique right prefixes, and `28,774,062,244,507` primitive comparisons
+  - CUDA join time `9.5399s`, or `3.0162 trillion` comparisons/s, recovering the full throughput of Experiment 236 despite the much smaller average join
+  - left-cache construction `0.7758s`, right construction `10.7295s`, uploads `1.5487s`, and complete wall time `23.1583s`
+  - all 16 independently rescanned joins agree exactly; weighted subtotal `3981962733686928195125760`
+  - successful Modal runs: `<redacted-modal-app-id>` and `<redacted-modal-app-id>`
+- Full-run projection using the exact prefix census:
+  - joins: about `112.4s` from the known `339,070,632,838,049` comparisons
+  - unique right construction: about `170.9s`; left construction about `3.3s`; transfers about `24.7s`
+  - serial producer/GPU execution therefore projects to roughly `5.2 minutes` on one L40S with eight physical CPU cores
+  - right construction and GPU work are almost perfectly balanced on the million-record run, so preparing the next batch while the current batch executes should reduce the end-to-end run toward `3-4 minutes`
+- Outcome: accept fused launches plus split-prefix caching as the production `7x7` GPU baseline. This is already about `55x` faster in wall time than the completed `4h47m` CPU campaign; implement producer/GPU double buffering next, then require the complete exact `T_4(7,7)` checksum before applying the architecture to `8x8` shards.
+
+### Experiment 238: Overlap the cached `7x7` producer with L40S joins
+- Goal: hide the right-prefix distribution construction and transfer path beneath the fused GPU work, since Experiment 237 measured almost equal CPU and CUDA times.
+- Pipeline:
+  - partition the right-prefix-sorted edge list without splitting a reuse group
+  - build and pack the next host batch asynchronously with eight OpenMP producer threads while the current batch uploads, executes, validates, and aggregates
+  - retain the complete left-prefix cache on the GPU; only the double-buffered right entries and join descriptors change between batches
+- Identical million-record benchmark and correctness gate:
+  - the exact checksums, `28,774,062,244,507` comparisons, 16 direct CPU join validations, and contribution `3981962733686928195125760` all agree with Experiment 237
+  - GPU time remains `9.6408s` at `2.9846 trillion` comparisons/s, confirming that concurrent CPU construction does not starve the L40S
+  - complete wall time falls from `23.1583s` to `12.7097s`, a `1.82x` end-to-end speedup
+  - successful Modal run: `<redacted-modal-app-id>`
+- Projection: the exact full workload still contains about `112s` of CUDA arithmetic; measured unique-right construction projects near `120s`, and most allocation/transfer work is now overlapped. Allowing for the larger left cache, batch boundaries, and nonuniform prefix cost gives a conservative `2.5-3.5 minute` target for the complete one-L40S run.
+- Outcome: accept asynchronous host preparation. Run the full `33,642,660`-record corpus and require all orbit, weight, comparison, and known `T_4(7,7)` checksums to pass exactly.
+
+### Experiment 239: Complete exact `T_4(7,7)` on one L40S
+- Goal: validate the entire fused, prefix-cached, overlapped GPU pipeline against the independently completed CPU campaign and the known full chromatic polynomial evaluation.
+- Complete workload and exact checksums:
+  - all `33,642,660` weighted binary orbit records, with labelled weight `562,949,953,421,312 = 2^49`
+  - all `16,821,330` complement-paired kernels, with selected weight `281,474,976,710,656 = 2^48`
+  - exactly `744,067` distinct right prefixes and `45,646` distinct left prefixes, agreeing with the independent census
+  - exactly `339,070,632,838,049` primitive support-pair comparisons, agreeing with Experiment 232
+  - GPU result `T_4(7,7) = 701672004810879255876925440`, equal to both the CPU two-bit result and evaluation of the independently computed full chromatic polynomial
+  - 16 sampled selected/complement GPU joins also pass independent direct CPU rescans
+- One Modal L40S with eight CPU producer cores:
+  - orbit load/filter/sort `3.1036s`
+  - retained left-cache construction `2.5695s`
+  - summed right-prefix construction `146.8974s`, overlapped batch-by-batch with CUDA work
+  - summed host-to-device upload `19.5744s`, and CUDA join time `116.6501s`
+  - sustained CUDA rate `2.9067 trillion` comparisons/s
+  - complete measured wall time `206.3686s`, or `3m26.4s`
+  - successful Modal run: `<redacted-modal-app-id>`
+- Comparison with the completed CPU campaign:
+  - CPU: approximately `4h47m27s` wall time on eight physical cores/16 SMT workers
+  - GPU pipeline: `3m26.4s` on one L40S plus eight CPU producer cores
+  - end-to-end wall-time speedup about `83.6x`; pure join work is about `581x` faster than the CPU campaign's implied primitive-comparison rate
+  - at the checked Modal rates used in Experiment 236, the GPU plus eight provisioned CPU cores cost only about `$0.13` before memory charges and image/file transfer overhead
+- Remaining profile:
+  - the fused join already stays close to the Experiment 236 large-kernel throughput and is no longer the main source of avoidable overhead
+  - the wall time exceeds `max(146.9s producer, 116.7s GPU)` by about 54 seconds, principally pageable allocation/copy, result handling, and imperfect balance among highly nonuniform right-prefix batches
+  - pinned reusable device/host buffers and work-balanced batches could plausibly save tens of seconds, but this is now a polishing opportunity rather than a feasibility requirement
+- Outcome: accept the GPU `7x7` path as fully validated at production scale. The earlier ten-minute engineering target is exceeded by about `2.9x`, and the result supplies a strong exact end-to-end gate for an `8x8` sharded producer/GPU implementation.
+
+### Experiment 240: Exact scale and weighted-orbit representation for `T_4(6,9)`
+- Goal: determine whether the validated GPU decomposition can compute `6x9` in under one hour and establish the exact outer-orbit and complement semantics before building the large corpus.
+- Exact Burnside counts under `S_6 x S_9`:
+  - `130,237,768` binary row/column orbits
+  - `25,256` self-complementary binary orbits
+  - `(130,237,768 + 25,256) / 2 = 65,131,512` orbits after adjoining colour-bit complement
+  - this is only `3.87x` the `16,821,330` kernels completed in Experiment 239; even without accounting for smaller six-row collision masks, the measured GPU phase projects well below ten minutes
+  - a weight-refined cycle-index calculation finds `13,155,914` midpoint orbits, so the simpler strategy of evaluating every 27-cell orbit uses exactly `(130,237,768 + 13,155,914) / 2 = 71,696,841` kernels, only `4.26x` the `7x7` count
+- Representation:
+  - keep six rows and nine columns, split as `4+5`, and encode the two colour-specific row-pair collision sets in only `2 binom(6,2) = 30` mask bits
+  - extend the canonical augmenter to configurable geometry, using six 10-bit row words in one `uint64_t`; preserve the existing `7x7` build as the default target
+  - use distinct versioned magic `R6ORB01` and exact per-depth orbit counts through `6x9`
+  - at the 27-cell midpoint, evaluate one canonical complement representative; multiply a distinct complement pair by two, but a self-complementary orbit only by one
+- Validation:
+  - the unchanged default augmenter still reproduces `7x4 = 9,343` orbits and labelled weight `2^28`
+  - the new geometry reproduces the exact sequence `1, 7, 50, 386, 3,250, 28,576` through `6x5`, with labelled weight `2^30`
+- Resource estimate: the final `6x8 -> 6x9` augmentation canonicalises about `1.10 billion` candidates, writes a roughly 2.1 GiB orbit file, and needs several GiB of hash-map/sort workspace; the available host has ample memory and storage.
+- Outcome: accept the `6x9`, `4+5` route and begin the exact weighted orbit build. The one-hour gate is comfortable unless the outer augmentation is unexpectedly more than an order of magnitude slower than the validated lower-depth rate.
+
+### Experiment 241: Complete weighted binary `6x9` orbit corpus
+- Goal: materialise and checksum the exact outer corpus required by the GPU calculation while measuring whether cold-start generation fits the one-hour budget.
+- Exact augmentation sequence:
+  - orbit counts through columns 0-9 are `1, 7, 50, 386, 3,250, 28,576, 251,610, 2,141,733, 17,256,831, 130,237,768`
+  - every depth independently matches its Burnside count and labelled weight `2^(6d)`
+  - the final `6x8 -> 6x9` step canonicalises `1,104,437,184` candidates in `749.116s`, about 1.474 million/s on one core
+- Complete cold build:
+  - `872.57s`, or `14m32.6s`, including every preceding depth plus final sorting and writing
+  - peak RSS `12,459,884 KiB`, safely below the available host memory
+  - versioned file `/tmp/rect6x9-full.orbits`, `130,237,768` records and 2,083,804,308 bytes
+  - SHA256 `10a306cbbedfe1e40bf35e8fb7619b17dcb8e8a560a0d9a66749bc22bcc9d4ea`
+  - final labelled weight `18,014,398,509,481,984 = 2^54`
+- Outcome: accept and retain the corpus. Even a cold computation has about 45 minutes left under the requested one-hour gate; subsequent GPU retries reuse the deterministic file and avoid this cost entirely.
+
+### Experiment 242: Fused cached `4+5` L40S feasibility probe for `T_4(6,9)`
+- Goal: generalise the production-validated `7x7` GPU pipeline to six rows and a `4+5` split, validate the even-cell complement accounting, and measure the full path before committing to all 71.7 million kernels.
+- Implementation and regression:
+  - make grid rows, total columns, split widths, packed-row width, and orbit-file magic compile-time parameters of the same CUDA source used for Experiment 239
+  - the six-row kernel uses only 30 collision bits and the same exact 64-bit weighted joins/U128 outer aggregation
+  - below 27 selected cells, multiply the orbit contribution and covered weight by two; at exactly 27 cells include every orbit with factor one
+  - a 20,000-record `7x7` Modal regression after generalisation reproduces contribution `134221509242240716800` and all 16 direct CPU join checks
+- Million-record `6x9` L40S probe:
+  - `1,000,000` source orbit records select `977,893` kernels, `10,339` distinct left prefixes, and `35,988` distinct right prefixes
+  - cached left distributions occupy 1,090,824,544 bytes on the device
+  - `25,600,221,784,828` primitive comparisons take `9.2148s`, sustaining `2.7782 trillion` comparisons/s
+  - summed right-prefix construction is `6.2163s`, upload `0.8392s`, and complete measured wall time `17.7644s`
+  - all 16 selected/complement joins agree with independent direct CPU scans
+  - exact weighted subtotal `98640320304805958427033600`
+  - successful regression/probe Modal runs: `<redacted-modal-app-id>` and `<redacted-modal-app-id>`
+- Feasibility:
+  - scaling wall time directly by all 130.2 million source records gives about `38.6 minutes`, already below the remaining cold-run budget
+  - this is conservative because the complete run sorts globally and constructs each right prefix once, whereas independent slices repeat prefixes
+  - scaling the sampled comparison mean over the exact 71,696,841 kernels projects about `11.3 minutes` of CUDA arithmetic; CPU construction should overlap most of it
+- Outcome: accept the fused `4+5` implementation and proceed immediately with the complete corpus. Require exact source-orbit count, kernel count, labelled/covered weights `2^54`, and all direct join checks before accepting the newly computed `T_4(6,9)` value.
+
+### Experiment 243: Complete exact `T_4(6,9)` on one L40S
+- Goal: compute the previously unavailable fixed-four value within the requested one-hour cold-run gate, using all exact outer and inner checks established in Experiments 240-242.
+- Complete exact workload:
+  - all `130,237,768` weighted `S_6 x S_9` binary orbit records, with labelled weight `18,014,398,509,481,984 = 2^54`
+  - exactly `71,696,841` evaluated kernels, agreeing with the independently derived weight-refined Burnside count
+  - complement-covered weight `18,014,398,509,481,984 = 2^54`; this proves that below-midpoint doubling plus all midpoint orbits covers every labelled binary mask with the intended multiplicity
+  - `73,874` distinct four-column left prefixes and `1,627,245` distinct five-column right prefixes
+  - `1,671,734,146,409,761` primitive support-pair comparisons
+  - all 16 sampled selected/complement joins agree with direct CPU rescans
+- New exact result:
+  - `T_4(6,9) = 197810562116614403484457574400`
+- One Modal L40S with eight CPU producer cores:
+  - load/filter/global sort `27.7960s`
+  - left-prefix cache construction `8.4123s`; 610,851,899 entries occupying 9,773,630,384 device bytes
+  - summed right-prefix construction `500.9520s`, overlapped batch-by-batch with CUDA
+  - summed uploads `73.4462s`
+  - CUDA join time `594.1853s`, sustaining `2.8135 trillion` comparisons/s
+  - complete GPU-stage wall time `900.1092s`, or `15m00.1s`
+  - successful Modal run: `<redacted-modal-app-id>`
+- One-hour gate:
+  - cold deterministic orbit construction `14m32.6s`
+  - complete L40S solver `15m00.1s`
+  - combined measured computation `29m32.7s`, leaving more than a factor-two margin under one hour even before reusing the corpus
+  - at the checked rates from Experiment 236, the provisioned L40S and eight CPU cores cost about `$0.58` for the 900-second solver, before memory and deployment-transfer charges
+- Interpretation:
+  - the million-record projection slightly overestimated CUDA time (`594s` actual versus about `11.3 minutes` projected) and predicted a pessimistic `38.6-minute` wall time because it could not account for global right-prefix reuse
+  - global caching reduces 71.7 million right-side builds to 1.63 million; overlapped CPU construction and CUDA work keep the full solver near the larger of their summed times rather than their sum
+  - the six-row `4+5` kernel retains essentially the same L40S throughput as `7x7`, confirming that the fused architecture transfers cleanly across asymmetric splits
+- Outcome: accept the exact `T_4(6,9)` value and the generalized GPU solver. The full result, orbit/weight identities, independently derived kernel count, direct join samples, and validated `7x7` regression all pass; retain the corpus for inexpensive reruns or additional independent checks.
+
+### Experiment 244: Exact outer scale and sharded build plan for `T_4(7,8)`
+- Goal: establish the exact kernel count and a practical corpus-construction route before spending GPU time on the next fixed-four value.
+- Exact cycle-index/Burnside counts under `S_7 x S_8`:
+  - `508,147,108` binary row/column orbits
+  - `37,140` self-complementary binary orbits, hence `254,092,124` orbits under adjoining bit complement
+  - `51,637,694` orbits at the 28-cell midpoint
+  - retaining the simple independently checkable rule from `6x9`—double below midpoint and evaluate every midpoint orbit—therefore uses exactly `(508,147,108 + 51,637,694) / 2 = 279,892,401` kernels
+- Representation and kernel:
+  - retain seven rows, eight columns, and a symmetric `4+4` split
+  - the selected/complement collision state uses `2 binom(7,2) = 42` bits and fits in the existing 64-bit entry format
+  - this is `3.90x` the `6x9` kernel count, but average support-pair work must be measured rather than inferred from the outer count
+- Parallel outer build:
+  - the final `7x7 -> 7x8` augmentation contains `33,642,660 * 128 = 4,306,260,480` candidates, too slow for an unnecessary single-core run
+  - split the existing checked `7x7` parent corpus into eight disjoint parent-index ranges, run one canonical augmenter per physical core, and hash-partition each local child map into reduced output buckets
+  - reduce buckets independently, then concatenate their versioned headers/records without changing weights; this is also the natural restart boundary for later GPU shards
+  - add an exact `combine` operation so the GPU can either consume one range-addressable file or the independently reduced buckets
+- Outcome: accept the `7x8`, `4+4` path. Build the corpus with eight physical augmentation workers, check `508,147,108` records and labelled weight `2^56`, then benchmark the actual fused L40S workload before choosing GPU shard concurrency.
+
+### Experiment 245: Complete weighted binary `7x8` orbit corpus
+- Goal: build the 508-million-record outer corpus fast enough for an interactive GPU campaign while retaining deterministic restart boundaries.
+- Eight-worker final augmentation:
+  - split all `33,642,660` checked `7x7` parents into eight contiguous ranges of 4,205,332 or 4,205,333 records
+  - each worker canonicalises 538,282,496 or 538,282,624 new-column candidates into about 319.1 million local unique children, then writes 32 hash-partitioned raw buckets
+  - worker times lie in `782.246-786.975s`, a spread below `0.7%`; range partitioning is exceptionally well balanced
+  - the eight local maps contain 2,552,911,138 records before cross-range deduplication
+- Independent bucket reduction:
+  - each of 32 reducers merges the corresponding bucket from all eight workers
+  - reduced bucket sizes lie in `15,870,131-15,886,464`, with no material hash skew
+  - concatenating the versioned reduced files produces exactly `508,147,108` records
+- Exact checks and resources:
+  - labelled weight `72,057,594,037,927,936 = 2^56`
+  - final file `/tmp/rect7x8-build/rect7x8-full.orbits`, 8,130,353,748 bytes (about 7.6 GiB)
+  - SHA256 `7662704bb48ca8ad03df3af8fad15d098ad0c8f139bce510c241be9c23e318c5`
+  - complete augmentation, reduction, combination, streaming check, and hash campaign `850.35s`, or `14m10.4s`
+  - observed aggregate memory stayed within the 249 GiB host; largest individual stage RSS reported about 14.0 GiB
+  - restartable workspace retains 39 GiB of local raw buckets plus 7.6 GiB of reduced buckets; none are deleted automatically
+- Outcome: accept and retain the exact corpus. Parallel construction makes the larger `7x8` outer enumeration slightly faster in wall time than the single-core `6x9` corpus, despite handling almost four times as many final orbits.
+
+### Experiment 246: Prefix-hash L40S sharding for the `7x8` `4+4` kernel
+- Goal: find a production partition that fits the symmetric four-column distribution cache in 48 GiB while retaining prefix reuse and exact restartable aggregation.
+- Rejected contiguous-range shape:
+  - the first 250,000 orbit records select 240,049 kernels and 46,434 distinct labelled left prefixes
+  - their left cache alone contains 927,214,831 entries or 14.84 GB; a one-million-record contiguous probe exceeds device memory at the persistent-left-cache allocation
+  - hundreds or thousands of such shards would rebuild the same prefixes repeatedly and discard the main `7x7`/`6x9` construction win
+- Accepted exact partition:
+  - assign every orbit record to `mix64(left_prefix) mod s`; all records sharing a four-column left prefix therefore remain in one shard
+  - every worker scans the same immutable corpus but accumulates record count, labelled weight, kernels, covered weight, and contribution only for its assigned prefix groups
+  - global aggregation checks the independent totals `508,147,108`, `279,892,401`, and `2^56` twice, so the hash partition cannot drop or duplicate an orbit silently
+  - shard results and full textual diagnostics are checkpointed locally as each Modal function completes; rerunning launches only missing shards
+- Modal data path:
+  - baking the 7.6 GiB corpus into a source-dependent image layer caused 10+ minute server-side image finalization after every CUDA edit, despite zero local NIC traffic
+  - upload the already content-addressed corpus once to named Volume `rectangle-free-data`; Modal deduplicates it immediately, and source-only image compilation returns to about seven seconds
+  - mount the volume read-only in practice at `/data/rect7x8-full.orbits` for every L40S worker
+- Exact 1/64 prefix-hash probe:
+  - `8,237,044` assigned records, labelled weight `1,155,237,675,011,975`
+  - `4,592,552` kernels, covered weight `1,164,562,404,768,088`
+  - `16,670` complete left-prefix groups; cache 432,331,405 entries or 6.917 GB
+  - `273,688,556,043,189` comparisons in `95.3232s`, sustaining `2.8712 trillion` comparisons/s
+  - right-prefix construction `227.9448s`, upload `31.8706s`, and complete wall time `279.5311s`
+  - all 16 sampled joins pass direct CPU validation; contribution subtotal `24488520890792164667422617600`
+  - successful Modal run: `<redacted-modal-app-id>`
+- Production choice:
+  - the probe implies about 28 GB of persistent left entries for a 1/16 hash shard, leaving roughly 16 GiB for right batches and results on the reported 44.39 GiB device
+  - use 16 shards rather than 64 to reduce repeated corpus scans and repeated right-prefix construction while preserving safe memory headroom
+  - aggregate GPU-worker time projects to several hours, with ideal wall time around 15-25 minutes at full concurrency; producer construction, not L40S comparisons, is now the limiting stage
+- Outcome: accept 16-way prefix-hash sharding and the Volume-backed restartable driver. Launch the complete campaign and require every outer checksum before recording `T_4(7,8)`.
+
+### Experiment 247: Complete exact `T_4(7,8)` on 16 prefix-sharded L40S workers
+- Goal: compute the new fixed-four value with exact restartable aggregation, validating every outer-count identity established in Experiments 244-246.
+- Complete exact workload and checks:
+  - all `508,147,108` weighted binary orbit records, with labelled weight `72,057,594,037,927,936 = 2^56`
+  - exactly `279,892,401` kernels, agreeing with the independent weight-refined Burnside calculation
+  - complement-covered weight `72,057,594,037,927,936 = 2^56`
+  - `16,971,044,950,105,581` primitive support-pair comparisons
+  - 16 prefix-hash shards individually return exact record/weight/contribution diagnostics; global aggregation passes every count and weight gate
+  - four direct selected/complement CPU rescans per shard, 64 total, all agree with their GPU results
+- New exact result:
+  - `T_4(7,8) = 1525175032291698572326745763840`
+- Balance and memory:
+  - per-shard kernels range from `17,043,283` to `18,004,134`, within about `5.6%`
+  - comparisons range from `1.0263e15` to `1.0840e15`, also tightly balanced
+  - persistent left caches range from 27,619,422,720 to 27,893,979,728 bytes (`25.72-25.98 GiB`), safely below the 44.39 GiB reported device memory while leaving room for right batches
+  - the 16 caches together represent 443,981,040,560 bytes; prefix-hash ownership constructs every labelled left prefix on exactly one worker rather than rebuilding it per record range
+- Timings:
+  - summed CUDA time `5,900.126s`, sustaining about `2.876 trillion` comparisons/s overall
+  - summed right-prefix construction `4,673.496s`, summed uploads `653.621s`, and summed worker wall time `9,209.478s = 2.558 worker-hours`
+  - individual worker wall times range from `537.206s` to `654.183s`, mean `575.592s`
+  - Modal supplied up to ten concurrent tasks; the campaign ran in two allocation waves and completed from approximately 09:44 to 10:06 UTC
+  - successful Modal app: `<redacted-modal-app-id>`
+- Cost at the checked 2026-08-12 Modal rates:
+  - L40S `$4.99`, eight physical CPU cores per worker `$0.97`, and requested 64 GiB memory `$1.31`
+  - total measured provisioned-worker cost about `$7.27`, excluding the small feasibility probes and any included monthly credit
+  - the earlier `$12-15` estimate was conservative because 16-way global prefix ownership saved substantially more repeated construction than the independent 1/64 probe could expose
+- Outcome: accept the exact `T_4(7,8)` value and the prefix-hash GPU campaign architecture. This is the first calculation here large enough to require multi-GPU sharding, and it demonstrates exact, well-balanced, restartable aggregation at low cost—the operational model intended for `8x8`.
+
+### Experiment 248: Audit of canonical-prefix caching and GPU pipeline proposals
+- Goal: check a performance review against the completed `7x8` implementation and quantify whether canonical half-prefix distributions are a producer tweak or a structural memory reduction.
+- Corrections to the review:
+  - the production Modal driver no longer uses record-range sharding; Experiment 247 already hashes complete labelled left prefixes to shards, so every left distribution is built on exactly one worker
+  - the resulting comparison loads differ by only about `5.6%`; replacing the hash with predicted-work bins can remove at most that small imbalance and is not the next large win
+  - sharding on right prefixes merely exchanges which side of the symmetric `4+4` join is persistent and which is rebuilt, unless both sides use a shared canonical cache
+- Exact canonical-cache census for seven-row, four-column halves:
+  - `9,343` binary prefix orbits, of which `9,327` have nonempty selected and complementary distributions
+  - selected support over the `9,327` jointly viable types totals exactly `68,758,306` entries; complementary support has the same total because `D_complement(p) = D_selected(complement(p))`
+  - retaining all `9,343` types used by a branch-free producer adds only 253 entries, for `68,758,559` entries and `1,100,136,944` bytes (`1.025 GiB`) at the current 16-byte `Entry`, plus negligible offsets and prefix-to-orbit metadata
+  - the completed campaign materialised `443,981,040,560` bytes (`413.49 GiB`) of selected-plus-complement left caches across its 16 disjoint labelled-prefix shards, about `403.6x` the canonical selected support footprint
+  - the census took `4.57s` on one CPU core and `171,806,189` DP transitions; totals are now emitted by `twocolour_3x4_probe` for reproducibility
+- Required equivariance bookkeeping:
+  - canonicalisation maps each labelled prefix to `(orbit_id, row_permutation)`; within-half column permutations leave its distribution unchanged, while the row permutation induces a permutation of the two 21-bit row-pair mask planes
+  - complement needs no second support store: complementing a canonical prefix selects another canonical orbit together with a fixed row permutation
+- Implementation caveat and preferred first prototype:
+  - applying the 42-bit row-pair permutation inside every primitive support comparison could erase part of the `2.876e12 comparisons/s` CUDA throughput and must not be assumed cheap
+  - first use the canonical cache as a GPU-side distribution factory: expand each required row-permuted distribution once into the existing persistent-left and double-buffered-right layouts, then run the unchanged validated join kernel
+  - this conservative form retains the current per-shard expanded-left memory, but eliminates hash-map DP construction and bulk host-to-device distribution uploads; it directly targets the measured `4,673.496s` summed right-build time and much of the `653.621s` summed upload time
+  - only after benchmarking that version should a tiled direct-canonical kernel be tried; it could remove the expanded cache and reduce the shard count, but its permutation cost and repeated canonical-entry reads need measurement
+- Remaining proposals:
+  - persistent pinned buffers and asynchronous copies are valid, but uploads were only `7.1%` of summed worker wall time and already overlap partially with CPU construction; fold them into the canonical-factory pipeline rather than treating `10-30%` as assured
+  - storing a dense left ID in each edge, compacting `Edge`/`JoinDesc`/`PackedPair`, and using a sentinel `MapEntry` are sound secondary changes; canonical descriptors make most of these changes natural and may make `MapEntry` irrelevant
+  - splitting joins is not yet justified: millions of one-block joins already give the GPU ample scheduler work, and the measured kernel is healthy; fixed tiles/atomic accumulation should be gated by an actual batch-tail profile because they add descriptors, atomics, and possible rereads
+- Outcome: pursue the canonical `7x4` cache plus complement mapping next, initially as an on-device distribution factory. This is the only proposal in the review with both a measured large factor and direct relevance to the future `8x8` producer architecture; retain pinned buffers and compact descriptors as part of that implementation, not as separate preliminary experiments.
+
+### Experiment 249: Canonical-prefix GPU distribution factory
+- Goal: replace repeated labelled-prefix hash-map DPs and bulk distribution uploads without changing the validated fused disjoint-join kernel.
+- Implementation:
+  - canonicalise each labelled half-prefix under row and within-half column permutations, retaining the canonical orbit key and the row permutation back to labelled coordinates
+  - canonicalise the complemented prefix independently, so selected and complementary descriptors both reference a single selected-distribution cache
+  - build each required canonical distribution once on the CPU, upload the packed cache once, and expand every required labelled distribution with a CUDA row-pair-mask permutation kernel
+  - for symmetric `4+4`, left and right share one canonical cache; the persistent expanded-left layout and the proven join kernel remain unchanged
+  - validate 16 spread canonical expansions against independently built labelled distributions before use, then retain the existing sampled direct-join validation and full-result gates
+  - expose the new path behind `CANONICAL_PREFIX_CACHE` and keep separate baseline and canonical Make targets
+- Complete `7x7` validation on one L40S:
+  - exact result and every outer checksum match Experiment 239; all 16 direct CPU rescans pass
+  - the right factory contains all `9,343` canonical `7x4` distributions and `68,758,559` entries; the corpus needs only 338 canonical `7x3` distributions on the left
+  - cache construction `1.789s`, right-layout construction `0.359s`, uploads `2.305s`, and GPU expansion `0.988s` total
+  - join time remains `116.442s` at `2.912e12 comparisons/s`, versus `116.650s` at `2.907e12 comparisons/s` before the change
+  - complete wall time falls from `206.369s` to `126.733s`, a `1.628x` end-to-end speedup
+  - successful Modal app: `<redacted-modal-app-id>`
+- Complete prefix-hash shard 0 of `7x8`:
+  - all `32,287,988` records, `17,752,049` kernels, weights, `1,073,855,852,992,165` comparisons, and contribution `97074293507701618043598888960` exactly match Experiment 247
+  - the shared factory covers `1,189,566` labelled prefixes with all `9,343` canonical distributions and the same `68,758,559`-entry (`1.025 GiB`) selected cache
+  - the persistent expanded-left cache is intentionally unchanged at `27,812,907,888` bytes
+  - canonical-cache construction `2.481s`, batch-layout construction `0.767s`, uploads `2.526s`, and left/right expansion `1.572s` total, versus `23.917s` left build, `275.007s` right build, and `35.725s` uploads in the original shard
+  - join time is `375.360s` at `2.861e12 comparisons/s`, within about 1% of the original `371.661s` and `2.889e12 comparisons/s`
+  - complete wall time falls from `573.554s` to `406.922s`, a `1.409x` speedup while preserving the production memory regime
+  - successful Modal app: `<redacted-modal-app-id>`
+- Outcome: accept the canonical cache as the production prefix factory. It removes nearly all producer and PCIe distribution cost without perturbing the arithmetic kernel; next reuse device allocations and pinned descriptor/result buffers to reduce the remaining per-batch overhead.
+
+### Experiment 250: Persistent pinned double-buffer pipeline
+- Goal: determine whether the allocation/copy cleanup proposed before Experiment 249 still matters after canonical distributions have removed almost all bulk host-to-device traffic.
+- Prototype:
+  - pre-scan batch descriptors to find exact high-water capacities, allocate two persistent device slots, and allocate pinned host staging for expansion descriptors, join descriptors, and results
+  - use two nonblocking CUDA streams and asynchronous copies; allow descriptor copies and result handling to overlap, but serialize canonical expansion and joins because one join batch already saturates the L40S
+  - retain reusable timing events instead of constructing and destroying events for every batch
+- Correctness:
+  - the 20,000-record probe passes all 16 direct CPU joins and its known exact subtotal
+  - the complete `7x7` run passes all orbit/weight/comparison gates, 16 direct CPU joins, and the known exact result
+  - complete `7x8` prefix-hash shard 0 again reproduces every Experiment 247 checksum and exact contribution
+- Measurements:
+  - on complete `7x7`, descriptor upload falls from `2.305s` to `0.048s`; buffer setup/submission costs `0.168s`, and wall time changes from `126.733s` to `124.908s` (`1.015x`), within ordinary run-to-run variation
+  - on `7x8` shard 0, descriptor upload falls from `2.526s` to `0.077s`, but join time varies from `375.360s` to `380.487s` and total wall time changes from `406.922s` to `407.412s`; there is no end-to-end improvement
+  - the production shard reserves `9,643,943,872` bytes for its two high-water right slots, in addition to the 27.81 GB expanded-left cache and 1.10 GB canonical cache
+  - successful Modal apps: full `7x7` `<redacted-modal-app-id>`; `7x8` shard 0 `<redacted-modal-app-id>`
+- Outcome: reject and revert the pinned double-buffer implementation. Canonical caching has made transfers too small for this complexity and nearly 9.0 GiB of additional device residency to pay for itself; retain the simpler canonical-only allocator and spend the next experiment on a change that affects join arithmetic or the expanded-left footprint.
+
+### Experiment 251: Direct-canonical join without expanded distributions
+- Goal: test whether the 1.025 GiB canonical cache can directly serve the fused join, eliminating the 27.81 GB expanded-left cache measured on a `7x8` shard.
+- Prototype:
+  - replace expanded offsets by canonical distribution offsets plus the row permutation for each join side
+  - transform each left entry once per left tile and each right entry once when loading a shared-memory tile, so permutation work remains outside the primitive Cartesian comparison loop
+  - retain the same one-block-per-join schedule, shared-memory tiling, reduction, exact result handling, and sampled direct CPU validation
+- Row-permutation implementations:
+  - the straightforward 42-bit loop over row pairs is exact but reaches only `1.588e12 comparisons/s` on the 20,000-record `7x7` probe
+  - a complete `S_7` lookup splits each 21-bit colour plane into three seven-bit chunks; the `5,040 x 3 x 128` table occupies `7,741,440` bytes and reduces each 42-bit transform to six cached lookups
+  - the lookup version reaches `2.400e12 comparisons/s` on the same exact probe and passes all 16 direct CPU joins
+- Complete `7x7` gate with the lookup kernel:
+  - all `33,642,660` records, `16,821,330` kernels, labelled/covered weights, `339,070,632,838,049` comparisons, 16 direct CPU joins, and the known exact result pass
+  - no expanded left or right distributions are allocated; retained distribution storage is the canonical left/right caches plus the 7.38 MiB permutation table
+  - CUDA time is `129.268s` at `2.623e12 comparisons/s`, versus `116.442s` at `2.912e12 comparisons/s` for the accepted expanded-cache kernel: an `11.0%` arithmetic-time regression
+  - complete wall time is `137.103s`, versus `126.733s` for the expanded-cache path
+  - successful Modal app: `<redacted-modal-app-id>`
+- Production decision:
+  - a planned `8x8` campaign will use approximately 128 shards, so the per-shard expanded-left residency can be made manageable by prefix ownership without paying this penalty
+  - because primitive comparisons dominate the projected `8x8` GPU cost, an 11% throughput loss is more expensive than the memory saving under that sharding plan
+  - the scheduled `7x8` direct-cache shard was stopped after this decision rather than spending a full shard run to reconfirm an already demonstrated memory/throughput tradeoff
+- Outcome: reject and revert direct-canonical joins for the production speed path. Preserve the canonical distribution factory with expanded labelled masks, which sustains approximately `2.9e12 comparisons/s`; use enough prefix shards to control memory in `8x8`.
+
+### Experiment 252: Orient every join with the smaller support on the lhs
+- Goal: reduce partially occupied left tiles and repeated right-side shared-memory loads without changing the primitive comparison count or expanded-cache architecture.
+- Implementation:
+  - compare selected/complement support counts while building each join descriptor and place the smaller support on the thread-owned lhs side
+  - encode the swap in the high bit of `lhs_count`; support counts are far below `2^31`, so `JoinDesc` remains 24 bytes and no additional descriptor traffic is introduced
+  - select the corresponding left/right entry pointers uniformly per block; the inner comparison loop and exact accumulation are unchanged
+- Complete `7x7` results:
+  - all outer checks, 16 direct CPU joins, and the known exact result pass
+  - oriented CUDA time `114.288s` at `2.967e12 comparisons/s`
+  - a matched baseline run from the same image uses `119.925s` at `2.827e12 comparisons/s`, making orientation `4.70%` faster in the matched pair
+  - the best earlier canonical baseline was `116.442s`, against which orientation remains `1.85%` faster
+  - successful Modal apps: oriented `<redacted-modal-app-id>`; matched baseline `<redacted-modal-app-id>`
+- Complete `7x8` prefix-hash shard 0:
+  - every record/kernel/weight/comparison checksum and exact contribution again match Experiment 247
+  - CUDA time falls from the Experiment 249 canonical-factory result `375.360s` to `362.353s`, a `3.47%` gain
+  - throughput rises from `2.861e12` to `2.964e12 comparisons/s`; complete wall time falls from `406.922s` to `394.893s`
+  - successful Modal app: `<redacted-modal-app-id>`
+- Outcome: accept smaller-lhs orientation in the normal production kernel. The improvement is modest but consistent on the symmetric `4+4` shard most relevant to `8x8`, costs no additional storage, and preserves every exact validation gate.
+
+### Experiment 253: Warp-shuffle final reduction
+- Goal: reduce the fixed per-join cost of eight block-wide shared-memory reduction rounds after the smaller-lhs optimization.
+- Implementation:
+  - reduce each warp's 64-bit sum with five `__shfl_down_sync` operations
+  - write eight warp sums to shared memory, use one block barrier, and reduce them in the first warp
+  - replace the 256-element shared partial array and eight block barriers with an eight-element array and one barrier; comparison tiling is unchanged
+- Complete `7x7` matched result:
+  - every exact outer/result gate and all 16 direct CPU joins pass
+  - warp CUDA time `112.507s` at `3.014e12 comparisons/s`; matched shared-reduction time `113.573s` at `2.985e12 comparisons/s`
+  - the matched gain is `0.94%`; complete wall time is `123.587s` for the warp version
+  - successful Modal apps: warp `<redacted-modal-app-id>`; matched baseline `<redacted-modal-app-id>`
+- Complete `7x8` prefix-hash shard 0 matched result:
+  - both variants reproduce every known shard checksum and exact contribution
+  - warp CUDA time `371.014s` at `2.894e12 comparisons/s`; matched shared-reduction time `373.313s` at `2.877e12 comparisons/s`
+  - the matched gain is `0.62%`; absolute rates varied from the earlier 2.964e12 orientation run, but the same-image pair isolates a small positive reduction effect
+  - successful Modal apps: warp `<redacted-modal-app-id>`; matched baseline `<redacted-modal-app-id>`
+- Outcome: accept warp-shuffle reduction in the production kernel. It is a small but reproducible `0.6-0.9%` saving, reduces shared memory and barriers, and has no correctness or storage downside.
+
+### Experiment 254: Checked 32-bit distribution-weight arithmetic
+- Goal: replace the hot 64x64-bit support-weight multiply with an exact 32x32-to-64-bit multiply while retaining 64-bit construction and accumulation.
+- Bound and guard:
+  - a half with fewer than 32 active cells has total raw assignment weight at most `2^31`
+  - for a full `8x4` half, the `2^32` raw assignments are not all valid (for example, the all-zero assignment creates monochromatic rectangles), so total surviving weight and every individual coefficient are strictly below `2^32`
+  - intermediate stages before the fourth column use at most 24 active cells
+  - construction nevertheless remains `uint64_t`; every completed coefficient is checked against `UINT32_MAX` before packing, so future geometries violating the bound fail loudly
+- Kernel:
+  - narrow loaded support weights explicitly to `uint32_t`
+  - promote both operands explicitly before multiplication as `uint64_t(left_weight) * uint64_t(right_weight)`; products, per-thread sums, reductions, and final join results remain `uint64_t`
+  - retain the existing 16-byte `Entry` layout for this isolated arithmetic test
+- Complete `7x7` matched result:
+  - all outer checks, 16 direct CPU joins, and the known exact result pass; no checked conversion overflows
+  - 32-bit CUDA time `104.936s` at `3.231e12 comparisons/s`
+  - matched 64-bit CUDA time `113.283s` at `2.993e12 comparisons/s`
+  - the arithmetic change is `7.37%` faster in the matched pair and reduces complete wall time to `115.536s`
+  - successful Modal apps: 32-bit `<redacted-modal-app-id>`; matched 64-bit `<redacted-modal-app-id>`
+- Outcome: accept checked 32-bit distribution-weight arithmetic in the production kernel. It is the largest arithmetic micro-optimization measured after canonical caching and preserves explicit 64-bit product/accumulator semantics.
+
+### Experiment 255: Structure-of-arrays device distributions
+- Goal: turn the accepted 32-bit arithmetic into a real bandwidth/cache saving by storing device masks and weights separately instead of retaining the padded 16-byte `Entry` layout.
+- Implementation and safety:
+  - retain `uint64_t` weights throughout hash-map construction and canonical-cache construction, including the checked `UINT32_MAX` packing gate from Experiment 254
+  - upload and expand separate `uint64_t masks[]` and `uint32_t weights[]` arrays; the host-side exact-validation representation remains unchanged
+  - tile masks and weights into separate shared arrays, reducing each 256-entry tile from 4,096 to 3,072 bytes
+  - multiply only after explicit promotion as `uint64_t(left_weight) * uint64_t(right_weight)`; products, thread accumulators, warp reductions, and join results remain `uint64_t`
+- Exact 20,000-record probe:
+  - all 16 direct CPU joins and the known subtotal pass
+  - CUDA time falls from `0.126928s` for the accepted 16-byte layout to `0.119437s`, a `5.90%` gain
+  - successful Modal app: `<redacted-modal-app-id>`
+- Complete `7x7` validation:
+  - all `33,642,660` records, `16,821,330` kernels, labelled/covered weights, `339,070,632,838,049` comparisons, 16 direct CPU joins, and the known exact result pass
+  - CUDA time falls from `104.936s` at `3.231e12 comparisons/s` in Experiment 254 to `100.086s` at `3.388e12 comparisons/s`, a further `4.62%` arithmetic-time gain
+  - expanded-left storage falls from `3,299,888,496` bytes to `2,474,916,372` bytes, exactly 25%; the full `7x4` canonical cache likewise falls from about 1.10 GB to about 0.825 GB
+  - total time was `129.933s`, but is not used for the decision because this run's input load was an anomalous `20.627s`; CUDA-event time isolates the kernel improvement
+  - successful Modal app: `<redacted-modal-app-id>`
+- Outcome: accept SoA device storage in canonical production builds. It improves both the dominant join throughput and the memory ceiling relevant to `8x8`, while retaining the exact checked conversion boundary and full 64-bit result semantics.
+
+### Experiment 256: Four independent join accumulators
+- Goal: expose more integer instruction-level parallelism by replacing the hot loop's single per-thread sum dependency chain with four sums over groups of four comparisons.
+- Exact 20,000-record `7x7` probe:
+  - all 16 direct CPU joins and the known subtotal pass
+  - four-accumulator CUDA time is `0.121338s` at `2.881e12 comparisons/s`, versus `0.119437s` at `2.927e12 comparisons/s` for the accepted single accumulator
+  - this is a `1.59%` regression, consistent with additional instructions or register pressure costing more than the dependency-chain relief saves
+  - successful Modal app: `<redacted-modal-app-id>`
+- Outcome: reject and revert the four-accumulator loop. Retain the compiler-unrolled single accumulator from Experiment 255.
+
+### Experiment 257: Remove the dead aggregation hash lookup
+- Goal: eliminate the `left_index.at(edge.left)` lookup that remained in result aggregation even though canonical validation reconstructs distributions directly from the edge key.
+- Implementation:
+  - move the lookup and `PackedPair` reference into the legacy noncanonical sampled-validation branch, their only remaining consumer
+  - canonical production aggregation now performs no left-index hash probe; this removes one potentially throwing `std::unordered_map::at()` call per edge (`16,821,330` calls on full `7x7`, and `17,752,049` on the measured `7x8` shard)
+- Validation:
+  - the exact 20,000-record probe passes all 16 direct CPU joins and its known subtotal
+  - successful Modal app: `<redacted-modal-app-id>`
+- Outcome: accept the cleanup. It does not affect CUDA-event time and total wall time is too noisy to assign a credible percentage, but it removes material, provably unused CPU work at no complexity cost.
+
+### Experiment 258: Per-block GPU tail profiling
+- Goal: determine whether heterogeneous one-block joins leave enough end-of-batch GPU capacity idle to justify selective multi-block splitting.
+- Diagnostic implementation:
+  - behind the opt-in `PROFILE_JOIN_TAILS` compile definition, record `%globaltimer` at the beginning and end of every join block
+  - retain a logarithmic histogram of exact descriptor comparison counts
+  - for each batch, measure the drain interval from the final block dispatch to the final block completion; sum these intervals over the run and compare them with summed measured kernel spans
+  - this drain fraction is an upper bound on benefit, not an expected speedup: the last wave still contains necessary work and splitting introduces scheduling/result-aggregation overhead
+  - production Modal and Make targets remain uninstrumented
+- Complete `7x7` profile on one L40S:
+  - the known exact result, all outer gates, and 16 direct CPU joins pass
+  - `33,642,660` join blocks span `339,070,632,838,049` comparisons; median block is in `(2^20,2^21]`, p99 in `(2^26,2^27]`, and the maximum is `713,002,176`
+  - summed post-dispatch drain is `9.131%` of summed kernel span; worst-batch drain is `64.77%`, and the longest block reaches `89.59%` of its batch span
+  - instrumented CUDA time is `99.992s` at `3.391e12 comparisons/s`, showing no material timestamp penalty relative to Experiment 255
+  - successful Modal app: `<redacted-modal-app-id>`
+- Representative `7x8` prefix-hash shard 0:
+  - all `32,287,988` records, `17,752,049` kernels, weights, `1,073,855,852,992,165` comparisons, and contribution `97074293507701618043598888960` match the established shard result
+  - `35,504,098` join blocks have median size in `(2^22,2^23]`, p99 in `(2^28,2^29]`, and maximum size `3,149,604,864`
+  - summed drain is `6.380%`; worst-batch drain is `43.88%`, and the longest block reaches `62.97%` of its batch span
+  - the `127,129` blocks above `2^29` comparisons are only `0.358%` of blocks but contain `95.181e12` comparisons, `8.864%` of shard work
+  - instrumented CUDA time is `310.953s` at `3.453e12 comparisons/s`
+  - successful Modal app: `<redacted-modal-app-id>`
+- Outcome: selectively splitting only extreme joins is worth one controlled implementation experiment, but expectations should remain bounded. The relevant `7x8` profile gives an absolute scheduling-tail ceiling of about `6.4%`; a realistic gain is likely smaller. A threshold near `2^29` comparisons targets less than `0.4%` of blocks while covering the measured heavy tail.
+
+### Experiment 259: Selective heavy-join splitting
+- Goal: recover part of the measured end-of-batch drain by splitting only extreme joins into independently scheduled blocks.
+- Prototype:
+  - orient joins as before, then split the lhs into contiguous chunks whose Cartesian work is at most a fixed threshold
+  - write one result per task and fold partial results into the original logical join on the CPU; this avoids GPU atomics and preserves deterministic exact `uint64_t` sums
+  - leave all joins below the threshold unchanged
+- Correctness:
+  - the 20,000-record probe passes, but contains no join above `2^29`
+  - complete `7x7` and both `7x8` threshold runs reproduce all established records, weights, comparison totals, direct validation joins, and exact contributions
+- Threshold `2^29`:
+  - complete `7x7` splits only 546 of `33,642,660` logical joins, adding 546 tasks; CUDA time is `100.134s`, versus `99.992-100.086s` unsplit, so there is no gain
+  - `7x8` shard 0 splits 127,129 of `35,504,098` logical joins and adds 139,341 tasks
+  - shard CUDA time falls from the matched profiled baseline `310.953s` to `308.045s`, a `0.94%` gain; throughput rises from `3.453e12` to `3.486e12 comparisons/s`
+  - successful Modal apps: short probe `<redacted-modal-app-id>`; full `7x7` `<redacted-modal-app-id>`; `7x8` shard `<redacted-modal-app-id>`
+- Threshold `2^28` on `7x8` shard 0:
+  - splits 612,869 logical joins and adds 790,353 tasks
+  - CUDA time is `309.618s`, only `0.43%` faster than unsplit and `0.51%` slower than the `2^29` threshold
+  - successful Modal app: `<redacted-modal-app-id>`
+- Outcome: reject and revert selective splitting. The best measured gain is below 1%, it does not transfer to `7x7`, and a fivefold broader split is worse. Retain the tail profiler and reconsider only if a representative `8x8` profile shows substantially more than the current `6.4%` drain ceiling.
+
+### Experiment 260: Exact `8x8` complement-orbit census
+- Goal: replace the approximate half-orbit production count by the exact number of binary row/column orbits under global complement, including weight-32 and self-complementary cases.
+- Burnside results:
+  - binary `8x8` row/column orbits: `14,685,630,688`
+  - self-complementary orbits: `435,808`
+  - exact complement-paired kernel representatives: `(14,685,630,688 + 435,808) / 2 = 7,343,033,248`
+  - weight-32 midpoint orbits: `1,415,871,516`
+  - evaluating every orbit of weight at most 32 without pairing distinct midpoint complements would require `8,050,751,102` kernels, `707,717,854` or `9.64%` more than the exact quotient
+- Cross-checks: the same program continues to reproduce all established `8xn`, `7x7`, `7x8`, and `6x9` ordinary/complement counts.
+- Outcome: require exact canonical complement pairing for weight-32 `8x8` orbits. The established GPU projection already used the correct `7,343,033,248` denominator, so this is not a new speedup relative to that estimate; it prevents a nearly 10% production overrun from the simpler selected-cell filter used by even-area campaigns.
+
+### Experiment 261: Complete weighted `7x8` to `8x7` orbit transposition
+- Goal: reuse the completed `7x8` binary-orbit corpus as the exact parent frontier for sampled and eventual production `8x7 -> 8x8` augmentation.
+- Implementation:
+  - add a specialised `binary_orbit_augment_8x8` build and the exact known `8xn` orbit-count table
+  - stream each seven-row/eight-column key into its eight-row/seven-column transpose while preserving the labelled orbit weight
+  - invert every transformed key during the pass and require exact equality with the source key; transposition is a bijection between `S_7 x S_8` and `S_8 x S_7` orbits, so no canonicalisation or deduplication is needed
+  - emit the versioned `R8ORB01`, seven-column corpus and validate it with the ordinary streaming orbit checker
+- Complete corpus result:
+  - source and target records: `508,147,108`
+  - target labelled weight: `72,057,594,037,927,936 = 2^56`
+  - streaming transpose time: `15.681s`
+  - output size: `7.6 GiB`
+  - SHA-256: `12df8f1e86ad9cfa691148b65d2d6cfa314004628f2a09996cbc48766b4e2937`
+- Outcome: accept `/tmp/rect8x7-full.orbits` as the checked parent corpus for the `8x8` census. The existing completed `7x8` campaign eliminates the need to regenerate the 508-million-orbit depth-seven frontier.
+
+### Experiment 262: Deterministic sampled `8x7 -> 8x8` augmentation
+- Goal: measure the actual eight-row canonical-augmentation rate and local reduction shape without generating the complete 14.7-billion-record child corpus.
+- Implementation:
+  - stream the complete checked parent file and select parents by stable `mix64(key) mod M = id`, avoiding an in-memory copy of the 508-million-record frontier
+  - append all 256 labelled eighth columns, canonicalise every child under `S_8 x S_8`, and accumulate exact inherited parent weights in a local hash map
+  - emit sorted versioned partial orbit files suitable for subsequent work/memory census; the sample weights are partial augmentation weights rather than globally reduced orbit weights
+- Eight deterministic strata with `M=262,144`, IDs 0 through 7:
+  - selected parents: `15,454`
+  - child candidates: `3,956,224`
+  - sum of per-stratum locally unique children: `3,433,199`, or `86.780%` of candidates
+  - individual strata select `1,839-1,968` parents and finish in `5.160-5.385s` when run concurrently on the eight physical cores
+  - aggregate eight-core rate is about `734,675` candidates/s; the isolated ID-0 run completes 503,296 candidates in `4.771s` at about `105,490/s` and 31 MiB RSS
+- Full-scale implications:
+  - the exact final augmentation contains `508,147,108 * 256 = 130,085,659,648` candidates
+  - extrapolating the concurrent per-core rate gives about `394` physical core-hours for canonicalisation and local reduction; 128 workers with eight physical CPU cores each would expose about a 23-minute ideal arithmetic floor before global reduction and I/O
+  - the final `14,685,630,688` records occupy about 219 GiB at 16 bytes each, while locally reduced intermediates will be substantially larger because most cross-parent duplicates are resolved only by global hash-bucket reduction
+- Sampling caveat: selecting parent orbits uniformly by hash is not a uniform sample of final child orbits, because a child can be reached from multiple parent orbits. These measurements are reliable for producer throughput and local deduplication, but not yet for unbiased join-work projection.
+- Outcome: accept streamed hash sampling and the existing weighted augmentation as feasible outer-generation machinery. The next gate is the sampled child prefix/cache/comparison census; global reduction and storage are significant engineering costs but do not presently dominate the projected GPU campaign.
+
+### Experiment 263: Production-shaped `8x8` work and memory census
+- Goal: replace the earlier fixed-split prefix-pair projection by measurements on actual canonically augmented `8x8` child orbits, quantify parent-sampling bias, and determine whether the proposed 128-way GPU sharding fits.
+- Exact half-prefix census:
+  - all `25,207` binary `8x4` row/column prefix orbits are reproduced; 110 have an empty selected or complementary distribution
+  - selected canonical distributions contain exactly `565,306,220` support entries, or `6,783,674,640` bytes in the accepted mask/`uint32_t`-weight SoA layout
+  - the `25,097` viable orbit types expand to `4,294,849,270` labelled four-column prefixes, only 118,026 fewer than all `2^32` masks
+  - expanding both selected and complementary distributions for every viable labelled prefix would require `231,995,142,767,524` entries or about 2.53 PiB, confirming that prefix ownership must retain only the subset appearing in each solve shard
+- 64 deterministic parent-hash strata:
+  - union and deduplication leave `27,401,499` sampled child orbits; exact complement selection evaluates `13,766,925`
+  - raw mean join work `598,927,397`, median `328,935,936`, p90 `1,414,573,440`, p99 `4,055,377,536`, maximum `28,287,030,912` comparisons
+  - a deterministic 1/32 subsample computes each child's 3-8 distinct seven-column deletion-parent orbits; inverse inclusion-probability correction over 431,279 children gives mean `589,429,536`, median `319,475,424`, p90 `1,394,605,440`, and p99 `4,044,784,128`
+  - 331,389 of those children have eight distinct parent types and 87,252 have seven; correcting parent-hash sampling changes the mean by only `1.59%`
+- L40S measurement on the combined 64-stratum corpus, prefix-hash shard 0 of 128:
+  - `119,528` kernels and `68,725,813,628,332` comparisons complete in `22.148s` at `3.103e12 comparisons/s`, with per-block timestamps enabled
+  - the sampled worker uses `22,338,764,268` bytes for expanded-left distributions; the partial canonical factory used by the sample adds 5.35 GB, versus 6.78 GB for the complete factory
+  - aggregate post-dispatch drain is `17.19%`, but this sample has only eight batches and the last contains 4,839 kernels; production shards contain millions of kernels, so this is not a reliable splitting incentive
+  - exact selected/complement direct validation passes; the sample's orbit weights are intentionally partial augmentation weights, so its contribution is a performance checksum rather than a shard of the final result
+  - successful Modal app: `<redacted-modal-app-id>`
+- Updated arithmetic projection:
+  - corrected total work is approximately `4.3282e18` primitive comparisons
+  - at the measured `3.103e12 comparisons/s`, joins require about `387.5` L40S-hours, versus the earlier 1,039-hour fixed-split estimate
+  - at the checked `$1.9512/L40S-hour`, GPU arithmetic is about `$756`; keeping eight Modal CPU cores attached for all GPU hours adds about `$146`
+  - sampled outer augmentation projects to about 394 physical core-hours, about `$19` at the checked `$0.04716/core-hour`, excluding reduction and storage
+- Shard-memory samples from the same 13.77-million-kernel census:
+  - 1/128: 23,694 left prefixes, 21.016 GB expanded-left; Chao lower bound 35,991 prefixes from 10,166 singletons and 4,202 doubletons
+  - 1/256: 11,776 prefixes, 10.488 GB; Chao lower bound 17,795
+  - 1/512: 5,934 prefixes, 5.275 GB; Chao lower bound 8,932
+  - 1/1024: 2,999 prefixes, 2.669 GB; Chao lower bound 4,490
+  - all samples remain only about 0.19% of final child orbits, so even Chao is a present-sample lower bound rather than a production upper bound
+- Outcome:
+  - accept the direct GPU arithmetic as comfortably feasible; the best current projection is roughly 388 L40S-hours and under `$1,000` for GPU plus attached CPU arithmetic before memory/storage/retries
+  - reject 128 shards as a safe production default: it already consumes about 29 GB for sampled expanded-left plus complete canonical storage and is still discovering many new prefixes, before allocating a large right batch
+  - use at least 512 prefix-owned shards; prefer 1,024 for the first production design because each shard still has roughly 7.2 million kernels on average, ample GPU work, while providing about fourfold memory headroom over 256
+  - partition reduced output by final left-prefix ownership once rather than making every worker rescan a roughly 235 GB (219 GiB) corpus; this removes the principal operational penalty of using 1,024 shards
+
+### Experiment 264: Fused production augmentation, complement pairing, and solve sharding
+- Goal: avoid materialising and globally reducing all 14.7 billion ordinary child orbits before complement pairing, while producing independently reducible prefix-owned solve shards.
+- Fused streaming construction:
+  - seek directly to a half-open range in the checked `8x7` parent corpus and process bounded parent chunks without loading the 7.6 GiB frontier into memory
+  - append all 256 labelled eighth columns and canonicalise each child under `S_8 x S_8`
+  - discard children with more than 32 selected cells; retain lower-weight children as their ordinary canonical key
+  - for a 32-cell child `c`, compute the canonical complement `c'` and use `min(c,c')` as the solve key; complement partners and self-complementary orbits are therefore handled exactly
+  - locally combine canonical child weights inside each bounded chunk, then combine complement representatives and write raw records directly to `mix64(left_prefix) mod shards`
+- One-pass reduction identity:
+  - every augmentation path to an ordinary child has the same canonical child key and therefore the same solve shard
+  - two distinct midpoint complement orbits map to one representative and their exact labelled orbit weights add; a self-complementary orbit maps to itself once
+  - consequently each solve-shard reducer simultaneously performs global augmentation deduplication and midpoint complement pairing; no intermediate 14.7-billion-record ordinary-orbit corpus is required
+  - lower-weight records retain their ordinary weight and the GPU's existing factor two; paired midpoint records retain the sum of both orbit weights and factor one, so global covered weight must be exactly `2^64`
+- Production checks:
+  - `solve-check` requires `7,343,033,248` final records, `708,153,662` midpoint representatives, `435,808` self-complementary representatives, exact prefix ownership, canonical complement representatives, and covered weight `2^64`
+  - the expected midpoint count is `(1,415,871,516 + 435,808) / 2`
+- Independent small-range validation:
+  - for parent range `[0,64)`, the streaming/chunked path and the older in-memory `extend -> reduce -> solve-partition` reference produce byte-identical sorted output in every one of eight solve shards
+  - for midpoint-heavy parent range `[250,000,000,250,000,064)`, 16,384 candidates contain 8,164 retained paths; all eight final solve shards again match the independent reference byte for byte
+  - changing the midpoint-heavy stream from 16-parent chunks to one 64-parent chunk leaves every reduced output byte-identical
+  - one midpoint-heavy reducer sample contains 358 midpoint representatives, confirming that the tested equality exercises the complement-pairing path rather than only the lower-weight case
+- Operational shape with 1,024 solve shards:
+  - generator workers each create one raw file per solve shard; reducers consume the corresponding file from every generator and write one sorted versioned orbit file
+  - dropping the upper complement half before intermediate output limits the raw stream to roughly half of the 130.1-billion augmentation candidates, with additional chunk-local canonical and complement deduplication
+- Outcome: accept the fused solve-shard representation and reducers as the production outer pipeline. It removes one enormous intermediate reduction layer, implements the exact midpoint quotient demanded by Experiment 260, and produces the prefix ownership required by the memory census.
+
+### Experiment 265: Restartable `8x8` Modal production campaign
+- Goal: turn the accepted fused outer pipeline and L40S kernel into a restartable campaign that can be inspected and tested without accidentally launching the expensive computation.
+- Driver: `modal_8x8_production.py` defines explicit `status`, `prepare`, `generate`, `reduce`, `check`, `solve`, and `aggregate` stages; the default is status-only. The production defaults are 128 CPU generator ranges, 1,024 independently owned solve shards, 16,384-parent augmentation chunks, 16,384-kernel GPU batches, and at most 128 simultaneous generator, reducer, or L40S containers.
+- Publication and restart safety:
+  - parent transposition, every 1,024-file generator result, and every reduced solve shard are built under unique attempt names and atomically renamed only after their command succeeds
+  - completed calls are recorded one at a time in an atomically replaced workspace checkpoint, so rerunning a stage submits only missing indices
+  - the checkpoint is bound to a SHA-256 fingerprint of the exact augmentation and CUDA sources plus a pipeline-version tag; incompatible stale results fail closed
+  - checkpoints retain parsed final counters and timings rather than thousands of complete per-batch logs, avoiding quadratic multi-gigabyte local checkpoint rewrites during a 1,024-shard solve
+- Exact stage gates:
+  - reduction aggregation requires `7,343,033,248` records, `708,153,662` midpoint representatives, `435,808` self-complementary representatives, and covered weight `2^64`
+  - the independent streaming `solve-check` then rereads every reduced file and verifies its canonical/complement representative and prefix ownership
+  - GPU aggregation independently requires exactly one kernel per retained representative and covered weight `2^64`; it sums the exact 128-bit contribution across all shards
+- Operational storage shape:
+  - the fused raw intermediate is still expected to be of order 1 TB before global shard-local deduplication, but it never creates the full ordinary 14.7-billion-orbit corpus
+  - the complement-paired final solve corpus contains `7,343,033,248 * 16 = 117,488,531,968` bytes of records plus 20-byte file headers, about 109.4 GiB; the earlier 219 GiB figure applies to the unpaired ordinary corpus avoided by this pipeline
+- Validation:
+  - the local parser/aggregator test accepts synthetic exact totals and rejects through the same production predicates
+  - the status-only Modal deployment successfully compiles both specialised binaries and reports `parent=False generated=0/128 reduced=0/1024 checked=False solved=0/1024`
+  - successful Modal app: `<redacted-modal-app-id>`
+- Usage, with each expensive transition explicit:
+  - `modal run modal_8x8_production.py --stage status`
+  - `modal run modal_8x8_production.py --stage prepare`
+  - `modal run modal_8x8_production.py --stage generate`
+  - `modal run modal_8x8_production.py --stage reduce`
+  - `modal run modal_8x8_production.py --stage check`
+  - `modal run modal_8x8_production.py --stage solve`
+  - `modal run modal_8x8_production.py --stage aggregate`
+  - `generate-one`, `reduce-one`, and `solve-one` with `--index N` provide bounded operational probes without bypassing the prerequisite gates
+- Outcome: accept the campaign wrapper as the production control plane. No parent preparation, outer generation, reduction, or L40S solve was launched in this experiment; the next safe action is a single-generator production-shaped probe, followed by a single reduced-shard/GPU probe only after all generator pieces for that reducer exist.
+
+### Experiment 266: CPU outer-pipeline performance review
+- Goal: audit `prepare`, `generate`, `reduce`, and `check` before paying for the production campaign, including exact work censuses and the boundary for useful GPU offload. No production stage was launched and no implementation was changed.
+- `prepare`:
+  - the complete transpose streams 7.6 GiB in and 7.6 GiB out and already completed locally in `15.681s`, including an inverse-transpose check for every record
+  - it is storage-bandwidth dominated at campaign scale and occurs once; GPU transfer and launch machinery cannot provide a meaningful end-to-end saving
+- Exact generation census from one sequential `3.71s` scan of all `508,147,108` checked `8x7` parents:
+  - only `444,372,517` parents have at most 32 selected cells and can produce a retained child
+  - of the nominal `130,085,659,648` appended columns, exactly `71,256,694,627` produce children with at most 32 cells; `12,427,729,606` land exactly at the weight-32 midpoint
+  - because cell count is invariant under row/column canonicalisation, testing `parent_cells + popcount(assignment) <= 32` before constructing/canonicalising the child removes `58,828,965,021` or `45.22%` of the dominant canonicalisation calls, a `1.826x` arithmetic ceiling before any canonicaliser improvement
+  - grouping assignments only under permutations of identical parent rows reduces the retained assignment representatives to `63,487,295,272`, a further `10.90%`; this is exact with binomial multiplicities but is secondary to the free weight test
+- Current generator profile on a 16,384-parent production-shaped contiguous range:
+  - `4,194,304` candidates complete in `12.434s` on the Ryzen 7 9700X; gprof attributes `96.4%` to `canonical_key`/`canonical_rows_rec`, `2.6%` to hash insertion, and less than 1% to the remaining driver work
+  - eight concurrent 4,096-parent ranges at evenly spaced file positions each process `1,048,576` candidates in `1.587-3.136s`; canonical difficulty and retained output vary substantially with key range
+  - the old approximately 394-core-hour projection came from sparse hash samples that each rescanned the complete 7.6 GiB parent file; the production command seeks directly to its range, so that figure is not a valid production estimate
+  - the measured contiguous rates suggest order `80-120` local core-hours for the current canonicalisation rather than 394, before raw-output costs and provider CPU differences; the early weight filter should reduce the arithmetic component toward roughly `45-70` core-hours. A complete remote generator shard remains the required pricing-grade measurement
+- Generator load balance:
+  - with 128 equal record ranges, retained assignments range from `312,962,455` to `734,626,189`, a `2.347x` min/max ratio; the maximum is `1.320x` the mean of `556,692,927`
+  - a cheap preliminary scan can choose boundaries by cumulative retained-assignment work instead, reducing the arithmetic tail by up to about 24% under this proxy and balancing raw output much better
+- Immediate generator implementation opportunities:
+  - reject by cell count before canonicalisation and skip parents above 32 cells
+  - insert the final lower/complement representative directly into one chunk map; the present code first fills a child map, allocates a second equally large map, scans the first map, and hashes every survivor again even though direct accumulation is algebraically identical
+  - size/clear the one map from the exact valid-assignment count rather than all 256 assignments per parent
+  - rewrite the canonicaliser around eight byte-valued column masks and precomputed row-permutation transforms; the recursive routine repeatedly rebuilds and sorts all column vectors and is the only CPU hotspot worth serious low-level tuning
+- Higher-level generation opportunity:
+  - retained augmentation still contains `71.26` billion assignment paths for only `7.343` billion final complement representatives, approximately 9.7 paths per final kernel before chunk deduplication
+  - an isomorph-free canonical-parent test could emit every ordinary child orbit from one deletion-parent orbit; computing the child orbit size from its automorphism group, then handling a midpoint complement pair from one representative, would reduce the raw/reduction layer toward the final 109.4 GiB corpus
+  - this is the largest possible end-to-end outer-pipeline win, but it needs an exact prototype against known complete smaller geometries because canonical-parent acceptance cannot propagate only the accepted parent's old recurrence weight
+- `reduce`:
+  - every raw midpoint record is re-canonicalised to validate a representative that the fingerprinted generator already produced; billions of these redundant complement calls can plausibly become a second arithmetic bottleneck after generation is accelerated
+  - output uses comparison `qsort` even though the GPU reader sorts all records again by `(right,left)`; either write the final hash order, use a radix sort, or sort once in GPU-consumption order and let the reader accept that order
+  - the C reducer is single-threaded although each Modal function requests two physical CPU cores; request one core or implement actual parallel reduction
+  - benchmark reducer concurrency against shared-volume bandwidth rather than assuming 128 simultaneous roughly-gigabyte readers is optimal
+- `check`:
+  - the current single process serially rereads the complete 109.4 GiB solve corpus
+  - for each of `708,153,662` midpoint representatives it canonicalises the complement once in `solve_representative` and immediately canonicalises the same complement again for the self-complement test, about 1.416 billion calls in total
+  - compute the complement once and reuse it, then check shards independently in parallel and aggregate their exact counters; alternatively fuse integrity validation into the GPU shard's input pass while retaining reducer metadata/checksums as the pre-solve gate
+- GPU boundary:
+  - `prepare` and `check` should remain CPU/I/O operations; `reduce` could use a GPU radix sort/reduce but only after a CPU reducer benchmark shows it matters
+  - `generate` is the credible GPU candidate: tens of billions of independent small canonicalisations can be batched, with the CPU retaining weight filtering, hash reduction, and sharded output
+  - first apply the exact CPU weight filter and canonicaliser cleanup, then benchmark an L40S/RTX 6000 Ada canonicalisation kernel on the same fixed parent ranges; GPU offload is justified by measured candidates per dollar and wall time, not merely parallelism
+- Outcome: do not launch the current outer production campaign unchanged. Implement the exact early weight filter, one-map accumulation, and work-balanced ranges first; in parallel, treat isomorph-free canonical augmentation as the serious high-level route to eliminating most raw I/O and reduction. GPU canonicalisation is promising enough for a bounded probe after the CPU baseline is corrected.
+
+### Experiment 267: Pre-canonicalisation weight rejection
+- Goal: avoid canonicalising appended `8x8` matrices that cannot belong to the selected/complement-quotiented half.
+- Implementation:
+  - compute the invariant selected-cell count of each canonical `8x7` parent once
+  - skip the complete 256-assignment loop when the parent already has more than 32 selected cells
+  - otherwise reject an assignment when `parent_cells + popcount(assignment) > 32`, before constructing its child rows or invoking the canonicaliser
+  - preserve the existing total-candidate and retained-candidate accounting
+- Exact work reduction from Experiment 266's complete census: canonical child calls fall from `130,085,659,648` to `71,256,694,627`, removing `45.22%` and imposing no new canonical work.
+- Correctness:
+  - for three 4,096-parent ranges at file positions 0, 1/4, and 5/8, all eight raw solve-bucket files are byte-identical to the pre-change output
+  - these ranges respectively exercise an almost-completely retained low-weight region, a partially retained region, and a region with no retained assignments
+- Eight-core evenly spaced range benchmark, each range containing 1,048,576 nominal candidates:
+  - summed per-process time falls from `18.768s` to `5.940s`, a `3.16x` gain on this deliberately broad weight sample
+  - the nearly full low-weight range remains canonicalisation-bound at `2.984s` versus `3.136s`
+  - the 1/4-position range falls from `2.954s` to `0.957s` with 352,521 retained assignments
+  - four ranges with 0-586 retained assignments fall from `1.587-2.369s` to `0.014-0.017s`
+- Outcome: accept the invariant early rejection. It is exact, nearly free, removes 58.8 billion known-useless production canonicalisations, and makes work-balanced parent partitioning essential because equal parent counts now have radically different costs.
+
+### Experiment 268: Direct one-map solve-representative accumulation
+- Goal: remove the chunk-local ordinary-child map followed by a second equally sized solve-representative map.
+- Implementation: after the early weight gate and ordinary child canonicalisation, immediately map a weight-32 child to its canonical complement representative and add the parent's exact weight to a single chunk map; lower-weight children use their ordinary key directly.
+- Exactness: addition by representative is associative, so combining ordinary duplicates before complement representatives or combining all assignment paths directly by representative produces the same key/weight sums.
+- Validation:
+  - ranges `[0,4096)` and `[127036777,127040873)` were regenerated with 1,024-parent chunks
+  - after independent solve-shard reduction, every one of eight output orbit files for both ranges is byte-identical to the accepted two-map, 4,096-parent-chunk baseline
+  - this simultaneously validates direct accumulation and invariance across changed chunk boundaries
+- Performance on the almost-fully-retained `[0,4096)` range with one 4,096-parent chunk:
+  - peak RSS falls from `34,436` KiB to `18,052` KiB, a `47.6%` reduction
+  - wall time is noise-equivalent (`2.944s` two-map versus `3.014s` one-map) because Experiment 266 attributes 96.4% of this low-weight range to canonicalisation
+  - the one-map path nevertheless removes one full-capacity allocation/initialisation, one full table scan, and one hash insertion for every unique ordinary child
+- Diagnostics now report `local_solve_unique`, whose meaning remains valid when a midpoint child and its complement coalesce inside a chunk.
+- Outcome: accept direct representative accumulation. Its primary immediate benefit is halving chunk-map memory, while its eliminated hash/table work becomes more relevant after canonicalisation is accelerated.
+
+### Experiment 269: Exact work-balanced generator ranges
+- Goal: replace 128 equal parent-record ranges, whose post-filter work differs by 2.347x, with deterministic ranges balanced by the exact number of assignments that pass the invariant weight gate.
+- Planner:
+  - stream the checked `8x7` parent corpus once and assign each parent the exact work proxy `sum(C(8,j), j=0..min(8,32-parent_cells))`
+  - close each contiguous range when its cumulative proxy reaches the corresponding fraction of the exact total `71,256,694,627`
+  - require complete `[0,508,147,108)` parent coverage and the established exact work total before emitting an `OK` result
+- Complete 128-range result:
+  - planning takes `3.288s` (`2.51s` user, `0.77s` system) and 1.7 MiB RSS on the local parent corpus
+  - range work is `556,692,701-556,693,130`, a spread of only 429 assignments around the `556,692,927` mean
+  - the old equal-record maximum was `734,626,189`, so the proxy tail falls by `24.22%`
+  - parent counts are intentionally variable; for example the first range is `[0,2,931,354)` and the last is `[502,161,890,508,147,108)`
+- Production integration:
+  - add an explicit restartable `plan` stage between `prepare` and `generate`
+  - parse and validate every boundary and work count into the source-fingerprinted checkpoint
+  - generator functions now receive their checked start/end boundary instead of recomputing equal record divisions
+  - generation refuses to start without a valid plan; status reports the plan independently
+- Validation:
+  - the local parser accepts all 128 ranges, exact coverage, contiguity, and work total
+  - the updated status-only Modal image compiles and reports `parent=False planned=False generated=0/128 reduced=0/1024 checked=False solved=0/1024`
+  - successful Modal app: `<redacted-modal-app-id>`
+- Outcome: accept exact retained-assignment balancing. It costs only one 3-second streaming pass, removes a known 24% arithmetic tail, and also makes generator raw-output volumes substantially more uniform.
+
+### Experiment 270: Single-owner complement validation and parallel checks
+- Goal: stop re-canonicalising trusted raw midpoint representatives in every reducer, eliminate duplicate work in the final checker, and remove the serial 109.4-GiB check bottleneck.
+- Reducer changes:
+  - raw records retain cheap exact validation of selected-cell count and prefix-shard ownership, but no longer recompute their canonical complement representative; the source-fingerprinted generator is the producer of that invariant
+  - reducers no longer canonicalise every final midpoint solely to count self-complementary records; that exact classification moves to the independent final checker
+  - reducer summaries still gate record count, midpoint count, labelled weight, and covered weight before any checker or GPU call
+  - request one physical CPU core rather than two because the hash reducer is single-threaded
+- Checker changes:
+  - for a midpoint record, compute its canonical complement once, reject a nonminimal representative, and reuse the same result for the self-complementary test
+  - this halves final-check complement calls from `2 * 708,153,662 = 1,416,307,324` to `708,153,662`
+  - expose a one-file `solve-check-shard` command and run all 1,024 shard checks as independently checkpointed one-core Modal functions, with at most 128 concurrent containers
+  - aggregate checker records, midpoint/self-complement counts, labelled weight, and covered weight; require both all established global constants and exact equality with independently aggregated reducer counters
+- Correctness:
+  - re-reducing two sampled eight-shard corpora produces files byte-identical to the prior strict reducer
+  - all 16 resulting files pass the new per-shard representative/ownership/weight checker; the samples include ordinary midpoint pairs and self-complementary representatives
+  - synthetic exact production totals pass both the Python reducer and checker parsers/aggregators
+  - the updated status-only Modal image compiles and reports all 1,024 checker checkpoints separately
+  - successful Modal app: `<redacted-modal-app-id>`
+- Outcome: accept single-owner canonical validation and parallel checking. Expensive complement canonicalisation now occurs once per final midpoint rather than once per raw midpoint plus twice per final midpoint, while the final exact gate becomes restartable and horizontally scalable.
+
+### Experiment 271: Remove redundant solve-corpus comparison sorting
+- Goal: avoid sorting every reduced solve shard by canonical orbit key when the GPU reader subsequently sorts the complete shard again by its required `(right,left)` join order.
+- Implementation: retain sorted output for general augmentation files, but write the specialised `solve-reduce` hash table directly in slot order under the same versioned orbit header. The exact checker and GPU reader do not require key order; the latter already performs its own edge sort.
+- Validation on a combined eight-bucket, 556,375-record reduced sample:
+  - sorting the `(key,weight)` records independently in Python makes the old and new files exactly equal as record multisets, including every weight
+  - the unsorted file passes exact representative, prefix ownership, midpoint/self-complement, and covered-weight checking
+- Local reducer measurement:
+  - wall/user time falls from `0.10/0.08s` to `0.04/0.03s`, approximately `2.5x` on this no-duplicate sample
+  - peak RSS falls from `51,332` KiB to `34,192` KiB by eliminating the dense sorted-record copy
+  - production savings scale over 7.343 billion final records and also remove one `O(n log n)` pass from the CPU-only outer pipeline
+- Outcome: accept hash-order specialised solve files. Exactly one sort remains, in the GPU loader and in the order actually consumed by batched joins.
+
+### Experiment 272: Packed-column `8xn` canonicaliser
+- Goal: replace the recursive canonicaliser's repeated reconstruction of all column vectors, the measured 96.4% generator hotspot, without changing canonical keys.
+- Implementation for the specialised eight-row build:
+  - retain the same degree-compatible, duplicate-row-skipping row-order search as the trusted reference implementation
+  - carry all eight partial column vectors through recursion as the eight bytes of one `uint64_t`; selecting a row becomes one masked shift and one precomputed spread-mask OR
+  - compute invariant column degrees once per input rather than once per leaf row order
+  - sort compact `(degree,vector)` 16-bit values at each leaf and reconstruct the packed canonical key through eight precomputed column-contribution lookups/ORs
+  - retain the complete old canonicaliser behind `FORCE_REFERENCE_CANON`; `VERIFY_FAST_CANON` evaluates both implementations on every call and fails immediately on disagreement
+  - use the packed implementation for all `8xn`, `n <= 8`, calls so complete smaller geometries provide exact exhaustive validation
+- Complete `8x5` gate:
+  - verification mode compares both canonicalisers on every one of the approximately 6.82 million augmentation candidates through depth five with no mismatch
+  - both builds reproduce exactly `613,894` orbits and labelled weight `2^40`
+  - their complete sorted `8x5` orbit files are byte-identical
+  - ordinary fast wall/user time is `7.63/7.62s`, versus `13.24/13.23s` for the forced reference, a `1.735x` complete-run speedup; depth-five augmentation alone improves from `12.715s` to `7.282s`
+- Production-shaped `8x8` gates:
+  - verification mode additionally matches 1,985,792 canonicalisations from 7,757 hash-sampled parents spread across the complete 508-million-parent corpus
+  - low-weight `[0,4096)` generation falls from `3.014s` to `1.331s`, a `2.264x` gain
+  - partially retained `[127036777,127040873)` falls from `0.945s` to `0.429s`, a `2.203x` gain
+  - after solve reduction, every record and weight in all eight output shards for both ranges matches the accepted reference-canonicaliser result
+- Outcome: accept the packed-column canonicaliser. Together with early weight rejection it changes the generator from the originally projected multi-hundred-core-hour concern into a much smaller stage; a complete provider-side generator shard remains the final wall-time and storage-throughput measurement.
+
+### Experiment 273: Isomorph-free canonical-parent augmentation
+- Goal: emit every child orbit from exactly one deletion-parent orbit, compute its labelled weight directly, and remove almost all cross-parent raw duplication before the 1,024 solve-shard reducers.
+- Canonical construction path:
+  - during the packed child canonicalisation, mark whether the newly appended column can occupy the distinguished first sorted column under any minimum canonical labelling
+  - accept the extension only in that case; deleting this distinguished column defines one isomorphism-invariant parent orbit, so two nonisomorphic parents cannot emit the same accepted child
+  - assignment paths within that one parent can still repeat a child through automorphisms, so a chunk-local exact-set insertion retains the child once rather than adding its weight repeatedly
+  - `VERIFY_CANONICAL_PARENT` confirms every fused acceptance also passes the slower explicit `canonicalise(delete-first-column(child)) == parent` test
+- Direct labelled orbit weights:
+  - count minimum-attaining row orders during canonicalisation, then restore permutations skipped among identical source rows and equal column vectors
+  - this gives `|Aut(M)|`; store the exact orbit size `8! n! / |Aut(M)|` rather than propagating and globally merging distinguished-column recurrence weights
+  - an independent `automorphism-check` command verifies canonicality, divisibility, stored orbit weight, and total labelled weight for an ordinary orbit corpus
+- Complete exact validation:
+  - canonical-parent and ordinary weighted augmentation produce byte-identical complete `8x5` corpora: `613,894` records and weight `2^40`
+  - the stronger complete `8x6` constructions produce byte-identical `17,256,831`-record, 264-MiB files with SHA-256 `b4814bcd45ed80b121c6c75cc9f97eb58e6c15a2abb0c59c6be9b7dcdf11290d`
+  - all `17,256,831` `8x6` records independently pass automorphism-derived weight checking in `20.400s`
+  - depth-six canonical-parent augmentation accepts `25,181,489` paths from `157,156,864` candidates and retains `17,256,831` unique children
+- Cost of the stronger construction:
+  - fused canonical-parent `8x6` completes in `243.91s`, versus `230.54s` for ordinary propagation, a `5.80%` CPU premium
+  - unlike the original explicit-deletion prototype, which made `8x5` about 2.2x slower, the fused distinguished-column test requires no second canonicalisation
+- Exact production quotient:
+  - for a child below weight 32, emit its direct ordinary orbit weight and retain GPU factor two
+  - at weight 32, skip the nonminimal complement member; double the direct orbit weight for a distinct representative/complement pair and retain it once for a self-complementary orbit
+  - complement preserves automorphism order, making the doubled distinct-pair weight exact
+  - production `solve-extend` now uses this path; `solve-extend-reference` retains the old propagated-weight implementation for regression tests
+- Production-shaped probes:
+  - `[0,4096)` processes 1,047,824 retained assignments in `1.444s`, essentially equal to the `1.438s` reference path, but emits only 4,096 unique solve records instead of 556,375 (`135.8x` fewer)
+  - midpoint-heavy `[250000000,250001024)` processes 66,471 retained assignments in `0.071s`; 31,224 canonical paths become 25,775 final representatives, including 5,673 midpoint records that pass exact complement/self checks
+  - reducing and checking every output shard succeeds; a specialised unique-input reducer intentionally rejects a repeated raw file/key
+- Production implications:
+  - the complete raw layer is now exactly one record per final solve representative: `7,343,033,248 * 16 = 117,488,531,968` record bytes, about 109.4 GiB, rather than hundreds of GiB to roughly 1 TiB of partially deduplicated recurrence paths
+  - raw and reduced corpora together need roughly 219 GiB before raw deletion, plus headers and the 7.6-GiB parent; reducers now hash only the final 7.343 billion records and need about 2 GiB rather than the previous 8-GiB allocation
+  - canonical-parent chunk maps use a conservative 64 rather than 256 capacity slots per parent; the low-weight 4,096-parent sample falls from 18.0 MiB to 5.7 MiB RSS with an identical record set
+  - the work-balanced planner remains valid because the dominant child canonicalisations are unchanged; only accepted-path output and reduction shrink
+- Production controls:
+  - reducers require global raw-key uniqueness and fail on any duplicate across the 128 generators, independently enforcing the canonical-parent theorem operationally
+  - the established 7.343-billion record, midpoint/self-complement, prefix ownership, and covered-weight gates remain unchanged
+  - the updated status-only Modal image compiles successfully: `<redacted-modal-app-id>`
+- Outcome: accept canonical-parent augmentation as the production outer algorithm. It obtains the sought high-level I/O/reduction win without increasing the dominant generator arithmetic materially, while complete `8x5` and `8x6` byte equality validates both unique-parent coverage and direct automorphism weights.
+
+### Experiment 274: Local 16-worker outer-pipeline projection
+- Goal: determine whether the optimized CPU-only `prepare -> plan -> generate -> reduce -> check` pipeline is now practical on the local Ryzen 7 9700X with eight physical cores and 16 SMT threads, and price the corresponding Modal generation stage.
+- Production-shaped generator sample:
+  - run 16 concurrent `solve-extend` processes, one from each eighth work-balanced generator range (`0, 8, ..., 120`), taking a central 1/64 parent slice from each range
+  - the sample processes `775,655` parents, `661,376,512` nominal candidates, `144,890,201` post-weight-filter canonicalisations, and emits `10,525,139` canonical-parent solve records
+  - aggregate wall/user time is `25.50/355.58s`; the process used about `13.94` logical cores on average, so the measurement includes the real SMT contention rather than assuming 16 physical cores
+  - scaling by the exact production canonicalisation count `71,256,694,627` gives `3.484h` wall and `48.576` logical-core-hours for generation
+  - the strata are representative across the complete parent file but are not a proof of perfectly uniform within-range canonicalisation cost; use roughly `3.5-4.0h` as the local generation budget
+- Reduction/check sample on the same output:
+  - reduce all `10,525,139` records into 16 unique-input solve shards with 16 processes: `0.16s` wall, `1.61s` user
+  - independently check all 16 reduced shards: `0.19s` wall, `3.01s` user
+  - simple record-count scaling puts both full stages in the low-minutes range locally; at 109.4-GiB scale, storage bandwidth and file-open/commit overhead will dominate the measured arithmetic
+- Local feasibility:
+  - `prepare` is already measured at `15.681s`, and `plan` at `3.288s`
+  - a reasonable complete local outer-pipeline budget is therefore about `3.6-4.2h`, allowing margin for 109.4-GiB raw writes, 109.4-GiB reduced writes, checking reads, and phase transitions
+  - peak persistent data is about `226.4 GiB`: 7.6-GiB parent plus 109.4-GiB raw and 109.4-GiB reduced corpora; raw data can be deleted after the independent reduction/check gates
+- Modal estimate at rates checked 2026-08-12:
+  - the generator sample projects `48.670` billed container-hours under the current `cpu=1, memory=2048` function shape
+  - at `$0.0000131/physical-core/s` and `$0.00000222/GiB/s`, generation is about `$2.30` CPU plus `$0.78` memory, or `$3.07` before credits and storage
+  - 128 balanced generators should take roughly `25-40 minutes` with 128-way concurrency; the Starter plan's published 100-container limit makes `45-70 minutes` a safer operational estimate because a second scheduling wave is required
+  - reducer/check arithmetic should cost well below `$1`; allow roughly `$3-5` for the complete Modal CPU outer pipeline before Volume retention, retries, and unusually slow commits
+- Outcome: the complete outer corpus pipeline is now feasible locally in one afternoon. Modal primarily buys about a three-to-fourfold wall-time reduction, not a large compute-cost saving; keeping generation on Modal is operationally attractive because the 109.4-GiB reduced solve corpus is then already colocated with the later L40S campaign.
+
+### Experiment 275: Production `8x8` canonical-parent generation on Modal
+- Goal: materialise the complete canonical-parent raw solve corpus with 128 exact work-balanced CPU generators, preserving a restartable path through preemption and concurrent publication.
+- Storage transition:
+  - the first production shard on the original v1 Volume generated in `1078.767s` and published all 1,024 output files successfully
+  - the complete campaign would create 131,072 raw files, above the v1 recommendation of 50,000 files and incompatible with its recommendation of no more than five concurrent writers
+  - create `rectangle-free-data-v2`, copy the checked 7.6-GiB `8x7` parent and completed shard 0 server-side, and require the complete parent weight check plus identical 1,024-file shard metadata before changing the campaign default
+  - stage each generator on local ephemeral storage, then copy and atomically publish its complete 1,024-file result into its independently owned v2 directory
+- Complete production result:
+  - all `128/128` generator calls are checkpointed and all 128 output directories are present
+  - aggregate parents: `508,147,108`
+  - nominal candidates: `130,085,659,648`
+  - post-weight-filter canonicalisations: `71,256,694,627`, exactly matching the planner census
+  - canonical-parent paths: `8,702,606,955`; emitted paths after complement selection: `7,932,922,444`
+  - final raw solve records: `7,343,033,248`, exactly the Burnside-derived complement-orbit count
+  - because the canonical-parent construction emits every final representative from one generator exactly once, the raw corpus is exactly `117,488,531,968` record bytes (109.4 GiB), plus 1,024 small headers per generator
+- Performance:
+  - bulk launch began around 16:38 UTC and the final checkpoint was written at 17:18 UTC, about 40 minutes wall time under the Starter 100-container limit and several transparent Modal preemptions/restarts
+  - successful generator CPU times sum to `158,039.270s` (`43.90` physical-core-hours); min/median/p90/max are `1074.828/1127.982/1437.660/2046.226s`
+  - for the 127 v2-instrumented shards, local-to-v2 copy averages `5.468s` and explicit commit averages `4.765s`; maxima are `9.465s` and `17.203s`
+  - successful-attempt CPU plus 2-GiB memory cost is about `$2.77` at the checked Modal rates, before small prepare/plan costs and work lost to preemption
+- Exact restart behavior:
+  - Modal automatically restarts a preempted input; a shard enters the local campaign checkpoint only after generation, all 1,024 final-file publications, and durable Volume commit succeed
+  - the completed totals prove that retries neither omitted nor duplicated a canonical-parent solve representative
+- Outcome: accept the complete raw corpus and the v2 publication design. The next gates are 1,024 unique-input reductions followed by 1,024 independent representative/weight checks; no L40S solve should start until both global aggregates pass exactly.
+
+### Experiment 276: Complete production reduction and independent solve-corpus check
+- Goal: reduce all 128 generator views into 1,024 prefix-owned solve shards, enforce global raw-key uniqueness, and independently validate every final representative before any L40S work is authorized.
+- Reducer probe:
+  - solve shard 0 reads all 128 generator inputs and reports `7,692,657` raw records and exactly `7,692,657` unique records
+  - it contains `705,874` midpoint representatives, covered weight `19,025,282,001,669,504`, and writes a 117.4-MiB solve file
+  - the Modal call completes in about 54 seconds end to end, including image/container startup, 128-file v2 reads, reduction, output, and commit
+- Complete reduction:
+  - all `1,024/1,024` independently owned reducer calls complete without a duplicate-input failure
+  - the 100-container bulk campaign takes about ten minutes, or roughly twelve minutes including the one-shard probe
+  - all 1,024 final solve files are present; individual record counts range from `6,298,589` to `8,359,651`
+  - exact aggregate raw records: `7,343,033,248`
+  - exact aggregate final records: `7,343,033,248`
+  - exact midpoint representatives: `708,153,662`
+  - exact labelled weight: `10,139,684,107,326,071,075`
+  - exact covered weight: `18,446,744,073,709,551,616 = 2^64`
+  - equality of raw and reduced record counts proves operationally that canonical-parent generation emitted no key from two generator ranges
+- Independent checking:
+  - run one checker per final solve shard, again with up to 100 concurrent Starter containers; the complete campaign takes about four minutes
+  - every record passes selected-cell, canonical/complement-representative, prefix-ownership, and exact stored-weight validation
+  - aggregate records, midpoint count, labelled weight, and covered weight exactly equal the independently aggregated reducer metadata
+  - exact self-complementary midpoint representatives: `435,808`
+  - final driver result: `CHECK OK`
+- Persisted campaign gate: `generated=128/128 reduced=1024/1024 checked=1024/1024 check_gate=True solved=0/1024`.
+- Storage: retain both the roughly 109.4-GiB raw corpus and 109.4-GiB checked solve corpus for now. Raw deletion is safe only as a separate explicit operation after deciding whether preserving a cheap independent regeneration/reduction audit trail is worth the storage.
+- Outcome: accept the complete 1,024-shard solve corpus as exact and authorize the GPU-solve stage. All CPU-side algebraic, uniqueness, ownership, midpoint-quotient, self-complement, and total-weight gates pass their established constants.
+
+### Experiment 277: First production `8x8` L40S solve shard
+- Goal: run one complete checked production shard through the final CUDA solver, validating device memory, canonical-prefix expansion, sustained arithmetic throughput, exact weighting, restart checkpointing, and per-shard cost before authorizing the remaining 1,023 L40S calls.
+- Production input: checked prefix-owned solve shard 0, containing `7,692,657` records, `705,874` midpoint representatives, labelled weight `10,437,164,042,317,667`, and covered weight `19,025,282,001,669,504`.
+- Configuration: one Modal L40S, eight physical CPU cores, 64 GiB host memory, 16,384-kernel batches, and four direct CPU join validations.
+- Exact result:
+  - records/kernels: `7,692,657`
+  - right groups: `2,765,567`
+  - primitive comparisons: `4,476,686,214,612,789`
+  - contribution: `6,440,796,914,680,148,420,415,091,507,200`
+  - all four direct CPU joins pass; record, kernel, and covered-weight counters exactly match the checked shard metadata
+- Performance:
+  - CUDA time: `1343.990823s`
+  - total solver time: `1381.783795s` (`23.030` minutes)
+  - non-CUDA setup/drain overhead: `37.793s`, only `2.73%` of total time
+  - sustained throughput: `3.330890463476665e12` comparisons/s, about `7.3%` above the earlier `3.103e12` production-shaped sample
+  - Modal app: `<redacted-modal-app-id>`
+- Cost at the checked 2026-08-12 rates:
+  - L40S `$0.75`, eight CPU cores `$0.14`, and 64-GiB memory `$0.20`
+  - total provisioned shard cost approximately `$1.09` before credits
+- Updated full-campaign projection:
+  - applying measured throughput to the current sampled total-work estimate `4.3282e18` gives about `360.9` L40S arithmetic-hours
+  - adding this shard's roughly 37.8-second fixed overhead to each of 1,024 shards gives about `371.7` provisioned L40S-hours
+  - projected resource cost is approximately `$725` GPU, `$140` CPU, and `$190` memory, or `$1,056` total before retries/credits
+  - the Starter plan's ten-GPU concurrency implies an ideal wall floor near `37.2h`; allow roughly `40-50h` for shard-work skew, allocation waves, and preemptions
+  - total comparison work remains a sample-derived estimate until all 1,024 production shards report exact counters, so cost and wall projections are capacity estimates rather than final totals
+- Outcome: accept the production GPU path. Memory, correctness, and throughput all pass; the arithmetic kernel is slightly faster than projected. The remaining operational decision is whether to run for roughly two days at Starter concurrency or obtain higher GPU concurrency/provider capacity before launching the other 1,023 shards.
+
+### Experiment 278: Three-shard concurrent production L40S batch
+- Goal: validate bounded concurrent solving and additional production-shard throughput while keeping new spend below the user's stated `$11.95` remaining budget.
+- Control-plane safety:
+  - add `solve-range --index I --count N` so one local coordinator launches exactly a bounded contiguous set of GPU calls and serializes their checkpoint updates
+  - this avoids both accidental submission of all unfinished solve shards and races from multiple local processes rewriting the same checkpoint
+  - launch only shards 1, 2, and 3; all three L40S containers run concurrently and complete without preemption
+- Exact shard results:
+  - shard 1: `7,414,092` kernels, `4,274,423,517,196,821` comparisons, contribution `6,218,750,460,859,864,509,471,547,392,000`, four direct validations
+  - shard 2: `7,535,159` kernels, `4,330,627,608,134,599` comparisons, contribution `6,204,261,890,809,579,940,927,048,908,800`, four direct validations
+  - shard 3: `7,228,985` kernels, `4,483,940,656,588,801` comparisons, contribution `6,325,011,640,404,496,271,489,067,417,600`, four direct validations
+  - every shard's record/kernel and covered-weight counters match its checked solve-corpus metadata; all `12/12` direct CPU joins pass
+- Performance and cost:
+  - shard total times are `22.455`, `22.832`, and `22.900` minutes
+  - CUDA times sum to `1.1047` hours over `13,088,991,781,920,220` comparisons, for weighted throughput `3.291352e12 comparisons/s`
+  - provisioned times sum to `1.1364` hours
+  - at the checked L40S/eight-core/64-GiB rates, costs are `$1.063`, `$1.081`, and `$1.084`, or approximately `$3.23` total
+  - relative to the stated `$11.95` remaining balance, this leaves approximately `$8.72` before any credits or billing adjustments
+- Persisted status: solve shards 0 through 3 are checkpointed; `4/1024` complete.
+- Outcome: accept bounded concurrent launches and the stable roughly `$1.07/shard` cost for these four early production shards. Do not infer that every shard has identical comparison work; use an explicit bounded count for any further budget-constrained batches.
+
+### Experiment 279: Four-shard concurrent production L40S batch
+- Goal: solve shards 4 through 7 concurrently while keeping cumulative new GPU spend within the user's remaining Modal balance.
+- Scope control: use the bounded coordinator with `--stage solve-range --index 4 --count 4`; no other solve shards are submitted.
+- Runtime behavior:
+  - all four requested L40S inputs run concurrently and finish without preemption or retry
+  - the autoscaler briefly reports a fifth container for under two minutes before returning to exactly four; no fifth solve input or result exists
+  - all four outputs pass record/kernel/covered-weight identity and four direct CPU joins each
+- Exact results:
+  - shard 4: `7,660,409` kernels, `4,436,317,519,402,299` comparisons, contribution `6,526,269,216,092,066,071,929,325,977,600`
+  - shard 5: `7,746,285` kernels, `4,517,716,399,607,788` comparisons, contribution `6,661,883,623,443,417,294,790,149,734,400`
+  - shard 6: `7,157,025` kernels, `4,231,615,158,296,933` comparisons, contribution `6,342,041,705,419,015,106,859,616,665,600`
+  - shard 7: `7,300,960` kernels, `4,351,622,486,456,365` comparisons, contribution `6,360,034,888,897,614,777,728,500,531,200`
+  - aggregate comparisons: `17,537,271,563,763,384`; direct validations: `16/16`
+- Performance and estimated cost:
+  - total solver times are `22.841`, `23.942`, `21.922`, and `22.586` minutes
+  - CUDA times sum to `1.4779` hours, sustaining weighted throughput `3.296120e12 comparisons/s`
+  - successful provisioned times sum to `1.5215` hours
+  - estimated successful-call cost is `$4.321`: shards 4-7 cost `$1.081`, `$1.133`, `$1.038`, and `$1.069`
+  - together with Experiment 278's `$3.228`, the two requested batches use approximately `$7.549` of the stated `$11.95` balance, leaving about `$4.40`; use roughly `$4.30` as a conservative remaining figure to allow for the transient container and billing rounding
+- Persisted status: solve shards 0 through 7 are checkpointed; `8/1024` complete.
+- Outcome: accept the batch. Production throughput remains stable near `3.3e12 comparisons/s`, all exact gates pass, and bounded submission again contains spend as intended.
+
+### Experiment 280: Provider-neutral production-result ledger
+- Goal: combine auto-pulled Scaleway/Vast outputs with the completed Modal shards in one durable local tree, while rejecting corrupt, incomplete, wrongly assigned, or conflicting shard results before final summation.
+- Add `aggregate_8x8_results.py` with four responsibilities:
+  - export each Modal checkpoint result as `results/modal/sNNNN.log` plus `sNNNN.status.json`, and retain a normalized `results/modal/campaign-checkpoint.json` provenance snapshot
+  - export all 1,024 independently checked shard expectations to `results/expected.tsv`, allowing later checks without the repository-local Modal checkpoint
+  - verify status state and identity, whole-log SHA-256, exact `RESULT`/`TIMING` lines, checked record/weight counters, four direct validations, solve-file header, and solve-file length
+  - deduplicate identical multi-provider answers, reject conflicting answers for the same shard, compute exact partial totals, list missing shards, and atomically publish `results/manifest.json`
+- Initial live test:
+  - exported all nine checkpointed Modal shards, 0 through 8
+  - the first unified snapshot accepted `48/1024` unique results: 9 Modal, 11 Scaleway, and 28 Vast
+  - a second verification using only `results/expected.tsv` accepted `49/1024`, because one more Scaleway status arrived between scans; this confirms that an in-progress pull can be re-snapshotted without relying on the Modal checkpoint
+  - no duplicate IDs, conflicting results, checksum failures, metadata mismatches, or solve-corpus mismatches were found
+- Snapshot semantics: workers publish provider files independently while the aggregator writes the combined manifest by atomic rename. Re-running the command advances the manifest to all complete status/log pairs visible in that scan; no partial aggregate is treated as the final `T_4(8,8)` value.
+- Command: `python3 aggregate_8x8_results.py ../rectangle-free-data-v2 --export-modal --write-manifest`. Subsequent refreshes can omit `--export-modal`; if the local checkpoint is absent, pass a nonexistent `--checkpoint` path and validation uses the portable expected table.
+- Outcome: store Modal results under the same `results/` root. Provider subdirectories preserve provenance, while one strict manifest supplies the provider-independent campaign state and eventual exact sum.
+
+### Experiment 281: Three high-end Modal shards alongside external campaigns
+- Goal: purchase three more bounded Modal results without duplicating the 160 low-end shards already launched separately on IBM.
+- Assignment correction:
+  - initially submit shards 9 through 11, before learning about the IBM range
+  - interrupt that app during initial allocation; it produces no result and adds nothing to the checkpoint
+  - confirm that shards 9-11 and 1021-1023 are absent from both the unified manifest and Modal checkpoint, then submit only high-end shards 1021 through 1023
+  - corrected Modal app: `<redacted-modal-app-id>`
+- Exact results:
+  - shard 1021: `7,250,287` kernels, `4,165,927,002,575,140` comparisons, contribution `6,482,000,715,721,939,694,749,962,240,000`
+  - shard 1022: `7,365,532` kernels, `4,219,531,519,872,670` comparisons, contribution `6,409,225,744,934,264,592,547,789,209,600`
+  - shard 1023: `6,731,084` kernels, `4,253,310,379,876,053` comparisons, contribution `6,448,778,406,870,543,764,293,238,784,000`
+  - all record/kernel and covered-weight counters match the independently checked solve metadata; all `12/12` direct CPU joins pass
+- Performance:
+  - total solver times are `1297.153s`, `1303.746s`, and `1306.595s`, or `21.619`, `21.729`, and `21.777` minutes
+  - CUDA times sum to `3803.939s` over `12,638,768,902,323,863` comparisons, sustaining weighted throughput `3.322548e12 comparisons/s`
+  - successful provisioned times sum to `3907.494s`; at the previously checked combined L40S/eight-core/64-GiB rate of about `$2.84/hour`, estimated costs are `$1.023`, `$1.029`, and `$1.031`, or `$3.083` total
+  - the cancelled app may add a small allocation/startup charge; it ran briefly but completed no solve
+- Persistence and aggregation:
+  - Modal checkpoint advances from 9 to 12 solved shards: 0-8 and 1021-1023
+  - export all 12 into `results/modal/` and rebuild the provider-neutral manifest
+  - the live snapshot accepts `61/1024` unique results: 12 Modal, 16 Scaleway, and 33 Vast; the external counts increased while this batch ran
+- Outcome: accept shards 1021-1023. High-end work is slightly faster than the earlier Modal samples, and the revised range avoids intentional overlap with IBM's 160 low-end assignments.
+
+### Experiment 282: Schema-v2 multi-provider integrity manifest
+- Goal: replace the stale 61-shard manifest with one exact, atomic snapshot spanning every current provider format, including `.log` outputs from IBM/Modal/Scaleway/Vast and `.result` outputs from Beam/Lightning.
+- Aggregator changes:
+  - accept exactly one `.log` or `.result` companion for each canonical `sNNNN.status.json`
+  - derive the unique `RESULT` and `TIMING` lines for the legacy Lightning shard 313 status, while recording its absent hash/result/timing claims as explicit provenance warnings rather than silently inventing remote claims
+  - bind every source to computed status and artifact SHA-256 values in the manifest; verify every claimed result SHA-256
+  - optionally hash all solve inputs carrying provider claims with `--verify-input-sha256`, deduplicating input work by shard and using up to eight hashing threads
+  - validate IBM auxiliary source-status identity, exit code, log hash, input/solver provenance, and source-status checksum when those fields exist
+  - retain all agreeing provider sources for a shard, reject any result-field conflict, and report source counts, duplicate counts, provider counts, warnings, validation coverage, and creation time
+  - publish schema version 2 by atomic rename; the manifest stores `artifact` rather than assuming every provider calls it a log
+- Live full-integrity command: `python3 aggregate_8x8_results.py ../rectangle-free-data-v2 --checkpoint /tmp/no-such-rectangle-free-checkpoint --verify-input-sha256 --write-manifest`.
+- Snapshot at `2026-08-14T23:25:40Z`:
+  - `635` valid source results reduce to `631/1024` unique shards, leaving `393`; provider sources are 46 Beam, 184 IBM, 40 Lightning, 12 Modal, 120 Scaleway, and 233 Vast
+  - four duplicate sources agree exactly: IBM/Modal shard 8 and Beam/IBM shards 86, 117, and 145; no conflict exists
+  - all `634/634` claimed result hashes match; all `229/229` claimed input hashes match the local solve corpus
+  - every source also passes shard/provider/state identity, unique result/timing lines, exact checked record/labelled/covered counters, record/kernel equality, four direct validations, solve header, and solve file length
+  - the four warnings are intentional provenance limitations: IBM's legacy shard-8 auxiliary status lacks its log hash, while Lightning shard 313's status lacks result SHA, result line, and timing line; the manifest computes and binds both local files without pretending the missing remote claims existed
+  - exact partial totals: `4,552,023,642` records/kernels, `2,687,933,289,598,174,616` comparisons, contribution `4,018,031,818,267,657,218,828,149,975,224,320`, and covered weight `11,421,492,505,409,843,712`
+- Manifest self-checks: entries/completed IDs/counts agree, completed and missing sets partition all 1,024 shards, records equal kernels, verified equals four times unique shards, input claims equal verified inputs, and known duplicate source lists have the expected providers.
+- Outcome: accept `results/manifest.json` schema v2 as the current exact campaign ledger. It is safe to refresh while atomic provider watchers continue publishing; partial contribution remains non-final until all 1,024 shards and the global record/covered-weight gates pass.
+
+### Experiment 283: Aggregate successful-compute statistics
+- Goal: add interpretable compute totals to the provider-neutral manifest without conflating parallel wall-clock, duplicate validation runs, successful solver time, failed attempts, or provider billing time.
+- Add a `performance` section with two campaign-wide views:
+  - `all_sources` sums every successful provider artifact, including duplicate shard computations used for cross-provider validation
+  - `deduplicated_shards` selects the first source sorted by provider/status path for each unique shard, giving one observed successful timing per exact contribution
+- Add a `by_provider` breakdown. Every rollup records result count, comparisons, GPU seconds/hours, solver seconds/hours, non-GPU seconds/hours, mean GPU and solver seconds, and comparison-weighted GPU throughput.
+- Explicit scope: these are additive successful compute-hours, not elapsed campaign wall-clock. They exclude failed attempts, allocation/startup, transfer, idle time, storage, and unreported retries; concurrent jobs are deliberately summed.
+- Snapshot at `2026-08-14T23:28:55Z`, after active downloads advanced the ledger to 640 sources and 636 unique shards:
+  - all successful sources: `217.133088` GPU-hours, `224.342313` solver-hours, `7.209225` non-GPU solver-hours, mean total `21.032` minutes/result, weighted `3.487497e12 comparisons/s`
+  - deduplicated shards: `215.724348` GPU-hours, `222.897524` solver-hours, `7.173176` non-GPU solver-hours, mean total `21.028` minutes/shard, weighted `3.488628e12 comparisons/s`
+  - provider weighted throughput: Beam `4.072800e12`, Vast `3.683355e12`, IBM `3.323038e12`, Modal `3.305555e12`, Lightning `3.300186e12`, and Scaleway `3.295883e12 comparisons/s`
+  - provider successful solver-hours: Beam `13.045675`, IBM `67.123459`, Lightning `14.765797`, Modal `4.521840`, Scaleway `44.263840`, and Vast `80.621702`
+- Self-checks: provider result counts sum to source count, provider timing/comparison totals sum to `all_sources`, deduplicated count equals completed count, deduplicated comparisons equal the exact partial manifest total, solver time is never below GPU time, and every reported weighted rate recomputes exactly from comparisons/GPU seconds.
+- Outcome: accept the performance rollups as the current successful-compute accounting. Provider invoices may be higher because the manifest intentionally does not estimate unobserved startup, failed work, or billing granularity.
+
+### Experiment 284: Production `8x8` GPU tail and Nsight profile
+- Goal: measure production-shaped block-tail loss and identify the actual kernel pipeline bottleneck before changing the CUDA scheduler or inner loop.
+- Inputs and provenance:
+  - use checked solve shard 0, with source and input SHA-256 values matching the production corpus
+  - run the full tail measurement on an on-demand RTX 5090 at Vast, and collect hardware counters on a temporary IBM L40S because the Vast host denies performance-counter access even to container root
+  - provision the IBM worker from public image `ibm-ubuntu-24-04-4-minimal-amd64-6`; no Red Hat image or licensed Red Hat software is used
+- Full RTX 5090 result:
+  - records/kernels: `7,692,657`; comparisons: `4,476,686,214,612,789`
+  - exact contribution: `6,440,796,914,680,148,420,415,091,507,200`, identical to Experiment 277; all four direct validations pass
+  - CUDA time: `1171.640406s`; total time: `1202.699131s`; sustained throughput: `3.820870457e12 comparisons/s`
+  - `15,385,314` measured blocks; maximum block work `33,733,324,800` comparisons
+  - block-work quantiles by ceiling power of two: p50 `2^27`, p90 `2^30`, p99 `2^32`, and p99.9 `2^33`
+  - aggregate batch-drain fraction: `32.7252%`; worst batch drain: `76.8781%`; the largest block accounts for effectively the whole residual span of its batch
+- IBM L40S Nsight Compute profile:
+  - production kernel uses 38 registers/thread and 3,136 bytes shared memory/block with no spills; achieved occupancy is `95.95%`, so register pressure and occupancy are not limiting
+  - SM compute and memory-pipeline utilization both reach `80.41%`, while DRAM throughput is only `7.32%`; this is not a device-memory-bandwidth bottleneck
+  - L1/TEX/shared path reaches `98.45%` throughput; the LSU pipeline is the dominant executed pipeline at `80.41%`
+  - scheduler issue rate is `0.74` warps/cycle with `25.92%` of cycles having no eligible warp
+  - average stall cycles per issued instruction are MIO throttle `5.10`, not-selected `3.14`, barrier `1.90`, short-scoreboard `1.71`, and wait `1.43`; MIO throttle alone is `32.83%` of the `15.54`-cycle average issue interval
+  - SASS inspection confirms that the compiler already unrolls four comparisons, combines mask reads into two `LDS.128` instructions, predicates the comparatively rare weight loads, and keeps the 32x32-to-64-bit products exact
+- Interpretation:
+  - production `8x8` loses enough arithmetic capacity to batch tails that heavy-first/work-balanced descriptor ordering is now a high-confidence optimization target, not merely a scheduling polish
+  - the inner kernel is limited primarily by repeated shared-memory mask reads through the MIO/LSU path, not DRAM, occupancy, launch overhead, descriptor size, or 64-bit multiplication
+  - asynchronous global copies alone are unlikely to help materially. A later inner-loop experiment should instead target shared-mask issue pressure, but a warp-shuffle register subtile is not automatically a win: the existing compiler emits only two 128-bit shared loads for four masks, whereas 64-bit warp broadcasts require multiple shuffle instructions
+- Artifacts: retain the raw Nsight reports, counter text, SASS, resource usage, build logs, and full tail log under `../rectangle-free-data-v2/profiles/ibm-l40s-20260815/` and `../rectangle-free-data-v2/profiles/vast-5090-20260815/`.
+- Cleanup: destroy the Vast instance and the temporary IBM instance, floating IP, subnet, public gateway, security group, key, and VPC after downloading the reports; both provider instance lists are empty.
+- Outcome: pursue heavy-first/work-balanced GPU scheduling next. Benchmark any shared-mask-stream redesign separately after recovering the measured tail loss; do not spend time on global-memory bandwidth or occupancy tuning for this kernel.
+
+### Experiment 285: Heavy-first production join scheduling
+- Goal: recover the large production `8x8` batch-tail loss measured in Experiment 284 without splitting joins, introducing atomics, or changing the exact arithmetic kernel.
+- Implementation:
+  - behind `HEAVY_FIRST_JOINS`, sort each host batch's join descriptors by descending exact Cartesian work, `(lhs_count & ~swapped_flag) * rhs_count`, before upload
+  - retain a dense 32-bit mapping from scheduled result slot to the original logical selected/complement slot; restore logical order on the CPU immediately after download, leaving validation and contribution aggregation unchanged
+  - include deterministic original-index tie breaking and a checked `UINT32_MAX` descriptor bound
+  - sorting and remapping run in the existing asynchronous CPU producer/result path; the CUDA kernel, descriptor ABI, distribution layout, comparison count, and arithmetic are unchanged
+- Matched full-shard benchmark:
+  - use checked production solve shard 0 and the same physical Vast RTX 5090 host, native `sm_120`, 16 OpenMP threads, 8,192-record batches, four direct validations, and tail instrumentation as Experiment 284
+  - exact gates pass: `7,692,657` records/kernels, labelled weight `10,437,164,042,317,667`, covered weight `19,025,282,001,669,504`, `4,476,686,214,612,789` comparisons, and contribution `6,440,796,914,680,148,420,415,091,507,200`
+  - all four direct CPU joins pass, and the contribution exactly matches Experiments 277 and 284, exercising the scheduled-to-logical result permutation over the full shard
+- Performance against Experiment 284's unsorted run on the same host:
+  - CUDA time falls from `1171.640406s` to `935.890176s`, a `20.121%` reduction
+  - throughput rises from `3.820870457e12` to `4.783345665e12 comparisons/s`, a `25.190%` increase
+  - total solver time falls from `1202.699131s` to `967.713747s`, a `19.538%` reduction
+  - aggregate drain falls from `32.7252%` to `5.6535%`, removing `82.724%` of the measured drain interval
+  - worst-batch drain remains `66.53%` and maximum-block fraction remains `1.0`, dominated by small/final batches; aggregate arithmetic time, rather than this maximum, is the production-relevant result
+  - heavy-first host timings remain small: right-layout construction `3.874s`, upload `3.366s`, and result permutation is absorbed in the roughly `31.824s` non-CUDA total
+- Deployment:
+  - enable `HEAVY_FIRST_JOINS` in the tracked local `8x8` Make target, Modal production image, and Modal tail-probe image
+  - leave `7x7` and `7x8` builds unchanged because their earlier measured tail ceilings were much smaller and this full-shard benchmark is specifically `8x8`
+- Cost and cleanup: the on-demand Vast worker was alive for `1555.7s` at `$0.35556/hour`, approximately `$0.154`; preserve its build and full-run logs under `../rectangle-free-data-v2/profiles/vast-5090-heavy-first-20260815/`, then destroy it and confirm the Vast instance list is empty.
+- Outcome: accept heavy-first ordering as the production `8x8` default. It is the sought high-level scheduling win: roughly one fifth less GPU time with no kernel or arithmetic change. The next independent kernel experiment should target shared-mask MIO pressure, but its risk/reward bar is now higher than before this gain.
+
+### Experiment 286: Four-LHS register blocking for shared-mask reuse
+- Goal: reduce the shared-memory MIO pressure and barrier frequency identified by Experiment 284 by reusing each staged RHS mask and weight across several independently accumulated LHS entries.
+- Implementation:
+  - add compile-time `LHS_PER_THREAD` variants for one, two, or four LHS entries per CUDA thread; retain one as the source-level default and the unchanged reference path
+  - in the two- and four-LHS variants, keep each thread's LHS masks and weights in registers, load each shared RHS mask once, conditionally load its weight once when any owned LHS is compatible, and maintain independent 64-bit sums before the existing block reduction
+  - retain explicit `uint64_t(lhs_weight) * uint64_t(rhs_weight)` promotion, exact 64-bit accumulation, the distribution ABI, comparison accounting, descriptor scheduling, and result order
+  - enable the accepted four-LHS variant only for tracked production `8x8` builds; leave the `7x7` and `7x8` targets unchanged
+- Compilation checks:
+  - native RTX 5090 `sm_120` builds use 36, 37, and 48 registers/thread for one, two, and four LHS entries respectively, with one barrier, 3,136 bytes shared memory/block, and no spills
+  - the production L40S `sm_89` four-LHS build uses 42 registers/thread, one barrier, 3,136 bytes shared memory/block, and no spills
+- Stable 250,000-record A/B on the same on-demand RTX 5090, using heavy-first scheduling and exactly `145,930,033,739,504` comparisons:
+  - one LHS: `30.477220s` and `30.462514s`, or `4.788167e12` and `4.790479e12 comparisons/s`
+  - two LHS: `28.111800s` and `28.153468s`, or `5.191060e12` and `5.183377e12 comparisons/s`
+  - four LHS: `26.504821s` and `26.504168s`, or `5.505792e12` and `5.505928e12 comparisons/s`
+  - every run returns the same exact contribution, `209,204,392,463,045,470,661,758,156,800`
+- Matched full-shard benchmark on checked production solve shard 0:
+  - all variants pass the same exact gates: `7,692,657` records/kernels, labelled weight `10,437,164,042,317,667`, covered weight `19,025,282,001,669,504`, four direct validations, `4,476,686,214,612,789` comparisons, and contribution `6,440,796,914,680,148,420,415,091,507,200`
+  - one LHS: CUDA `885.827528s`, total `911.791984s`, `5.053677e12 comparisons/s`
+  - two LHS: CUDA `836.803908s`, total `865.237687s`, `5.349743e12 comparisons/s`
+  - four LHS: CUDA `804.957080s`, total `832.207435s`, `5.561397e12 comparisons/s`
+  - relative to the matched one-LHS run, four-LHS blocking reduces CUDA time by `9.129%`, raises comparison throughput by `10.047%`, and reduces total solver time by `8.728%`; it is also `3.806%` faster in CUDA time than the two-LHS variant
+- Deployment: add `-DLHS_PER_THREAD=4` to the local `twocolour_8x8_gpu_canonical` target, the Modal production image, and the Modal L40S tail/probe image. Existing provider images or binaries must be rebuilt to receive the change.
+- Artifacts and cost: retain all build logs and matched short/full runs under `../rectangle-free-data-v2/profiles/vast-5090-lhs-blocking-20260815/`. The worker ran for about `3331.9s` at `$0.368148/hour`, approximately `$0.341`; destroy it after collecting the artifacts and confirm the Vast instance list is empty.
+- Outcome: accept four-LHS register blocking as the production `8x8` default. It directly relieves the measured shared-mask issue bottleneck, gives a reproducible further 9% full-shard CUDA-time reduction after heavy-first scheduling, and preserves every exactness gate.
+
+### Experiment 287: Post-blocking L40S Nsight profile
+- Goal: identify the bottleneck that replaces the shared-memory MIO pressure measured in Experiment 284 after accepting heavy-first scheduling and four-LHS register blocking.
+- Matched setup and provenance:
+  - provision one on-demand IBM `gx3-24x120x1l40s` worker from public image `ibm-ubuntu-24-04-4-minimal-amd64-6`; use no Red Hat image or licensed Red Hat software
+  - use CUDA `12.8`, Nsight Compute `2025.1.1`, the same four profiler sections and first 8,192 production records as Experiment 284, and driver branch `580` (`580.178.04`)
+  - source SHA-256 is `734088c0000c75a8ac61db58ce59ad4e12c7724c6e7bec0ca87a5942fb395746`; solve-shard SHA-256 is the established `8dda094f16ca6a3f39f98102ef54b3b34da8ac6b7101bee087af870d4996d9c2`
+  - the optimized kernel uses 42 logical registers/thread, 48 allocated registers/thread, one barrier, 3,136 bytes shared memory/block, and no spills
+- Exact gate before profiling:
+  - `8,192` records/kernels, labelled weight `11,138,286,855,361`, covered weight `20,282,852,929,922`, and `4,690,516,122,762` comparisons
+  - contribution `6,961,871,358,394,820,335,396,454,400`; all four direct CPU validations pass
+- Counter comparison with Experiment 284's one-LHS report over the same grid and work:
+  - profiled kernel duration falls from `3.844112s` to `3.074972s` and executed warp instructions fall from `1,343,674,572,643` to `1,063,071,509,575`; this `20.0%`/`20.9%` diagnostic reduction includes both subsequently accepted changes and is not a replacement for Experiment 286's matched full-shard timing
+  - memory-request pipeline utilization falls from `79.49%` to `17.52%`, and memory-access utilization from `53.12%` to `13.11%`
+  - MIO-throttle stall cycles per issued instruction collapse from `5.100895` to `0.000019`; short-scoreboard stalls also fall from `1.708855` to `0.946148`
+  - the dominant replacement stalls are not-selected `4.120314`, math-pipe throttle `3.793074`, barrier `3.696505`, and wait `1.994064` cycles per issued instruction
+  - scheduler issue activity falls from `74.08%` to `57.40%`; average active warps/scheduler fall from `11.51` to `9.98`, while eligible warps remain nearly flat at `3.06` versus `2.94`
+  - average active threads/warp fall from `31.95` to `24.35`; threads not predicated off rise from `14.93` to `23.91`, showing that four-LHS reuse removes most predicate waste among participating lanes but exposes underfilled or divergent LHS groups
+- Interpretation:
+  - four-LHS blocking fully resolves the measured shared-mask MIO bottleneck; another unconditional doubling to eight LHS entries is no longer supported by the counters because it would trade already negligible MIO pressure for more registers, math-pipeline pressure, and partial-group waste
+  - simple support-mask ordering may still suppress some weight loads or multiplies by grouping compatible predicates, but it cannot remove the mandatory intersection instructions and is not the first profile-directed experiment
+  - absent a stronger mathematical idea, the next targeted kernel prototype should dispatch uniformly per join among one-, two-, and four-LHS paths according to support size or final-group fill, optionally with smaller blocks for very small supports; this preserves four-LHS reuse for heavy joins while reducing useless work in partial groups
+- Artifacts: retain the exact gate log, build/resource reports, raw counter CSV, detailed report, source-correlated SASS, and `.ncu-rep` under `../rectangle-free-data-v2/profiles/ibm-l40s-lhs4-20260815/`.
+- Resource status: at the user's request, leave the Ubuntu L40S worker and its isolated VPC/network resources running for the next proposed experiment rather than destroying and reprovisioning them. The worker is therefore still billable.
+- Outcome: accept the profile with no solver change. Do not pursue unconditional eight-LHS blocking next; evaluate the user's follow-up idea first, with adaptive LHS dispatch as the current profile-derived fallback.
+
+### Experiment 288: Seven-row 10+32 prefix-bucket CUDA feasibility
+- Goal: test the exact proposal in `prefix_idea.md`: peel both colour-plane tokens for row-pair IDs `0,1,2,3,6` from each 42-bit seven-row support mask, reject incompatible ten-bit bucket products once, and join the remaining exact 32-bit suffix masks on the GPU.
+- Correctness and isolation:
+  - add an isolated `twocolour_7x8_prefix_gpu` prototype target; leave the accepted `8x8` production kernel and images unchanged
+  - exhaustively verify the split on every pair of 42 singleton token masks, compare every prefix-kernel result with the existing 64-bit SoA control kernel, and recompute configurable joins independently on the CPU
+  - retain checked `uint32_t` distribution weights and explicit `uint64_t(left_weight) * uint64_t(right_weight)` products
+- Kernel design:
+  - compact entries to `{uint32_t suffix, uint32_t weight}` and group them under sparse ten-bit bucket descriptors
+  - retain one block per logical join and use eight warp-local workers; each warp orients a compatible bucket pair so its smaller support is lane-owned and scans the other side through a private 32-entry shared tile
+  - use dynamic chunks of 16 consecutive bucket pairs; derive row/column bucket coordinates once per chunk rather than performing a runtime divide per pair, and retain the left descriptor across consecutive right buckets
+  - compact entry/bucket offsets to checked 32-bit values, reducing `PrefixBucket` from 16 to 12 bytes and `PrefixJoinDesc` from 24 to 16 bytes
+- Rejected variants:
+  - two and four suffix entries per lane reduce throughput; one is best because most compatible bucket tasks already need at most one or two 32-lane passes
+  - 12- and 14-bit prefixes prune more suffix comparisons but create so many occupied-bucket products that scheduling/metadata cost dominates; the proposed ten-bit split is the best flat decomposition
+  - static warp striding is measurably worse on heavy joins; chunk sizes 16 through 128 are similar there, while 8-16 are better for lighter joins, so select 16
+- Exact representative L40S benchmark:
+  - use the same deterministic 8,192 uniformly sampled accepted `7x8` orbit representatives as the census, producing exactly 16,384 selected/complement joins with no copied descriptors
+  - layouts contain `172,717,653` left and `175,644,440` right entries, with `3,498,347` and `1,216,494` occupied buckets respectively
+  - original work is `484,029,565,156` comparisons; compatible bucket pairs are `49,944,211`; suffix work is `139,376,375,250`, exactly `28.7950128%` retained as reported by the independent census
+  - the existing 64-bit SoA control takes `0.207172s` (`2.336361e12` comparisons/s); the prefix kernel takes `0.101650s` (`1.371142e12` surviving suffix comparisons/s), a `2.038099x` kernel speedup
+  - every GPU result agrees between kernels and 16 independently rebuilt CPU joins pass
+- Memory implication: suffix entries fall from 12 bytes in the current mask/weight SoA to 8 bytes; sparse bucket metadata is about 4.7 million 12-byte records in this sample, so the bucketed entry-plus-metadata representation is still materially smaller than the original entries.
+- Producer qualification: this correctness-first implementation transforms and comparison-sorts every labelled distribution on the CPU. Its measured `124.601475s` build time for the representative batch is not production-acceptable and dwarfs the join time. Production must use at least a linear histogram/scatter and exploit canonical/right-prefix reuse, plausibly moving the scatter to the GPU; the `2.04x` result is therefore a kernel feasibility result, not yet an end-to-end solver claim.
+- `7x9` integration prerequisite: the natural `4+5` split has a 35-bit raw key for each seven-row five-column half, while the current generic solver's raw/canonical prefix plumbing uses `uint32_t`. Widen those key types to 64 bits before constructing a real `7x9` corpus or solver; this is independent of the 42-bit rectangle-token mask and its exact 10+32 split. The prototype now rejects such a build rather than silently truncating it.
+- Projection: if the representative ratio transfers to the rough `7x9` workload estimate, pure join time falls from approximately 33 to 16 GPU-hours. Treat this as a workload-level estimate pending an integrated producer and true `7x9` corpus benchmark.
+- Resource status: retain the Ubuntu IBM L40S worker at the user's request for the producer experiment and possible `7x7` validation.
+- Outcome: accept the exact ten-bit/32-bit kernel as a strong seven-row optimization. Pursue linear bucket construction next; do not pursue wider flat prefixes or multi-entry-per-lane variants.
+
+### Experiment 289: Linear parallel construction of prefix-bucket layouts
+- Goal: remove the comparison-sort bottleneck in Experiment 288's correctness-first CPU producer while retaining a simple exact reference path for a later integrated/GPU producer.
+- Implementation:
+  - replace per-distribution comparison sorting with a two-pass counting scatter over the exactly 1,024 possible ten-bit prefixes
+  - precompute disjoint output ranges for every selected/complement distribution, then transform and scatter distributions independently with OpenMP; compact the small sparse bucket vectors into their final layout after the parallel pass
+  - retain checked 32-bit entry/bucket offsets, the exact suffix/weight representation, and the unchanged accepted CUDA kernel
+  - report canonical-factory and labelled-layout times separately
+- Matched deterministic 512-kernel validation:
+  - factory time is `0.327224s` and layout time falls from the prior histogram-only `6.021342s` to `0.648089s`, a `9.29x` layout speedup; combined factory/layout time falls from `6.351815s` to `0.975314s`, a `6.51x` speedup
+  - all 16 CPU validations and every direct/prefix GPU result still agree
+- Full 8,192-kernel census workload:
+  - rebuild the same `348,362,093` labelled entries and `4,714,841` sparse buckets as Experiment 288
+  - factory time is `0.767719s`, layout time is `9.406295s`, and combined build time is `10.174014s`, down from `124.601475s` by `12.25x`
+  - exact work remains `484,029,565,156` original and `139,376,375,250` suffix comparisons (`28.7950128%` retained); 16 CPU validations and all GPU result comparisons pass
+  - control CUDA time is `0.202081s`; prefix CUDA time is `0.101897s`, a `1.983190x` speedup, consistent with Experiment 288's `2.038099x` run-to-run result
+- Qualification: the from-scratch CPU layout is now a useful reference/fallback but still costs roughly ten seconds for this unusually large distinct-distribution batch, versus about one tenth of a second of sampled join work. A production `7x9` path should reuse labelled prefix layouts across incident edges and implement canonical transform plus histogram/scatter on the GPU if producer profiling shows it material. The linear CPU path establishes the exact target layout and removes sorting as a fundamental obstacle.
+- Resource status: retain the Ubuntu IBM L40S worker for the planned `7x7` comparison and possible GPU construction probe.
+- Outcome: accept the linear parallel CPU producer. Treat approximately `2x` as the current representative kernel gain; do not yet claim a `2x` end-to-end solver gain.
+
+### Experiment 290: Prefix-bucket comparison on the known `7x7` workload
+- Goal: determine whether the exact seven-row 10+32 split also helps the existing asymmetric `3+4` join, using the known `7x7` corpus as an independent validation workload.
+- Implementation: generalize the isolated prototype to unequal half widths with separate canonical factories, add a `twocolour_7x7_prefix_gpu` target, and leave the accepted ordinary `7x7`, `7x8`, and production `8x8` targets unchanged.
+- Deterministic L40S benchmark:
+  - uniformly sample 8,192 accepted representatives from the known full `7x7` orbit corpus, producing 16,384 selected/complement joins
+  - build `23,797,436` left and `151,531,419` right entries with `1,275,871` and `1,544,568` sparse buckets; canonical factories take `0.725193s`, parallel layouts `4.433289s`, and their combined build takes `5.158481s`
+  - original work is `165,387,411,641` comparisons; `51,544,890` compatible bucket pairs retain `38,608,025,532` suffix comparisons, or `23.3439928%`
+  - the 64-bit control takes `0.058733s` (`2.815912e12` comparisons/s); the prefix kernel takes `0.054129s` (`0.713262e12` suffix comparisons/s), a `1.085062x` kernel speedup
+  - every direct/prefix GPU result agrees and 16 independently rebuilt CPU joins pass
+- Interpretation: stronger pruning does not translate into the approximately `2x` `7x8` gain because the smaller three-column distributions create finer, less efficient warp tasks. The result is nevertheless an independent exact validation of the split and kernel across unequal half widths.
+- Outcome: do not retrofit the prefix path for a new full `7x7` solve: an 8.5% kernel gain does not justify its producer/integration complexity for an already-known answer. Continue to target `7x9`, where larger distributions and the `7x8` benchmark indicate much better amortization.
+
+### Experiment 291: Widen raw half-prefix keys for a `7x9` 4+5 split
+- Goal: remove the first exact `7x9` integration blocker: seven rows by five columns require a 35-bit raw half-prefix, while the solver previously used `uint32_t` for raw/canonical prefix keys.
+- Implementation:
+  - introduce `PrefixKey = uint64_t` for raw selected/complement prefixes, canonical prefix keys, edge endpoints, unique-key vectors, and host lookup maps
+  - retain 32-bit distribution IDs, row-permutation maps, support counts, result slots, weights, and GPU join descriptors; the 42-bit rectangle-token mask and CUDA arithmetic are unchanged
+  - construct complement masks in the widened type, so all 35 bits of a five-column half are preserved
+  - remove the prototype's fail-closed 7x5 guard now that the shared solver plumbing is wide enough
+- Existing-geometry regression on the retained L40S:
+  - deterministic 512-kernel `7x8` sample reproduces exactly `32,759,926,083` original comparisons and `9,406,205,061` prefix-suffix comparisons (`28.7125344%` retained); all GPU results agree and 16 CPU validations pass
+  - deterministic 512-kernel `7x7` sample similarly passes all GPU comparisons and 16 CPU validations
+  - the accepted production `8x8` canonical/heavy-first/four-LHS configuration compiles successfully with the widened host keys
+- Compatibility: `OrbitRecord` remains two 64-bit words and existing `7x7`, `7x8`, and `8x8` files are unchanged. The wider type is an in-memory solver detail, not a corpus-format migration.
+- Outcome: accept 64-bit raw/canonical prefix keys. Next produce safely repacked sampled `7x9` orbit records and benchmark the genuine 4+5 distributions.
+
+### Experiment 292: Deterministic safely repacked `7x8 -> 7x9` sample augmentation
+- Goal: construct genuine canonical `7x9` representatives for performance testing without materialising the projected roughly 54 GiB complete corpus or misreading the existing 8-bit row packing in a 9-bit build.
+- Implementation:
+  - add `binary_orbit_augment_7x9` with seven rows, nine maximum columns, nine-bit row words, distinct magic `R7ORB09`, and the exact known `7x9` ordinary-orbit count `7,216,495,370`
+  - add `sample-extend7x8`, which validates the complete `R7ORB01`/8-column parent header, deterministically samples unique parent record indices, explicitly unpacks seven 8-bit parent rows, appends each of 128 possible ninth columns, canonicalises under `S_7 x S_9`, locally merges duplicate children, and writes sorted 9-bit-packed records
+  - validate candidate count and exact partial augmentation weight before output: child weight must equal 128 times sampled-parent weight
+  - add a matching `twocolour_7x9_prefix_gpu` 4+5 target using the separate `R7ORB09` magic
+- Determinism and exact gates:
+  - two independent 64-parent runs each produce `8,192` candidates and `7,508` locally unique children with parent weight `9,390,124,800` and child weight `1,201,935,974,400`
+  - both files are byte-identical with SHA-256 `9223b705da94c8aef39b00f78a3b7cf28e8c874285265f4aa97160c9e1f5eef1`
+  - the 128-parent sample produces `16,384` candidates, `15,012` local children, parent weight `18,555,868,800`, child weight `2,375,151,206,400`, and SHA-256 `3096c1c56d1d0a5e30b8e11242ca677c032918e53f8050613d1e6817e8a38122`
+- Scope: weights are exact for the sampled augmentation paths but are not globally reduced `7x9` orbit weights; children reachable from unsampled parents are deliberately absent. The corpus is an exact canonical performance sample, not a contribution shard or an unbiased uniform sample of final child orbits.
+- Outcome: accept the explicit row-repacking sampler and distinct 9-bit corpus identity. Use its nested 16/64/128-parent samples for the genuine 4+5 kernel feasibility benchmark.
+
+### Experiment 293: Genuine `7x9` 4+5 prefix-bucket L40S benchmark
+- Goal: replace the `7x8` 4+4 proxy with actual canonical nine-column children and measure exact pruning, memory shape, producer cost, and matched 64-bit-control versus 10+32-prefix CUDA time.
+- Setup: use the retained Ubuntu L40S, CUDA 12.8, 16 OpenMP threads, the deterministic nested samples from Experiment 292, one natural selected/complement join pair per retained representative, and no copied join descriptors. Every prefix result is compared with the 64-bit SoA control and 16 joins are independently rebuilt on the CPU.
+- Results:
+  - 16 parents: `1,856` child records, `947` evaluated kernels, and `246,628,143,783` original comparisons; retain `51,923,569,539` (`21.0533837%`); control `0.184143s`, prefix `0.068980s`, speedup `2.669509x`
+  - 64 parents: `7,508` child records, `4,058` kernels, and `2,422,105,049,927` original comparisons; retain `364,540,703,069` (`15.0505736%`); control `1.264572s`, prefix `0.240240s`, speedup `5.263787x`
+  - 128 parents: `15,012` child records, `7,585` kernels / `15,170` joins, and `3,747,583,374,374` original comparisons; retain `713,869,827,641` (`19.0488044%`); control `1.386856s` (`2.702215e12` comparisons/s), prefix `0.444050s` (`1.607634e12` surviving comparisons/s), speedup `3.123197x`
+- Exactness: all three runs report identical direct/prefix result vectors and pass 16 independent CPU joins. This exercises 35-bit raw five-column prefixes, distinct selected/complement canonical factories, 42-bit token transformation, ten-bit extraction, 32-bit suffix joins, and partial augmentation weights together.
+- Largest-sample shape and memory:
+  - `4,367` unique left and `5,160` unique right prefixes expand to `102,867,593` and `656,971,962` entries, with `2,060,569` and `1,593,144` occupied buckets
+  - the A/B executable holds both 12-byte control and 8-byte prefix entries simultaneously, requiring about 14.2 GiB for their device entry arrays plus roughly 44 MB of bucket metadata; the 48 GiB L40S has ample headroom
+  - a prefix-only layout for the same distinct distributions is about 5.7 GiB plus metadata, materially smaller than the control representation
+- Producer timing: on the largest sample, canonical factories take `6.607149s`, CPU transform/histogram/scatter takes `26.149287s`, and combined build takes `32.756436s`. This from-scratch CPU producer is vastly slower than the `0.444050s` prefix join and cannot be used per production batch unchanged. Production must reuse layouts across incident edges and move canonical transform plus histogram/scatter to the GPU, or otherwise cache the labelled bucket layouts.
+- Interpretation:
+  - actual five-column distributions improve the mathematical pruning from `28.8%` retained on `7x8` to `15-21%` in these samples; larger compact working-set savings also help relative to the control
+  - the nested samples expose a heavy workload tail, so their individual ratios vary from `2.67x` to `5.26x`; use the largest sample's `3.12x`, not the best case, as the current conservative kernel estimate
+  - applying `3.12x` to the earlier rough 33 GPU-hour unoptimized join estimate gives approximately 10.6 GPU-hours. This is still a projection: parent sampling is not uniform over globally reduced final child orbits, and the integrated producer has not been measured.
+- Resource status: retain the Ubuntu IBM L40S worker at the user's earlier request; it remains billable.
+- Outcome: accept prefix bucketing as a high-confidence, multi-fold `7x9` kernel optimization. The next engineering gate is GPU-side bucket construction and layout reuse; do not generate the full `7x9` corpus until that producer path demonstrates acceptable end-to-end throughput.
+
+### Experiment 294: GPU histogram/scatter construction of `7x9` prefix layouts
+- Goal: replace Experiment 293's dominant CPU transform/counting-scatter path with an exact GPU builder and quantify the remaining canonical-cache/upload cost.
+- Implementation behind `GPU_PREFIX_BUILDER_PROBE`:
+  - create one compact descriptor per labelled selected/complement distribution, referring to its canonical source, row permutation, destination entry offset, and support count
+  - histogram the ten-bit prefixes with one CUDA block and a 1,024-counter shared table per distribution
+  - download dense counts, construct only sparse 12-byte bucket descriptors and dense scatter offsets on the CPU, then upload those offsets
+  - transform canonical 42-bit masks again and scatter exact `{uint32_t suffix, uint32_t weight}` entries with block-local shared atomic cursors
+  - run the prefix join directly from the GPU-built layout and compare every result with both the existing 64-bit control and CPU-built prefix layout
+- Small genuine `7x9` validation (16 sampled parents):
+  - build exactly the same `16,945,171` left and `64,691,994` right entries and `316,035`/`136,153` sparse buckets as the CPU reference
+  - GPU histogram takes `0.010429s`, scatter `0.012070s`, metadata `0.014401s`, and the complete build including fresh canonical uploads/allocations takes `0.094233s`, versus `4.174378s` for CPU factory plus layout
+  - GPU-built join takes `0.068955s` and agrees exactly with every control result
+- Production-sized 128-parent result:
+  - rebuild `102,867,593` left and `656,971,962` right entries with `2,060,569` and `1,593,144` sparse buckets
+  - histogram `0.040442s`, scatter `0.062132s`, metadata round trip/planning `0.066026s`, host descriptor plan `0.000603s`, and fresh canonical uploads `0.568219s`
+  - left total build `0.073847s`, right total build `0.668066s`, combined `0.741914s`; CPU labelled-layout construction alone is `20.454091s`, so the GPU builder is `27.57x` faster even including fresh uploads
+  - GPU-built prefix join takes `0.436998s` and is exact. Fresh left+right GPU build plus join is `1.178912s`, already below the matched `1.282755s` control join alone; persistent canonical data and left layout would improve this further
+- Remaining common producer cost and capacity:
+  - CPU canonical factories still take `6.568287s` before either labelled layout; this is now the dominant producer stage
+  - the sample's four-column factory contains `12,505,719` canonical entries, while its five-column factory contains `370,985,101`, about 5.5 GiB at the current 16-byte `Entry` size, for only `5,160` encountered raw right prefixes
+  - therefore a complete five-column canonical cache is unlikely to fit comfortably on one 48 GiB GPU. Persist the small left/four-column cache, but stream work-balanced right/five-column canonical subsets, build their compact layouts on-device, execute every incident join, and recycle them
+- Qualification: the probe deliberately retains the CPU A/B layouts and uploads canonical arrays afresh to make exact comparison easy. A production integration should remove those duplicate arrays, keep reusable canonical data resident where capacity permits, and overlap the next right-side factory/subset with the current join.
+- Resource status: retain the Ubuntu IBM L40S worker at the user's request; it remains billable.
+- Outcome: accept GPU histogram/scatter construction. Prefix layout construction is no longer the blocker; next design and benchmark streamed five-column canonical-factory subsets with right-prefix/work-balanced ownership.
+
+### Experiment 295: Streamed work-balanced five-column right-prefix subsets
+- Goal: bound the five-column producer/cache footprint for a future full `7x9` solve by retaining the compact four-column left layout, constructing only a subset of right prefixes and their canonical distributions, executing every incident join, and recycling the right subset.
+- Exact probe design:
+  - partition the sorted right-prefix key space into contiguous groups, using the already measured retained suffix comparisons per right prefix as the primary work estimate
+  - build the persistent left layout once with Experiment 294's GPU histogram/scatter path; independently build each group's canonical factory and GPU right layout, execute its selected/complement joins, validate every result against the ordinary 64-bit control result in logical order, and free the group's device layout before continuing
+  - retain expanded-entry min/max and canonical-entry peak/sum diagnostics so a production planner can impose a memory cap as well as a comparison-work target
+  - require one logical join copy in this correctness probe; the existing monolithic CPU and GPU layouts remain live only to provide the exact A/B reference and are not part of the proposed production memory layout
+- Matched genuine `7x9` workload: use Experiment 293's deterministic 128-parent corpus, containing `15,012` child records, `7,585` accepted kernels / `15,170` joins, `5,160` distinct right prefixes, `656,971,962` expanded right entries, and exactly `713,869,827,641` retained suffix comparisons. Every streamed variant agrees with every direct result.
+- Stream-count curve on the same L40S:
+  - one group: right join `0.427290s`, versus `0.437022s` for the matched monolithic prefix join; its `656,971,962` expanded and `370,985,101` canonical right entries intentionally provide no memory reduction and establish that the streamed descriptor/result path itself has no penalty
+  - two comparison-balanced groups: `356.77-357.10` billion comparisons/group, right join `0.566829s`, maximum `363,764,608` expanded entries, maximum `219,706,655` canonical entries, and `407,914,229` summed canonical entries
+  - four comparison-balanced groups: `178.11-178.81` billion comparisons/group, right join `0.796271s`, maximum `211,499,812` expanded entries, maximum `138,505,651` canonical entries, and `422,814,183` summed canonical entries
+- Memory result: four groups reduce peak right expanded entries by `67.8%` and peak right canonical entries by `62.7%`. Their summed canonical factories contain `14.0%` more entries than the monolithic factory because canonical distributions shared by raw keys in different groups are rebuilt. The persistent left layout has `102,867,593` entries and takes `0.102264s` to construct in the representative four-group run.
+- Producer result: across four groups, right canonical factories take `9.291505s`, GPU right layouts take `0.759874s`, and the complete streamed phase takes `11.144879s` in the deliberately memory-heavy A/B executable. Canonical construction, not GPU layout construction, remains the dominant producer cost and should be overlapped or supplied by parallel CPU producers in production.
+- Scheduling findings:
+  - the comparison-balanced four groups are within `0.4%` of equal work, yet multiple launches take about `1.82x` the one-group join time; the remaining cost is repeated heterogeneous-block tails, not inter-group imbalance
+  - a preliminary expanded-entry-balanced four-way split had a lower `164,321,136`-entry maximum and similar `0.772026s` join time. A production planner should therefore choose the fewest groups that satisfy memory capacity, use an explicit entry/canonical-memory cap, and use comparison work only to balance within that constraint
+  - sorting each group's joins heavy-first destroys right-layout locality and worsens join time to `0.958715s`; reject that ordering for the prefix kernel
+- Qualification: the sample contains only `15,170` joins, so its per-launch tail penalty is pessimistic for much larger production subsets. Conversely, a complete corpus may expose a larger canonical working set. Production sizing must be based on a census and actual free device memory, not a fixed four-group count.
+- Outcome: accept exact streamed-right ownership as the capacity path, but do not regard more groups as free. Use the largest right subset that safely fits, preserve right-prefix locality, and next address/overlap the CPU canonical-factory stage rather than further tuning the already sub-second GPU layout builder.
+
+### Experiment 296: Exhaustive `7x5` canonical-distribution capacity census
+- Goal: determine whether all five-column canonical distributions can be retained once per L40S worker, eliminating Experiment 295's repeated CPU factory builds and cross-group canonical duplication.
+- Exact orbit front end:
+  - generate the complete binary `7x5` row/column-orbit file with the existing canonical augmentation path in `0.978s`
+  - validate exactly `136,758` representatives and labelled weight `34,359,738,368 = 2^35`; the resulting file is only about 2.1 MiB
+  - normalize the generator's representative convention through the solver canonicalizer, then prove the normalized keys remain a bijection of all `136,758` orbits
+  - canonical complementation gives exactly `68,379` pairs and no self-complementary orbit, as expected for the odd 35-cell geometry
+- Bounded-memory census implementation:
+  - build each canonical distribution independently with the production distribution recurrence, retain only its support count and maximum entry weight, and free its entries immediately
+  - validate every complement target is present, every distribution weight passes the existing checked `uint32_t` bound, and report quantiles/heavy tails without ever allocating the proposed complete cache
+- Exhaustive 24-thread result on the retained IBM worker:
+  - `4,740,574,641` total canonical entries, mean `34,663.966`, median `17,916`, p90 `92,512`, p95 `127,544`, p99 `198,192`, p99.9 `277,784`, and maximum `389,660`
+  - the complete recurrence takes `24.642436s`; total census time including canonical normalization and complement validation is `26.749961s`
+  - maximum resident memory is about 599 MiB because distributions are discarded after counting
+- Capacity result:
+  - current aligned `{uint64_t mask, uint64_t weight}` entries would require `70.640067 GiB`
+  - an ordinary mask64/weight32 SoA would require `52.980050 GiB`
+  - one packed 64-bit word per entry requires `35.320033 GiB`, or `37,924,597,128` bytes
+  - a nominal 48,000,000,000-byte L40S therefore has about `10,075,402,872` bytes (`9.383 GiB`) left before descriptors, persistent/streamed labelled layouts, CUDA context, and temporary workspace; actual allocation headroom must be measured
+- Exact packing opportunity: across all 4.74 billion entries the maximum weight is only `160`, requiring eight bits. A canonical source entry can therefore store its 42-bit mask and eight-bit weight in one `uint64_t`, with 14 spare high bits. Expanded layout weights remain explicit `uint32_t`, products remain `uint64_t(weight) * uint64_t(weight)`, and construction/upload must assert the measured format bounds.
+- Architectural implication: keep the complete packed canonical source resident once, retain the compact four-column left layout, and stream only memory-capped labelled five-column layouts. This removes repeated canonical recurrence work and the 10-14% cross-group duplication measured in Experiment 295 while preserving the capacity escape hatch.
+- Qualification: this census proves representation size, not allocatability or speed. The next gate is to build/upload the packed cache on the actual L40S, report true free-memory headroom, adapt histogram/scatter to unpack it, and reproduce the genuine `7x9` sample results exactly while streaming an expanded right subset.
+- Outcome: accept universal packed `7x5` canonical caching as the preferred architecture. It is a stronger result than CPU/GPU overlap because it removes the recurring factory stage rather than hiding it.
+
+### Experiment 297: Resident universal packed cache on an L40S
+- Goal: turn Experiment 296's capacity calculation into an actual allocation and exact end-to-end gate: build all canonical entries in packed form, upload them, keep them resident while constructing labelled layouts, and reproduce every genuine `7x9` sample join.
+- Implementation behind the separate `UNIVERSAL_PACKED_CACHE_PROBE` target:
+  - normalize all `136,758` complete `7x5` orbit representatives into solver-canonical keys and make one counting pass to establish checked 64-bit source offsets
+  - make a second independent distribution pass directly into uninitialized `uint64_t[]` storage, asserting the 42-bit mask and eight-bit weight bounds for every one of the `4,740,574,641` entries
+  - upload the resulting `37,924,597,128`-byte source once; packed histogram/scatter kernels unpack mask/weight, apply each labelled row permutation, and emit the unchanged exact `{uint32_t suffix, uint32_t weight}` layout
+  - retain the ordinary four-column left layout, recycle four comparison-balanced five-column right layouts, and compare every packed-cache result with the existing 64-bit direct result
+  - use uninitialized host storage because zero-filling 37.9 GB before overwriting every word cost about 18 seconds in the first gate
+- Initial 16-parent capacity/correctness gate:
+  - complete packed cache allocation leaves `9,285,533,696` device bytes free
+  - cache plus the small left layout and largest right group still leave `8,893,366,272` bytes free
+  - all `1,894` selected/complement joins agree exactly; this independently validates packed weight extraction and canonical row transformation
+- Full 128-parent capacity gate on the retained L40S:
+  - use the same `15,012` records, `7,585` kernels / `15,170` joins, `713,869,827,641` retained comparisons, `102,867,593` left entries, and four comparison-balanced right groups as Experiments 293-295
+  - device memory is `47,210,430,464` bytes free before the cache, `9,285,533,696` after the cache, `8,436,187,136` after the persistent left layout, and at least `6,737,494,016` bytes (`6.275 GiB`) at the largest right-layout point
+  - the largest right group contains `211,499,812` entries and `554,041` buckets; all four groups allocate, execute, and recycle successfully
+  - every packed-cache join agrees exactly with the direct kernel
+- Startup cost: count `23.133246s`, uninitialized allocation `0.000059s`, pack `24.868242s`, device upload `3.523075s`, and complete one-time cache setup `53.300540s`. This is worker startup cost and can be reused across all solve shards assigned to the worker.
+- Recurring phase:
+  - persistent left construction takes `0.074865s`
+  - all four packed-source right layouts take `0.211606s`, versus `0.759874s` with repeated subset canonical uploads in Experiment 295, a `3.59x` builder improvement
+  - joins take `0.798830s`, reproducing Experiment 295's `0.796271s` and confirming that packing changes producer traffic rather than join arithmetic
+  - the complete post-cache streamed phase takes `1.108109s`, versus `11.144879s` when rebuilding subset factories, a `10.06x` recurring end-to-end improvement
+- Memory qualification: the probe deliberately retains the large ordinary A/B host factories and layouts to provide exact reference results, reaching about 58.6 GiB host RSS. A production packed-only worker omits those arrays. Device measurements are already representative because all ordinary A/B device storage is freed before the packed gate.
+- Architectural result: the complete universal canonical source fits in actual L40S memory with useful headroom. Keep it resident for the worker lifetime, preserve the four-column left layout where ownership permits, and choose the fewest right-layout groups satisfying an explicit free-memory reserve. No recurring five-column canonical factory or canonical upload is required.
+- Resource status: retain the Ubuntu IBM L40S worker at the user's request; it remains billable.
+- Outcome: accept the resident packed universal cache as the production direction for `7x9`. The principal producer bottleneck from Experiments 293-295 is removed; next convert the correctness probe into a packed-only solve path and define shard/input ownership so one cache startup serves many solve shards.
+
+### Experiment 298: Packed-only restartable `7x9` production solver
+- Goal: remove all ordinary five-column factories/reference layouts from the recurring path, reuse one universal packed cache across multiple independently checkpointed work items, and retain the exact production contribution accounting used by the known `7x7`, `6x9`, and `7x8` solvers.
+- Solver and ownership interface:
+  - add `twocolour_7x9_packed_solve`, which accepts the complete canonical `7x5` orbit file, a work manifest, a result directory, an expanded-right entry cap, and a direct-validation count
+  - manifest rows are `ID ORBITS START END [FILTER_MOD FILTER_ID]`; one process loads the 35.32 GiB cache once and executes every pending row sequentially
+  - production input should be prepartitioned by `mix64(left_prefix) mod s`, not repeatedly filtered from the projected roughly 115 GB full corpus. Every labelled four-column left prefix is then constructed on exactly one shard, while several shard files can be assigned to one GPU manifest to amortize cache startup
+  - use 128 left-prefix ownership shards as the initial safe `7x9` geometry: compact left layouts should occupy only a few GiB per shard, leaving room beside the universal cache and right batches. The solver also performs a per-item left-memory preflight before allocating
+  - form the fewest contiguous right-prefix batches satisfying both the requested cap (default `200,000,000` expanded entries) and actual free memory after a fixed 4 GiB reserve
+- Exact accounting and restartability:
+  - accumulate `factor * orbit_weight * selected_join * complement_join` in 128 bits and independently accumulate labelled weight, complement-covered weight, retained kernel count, baseline direct comparisons, prefix counts, and timings
+  - atomically publish a versioned `${ID}.result` only after the complete item succeeds; on restart, validate the result version plus ID, path, range, and filter identity before skipping it
+  - a deliberate manifest change reusing `sample16` with a different range fails closed before loading the cache
+  - add `aggregate_packed_7x9.py` to validate every manifest/result identity, report missing work and exact partial totals, and optionally enforce the complete global gates: `7,216,495,370` records, `3,608,247,685` complement representatives, and labelled/covered weight `2^63`
+- Independent ordinary-kernel references:
+  - 16-parent sample: `947` kernels, `246,628,143,783` direct comparisons, contribution `50,261,481,439,442,205,327,360,000`
+  - 128-parent sample: `7,585` kernels, `3,747,583,374,374` direct comparisons, contribution `856,339,768,734,961,571,794,944,000`
+  - the packed-only solver reproduces both contributions exactly, with four independent CPU join validations per item
+- One-cache/two-item L40S run:
+  - universal cache setup takes `52.899506s`; the complete process, including both work items, takes `55.34s` wall time and peaks at `37,740,996 KiB` host RSS
+  - the 16-parent item uses one right batch, `0.068953s` of GPU time, and `0.674460s` total including `0.305354s` of direct CPU validation; its minimum free device memory is `8,624,930,816` bytes
+  - the 128-parent item uses four right batches capped just below 200 million entries, `0.748284s` of GPU time, and `1.622964s` total including `0.141532s` of validation; left factory/layout and all right layouts take `0.312835s`, `0.110701s`, and `0.216697s` respectively, with at least `6,827,671,552` device bytes free
+  - the ordinary 64-bit reference takes `2.687180s` and `10.648389s` for the same items, so packed-only recurring work is `3.98x` and `6.56x` faster even while retaining validation; the larger sample benefits more from universal right reuse
+- Published-result aggregation test: the two atomic files sum to `16,868` records, `8,532` kernels, `3,994,211,518,157` direct comparisons, and contribution `906,601,250,174,403,777,122,304,000`. A second solver invocation validates and skips both results, prints `ALL_COMPLETE`, and never constructs the cache.
+- Qualification: the production solver reports baseline direct comparison products because exact retained suffix-comparison counting on the CPU would rescan hundreds of millions of bucket pairs and distort runtime. GPU seconds and exact contribution are authoritative; retained-work estimates can be collected separately during campaign profiling.
+- Resource status: retain the Ubuntu IBM L40S worker at the user's request; it remains billable.
+- Outcome: accept the packed-only manifest solver, atomic result format, and aggregator as the `7x9` solve foundation. Before a full campaign, integrate 128-way left-prefix ownership into corpus reduction and run one production-shaped reduced-shard capacity/throughput probe.
+
+### Experiment 299: Direct 128-way `7x9` solve-corpus reduction and production-shaped L40S gate
+- Goal: avoid writing and repartitioning a complete roughly 115 GB `7x9` orbit corpus, prove exact 128-way left-prefix ownership through the distributed reduction stages, and measure a substantially larger packed-only solve shard.
+- Corpus pipeline:
+  - add `extend7x8`, which reads an explicit sequential range of the complete `R7ORB01` `7x8` corpus, safely repacks its seven eight-bit rows into nine-bit rows, emits all 128 ninth-column assignments, canonicalises them as `R7ORB09`, locally merges duplicates, and writes full-key hash buckets
+  - add `reduce-solve`, which merges one full-key reducer bucket, discards representatives above 31 selected cells, and writes headerless pieces directly to owner `mix64(left_7x4_prefix) mod 128`; each key belongs to exactly one full-key reducer and one solve owner
+  - add `solve-reduce-unique`, which combines all reducer pieces for one solve owner, rejects any duplicate key, validates both the cell-count and owner invariants, and writes the versioned solver-ready orbit file without a global sort
+  - retain non-unique `solve-reduce` as a defensive alternative, plus `solve-partition` as a simple reference implementation for complete/intermediate files
+  - add per-shard and complete solve-corpus checks. The complete retained corpus must contain exactly `3,608,247,685` records with labelled weight `2^62`; complement factor two must cover `2^63` labelled binary matrices
+- Independent exact pipeline tests on the retained IBM worker:
+  - the first 128 parents produce `5,994` locally unique children; the direct and reference paths agree exactly on every `(key, weight)` across all 128 solve shards
+  - a middle range `[250,000,000,250,000,128)` produces `15,448` children, of which `4,105` survive the 31-cell filter; direct and reference paths again agree exactly across all shards
+  - deliberately presenting the same reducer piece twice to `solve-reduce-unique` is rejected on the first duplicate, proving that the production uniqueness assertion is live
+- Production-shaped sample:
+  - deterministically sample `524,288` of the complete `508,147,108` parent orbits and augment them to `67,108,864` candidates and `62,095,846` locally unique `7x9` children in `222.176s`; peak host RSS is `4,038,968 KiB`
+  - complement filtering retains `31,066,876` records. The 128 ownership shards range from `205,329` to `287,201` records; shard 108 is the largest
+  - this is much larger than the prior 17,962- and 70,788-kernel probes, but remains a partial augmentation rather than a globally reduced or statistically unbiased sample of the final corpus
+- Instrumentation and result compatibility:
+  - packed result format version 2 records persistent-left prefixes, entries, and buckets; peak right-batch entries and buckets; and the effective right-entry cap
+  - progress is printed only for the first, every 25th, and final right batch, keeping production logs bounded
+  - the aggregator reports these layout diagnostics and uses the retained-corpus full gates (`3,608,247,685` records/kernels, labelled weight `2^62`, covered weight `2^63`)
+- Largest-shard L40S result with a 200-million-entry right cap:
+  - `287,201` exact kernels, `263,912` distinct right prefixes, and `162` right batches
+  - persistent left layout: `4,826` prefixes, `129,984,819` entries, and `1,719,477` occupied buckets
+  - peak right layout: `199,999,977` entries and `1,954,426` buckets; minimum free device memory remains `6,599,081,984` bytes beside the 35.32 GiB universal cache
+  - baseline work is `107,830,043,941,063` direct comparisons; CUDA time is `26.428864s`, equivalent to `4.0808e12` direct comparisons/s
+  - recurring solver time is `41.315000s`: left factory `0.438403s`, left layout `0.132077s`, streamed right layouts `10.376900s`, and GPU joins `26.428900s`; process wall time including the one-time `52.727215s` cache startup is `94.19s`
+  - exact contribution is `20,993,586,450,920,256,172,408,012,800`; the version-2 aggregator reproduces all recorded totals and layout metrics
+- Interpretation:
+  - the 128-way ownership architecture passes this substantially larger capacity gate with about 6.15 GiB of measured free device memory at the high-water point; resident-left growth is sublinear over the 32k-, 131k-, and 524k-parent samples (`1,981`, `3,324`, `4,826` prefixes)
+  - recurring time is now dominated by exact joins, with streamed layout construction about 25% of solver time. Cache startup is already amortisable across a multi-shard manifest
+  - do not extrapolate total full-corpus time directly from this sample: locally unique sampled children have not undergone duplicate merging against the other 99.9% of parents and their comparison-work distribution is not guaranteed to match the final orbit corpus. A final campaign estimate needs either a larger distributed census or the first globally reduced production shards
+- Resource status: retain the Ubuntu IBM L40S worker at the user's request; it remains billable.
+- Outcome: accept direct filtered solve-corpus reduction, exact 128-way ownership, and result-schema version 2. The next useful gate is a small multi-generator/multi-reducer production rehearsal that measures I/O volume and globally reduced shard shape before committing to the complete `7x9` generation campaign.
+
+### Experiment 300: Multi-stage `7x9` corpus rehearsal and early complement filtering
+- Goal: exercise the real generator/full-key-reducer/solve-owner shuffle with multiple workers, measure its CPU and I/O shape, and compare the final distributed output exactly with a conventional global reduction.
+- Rehearsal geometry on the retained IBM worker:
+  - split the contiguous parent range `[250,000,000,250,032,768)` into four adjacent 8,192-parent generators
+  - write 16 full-key hash buckets per generator, run all 16 reducers concurrently, partition their retained outputs among 128 `mix64(left_prefix)` solve owners, and combine all 16 pieces for each owner with the uniqueness assertion enabled
+  - independently reduce all 64 raw generator files into one conventional `7x9` file and reference-partition it into the same 128 owners
+- Unfiltered pipeline measurements:
+  - four generators expand `32,768` parents to `4,194,304` candidates and `3,940,475` locally unique records; they take `3.347604s` wall / `12.500s` CPU and write `63,047,600` bytes
+  - the 16 full-key reducers merge this to `3,932,697` global keys, removing `7,778` cross-generator duplicates, then retain `1,019,139` solve records; concurrent reducer time is `0.063897s` wall / `0.650s` CPU
+  - reducer solve pieces occupy `16,306,224` bytes and the 128 versioned final files `16,308,784` bytes. Final solve reduction takes `0.061787s` wall at this small scale and reports no duplicate across reducers
+  - the conventional full intermediate occupies `62,923,172` bytes and peaks at `255,552 KiB` RSS during its global hash reduction; streaming reference partitioning takes `0.08s`
+  - every final `(key, weight)` agrees exactly with the reference in every one of the 128 shards: `1,019,139` records and labelled weight `184,129,584,105,600`
+- Missed high-level optimization: representatives above 31 selected cells can be discarded before canonicalisation rather than after the full-key shuffle. Cell count is invariant under row/column canonicalisation, and the odd 63-cell geometry has no midpoint, so the retained representative and factor-two complement accounting are unchanged.
+- `solve-extend7x8` implementation:
+  - compute the parent cell count once and reject an appended seven-bit column whenever `parent_cells + popcount(column) > 31`
+  - avoid constructing/canonicalising rejected children, avoid inserting them in the local hash map, and never write them to the reducer shuffle
+  - retain the unfiltered `extend7x8` command for full-corpus/reference work
+  - size the initial retained-only map for one quarter of the 128 assignments per parent and allow the normal load-factor rehash to grow safely for unusually light parent ranges
+- Matched filtered A/B result on the complete rehearsal:
+  - raw records fall from `3,940,475` to `1,021,321` and raw bytes from `63,047,600` to `16,341,136`, a `74.08%` reduction on this range
+  - generator CPU falls from `12.500s` to `5.320s` (`2.35x` faster) and concurrent wall time from `3.347604s` to `1.606509s` (`2.08x` faster)
+  - reducer CPU falls from `0.650s` to `0.300s`; its global output remains exactly `1,019,139` records
+  - the right-sized map reproduces all 286,464 bucketed records for the first generator exactly while reducing its peak RSS from about `34.6 MiB` to `9,984 KiB`
+  - all 128 final filtered shards remain exactly identical to both the unfiltered distributed path and the conventional reference
+- Distribution warning: four larger 131,072-parent ranges sampled near the parent-corpus quartiles retain `58,286,327` of `67,108,864` raw assignments (`86.85%`) and write `794,605,600` bytes, or `1,515.59` bytes per parent. The narrow middle rehearsal's 74% byte saving is therefore not a safe whole-corpus projection; retained canonicalisation work varies sharply with parent range.
+- Outcome: accept early solve-only complement filtering as an exact, potentially large CPU/memory/shuffle reduction. Before selecting production generator ranges or estimating total bytes, scan the complete parent corpus for retained-assignment work and partition generators by that work rather than record count.
+
+### Experiment 301: Exact `7x9` generator-work census and full-sized generator gate
+- Goal: replace biased record-count ranges and small-sample extrapolations with an exact complete-parent census, emit work-balanced production ranges, and execute one real 128-way generator range end to end.
+- Exact planner:
+  - add `solve-plan7x9`, which scans the complete `508,147,108`-record `R7ORB01` parent corpus and counts appended columns satisfying `parent_cells + popcount(column) <= 31`
+  - independently accumulate orbit-weighted retained assignments and require exactly `2^62`, proving that the early complement filter covers the expected half of all labelled `7x9` matrices
+  - make a second streaming pass to split at exact cumulative-work quantiles; hard gates record count, active-parent count, retained work, labelled weight, and EOF before publishing the plan
+- Complete census result on the retained IBM worker:
+  - `413,704,224` parent orbits have at least one retained appended column
+  - exactly `32,521,414,912` children require canonicalisation, with labelled weight `4,611,686,018,427,387,904 = 2^62`
+  - two complete streaming passes take `14.64s` wall (`11.90s` user, `2.73s` system) and only `1,728 KiB` RSS
+- 128-way production plan:
+  - each range has approximately `254,073,555` retained canonicalisations; measured range work differs by at most about 200 because an individual parent cannot be split
+  - parent record counts vary from `2,794,867` to `6,143,153`, a `2.20x` spread. Equal record ranges would therefore create severe CPU and memory tails despite identical nominal shard counts
+  - the four-way cross-check produces work totals `8,130,353,750`, `8,130,353,766`, `8,130,353,686`, and `8,130,353,710`, and reproduces all complete-census gates
+- Full-sized generator gate:
+  - execute planned range 64, `[253,829,273,256,849,135)`: `3,019,862` parents, `386,542,336` raw assignments, and exactly `254,073,565` retained/canonicalised paths
+  - local merging leaves `218,576,502` unique records (`86.03%` of retained paths), written evenly across 128 full-key buckets: `1,703,311` to `1,711,064` records per bucket
+  - output is `3,497,224,032` bytes (`3.257 GiB`); naively multiplying this representative range by 128 gives roughly `417 GiB` of raw reducer shuffle, so the complete campaign still needs streaming cleanup and should not retain all raw generations indefinitely
+  - runtime is `451.81s` wall (`445.47s` user, `6.33s` system). If representative, all 128 generators consume about 16 core-hours and finish in roughly eight minutes when fully concurrent; provider/storage overhead is additional
+  - the first sizing policy starts with a 4 GiB map and rehashes to 8 GiB, causing a measured `12,584,256 KiB` transient RSS peak while both tables coexist
+- Exact retained-work preflight:
+  - scan only the assigned parent range before allocation, compute its exact retained work, validate it again during generation, and choose the first power-of-two table satisfying the map's 70% load limit
+  - on an independent 15,608,896-work range, the preflight output is exactly identical across all 16 buckets and runtime remains `16.38s` versus `16.47s`
+  - peak RSS falls from `787,948 KiB` to `525,888 KiB` (`33.3%` lower) by allocating the final table tier directly. For the production range this should remove the observed 4+8 GiB transient and require roughly the final 8 GiB table plus overhead
+- Outcome: accept exact retained-work planning and preflight allocation. A 128-generator campaign is CPU-feasible, but workers should have at least about 10 GiB usable memory and raw shuffle is likely around 400 GiB. Before launching it, production orchestration should stream completed full-key reducers and delete recoverable raw buckets so peak persistent storage does not approach the full shuffle total.
+
+### Experiment 302: Matched warm-shard `7x9` prefix versus optimized direct CUDA A/B
+- Goal: answer whether the accepted ten-prefix/32-bit-suffix path is faster end to end than the later four-LHS 64-bit kernel when both use the same production-shaped `7x9` shard, resident universal cache, exact distributions, batching rule, validation, and result accounting.
+- Controlled implementation:
+  - add `PACKED_DIRECT_64_CONTROL` to derive ordinary mask64/weight32 SoA labelled layouts directly from the same immutable 35.32 GiB packed canonical `7x5` cache used by the prefix solver; no recurring five-column factory or canonical upload is present in either path
+  - retain identical left/right prefix keys, canonical row transformations, selected/complement distributions, contiguous right-key batches, checked weights, direct-comparison accounting, four CPU validations, 128-bit contribution aggregation, and atomic result format
+  - compile direct one-, two-, and four-LHS variants and test heavy-first scheduling independently; add the accepted unsorted four-LHS control as `twocolour_7x9_packed_direct64`
+- Host and exact workload:
+  - use one on-demand Vast L40S, native `sm_89`, CUDA 12.8, driver `580.159.03`, 46,068 MiB VRAM, 2,520 MHz maximum SM clock, and 32 effective host cores; provisioned rate is `$0.654444/hour` including 100 GB disk
+  - deterministically regenerate Experiment 299's 524,288-parent augmentation and owner shard 108: `287,201` kernels, `263,912` right prefixes, labelled weight `41,829,200,824,320`, covered weight `83,658,401,648,640`, and SHA-256 `b34fc95ef7e3fda14b2c08087869c0398a29a5305350b0f26b0e3543544ea39f`
+  - both paths reproduce contribution `20,993,586,450,920,256,172,408,012,800`; all direct CPU validations pass in every run
+- Identical 200-million-entry-cap comparison:
+  - prefix: 162 right batches, CUDA `26.286568s`, recurring end-to-end shard time `40.545998s`
+  - heavy-first direct four-LHS: the same 162 batches, CUDA `81.212948s`, recurring time `92.277908s`
+  - prefix therefore uses `56.06%` less warm per-shard time at the controlled common cap, or delivers `2.276x` the shard throughput
+- Direct-kernel selection at the common cap:
+  - heavy-first one LHS takes CUDA `106.916531s` / recurring `117.944305s`
+  - heavy-first two LHS takes CUDA `89.327937s` / recurring `100.322922s`
+  - heavy-first four LHS takes CUDA `81.212948s` / recurring `92.277908s`; four-LHS reuse remains valuable for direct `7x9`, even though its absolute rate is much lower than on `8x8`
+- Best-capacity repeated A/B:
+  - prefix automatically selects a `457,654,272`-entry cap and 71 batches; repeated CUDA times are `17.358264s` and `17.366225s`, while recurring totals are `33.374681s` and `34.420753s`
+  - direct automatically selects a `263,509,333`-entry cap and 123 batches because its expanded entries occupy 12 rather than eight bytes
+  - heavy-first direct four-LHS takes CUDA `67.552105s` and `67.559886s`, but preserving right-key locality is better: unsorted four-LHS repeats take CUDA `58.204795s` and `57.614258s`, with recurring totals `68.819666s` and `68.185784s`
+  - heavy-first therefore costs the direct path about `14.28%` in CUDA time and `12.32%` recurring time at matched maximum capacity; reject heavy-first ordering for streamed `7x9` direct joins as well as prefix joins
+- Production-relevant warm result:
+  - prefix averages CUDA `17.36225s` and recurring end-to-end `33.89775s`
+  - best direct averages CUDA `57.90955s` and recurring end-to-end `68.50275s`
+  - prefix reduces complete warm per-shard time by `50.516%`, equivalently delivering `2.0209x` the shard throughput; its CUDA join stage alone is `3.335x` faster
+  - prefix right-layout construction is actually slower (`12.0931s` average versus `5.92623s` direct), but the roughly 40.55-second join saving dominates the roughly 6.17-second extra layout cost
+- Cache interpretation: the immutable universal cache is constructed and uploaded once per long-running worker process, then reused by every manifest shard. Its roughly 26.5-second startup is identical for both variants and is deliberately excluded from the warm per-shard result. This is the relevant production metric when one worker processes many shards.
+- Capacity qualification: automatic maxima leave `4,242,145,280` bytes free for prefix and `4,292,476,928` for direct, effectively consuming the intended 4 GiB reserve once bucket metadata is included. Retain an explicit safety margin below the probed maximum for heterogeneous production shards; the result establishes the algorithmic comparison, not a universally safe default cap.
+- Artifacts: retain input, canonical orbit file, binaries, atomic results, and complete logs under `../rectangle-free-data-v2/profiles/vast-l40s-7x9-ab-20260815/`.
+- Outcome: accept the ten-prefix/32-bit-suffix design as a measured end-to-end `7x9` optimization, not merely a kernel microbenchmark. On this production-shaped shard it approximately doubles warm worker throughput versus the best matched direct 64-bit implementation.
+
+### Experiment 303: Fully resident `7x9` prefix solve on an 80 GB A100
+- Goal: determine whether keeping the 35.32 GiB universal canonical source resident on an 80 GB GPU, while expanding right layouts up to the current 32-bit entry-offset limit, materially improves complete warm-shard performance.
+- Controlled workload and implementation:
+  - use Experiment 302's exact owner shard 108 and canonical `7x5` orbit file, with SHA-256 values `b34fc95ef7e3fda14b2c08087869c0398a29a5305350b0f26b0e3543544ea39f` and `648a4a32af2eb4ecd856dc165e0996967d65fbf8c1d5038f188fb7d46814ee1d`
+  - compile the unchanged accepted prefix solver for native `sm_80`; retain `287,201` records/kernels, `263,912` distinct right prefixes, four CPU validations, `107,830,043,941,063` direct comparisons, and exact contribution `20,993,586,450,920,256,172,408,012,800`
+  - use one on-demand Vast A100 SXM4 80 GB at `$0.942593/hour` including 50 GB disk: 81,920 MiB VRAM, 400 W power limit, 1,410 MHz maximum SM clock, advertised 1,671.5 GB/s memory bandwidth, and PCIe 4 at 24.1 GB/s
+- Host-placement correction:
+  - the container exposes 152 logical CPUs although its cgroup quota is only 18.24 cores; the default OpenMP launch therefore oversubscribes the quota by more than eightfold
+  - the oversubscribed exact run takes `159.196859s` to construct/upload the immutable cache and `43.724743s` recurring, despite reaching the same eight-batch answer
+  - pin production measurements to physical CPUs 0--17 on the GPU-local NUMA node with 18 OpenMP workers; corrected cache startup is `58.572798s` (`25.526639s` count, `24.961164s` pack, `4.712600s` upload) and is amortized once per long-lived worker
+- Fully resident/current-maximum result:
+  - the right-entry cap reaches the format limit, `4,294,967,295`; the largest realized layout has `4,294,961,189` entries, only eight right batches are needed, and minimum free device memory remains `11,090,722,816` bytes
+  - corrected recurring time is `42.391786s`: right-layout construction `15.3161s`, CUDA join `22.375541s`, and about `4.70s` for all remaining loading, left construction/layout, grouping, validation, and coordination
+  - equivalent direct-comparison rate during the join is `4.8191 T/s`; the result is exact and all four CPU validations pass
+- Same-GPU memory-cap control:
+  - constrain the same A100 to the L40S's `457,654,272`-entry cap: 71 batches, right-layout construction `19.9006s`, CUDA `34.198899s`, and recurring total `59.956972s`
+  - allowing the A100 to use its full current-format capacity therefore cuts recurring time by `29.296%` (`1.41435x` throughput), CUDA time by `34.572%` (`1.52841x`), and right-layout time by `23.037%`; extra memory has a substantial benefit independent of architecture
+- Cross-architecture comparison:
+  - Experiment 302's L40S maximum averages CUDA `17.36225s` and recurring `33.89775s`, equivalent to `6.2106 T/s`
+  - despite reducing batch count from 71 to eight, the fully resident A100 is `25.058%` slower end to end and `28.875%` slower in the join than the L40S; the A100's extra capacity does not overcome its lower throughput on this integer-heavy prefix kernel
+  - memory beyond that required for the universal source, left layout, workspace, and one 4.29-billion-entry right layout cannot reduce batches under the current 32-bit entry-offset format; this A100 run still leaves about 10.33 GiB free at the format limit
+- Production interpretation: cache construction is a worker-level one-time cost, not a per-shard cost. Larger logical solve shards may further amortize fixed loading/left-layout work and reduce duplicated prefixes at boundaries, but right-layout construction, grouping, and CUDA joins scale with distinct prefix/comparison work and do not remain a fixed roughly 20-second CPU charge.
+- Artifacts: retain build/system logs, the exact input and canonical files, native binary, atomic results, the oversubscription diagnostic, and all full-run logs under `../rectangle-free-data-v2/profiles/vast-a100-80gb-7x9-resident-20260815/`.
+- Cost and cleanup: Vast credit falls from `$9.420239` to `$9.201479`, so provisioning, setup, three exact solves, controlled diagnosis, and artifact transfer cost `$0.218760`; destroy instance `47816274` and confirm that the Vast instance list is empty.
+- Outcome: an 80 GB resident-cache A100 is not cost/performance competitive with the tested L40S for the current solver. Extra layout capacity is worth roughly a 1.41x same-A100 gain, but Ada's higher integer-kernel throughput is the larger effect. Prefer L40S-class Ada for production unless a streamed-cache design on a faster 24--32 GB Ada card wins an end-to-end benchmark.
+
+### Experiment 304: Host-streamed universal cache on an RTX 5090
+- Goal: combine the larger-batch benefit isolated in Experiment 303 with Blackwell integer throughput by retaining the immutable 35.32 GiB packed canonical source in host RAM and explicitly staging only the canonical distributions required by each right-layout batch.
+- Exact cache-traffic census:
+  - add `twocolour_7x9_cache_census`, reusing the solver's canonicalization and exact distribution counts without constructing the 35.32 GiB packed payload or allocating a GPU cache
+  - on Experiment 302's exact shard, all `263,912` right prefixes expand to `32,358,190,924` labelled entries (`241.087 GiB`), but only `80,522` of `136,758` canonical distributions are touched; their union is `27.150 GiB`
+  - at a 3,000,000,000-entry right cap, 11 batches require `9,302,969,028` unique-per-batch canonical entries, or `69.3125 GiB`; a 1 GiB/8,192-description staging policy uses 96 chunks and transfers `69.3149 GiB`, only `0.0034%` above the ideal unique-per-batch traffic
+  - the old roughly L40S-sized `457,654,272` cap instead needs 71 batches and `105.818 GiB` of ideal source traffic, so larger batches reduce both launch/tail cost and repeated canonical transfer
+- Exact streamed implementation:
+  - retain the complete packed source in ordinary host memory; allocate one reusable 1 GiB pinned host staging buffer and one reusable 1 GiB device staging buffer, leaving the rest of device memory for persistent left and expanded right layouts
+  - canonicalize all selected/complement descriptions, sort them by universal distribution ID, gather each unique packed distribution once per chunk, and remap its source offset into the compact staged payload
+  - for each chunk, upload the staged payload once, run the existing exact histogram, copy dense counts back for sparse-bucket planning, upload offsets, and run the existing scatter while the source remains staged; recycle staging only after both passes
+  - preserve raw-prefix/right-key locality in the final expanded layout and join order, the accepted 10+32 prefix kernel, checked 32-bit weights, 32-bit layout offsets, four direct CPU validations, exact comparison accounting, and atomic result publication
+- Host and workload:
+  - use one on-demand Vast RTX 5090 at `$0.485185/hour` including 50 GB disk: 32,607 MiB VRAM, 575 W power limit, 3,090 MHz maximum SM clock, CUDA 12.8/native `sm_120`, 32 physical Threadripper PRO 7975WX cores, and a reported 54.1 GB/s host/device link
+  - retain the exact input/canonical SHA-256 values from Experiments 302--303, `287,201` records/kernels, `107,830,043,941,063` direct comparisons, four passing CPU validations, and contribution `20,993,586,450,920,256,172,408,012,800`
+- Conservative 500-million-entry validation:
+  - 65 batches, `14,016,720,288` staged source entries, CUDA `20.038284s`, right layouts `11.4046s`, and recurring total `34.421050s`; this already nearly matches the L40S while leaving `26,941,849,600` device bytes free
+  - source gather takes `2.62141s` and PCIe upload `2.07681s`; the complete new path is exact before increasing its memory footprint
+- Accepted 3-billion-entry result:
+  - 11 batches, maximum `2,999,994,682` right entries, maximum `14,304,121` sparse buckets, 96 source chunks, exactly the census-predicted `9,303,286,493` transferred source entries (`69.3149 GiB`), and `6,828,064,768` minimum free device bytes (`6.359 GiB`)
+  - repeated recurring totals are `21.936480s` and `21.628293s`, averaging `21.7823865s`; CUDA joins are `10.214083s` and `10.195832s`, averaging `10.2049575s` or `10.5664 T` equivalent direct comparisons/s
+  - average right-layout construction is `8.778585s`, including `2.218345s` planning, `1.638015s` host gather, `1.397830s` source upload, about `0.7813s` histogram, `1.0241s` scatter, and `1.4477s` metadata
+  - observed staging upload is `49.59 GiB/s` and host gather is `42.32 GiB/s`; synchronous explicit streaming is already a small fraction of the solve rather than its bottleneck
+- Capacity control:
+  - automatic sizing reaches an effective `3,338,108,928`-entry cap and ten batches, taking CUDA `10.026335s` and recurring `21.471221s`
+  - this is only `1.43%` faster than the conservative repeated mean and leaves `4,103,864,320` bytes (`3.822 GiB`) free, below the intended 4 GiB safety margin after bucket metadata; retain 3.0 billion as the production default on this 32 GB card
+- Comparison with the resident L40S baseline:
+  - Experiment 302 averages recurring `33.89775s` and CUDA `17.36225s`; the safe streamed 5090 averages recurring `21.7823865s` and CUDA `10.2049575s`
+  - host streaming therefore reduces complete recurring time by `35.741%` (`1.55620x` throughput) and join time by `41.223%` (`1.70135x`) while using a smaller and cheaper GPU
+  - increasing the 5090 cap from 500 million to 3 billion reduces complete recurring time by `36.718%` (`1.58022x`), independently confirming that memory capacity mattered even though an 80 GB A100 was the wrong architecture
+- Cache interpretation: the 25--28-second universal count/pack plus staging allocation remains a one-time worker startup and is excluded from recurring results, exactly as in Experiments 302--303. A production worker should process a long manifest with at least 64 GiB usable host RAM, preferably 96 GiB or more, and keep the packed cache alive across all shards.
+- Artifacts: retain census/build/system logs, native binaries, exact inputs, atomic results, and all full-run logs under `../rectangle-free-data-v2/profiles/vast-5090-7x9-stream-20260815/`.
+- Cost and cleanup: Vast credit falls from `$9.201479` to `$9.012362`, so provisioning, one host restart, census, compilation checks, four exact solves, and artifact transfer cost `$0.189117`; destroy instance `47817652` and confirm that the Vast instance list is empty.
+- Outcome: accept the host-streamed packed cache and a conservative 3-billion-entry right cap as the current production `7x9` architecture. It is the desired cross-level win: canonical equivariance still removes recurrence, explicit streaming converts cheap host bandwidth into sixfold larger GPU batches, and the complete exact shard is about 36% faster than the resident L40S path.
+
+### Experiment 305: Labelled canonical-layout reuse census for streamed `7x9`
+- Goal: test whether multiple raw right prefixes request the same labelled expanded layout, identified exactly by `(canonical distribution ID, row permutation)`, so that one device layout can be shared and charged only once during right-batch formation.
+- Exact census extension:
+  - retain the canonical row map as well as the universal distribution ID for every selected and complement prefix
+  - count unique labelled transforms both over the complete shard and independently inside every contiguous capacity batch
+  - simulate capacity-aware batch formation that charges only newly introduced transforms, then recompute ideal canonical-source traffic and the existing 256 MiB, 512 MiB, and 1 GiB staging schedules
+  - use Experiment 304's exact owner-108 input and canonical cache metadata: `287,201` kernels, `263,912` distinct right prefixes, `136,758` canonical distributions, and `4,740,574,641` canonical entries; all cache and workload gates pass
+- Reuse result:
+  - the shard contains `527,824` logical selected/complement layouts but `527,798` distinct labelled transforms, so only 26 transform keys repeat anywhere in the whole shard
+  - weighted by layout size, completely global sharing could remove only `2,518,006` of `32,358,190,924` expanded entries: about 19.2 MiB out of 241.087 GiB, or `0.00778%`
+  - none of those 26 repetitions occurs inside the same contiguous batch at 500,000,000-, 3,000,000,000-, or 3,330,000,000-entry caps. For every cap, batch-unique transform entries equal raw expanded entries exactly and reported layout reuse is `1.000000x`
+  - consequently the deduplicated simulator produces exactly the same 65, 11, and 10 batches, respectively, with identical layout volume, canonical-source traffic, staging chunk count, and staging transfer volume
+- Interpretation: canonical distribution reuse is large before applying row permutations, which is why the universal cache and source staging work well. The labelled row transform almost completely distinguishes raw prefixes, however, so deduplicating final expanded layouts is a different and essentially absent symmetry. Recovering the negligible cross-batch repeats would require retaining layouts across batches and cannot materially repay its memory and lookup costs.
+- Artifacts: retain the census log, native census binary, system description, and exact input hashes under `../rectangle-free-data-v2/profiles/vast-5090-7x9-labelled-dedup-20260815/`.
+- Cost and cleanup: the first Norwegian rental failed during Ubuntu archive access and was destroyed; the replacement on-demand RTX 5090 completed the exact census. Vast credit falls from `$9.012362` to `$8.974245`, for a total experiment cost of `$0.038117`; destroy instance `47820089` and confirm the instance list is empty.
+- Outcome: reject labelled-layout deduplication. Do not add its hash maps or alter production batch formation; the exact upper bound is effectively zero for this workload. Retain the census instrumentation so future geometries can be checked cheaply before implementation.
+
+### Experiment 306: Canonical-source-pair batch scheduling for streamed `7x9`
+- Goal: reduce repeated host gathering and PCIe transfer of the immutable canonical source by grouping right prefixes that consume the same canonical distributions, while retaining the 3-billion-entry device-layout cap and sorted raw-right order inside every CUDA launch.
+- Exact structural opportunity:
+  - selected and complement canonical distributions form fixed unordered complement pairs; every labelled right layout derived from one raw prefix consumes exactly one such pair
+  - the existing 11 contiguous batches stage `9,303,286,493` entries (`69.3149 GiB`) from a shard-wide unique source of only `3,644,039,594` entries (`27.1502 GiB`)
+  - sorting by unordered source pair and applying the unchanged next-fit 3-billion-entry cap still produces 11 batches, stages `3,648,562,527` entries (`27.1839 GiB`) in 69 chunks, and is within `0.034 GiB` of the global floor; transfer volume falls by `60.782%`
+  - locality-constrained window schedulers do not recover this reuse: 64-prefix windows still stage `69.0712 GiB`, while 256- and 1,024-prefix windows are slightly worse than contiguous order. The useful symmetry is global rather than locally clustered in raw-key order
+- Solver integration:
+  - retain each raw prefix's two canonical distribution IDs alongside its already-required expanded-entry count
+  - under `PACKED_SOURCE_AWARE_BATCHES`, sort prefix indices by their normalized unordered distribution pair, form capacity-limited batches, then sort the indices back into raw-right order within each batch
+  - build explicit right-prefix and edge ownership vectors so non-contiguous batches remain exhaustive and disjoint; preserve logical edge/result order inside each batch, exact 128-bit accumulation, four CPU validations, and atomic result publication
+  - enable the scheduler in the tracked `twocolour_7x9_packed_stream` target; the ordinary packed/resident and direct controls remain unchanged
+- Matched host and workload:
+  - use one on-demand Vast RTX 5090, native `sm_120`, driver `580.159.03`, 32,607 MiB VRAM, 520 W power limit, advertised 23.8 GB/s PCIe link, and 32 physical OpenMP workers pinned to the GPU-local NUMA node under a 30.72-core quota
+  - retain Experiment 304's exact owner-108 workload and hashes: `287,201` kernels, `263,912` right prefixes, `107,830,043,941,063` direct comparisons, and contribution `20,993,586,450,920,256,172,408,012,800`; every run passes four direct CPU joins
+- Exact end-to-end A/B at the 3-billion-entry cap:
+  - refactored contiguous-control runs take `30.169006s` and `30.089865s`, averaging `30.129435s`; their CUDA joins average `7.049605s`
+  - source-pair runs take `25.447410s`, `28.210664s`, and `25.393986s`; CUDA time remains tightly bounded at `6.903796--6.929242s`, while the middle total is a host-side scheduling outlier
+  - the three-run mean is `26.350687s`, a `12.542%` complete recurring reduction or `1.1434x` throughput; the median is `25.447410s`, a `15.540%` reduction or `1.1840x` throughput
+  - average right-layout time falls from `17.36495s` to `13.16173s` (`24.21%`), source gathering from `5.10743s` to `2.41731s` (`52.67%`), and source upload from `3.06947s` to `1.15450s` (`62.39%`)
+  - join time improves by `1.93%` rather than regressing, and peak sparse buckets fall from `14,304,121` to `11,694,741`; minimum free memory rises slightly from `6,828,195,840` to `6,859,653,120` bytes
+- Rejected refinement: choosing the higher degree/entry-weight endpoint as each pair's sort anchor reduces modeled raw-order intervals from `200,750` to `125,270` and has essentially identical source traffic, but its exact run takes `7.080060s` of CUDA and `26.304269s` total while growing peak buckets to `18,049,402`. Retain the simpler normalized-pair order; interval count is not a sufficient predictor of batch tails.
+- Qualification: this rental's PCIe link and EPYC host are markedly slower than Experiment 304's roughly 50 GiB/s upload and 42 GiB/s gather measurements, so the exact source-volume reduction transfers to production but the `12.5--15.5%` total-time percentage should not be applied unchanged to every 5090 host. On a high-bandwidth host, the absolute I/O saving is smaller; the unchanged/slightly improved join result removes the main correctness and locality risk.
+- Artifacts: retain census/build/system logs, exact inputs, all control/pair/anchor results, and native binaries under `../rectangle-free-data-v2/profiles/vast-5090-7x9-source-schedule-20260815/`.
+- Cost and cleanup: Vast credit falls from `$8.974245` to `$8.828600`, so provisioning, census development, compilation, two controls, three accepted runs, one rejected-anchor run, and artifact transfer cost `$0.145645`; destroy instance `47820668` and confirm the instance list is empty.
+- Outcome: accept canonical-source-pair batch scheduling as the production streamed `7x9` default. It is an exact global symmetry win: canonical traffic is reduced almost to its theoretical minimum, the layout stage is roughly one quarter faster on the matched host, and complete recurring shard throughput improves materially without sacrificing join performance.
+
+### Experiment 307: Exact weighted suffix-query structures for `7x9`
+- Goal: test whether the remaining Cartesian 32-bit suffix scan can be replaced by a reusable exact weighted-disjointness query, including index construction and the workload's actual bucket/query distribution.
+- Production-shaped profile:
+  - add diagnostic-only GPU profiling that aggregates every physical right bucket across all incident joins, recording compatible left-bucket pairs, left-entry query count, actual query popcounts, and exact Cartesian suffix work
+  - on owner shard 108 at the accepted 3-billion-entry cap, `2,119,414,730` compatible bucket pairs issue `113,816,201,129` left queries and retain `20,241,404,541,601` suffix comparisons
+  - the average query suffix has `12.159362` set bits. A 64-entry bit-sliced model therefore needs `3,737,646,926,852` query plane words plus `16,671,210,240` construction words, nominally `5.3915x` fewer operations than Cartesian comparison
+  - work is broad rather than concentrated in a tiny hot set: right buckets above 256, 512, 1,024, 2,048, and 4,096 entries account for `67.42%`, `50.58%`, `34.81%`, `22.07%`, and `12.25%` of suffix comparisons, respectively
+- Exact bit-sliced prototype:
+  - for indexed right buckets, transpose every 64 suffixes into 32 exact `uint64_t` bitplanes; each left query ORs the planes selected by its suffix and sums weights at surviving bit positions
+  - retain the current Cartesian kernel adaptively below a 257-entry threshold, special-case the zero query by using an exact per-bucket weight sum, preserve 64-bit products/results, and validate all final joins and the complete contribution
+  - benchmark at a matched 500-million-entry cap so the auxiliary index fits without replacing the production layout. It indexes `28,644,581,532` entries across 65 batches; GPU construction takes only `0.449125s` (`0.560875s` including planning/allocation)
+  - the unchanged Cartesian control takes CUDA `19.216405s` and recurring `28.441460s`; the exact bit-sliced path takes CUDA `31.847504s` and recurring `41.866994s`, respectively `65.73%` and `47.20%` slower
+  - interpretation: independent per-lane plane selection, irregular plane loads, divergent survivor enumeration, and scattered weight gathers cost more than the eliminated integer intersections. The arithmetic model alone overstates GPU benefit even though index construction is cheap
+- Heavy-bucket structure census:
+  - extract the 16 highest-work physical right buckets from each of the 11 production batches. These 176 buckets still cover only `0.144%` of total suffix work, confirming that no small exceptional set can carry the optimization
+  - their median bucket contains `15,362` suffixes; a median `21.5%` of entries are distinct in either 16-bit half. Materialising a 65,536-entry subset table for each distinct opposite-half group requires a median `1.697 GiB` per bucket and as much as `8.483 GiB`; straightforward blocked 16+16 SOS is infeasible
+  - the representative highest-work bucket has `36,088` suffixes and `7,289` real queries. Its exact Patricia trie contains `72,175` nodes (`1,732,200` bytes, about six times the raw suffix/weight storage) and visits `98,901,353` nodes versus `263,045,432` Cartesian pairs, only a `2.6597x` abstract reduction before irregular GPU traversal
+  - an exact weighted reduced ZDD compresses this bucket to `24,244` nodes and three weighted terminals (`581,856` bytes), but the same queries visit `252,829,527` nodes: only `1.0404x` fewer than Cartesian work. Both Patricia and ZDD answers agree with direct scans and weighted aggregate `77,335,556`
+- Host and exactness: use the on-demand 575 W/3,090 MHz Vast RTX 5090 with a 54.1 GB/s-class PCIe link, native `sm_120`, 32 GPU-local physical CPU workers, and the established exact owner/canonical hashes. Every diagnostic and prototype run reproduces contribution `20,993,586,450,920,256,172,408,012,800` and passes four direct CPU joins.
+- Artifacts: retain full profile/structure logs, control and bitplane results, native binaries, exact inputs, and system description under `../rectangle-free-data-v2/profiles/vast-5090-7x9-suffix-query-20260815/`.
+- Resource status: retain Vast instance `47822992` for the immediately following canonical-right equivariant-join experiment. Credit used through this checkpoint is approximately `$0.140139`; final rental cost and destruction are recorded when that work completes.
+- Outcome: reject adaptive bitplanes, straightforward blocked SOS, Patricia tries, and weighted ZDDs for the current suffix join. The regular Cartesian CUDA scan remains faster despite substantially more abstract operations. Keep the profiling/prototype code behind opt-in macros and proceed to canonical-right equivariant joining, which attacks repeated labelled expansion rather than replacing the inner predicate.
+
+### Experiment 308: Canonical-right equivariant joining for `7x9`
+- Goal: exploit `join(L, pi(D)) = join(pi^-1(L), D)` so every canonical five-column distribution is materialised once per batch, transferring the row permutation to the smaller four-column side instead of expanding every labelled right prefix.
+- Exact formulation and structural census:
+  - add exact inverse/composition operations for the packed seven-row permutation map and exhaustively validate all `7! = 5,040` permutations on every one-bit pair mask; also add and validate the inverse of the `10+32` mask split
+  - retain source-pair batching, choose one representative labelled gauge for each unordered canonical source pair, and transform the left canonical distribution by `left_map o inverse(raw_right_map) o representative_right_map`
+  - deduplicate each batch's resulting `(left canonical distribution, composed row map)` objects, bucket those transformed four-column layouts once, bucket each representative five-column pair once, and feed both to the unchanged exact prefix join kernel
+  - at the 3-billion-entry control cap, the complete owner-108 shard requests `5,470,237,529` raw left entries but only `4,311,040,128` entries after transform deduplication (`1.2689x` reuse). Adding `3,645,362,424` canonical right entries gives `59.280 GiB` of recurring layout output versus `241.087 GiB` in the labelled-right control: an exact `4.0669x` reduction
+  - the proposed per-batch layout peaks at only `8.555 GiB`. At the full `UINT32_MAX` scheduling cap it needs eight batches, `58.073 GiB` total output, and at most `10.941 GiB` in one batch, so the architecture is comfortably memory-safe on the 32 GiB RTX 5090
+- Exact end-to-end result on the matched retained worker:
+  - the newly rebuilt production control takes CUDA `9.961893s` and recurring `19.899428s`; right-layout construction is `7.051490s`, persistent left construction is `0.078615s`, and four direct CPU validations pass
+  - choosing the first raw representative for each source pair reduces right construction to `2.222790s`; transformed-left construction adds `2.745390s`. Despite saving about `2.16s` of layout time, joins rise to `19.257036s` and recurring time to `27.183242s` (`36.60%` slower)
+  - the cause is the fixed ten-bit prefix split: its chosen five row-pair coordinates are not invariant under `S_7`. A shared canonical gauge preserves the answer and the `107,830,043,941,063` direct pairs but changes which conflicts receive cheap prefix rejection
+  - choose a deterministic hash-max representative to remove the lexicographic/canonical-row bias. This improves CUDA to `17.506909s` and recurring time to `25.644375s`, but remains `28.87%` slower than control
+  - diagnostic-only block reductions count `36,435,763,285,000` suffix comparisons for the randomized shared gauge, versus Experiment 307's `20,241,404,541,601` in the labelled control: `1.8001x` more suffix work, matching the join regression and ruling out a mere implementation artifact
+  - exploit the lower memory footprint by raising the cap to `UINT32_MAX`. Eight batches reduce CUDA to `15.808352s` and recurring time to `23.848013s`, with `18,792,316,928` bytes still free and all four validations passing. This best variant is nevertheless `19.84%` slower end to end
+- Interpretation: canonical-right grouping genuinely removes over four fifths of labelled layout expansion, but materialisation was already only about seven seconds on this high-bandwidth host. The symmetry move destroys enough fixed-prefix pruning to add roughly six seconds even after larger batching. Recovering the win would require a nontrivial gauge-selection or permutation-invariant/adaptive prefix index; simple representative selection cannot justify that complexity, and the theoretical saving with unchanged join speed is only about two seconds on this worker.
+- Code and artifacts: keep the exact census, row-map algebra, randomized-gauge prototype target, and low-overhead suffix-comparison counter behind opt-in macros. The production `twocolour_7x9_packed_stream` target remains the Experiment 306 labelled-right path. Retain all census, result, and run logs under `../rectangle-free-data-v2/profiles/vast-5090-7x9-canonical-right-20260815/`.
+- Cost and cleanup: Experiment 308 uses approximately `$0.155573` after Experiment 307's checkpoint (about `$0.295712` for the combined retained-worker phase). Destroy Vast instance `47822992` after artifact transfer and confirm it is absent from the instance list; final credit is `$8.532888`.
+- Outcome: reject canonical-right equivariant joining for production despite its strong layout-volume reduction. The fixed `10+32` prefix kernel is fast precisely because it remains in the workload's labelled row gauge. Do not combine this path with the rejected suffix-query structures; retain the accepted source-aware streamed control and move next to pipeline overlap or a genuinely permutation-compatible pruning scheme.
+
+### Experiment 309: Reuse source-aware scheduling plans in the streamed `7x9` producer
+- Goal: remove duplicated canonical-prefix work before implementing producer/join overlap. The source-aware scheduler already computes both canonical distribution IDs and row maps for every raw right prefix, but the host-streamed layout builder independently repeated both canonicalisations and lookups for every batch.
+- Implementation:
+  - retain each selected/complement row map alongside the scheduler's existing distribution IDs
+  - factor the streamed layout builder around a compact pair of `(distribution ID, row map)` references and feed it the batch's already-computed plans under `PACKED_REUSE_SOURCE_PLANS`
+  - preserve destination ordering, source-pair batching, staging chunk formation, GPU histogram/scatter, bucket metadata, join descriptors, kernel arithmetic, validation, and atomic result publication exactly; the ordinary production target remains available as the matched control
+- Matched host and workload: use one on-demand 600 W RTX 5090 on Vast, native `sm_120`, 55.1 GB/s advertised PCIe, a 24-core Threadripper Pro 9965WX allocation, 32,607 MiB VRAM, and the established owner-108/canonical hashes. Run three work items in each process so the 31-second universal-cache startup is amortised and excluded consistently.
+- Exact A/B:
+  - three rebuilt controls take `15.893375s`, `15.854410s`, and `15.952639s`, averaging `15.900141s`; CUDA averages `6.819712s`
+  - three source-plan-reuse runs take `14.044013s`, `14.092283s`, and `14.064545s`, averaging `14.066947s`; CUDA remains `6.816217s`
+  - complete recurring time falls by `11.529%`, or `1.1303x` throughput. Right-layout planning falls from `2.370850s` to `0.034897s`; total right-layout time falls from about `6.285s` to `4.451s`
+  - source gather/upload, histogram/scatter, bucket counts, maximum expanded entries, direct comparison count `107,830,043,941,063`, contribution `20,993,586,450,920,256,172,408,012,800`, and minimum free device memory are unchanged. Every run passes four direct CPU joins
+- Interpretation: this is removal rather than overlap, and it is better than trying to hide the same deterministic work. After the change, the remaining recurring producer contains about `0.743s` host gather, `0.519s` source upload, `0.499s` histogram, `0.901s` scatter, and `1.157s` metadata. Producer/join pipelining should now target gather/upload while avoiding the doubled expanded-layout residency rejected in Experiment 250.
+- Outcome: accept scheduler-plan reuse as the new streamed-producer baseline and commit it separately before the asynchronous pipeline experiment.
+
+### Experiment 310: Packed-source prefetch overlapped with `7x9` joins
+- Goal: overlap the remaining host gather and PCIe source upload for batch `n+1` with the exact prefix join for batch `n`, without repeating Experiment 250's failed double residency of multi-gigabyte expanded layouts.
+- Memory-bounded pipeline:
+  - retain the complete packed universal source in ordinary host memory and add one reusable 4.5 GiB pinned host buffer plus one 4.5 GiB device buffer for the next batch's packed canonical source
+  - pre-plan the batch into the existing bounded 8,192-description/1-GiB-source chunks, gather all chunk sources into the pinned buffer, and issue one asynchronous H2D copy on a nonblocking stream while the current join runs on the default stream
+  - after the current results are complete and its 22--24 GiB expanded right layout is freed, run the unchanged histogram/scatter builder from the prefetched compact source. At no point are two expanded layouts resident
+  - record the join-end event immediately after kernel launch, so CPU planning/gather time cannot contaminate CUDA timing; explicitly synchronize the prefetch event before construction and report the actual wait, logical producer stages, maximum source footprint, and exact contribution
+- Exact 3-billion-entry result on Experiment 309's matched RTX 5090:
+  - three pipeline runs take `12.948175s`, `12.998189s`, and `13.024506s`, averaging `12.990290s`; CUDA averages `6.821727s` and remains indistinguishable from the `6.816217s` plan-reuse control
+  - versus Experiment 309's `14.066947s`, overlap saves `7.654%` recurring wall time (`1.0829x` throughput). Relative to the original duplicated-plan producer's `15.900141s`, the two accepted producer changes save `18.301%` (`1.2240x`)
+  - logical per-shard source work is about `0.976s` gather plus `0.506s` upload, but the observed prefetch wait is only `0.0657s`, dominated by the unavoidably unhidden first batch. The next ten gathers/uploads are effectively hidden by joins
+  - the largest prefetched batch contains `543,232,081` packed entries (`4.0474 GiB`). The deliberately conservative 4.5-GiB allocation leaves `3,097,165,824` bytes (`2.884 GiB`) free at the 3-billion cap; this fast setting is exact but below the intended production reserve
+- Conservative capacity result:
+  - reduce the labelled-right cap to 2.75 billion. This produces 12 batches, lowers the maximum prefetched source to `459,779,455` entries (`3.4256 GiB`), and raises minimum free device memory to `5,106,237,440` bytes (`4.756 GiB`)
+  - three exact runs take `13.234840s`, `13.241678s`, and `13.255736s`, averaging `13.244085s`; CUDA averages `6.983067s`
+  - the conservative setting is `5.850%` faster than the accepted plan-reuse baseline (`1.0621x`) and `16.705%` faster than the original producer (`1.2005x`). It gives up only `1.95%` wall time relative to the aggressive 3-billion pipeline while restoring comfortable VRAM headroom
+- Exactness and startup: all control, plan-reuse, 3-billion pipeline, and 2.75-billion pipeline runs reproduce `107,830,043,941,063` direct comparisons and contribution `20,993,586,450,920,256,172,408,012,800`, and each performs four direct CPU validations. Allocating the larger pinned/device prefetch buffers increases one-time cache startup by roughly `0.6s`; this is amortised across a multi-shard worker manifest.
+- Production guidance:
+  - enable scheduler-plan reuse in `twocolour_7x9_packed_stream`
+  - retain `twocolour_7x9_packed_pipeline` as the high-throughput RTX-5090 target, with loud capacity failure if a batch's packed source exceeds the compiled buffer
+  - use a 2.75-billion expanded-right cap as the default production recommendation on 32-GiB cards. Use 3 billion only after shard-specific expanded-layout and bucket-memory preflight; its extra speed is about 2%, not enough to justify an OOM campaign tail
+- Artifacts: retain binaries, exact inputs, atomic results, all repeated control/reuse/pipeline logs, and the capacity runs under `../rectangle-free-data-v2/profiles/vast-5090-7x9-pipeline-20260816/`.
+- Cost and cleanup: the complete matched Experiment 309--310 worker phase, including provisioning, cache builds, three controls, three plan-reuse runs, eight pipeline/capacity runs, final build matrix, and artifact transfer, costs approximately `$0.184254`. Destroy Vast instance `47843334`, confirm it is absent from the instance list, and finish with `$8.348634` credit.
+- Outcome: accept packed-source producer/join overlap. It captures essentially all hideable source gather/upload time with a compact single-buffer pipeline, composes cleanly with source-plan reuse, leaves the arithmetic kernel unchanged, and avoids the expanded-layout double buffering that previously failed.
+
+### Experiment 311: Complete local `7x9` solve-corpus construction
+- Goal: materialise and validate the complete 128-owner filtered `7x9` solve corpus on the local eight-core/16-thread Ryzen 7 9700X host, using restartable generator, full-key reducer, and final-owner checkpoints.
+- Exact input and plan: read the checked `508,147,108`-record `7x8` parent corpus at `/tmp/rect7x8-build/rect7x8-full.orbits`; the two-pass planner reproduces `413,704,224` active parents, `32,521,414,912` retained extensions, labelled weight `2^62`, and 128 contiguous work-balanced generator ranges.
+- Local resources: run 16 processes on eight physical cores/16 SMT threads with 249 GiB RAM and a 4 TB WD Blue SN5000 NVMe. Sixteen simultaneous generator hash tables consume about 128 GiB RSS without exhausting memory.
+- Generator result: all 128 ranges finish in `4517.3s` (`75.29` minutes), publishing 16,384 full-key bucket files containing `452,908,833,952` bytes (`421.78 GiB`).
+- Reducer result: all 128 full-key reducers finish in approximately `500.5s`, merging the raw shuffle to 16,384 owner pieces containing `57,731,962,960` bytes. A wrapper-only filename-width error initially looked for `piece.s000` instead of the actual `piece.s0000`; every reducer process and log had completed normally. Fix the checkpoint validator, validate all 16,384 existing pieces, and publish them without recomputation.
+- Final assembly: 16-way `solve-reduce-unique` constructs and individually validates all 128 solve owners in `52.2s`. Final files contain `57,731,965,520` bytes including their 20-byte headers.
+- Independent global gate: scan all final files and obtain exactly `3,608,247,685` records, labelled weight `4,611,686,018,427,387,904 = 2^62`, and complement-covered weight `9,223,372,036,854,775,808 = 2^63`; every cell-count and owner invariant passes. The final corpus resides under `../rectangle-free-data-v2/7x9-corpus/solve/`.
+- Timing interpretation: the three compute stages take about `84.5` minutes in total, plus roughly 25 seconds for the final 54-GiB global scan. The observed end-to-end elapsed time was longer only because the completed reducer pieces waited for the wrapper fix and restart.
+- Retention: keep the 422-GiB raw shuffle and 54-GiB reducer pieces until the production solve has started and an explicit cleanup decision is made.
+- Outcome: accept the complete exact 128-shard `7x9` solve corpus as production-ready input for the packed RTX-5090 solver.
+
+### Experiment 312: Adaptive five-pair prefix portfolio oracle for `7x9`
+- Goal: determine whether replacing the fixed five row-pair coordinates used by the `10+32` kernel with a small adaptive portfolio can eliminate at least 30% of retained suffix comparisons and plausibly reduce complete solve time by 20%.
+- Diagnostic implementation:
+  - add the CPU-only `prefix_portfolio_oracle.cpp`; it reconstructs exact four- and five-column distribution supports with the production recurrence but never constructs the universal cache and does not use CUDA
+  - enumerate all `C(21,5) = 20,349` five-pair coordinate sets
+  - sample canonical right-source groups with two strata: the highest-incidence half is included directly and the other half is a deterministic hash sample carrying its inverse sampling weight
+  - retain up to eight incident joins per source group, draw 16,384 uniform Cartesian support pairs for each selected/complement component, map each 21-coordinate conflict mask back through the right distribution's inverse row permutation, and use a 21-bit subset transform to score every candidate
+  - measure the production fixed labelled-gauge split separately; treating it as a fixed canonical-gauge candidate is incorrect and was caught by the smoke test
+  - use the most permissive practical model: selected and complement canonical distributions may choose configurations independently. Greedy portfolios are learned on half the source pairs and evaluated on the other half. The unconstrained per-distribution best of all 20,349 candidates is also reported as an impossible upper bound
+  - every sampled histogram must normalize back to its independently accumulated direct Cartesian work; the candidate census and orbit headers are hard-gated
+- Calibration on the retained Experiment 307 owner-108 artifact:
+  - 512 sampled source pairs yield 1,024 independently selectable canonical distributions and an estimated `1.09106e14` direct comparisons
+  - the sampled fixed split retains `18.5989%`, close to the exact full-profile `18.7715815%`; this is a useful independent check of row-map direction, support sampling, and stratified weighting
+  - the unconstrained per-distribution oracle reduces suffix work by `35.7263%` on held-out distributions and `31.4557%` over the combined sample
+  - learned held-out reductions for portfolios of sizes 1, 2, 4, 8, and 16 are respectively `-2.1217%`, `3.6182%`, `14.5587%`, `17.6246%`, and `21.7311%`. The corresponding combined-sample 16-way result is `20.9749%`
+- Independent final-corpus check:
+  - deterministically stride 287,201 records across the complete production owner `s0108` rather than reading a contiguous sorted prefix; 256 sampled source pairs yield 512 independently selectable distributions
+  - the fixed split retains `18.3948%`
+  - the unconstrained oracle reduces held-out suffix work by `28.7951%` (`28.1626%` combined), while the learned 16-way portfolio reduces held-out work by only `9.8403%` (`19.9999%` combined). The large train/test variation confirms that per-distribution coordinate preferences do not generalize reliably from a modest portfolio
+- End-to-end ceiling and implementation cost:
+  - the first 33 production results average `869.083s` total, `627.555s` in CUDA joins, and `140.744s` constructing right layouts
+  - even the better `21.7311%` held-out portfolio result would save only about 136 seconds if kernel time scaled perfectly, for a zero-overhead complete-time reduction of about `15.7%` (`1.186x` throughput). The independent production-owner held-out result is substantially lower
+  - 16 simultaneous left variants would require about `23.754 GiB` for their entry arrays alone. Serial variant grouping avoids that allocation but fragments the accepted source-pair batches, requires intermediate per-edge join results, and adds layout/metadata work, so real performance must be below the zero-overhead ceiling
+- Artifacts: retain the native diagnostic and final logs under `../rectangle-free-data-v2/profiles/prefix-portfolio-oracle-20260816/`. The live production worker was not touched and no rental cost was incurred.
+- Outcome: reject adaptive prefix portfolios for the current `7x9` production solver. The unconstrained oracle shows that coordinate choice matters, but portfolios up to 16 fail the requested 30% suffix/20% complete-time gate before paying substantial layout and scheduling costs. Keep the diagnostic for future geometries or a fundamentally cheaper runtime-coordinate representation.
+
+### Experiment 313: GPU-native streamed prefix metadata construction
+- Goal: remove the remaining serial CPU scan over all 1,024 prefix counters for every labelled distribution in the accepted pipelined `7x9` producer. The first 33 production results average `60.621518s` in right metadata and `869.083212s` complete, making this the largest measured non-join stage.
+- Implementation:
+  - retain the existing exact GPU histogram, but run a per-distribution Blelloch exclusive scan on the device and copy only `{occupied bucket count, entry count}` back to the host
+  - scan those two-scalar records on the host to assign final checked 32-bit bucket ranges, then compact sparse 12-byte bucket descriptors in deterministic prefix order on the GPU
+  - copy only compact descriptors back for the existing final bucket upload; feed the device-produced dense offsets directly to the unchanged scatter kernel
+  - keep the old dense device-to-host scan and host-to-device offset round trip as `twocolour_7x9_packed_pipeline_control`; enable `GPU_PREFIX_METADATA` in the accepted `twocolour_7x9_packed_pipeline` target
+- Matched isolated A/B: use a separate on-demand native `sm_120` RTX 5090, the exact Experiment 302/304 owner-108 input and canonical cache, a 2.75-billion-entry cap, source-plan reuse, packed-source prefetch, 24 OpenMP threads, and three fresh-process alternating runs per variant.
+- Exactness: all six solves reproduce `287,201` records, `263,912` right prefixes, `107,830,043,941,063` direct comparisons, contribution `20,993,586,450,920,256,172,408,012,800`, identical entry/bucket maxima, and four independent CPU joins per run.
+- Control means: recurring `17.692146s`, CUDA `7.196999s`, right layout `7.219043s`, and right metadata `2.643980s`.
+- GPU-metadata means: recurring `15.774391s`, CUDA `7.200140s`, right layout `5.438853s`, and right metadata `1.208073s`.
+- Result: metadata falls `54.31%`; right layout falls `24.66%`; complete recurring time falls `10.84%` (`1.1216x` throughput). Histogram (`0.51096s`) and scatter (`0.902--0.905s`) are unchanged, confirming that the gain comes from metadata construction rather than changed arithmetic or workload.
+- Production projection: applying the measured `54.31%` metadata reduction to the first 33 full shards saves about `32.9s` of their `869.1s` mean, approximately `3.8%` end to end. Treat the matched A/B as authoritative and this linear full-shard projection as provisional until the next worker migration.
+- Artifacts: retain all logs, exact result files, and native binaries under `../rectangle-free-data-v2/profiles/vast-5090-7x9-gpu-metadata-20260816/`. The live interruptible production worker was not modified.
+- Outcome: accept GPU-native scan/compaction as the future `7x9` pipeline default. Its device-resident dense offsets also provide the natural construction point for the next compatible-prefix enumeration experiment.
+
+### Experiment 314: Exact compatible-prefix enumeration
+- Goal: avoid scheduling the full `left_bucket_count * right_bucket_count` product in the ten-bit prefix kernel. Retain a dense right-prefix lookup from Experiment 313 and enumerate only prefixes disjoint from each occupied left prefix before performing the unchanged 32-bit suffix join.
+- First exact prototype:
+  - retain one 16-bit prefix-to-local-bucket lookup per labelled right distribution; `UINT16_MAX` denotes an absent prefix and costs about 160 MiB at the largest matched batch
+  - assign one occupied left bucket and its complete submask list to each warp
+  - reproduce every exact counter and contribution, but CUDA rises from the Experiment 313 mean `7.200140s` to `14.661607s`; variable submask-list and suffix work creates severe warp tails
+- Load-balanced formulation:
+  - build one universal CSR table containing exactly `3^10 = 59,049` compatible prefix values
+  - scan each block's occupied left prefixes into fixed-size compatible-list tasks, let warps claim tasks dynamically, and binary-search the small per-block task scan to recover the left bucket
+  - retain prefix order, the compact right-bucket layout, exact 64-bit products/results, 128-bit contribution accounting, and the same four CPU validations
+- Task-size curve on the same isolated RTX 5090 and exact owner-108 workload:
+  - 32 candidates/task: CUDA `9.232798s`, recurring `17.873854s`
+  - 16 candidates/task: CUDA `8.907840s`, recurring `17.535965s`
+  - 8 candidates/task: CUDA `8.636609s`, recurring `17.259562s`
+  - 4 candidates/task: CUDA `8.564277s`, recurring `17.172327s`
+- Exactness: every variant reproduces `287,201` records, `107,830,043,941,063` direct comparisons, contribution `20,993,586,450,920,256,172,408,012,800`, identical layout sizes, and all four independent CPU joins. Minimum free VRAM falls from about `5.104 GiB` to `4.934 GiB` because of the dense lookup.
+- Result: the best four-candidate variant remains `18.95%` slower in CUDA and `8.86%` slower end to end than Experiment 313's accepted means (`7.200140s` and `15.774391s`). Avoiding rejected prefix products does not compensate for block scans, lookup traffic, binary searches, and irregular task scheduling; the current Cartesian loop rejects them extremely cheaply while preserving right-layout locality and uniform chunks.
+- Artifacts: retain logs, result files, and native binaries under `../rectangle-free-data-v2/profiles/vast-5090-7x9-compatible-prefix-20260816/`. Keep `COMPATIBLE_PREFIX_ENUMERATION` and its dedicated Make target opt-in; the accepted production target remains the Experiment 313 GPU-metadata Cartesian kernel.
+- Outcome: reject compatible-prefix enumeration for current production. This closes the remaining exact ten-bit prefix-scheduling idea without changing the accepted solver.
+
+### Experiment 315: Cross-shard right-prefix overlap census
+- Goal: measure how much identical labelled-right layout construction is repeated because the 128 solve owners are partitioned by left prefix. Report exact raw-key overlap, record/orbit-weight coverage, pairwise stability, and a deterministic estimate weighted by the actual selected-plus-complement five-column support size.
+- Implementation:
+  - add the CPU-only `right_prefix_overlap_census`; it validates and streams complete `R7ORB09` solve files, extracts right prefixes, aggregates record counts and labelled weights, and k-way merges the sorted per-shard sets
+  - report exact union/multiplicity and pairwise intersections; sample union keys by `mix64(key)` and rebuild their exact selected and complement support counts with the production recurrence
+  - the sampled expanded-entry ratio weights repeated keys by the amount of labelled layout output they actually request, rather than assuming every prefix costs the same
+- Exact reuse curve on contiguous owner groups:
+  - 2 shards: raw reuse `30.1498%`; sampled expanded-entry reuse `31.3165%`
+  - 4 shards: raw `53.6846%`; expanded `54.0933%`
+  - 8 shards: raw `70.8891%`; expanded `71.4092%`
+  - 16 shards: raw `82.1493%`; expanded `82.8433%`
+  - 32 shards: raw `89.5878%`; expanded `90.4778%`
+- Stability: a widely spaced group `{0,16,32,48,64,80,96,112}` gives raw reuse `71.2887%` and expanded reuse `72.2878%`, closely matching contiguous owners 0--7. Pairwise Jaccard ranges are `0.4189--0.4622` for the contiguous group and `0.4189--0.4745` for the spaced group.
+- Workload coverage: with eight owners, `97.15--97.27%` of records and `97.97--98.08%` of labelled weight use a right prefix present in multiple owners. With 32 owners these rise to `99.3811%` and `99.6252%`. The overlap is broad, not a small exceptional hot set.
+- Producer ceiling after Experiment 313: the first 33 production shards average about `107.8s` of projected post-metadata right-layout time in an approximately `836.2s` solve. Perfectly realizing the sampled reuse gives zero-overhead end-to-end projections of roughly `1.04x`, `1.08x`, `1.10x`, `1.12x`, and `1.13x` for groups of 2, 4, 8, 16, and 32. CUDA joins remain unchanged, so this is a producer optimization rather than another arithmetic breakthrough.
+- Capacity qualification: one production left layout is roughly 1.6 GiB. A 32-GiB RTX 5090 cannot retain a large owner group beside the 2.75-billion-entry right layout and prefetch buffers. A four-owner tile is the most credible next prototype: retain four disjoint left layouts, lower the right-entry cap enough to restore reserve, build the union right layout once per batch, and maintain four independent exact accumulators. Its measured support reuse is about 54%, but extra batches/tails must be included in the A/B.
+- Artifacts: retain complete 2-, 4-, contiguous/spaced 8-, 16-, and 32-owner logs under `../rectangle-free-data-v2/profiles/right-prefix-overlap-census-20260817/`.
+- Outcome: accept cross-owner right-layout reuse as a real high-level opportunity and reject the assumption that left-owner shards have mostly distinct right work. The next decisive experiment is a matched four-owner GPU tile, not a full corpus rewrite.
+
+### Experiment 316: Exact four-owner shared-right GPU tile
+- Goal: determine whether the 53.7% four-owner right-prefix reuse measured in Experiment 315 survives the real RTX-5090 VRAM limit, smaller right batches, full heavy tails, and exact per-owner accumulation.
+- Implementation:
+  - add the opt-in `twocolour_7x9_packed_four_owner` target; retain four independent labelled-left layouts on device, make the sorted union of their right prefixes, construct each union right layout once, and run the unchanged exact prefix-disjoint kernel separately against every incident owner
+  - preserve one exact contribution, covered weight, direct-comparison count, validation counter, and atomic result file per owner
+  - cap batches by both expanded right output and distinct packed-source input; the latter is required because a union batch can fit device output memory while exceeding the persistent 4.5-GiB source-prefetch buffer
+  - replace the prototype's two per-edge binary searches with linear merge cursors over the already sorted edge/right sequences; this removes an avoidable `O(E log R)` CPU cost over 114 million edges
+  - leave the accepted single-owner `twocolour_7x9_packed_pipeline` target unchanged
+- Qualification and smoke test:
+  - use a separate on-demand native-`sm_120` RTX 5090 with 32,607 MiB VRAM, 575 W limit, 3,105 MHz maximum SM clock, PCIe 5/advertised 43.3 GB/s, CUDA 12.8, and six physical i5-12400F cores/12 hardware threads
+  - a four-distinct-owner 40,000-record test reproduces all four independent contributions and 24 checked result fields exactly; the final linear-merge tile takes `9.197738s` recurring at a 500-million-entry cap
+  - the first 10,000 records of each owner have only `1.0053%` raw overlap, so this is a correctness gate rather than a speed proxy
+- Full matched A/B on complete owners 0--3 (`114,315,435` records/joins), excluding the identical one-time universal-cache construction:
+  - independent accepted solver, 2.75-billion-entry cap: `3,352.920785s` (`55.8820 min`) end to end, `2,533.310710s` CUDA, `479.334s` right-layout construction, and 1,430 right batches
+  - four-owner tile, requested 2.2-billion cap and memory-limited effective cap `2,176,016,384`: `3,058.494028s` (`50.9749 min`) end to end, `2,662.586939s` CUDA, `218.538740s` right-layout construction, and 814 shared batches
+  - net: save `294.426757s`, or `8.7812%` less wall time / `1.09627x` speedup
+- Mechanism and costs:
+  - exact input right-prefix count falls from `32,177,904` labelled owner occurrences to `14,903,333` union keys, reproducing the census's `53.684575%` raw reuse exactly
+  - right-layout time falls `54.4078%`; packed source entries fall from `19,086,295,997` to `5,069,322,305` (`73.4400%`), and batch count falls `43.0769%`
+  - CUDA time rises `5.1031%` because the lower cap and changed grouping create more join-tail overhead; sharing saves enough producer and scheduling work to overcome it
+  - time outside CUDA and reported right-layout construction falls from `340.276075s` to `177.368349s`, helped by union planning and the linear ownership merges
+  - the tile peaks at `2,176,016,334` right entries and leaves `4,053,467,136` bytes (`3.775 GiB`) free; this is feasible on a 32-GiB 5090, though a production cap near 2.1 billion would restore a little more safety margin
+- Exactness: every owner's records, labelled weight, kernels, covered weight, direct comparisons, and contribution match the independent result (24/24 checked fields). The aggregate direct-comparison count is `43,702,888,091,751,051`; aggregate contribution is `78,041,657,830,662,424,908,917,287,833,600`.
+- Cost and artifacts: instance `47904326` ran for `8,020.3s` at `$0.419444/hour`, approximately `$0.934`; destroy it after collection. Retain full control/tile and smoke logs, all atomic results, native binaries, hashes, and the host description under `../rectangle-free-data-v2/profiles/vast-5090-7x9-four-owner-20260817/`.
+- Outcome: accept four-owner shared-right tiling as a measured production optimization for 7x9. The gain is modest rather than transformative, but it is exact, memory-feasible, and larger than the Experiment 315 projection. Production integration should schedule solve owners in groups of four and retain the dual output/source capacity gate; larger owner groups remain unsuitable for a 32-GiB 5090 without streaming left layouts.
+
+### Experiment 317: Sparse hierarchical prefix census for `8x8`
+- Goal: determine whether the successful seven-row prefix decomposition has a production-shaped eight-row analogue capable of eliminating enough of the current `56`-bit Cartesian join to justify a new CUDA kernel.
+- Add the CPU-only `prefix_hierarchy_8x8_census`. It reads checked `R8ORB01` solve shards, rebuilds exact selected and complement `8x4` distribution supports, learns a greedy row-pair coordinate order on alternating training records, and evaluates all retained work exactly on the held-out joins. No distribution weights are needed for comparison counts, but support construction uses the same rectangle-token recurrence and collision rejection as the solver.
+- Prefix algebra:
+  - each of the 28 row-pair coordinates contributes one bit from each colour plane
+  - flat prefixes of 8, 10, 12, and 14 bits peel 4--7 complete row-pair coordinates
+  - the sparse hierarchy peels `10+10+4` bits, leaving an exact 32-bit suffix without allocating a dense `2^24` table
+  - only occupied prefix nodes are represented, and exact compatible-node products are counted at every level
+- Coordinate stability: independent learned orders on shards 0, 512, and 1023 consistently choose the six edges induced by rows 0--3 first. Freeze the cross-shard order beginning `0,1,7,2,8,13`, followed by `18,3,14,27,9,24`; the first six coordinates are exactly `(0,1),(0,2),(1,2),(0,3),(1,3),(2,3)` rather than an arbitrary collection of token bits.
+- Exact fixed-order evaluation: stride 256 records from each of solve shards 0, 256, 512, 768, and 1023, and evaluate the 256 selected/complement joins belonging to the alternating held-out half of each sample. The five samples contain `367,615,951,028` direct support pairs.
+  - flat 12-bit prefixes retain `83,410,805,534` pairs, or `22.689659%` (`4.4073x` fewer comparisons)
+  - after the first 10-bit hierarchical level, `26.288794%` remain
+  - after 20 hierarchical bits, `13.928265%` remain
+  - after all 24 bits, `41,046,646,459` pairs remain, or `11.165633%` (`8.9561x` fewer comparisons)
+  - per-shard 24-bit retained fractions are `9.8442%`, `9.8860%`, `14.2025%`, `10.4965%`, and `11.6266%`; the opportunity is stable across the ownership range
+- Scheduling qualification: the final 32-bit leaf tasks average only about 90--132 suffix comparisons on these samples. The last four prefix bits remove only about 20% of the work surviving the first 20 bits while substantially increasing task count. A flat 12-bit kernel and a sparse `10+10`/36-bit kernel are therefore necessary controls; the full `10+10+4` comparison reduction must not be mistaken for an automatic GPU speedup.
+- Outcome: accept prefix pruning as the strongest untested `8x8` arithmetic optimization. First benchmark an exact flat 12-bit CUDA path against the current heavy-first/four-LHS production kernel, then add the second sparse level only if its fused scheduler amortizes the much finer tasks. Use an Ubuntu IBM L40S for GPU experiments and leave the production target unchanged until a full exact A/B passes.
+
+### Experiment 318: Exact `8x8` flat and sparse-hierarchical prefix kernels
+- Goal: turn Experiment 317's comparison-count reduction into an exact CUDA A/B against the accepted heavy-first/four-LHS direct kernel, then determine whether a sparse second level pays for its finer task graph.
+- Implementation and exactness:
+  - generalize the isolated seven-row prefix prototype to eight rows while leaving the production `twocolour_8x8_gpu_canonical` target unchanged; eight-row suffixes remain exact `uint64_t` values and checked distribution weights remain `uint32_t`, with explicit 64-bit promotion for every product
+  - use the census's fixed row-pair order, beginning with the six edges on rows 0--3; add independently heavy-first schedules for the direct and prefix kernels and restore both result vectors to logical order before comparing them
+  - add an opt-in sparse hierarchy whose first level uses six row-pair coordinates (12 bits) and whose configurable second level uses one through four more coordinates (2--8 bits); only occupied child buckets are stored
+  - every reported GPU run agrees join-for-join with the direct kernel and checks 16 or 32 independently rebuilt CPU joins
+- Host: provision one IBM `gx3-24x120x1l40s` in `eu-de-2` from public Ubuntu image `ibm-ubuntu-24-04-4-minimal-amd64-6`, with an L40S 46,068 MiB, 24 vCPUs, CUDA 12.8, and the open 580.178.04 NVIDIA driver. No Red Hat image or licensed Red Hat software is used.
+- Representative workload: deterministically sample 8,192 records from checked production solve shard 0, producing 16,384 selected/complement joins, `4,725,107,362,012` direct comparisons, `185,107,793` expanded left entries, and `531,372,368` expanded right entries.
+- Flat-width sweep before the corrected heavy-first comparison:
+  - 10 bits retain `26.6871304%` of comparisons and take `1.082449s`
+  - 12 bits retain `22.7007442%` and take `0.817009--0.818598s`
+  - 14 bits retain `20.4659831%` and take `0.782247--0.803049s`
+  - 16 bits retain `17.9956534%` but regress to `0.996614s`; its 9.175 billion bucket products cost more than the arithmetic removed
+  - choose 14 bits: its repeated timing is about 2--4% below 12 bits, whereas both neighboring directions are clearly worse
+- Production-scheduler A/B with seven repeats and independent heavy-first ordering:
+  - 12-bit prefix: direct `1.305613s`, prefix `0.740074s`, exact speedup `1.764166x`
+  - 14-bit prefix: direct `1.306636s` at `3.616239e12 comparisons/s`, prefix `0.710979s`, exact speedup `1.837799x`
+  - the 14-bit path executes `967,039,676,286` suffix comparisons at `1.360153e12/s`; the speedup is therefore smaller than the raw `4.886x` comparison reduction but remains a large incremental arithmetic gain over the accepted scheduler
+- Sparse-depth sweep, using the same first 12 bits:
+  - adding 2 bits retains `20.4659831%`, creates `226,154,106` compatible leaf pairs, and takes `0.831768s`
+  - adding 4 bits retains `17.9956534%`, creates `546,178,350` compatible leaf pairs, and takes `0.895559s`
+  - adding 6 bits retains `16.2964351%`, creates `734,530,664` compatible leaf pairs, and takes `0.859604s`
+  - adding 8 bits retains `13.8173947%`, but creates `2,125,480,603` compatible leaf pairs and takes `1.312176s`
+  - all depths are exact, but none beats the flat kernel. The deepest hierarchy performs only about 307 suffix comparisons per compatible leaf pair on average; descriptor traversal, divisions, and irregular fine-grained scheduling consume the saved arithmetic
+- Cross-shard gate: a separate 4,096-record sample from checked solve shard 512 retains `21.2766128%` under the 14-bit split, reproduces all exact checks, and gives `0.474966s` prefix time for `2,458,472,307,174` direct comparisons. This confirms the learned coordinate order is not specific to shard 0; this run predates the corrected heavy-first harness and is not used for the production incremental speedup.
+- Producer and memory qualification:
+  - this is still an isolated kernel prototype. Its CPU correctness layout builds both direct and prefix representations and takes about 34--39 seconds on the 8,192-record sample, so it is not an end-to-end production producer
+  - unlike the seven-row `10+32` layout, an eight-row prefix entry remains 16 bytes because its suffix is wider than 32 bits, versus 12 bytes for the accepted direct SoA entry; sparse bucket metadata adds further capacity pressure
+  - production integration therefore needs GPU histogram/scatter construction, prefix-only residency, checked batching under the existing 1,024-owner memory budget, and a complete solve-shard A/B. The measured `1.8378x` is an arithmetic-kernel gain, not yet a claim of equal end-to-end speedup
+- Outcome: accept the flat 14-bit kernel as the next `8x8` production-integration candidate. Reject the current sparse hierarchy as a runtime optimization despite its stronger mathematical pruning, but retain it as an opt-in exact research target. The next decisive work is a GPU-native prefix producer and a full production-shard comparison; do not launch the remaining `8x8` campaign from this prototype alone.
+
+### Experiment 319: Production `8x8` flat-prefix integration
+- Goal: integrate Experiment 318's exact 14-bit join into the complete checked-shard solver, eliminate the prototype's duplicate direct representation and CPU prefix construction, establish a safe L40S memory bound, and require a matched full-shard A/B before changing the future production default.
+- Production implementation:
+  - add `twocolour_8x8_prefix_solve.cu`, which preserves the established solve-shard CLI and `RESULT` contract while storing only 14-bit-prefix entries on the join sides
+  - construct the canonical distribution factory once, upload it as persistent `uint64_t` masks plus checked `uint32_t` weights, build the left prefix layout once, and release the large host entry vector before recurring batches
+  - build prefix layouts on the GPU with exact row-map transformation, global histograms, an occupied-prefix list, compact bucket metadata, and scatter; metadata work is proportional to occupied support instead of downloading and scanning every dense 16,384-bin histogram
+  - bound builder scratch by chunks of 2,048 distributions: approximately 128 MiB of counters and 64 MiB of occupied-prefix storage, independent of shard size
+  - retain each right distribution as an indivisible batching unit, cap batches at 8,192 records by default, and add a second device-memory cap using a conservative 28 bytes per right entry plus a 2-GiB reserve
+  - schedule joins heavy-first by their exact direct Cartesian work, restore selected/complement results to logical order, retain four independent direct CPU joins by default, and keep all products and accumulated results in `uint64_t`
+  - isolate the old dense prototype-only builder kernels from production compilation; their 64-KiB shared arrays exceed the L40S's per-block limit at the selected 16,384-prefix width and are not used by the sparse production builder
+- Deployment integration: add the `twocolour_8x8_prefix_solve` Make target; update `modal_8x8_production.py` pipeline version 4 to compile both prefix and direct binaries, select `prefix` by default, expose `--solver direct` as an explicit fallback, fingerprint all included CUDA sources, and use the validated 8,192-record batch default.
+- Host: the same class of fresh IBM `gx3-24x120x1l40s` Ubuntu worker as Experiment 318, with one L40S (46,068 MiB), 24 vCPUs, CUDA 12.8, and open driver 580.178.04. No Red Hat image or licensed Red Hat software is used.
+- Exact 8,192-record integration gate on solve shard 0:
+  - both solvers return `4,690,516,122,762` direct comparisons and contribution `6,961,871,358,394,820,335,396,454,400`
+  - direct: CUDA `1.300465s`, total `9.457666s`
+  - prefix: CUDA `0.719532s`, total `6.698733s`
+  - speedups are `1.8074x` in CUDA and `1.4119x` end to end; this includes the new prefix producer rather than reusing the prototype's host layout
+- Production-shaped 250,000-record gate:
+  - both solvers return `145,930,033,739,504` direct comparisons and contribution `209,204,392,463,045,470,661,758,156,800`
+  - direct: CUDA `40.748269s`, total `57.747947s`
+  - prefix: CUDA `22.434382s`, total `39.384423s`
+  - speedups are `1.8163x` in CUDA and `1.4663x` end to end; minimum prefix free memory is `17,768,513,536` bytes
+- Matched complete solve-shard-0 gate:
+  - both runs process `7,692,657` records, `2,765,567` right groups, labelled weight `10,437,164,042,317,667`, covered weight `19,025,282,001,669,504`, and `4,476,686,214,612,789` direct comparisons
+  - both reproduce the established exact contribution `6,440,796,914,680,148,420,415,091,507,200`, and all four independently rebuilt CPU joins pass
+  - accepted direct heavy-first/four-LHS control: CUDA `1240.727700s`, total `1279.044930s` (`21m19.0s`)
+  - production flat-prefix path: CUDA `668.680089s`, total `769.346226s` (`12m49.3s`)
+  - the prefix integration is `1.85549x` faster in CUDA and `1.66251x` end to end, reducing CUDA time by `46.106%` and complete wall time by `39.850%`
+  - prefix overhead outside the join is `100.666s` versus `38.317s` direct; its recurring right-layout construction costs `80.683s`, so this comparison includes rather than hides the larger producer
+  - the full left layout contains `1,124,081,023` entries, the persistent canonical cache contains `565,306,220` entries, and the minimum observed free device memory is `11,013,586,944` bytes (`10.256 GiB`)
+  - a post-benchmark dry planning gate with the conservative device cap produces 940 batches instead of the measured run's 939, so the safety bound changes only one batch boundary on shard 0
+- Interpretation: the reported prefix `comparisons_per_second` is direct-work-equivalent throughput because the compatibility prefix eliminates most suffix products; it must not be interpreted as the physical suffix-comparison instruction rate. The complete wall measurement is the production-relevant result.
+- Artifacts: preserve all matched 8,192-record, 250,000-record, and full-shard logs under `../rectangle-free-data-v2/profiles/ibm-l40s-8x8-prefix-production-20260817/`.
+- Outcome: accept the flat 14-bit prefix solver as the default for any future `8x8` rerun. It passes the complete exact shard gate, fits the L40S with more than 10 GiB measured headroom, and cuts matched full-shard wall time by almost 40%. Retain the direct binary as a fallback and validation control; already completed exact shards do not need recomputation merely to adopt the faster implementation for a future campaign.
+
+### Experiment 320: Post-integration `8x8` prefix-kernel performance audit
+- Goal: test the remaining plausible kernel-level wins after Experiment 319, especially whether binary tensor cores can replace scalar suffix comparisons, whether the entry layout or per-thread work assignment is leaving bandwidth on the table, and whether heavy joins create a material end-of-grid tail.
+- Exact BMMA prototype:
+  - add the opt-in `twocolour_8x8_bmma_probe` target, built around the production prefix layouts and join schedule rather than a synthetic dense matrix
+  - zero-pad each 42-bit suffix to 128 bits and use experimental WMMA `8x8x128` binary matrix multiply with bitwise AND and population count; a zero accumulator identifies exactly the disjoint pairs, whose checked `uint32_t` weights are then promoted before the exact `uint64_t` product
+  - retain an independent scalar production-kernel result vector and require equality for every selected/complement join
+- BMMA result on the Experiment 319 IBM Ubuntu L40S class:
+  - for 128 records/256 joins and `89,977,965,748` direct comparisons, scalar takes `0.098951s` and BMMA `0.575062s`: BMMA is `5.81x` slower
+  - for 8,192 records/16,384 joins and `4,690,516,122,762` direct comparisons, scalar takes `0.733593s` and BMMA `2.031722s`: BMMA is `2.77x` slower; packing costs another `0.044037s`
+  - all result vectors agree exactly. Tensor-core conflict detection cannot compensate for 128-bit padding, tile staging, fragment setup, and scanning 64 output cells when the scalar primitive is one native 64-bit AND plus a predicated multiply
+- Entry-layout and LHS-width controls on the same 8,192-record layout:
+  - a structure-of-arrays variant with separate `uint64_t` suffix and `uint32_t` weight arrays takes median `0.903590s` versus `0.736941s` for the aligned 16-byte `PrefixEntry`, an `18.44%` regression. The apparently wasted four bytes buy simpler/coalesced combined loads and shared-memory staging
+  - increasing `PREFIX_LHS_PER_THREAD` from one to two raises the scalar median to `0.788116s` (about 7% slower), while four raises it to `1.098887s` (about 50% slower). The prefix buckets are too small and irregular to amortize the additional live state as the older unprefixed kernel did
+  - all variants remain exact; reject BMMA, SoA storage, and multi-LHS execution
+- Dynamic prefix-task chunk sweep:
+  - on the 8,192-record sample, median GPU times for chunk sizes 4, 8, 16, 32, and 64 are respectively `0.707259s`, `0.695702s`, `0.731546s`, `0.731694s`, and `0.887920s`; the small sample makes chunk 8 appear about 4.9% faster than the production default of 16
+  - on the more representative 250,000-record workload, two alternating runs average `22.282392s` for chunk 16 and `22.144780s` for chunk 8, only `0.62%` apart and within run variation. Both reproduce `145,930,033,739,504` direct comparisons and contribution `209,204,392,463,045,470,661,758,156,800`
+  - retain chunk 16. The sample-only result does not survive the production-shaped gate
+- Nsight Compute diagnosis of one complete 8,192-record launch:
+  - the kernel reaches `82.53%` of the limiting pipeline and `94.01%` L1/TEX throughput, while DRAM is only `5.53%`/`47.71 GB/s`; L1 and L2 hit rates are `74.20%` and `85.93%`
+  - schedulers issue `0.69` warps/cycle and have an eligible warp `69.06%` of cycles, with `11.98` active and `3.85` eligible warps per scheduler. The kernel uses only 33 registers/thread and 4.16 KiB static shared memory, so neither occupancy nor off-chip bandwidth is the primary limit
+  - source-level counter collection stalled in the profiler and was terminated without affecting the successful aggregate report. The aggregate evidence is already decisive: the scalar kernel strongly utilizes the L1/TEX/memory-pipe path and offers no obvious low-level bottleneck to remove
+- Lightweight production-tail profile:
+  - record each block's `%globaltimer` start/end only under `PROFILE_PREFIX_TAILS`; the ordinary production binary has no additional kernel arguments, stores, or synchronization
+  - at 8,192 records the drain after the final block starts is `9.4159%` of launch span. On 250,000 records/500,000 blocks across 31 batches, aggregate drain falls to `5.9816%`; the worst individual batch is `22.7571%`
+  - an individual longest block can occupy `96.12%` of one batch span, but heavy-first ordering launches it early enough that it does not set the aggregate tail. Even a physically impossible elimination of all measured drain would save at most about 3.3% of this run's complete time because joins are 22.05 of 40.39 seconds
+  - reject production join splitting: its theoretical ceiling is small and the required extra descriptors, blocks, and atomic accumulation would consume part of it
+- Artifacts: retain all exact benchmark logs, task sweeps, tail logs, the Nsight report, text details, and raw CSV under `../rectangle-free-data-v2/profiles/ibm-l40s-8x8-prefix-postintegration-20260817/`.
+- Outcome: keep the Experiment 319 production kernel unchanged. The audit found no missed major CUDA-level win: tensor cores, SoA compaction, wider LHS blocking, smaller task chunks, and tail splitting all fail their gates. Future material acceleration must again remove work algorithmically or reduce the prefix producer's end-to-end cost; expected remaining kernel micro-tuning is in the low-single-digit range.
+
+### Experiment 321: Register-resident inline-PTX BMMA and sparse weight corrections
+- Goal: test the materially different BMMA formulation proposed in `bmma_idea.md`: use `mma.sync.aligned.m16n8k128.row.col.s32.b1.b1.s32.and.popc` directly, retain all 128 conflict counts in lane registers, and eliminate the first probe's shared-memory accumulator store/reload. Require exactness and at least a `1.20x` kernel speedup before any production integration.
+- Implementation and mapping gate:
+  - add the isolated `twocolour_8x8_inline_bmma_probe`; production targets and their default kernel remain unchanged
+  - implement the PTX-specified lane mapping directly: each lane supplies two A registers and one B register and owns four output accumulators; compare both repeated segmented loads and cooperative coalesced loads followed by warp shuffles
+  - exercise 64 deterministic synthetic `16x8` mask matrices and check every one of their 8,192 outputs against scalar `popcount(left & right)` before constructing a real layout
+  - retain the production 14-bit prefix buckets, heavy-first join order, checked `uint32_t` weights, promoted `uint64_t` products, and exact join result vectors
+- Host and compilation: provision a fresh standard IBM `gx3-24x120x1l40s` in `eu-de-2` from public Ubuntu image `ibm-ubuntu-24-04-4-minimal-amd64-6`, with CUDA 12.8 and open NVIDIA driver 580.178.04. No Red Hat image or licensed Red Hat package is used. Inline PTX compiles natively for `sm_89` without spills: the pure predicate path uses 34 registers, eager direct weighted uses 40, cooperative weighted 52, direct hybrid 48, and fused sparse correction 46, versus 33 for the scalar control.
+- Exact 128-record gate:
+  - all 256 selected/complement joins match scalar
+  - eager inline PTX direct takes `0.151755s` and cooperative shuffle `0.171507s`, versus scalar `0.112527s`; the direct path is `35%` slower but is `3.79x` faster than Experiment 320's `0.575062s` WMMA path
+  - predicate-only direct PTX takes `0.123569s`, showing that register residency removes most, but not all, of the old data-path cost
+- Representative 8,192-record gate on the same `4,690,516,122,762` direct-comparison workload:
+  - every pure and hybrid variant reproduces all 16,384 scalar join results
+  - matched eager medians are scalar `0.738168s`, direct inline PTX `0.787825s`, and shuffle inline PTX `0.793866s`; direct is only `6.73%` slower (`0.93697x` scalar throughput) and is `2.58x` faster than the old `2.031722s` WMMA kernel
+  - predicate-only direct PTX takes `0.535207s`, `1.379x` faster than the weighted scalar control. The tensor predicate is therefore competitive; distributing weights and accumulating exact products erases its advantage
+  - every in-kernel hybrid loses because compiling scalar and PTX paths together raises register pressure. The best direct threshold result is `0.855338s` at 128 comparisons; pure PTX is faster than every hybrid, and an all-scalar hybrid takes `0.937459s`
+- Weight specialization and exact sparse decomposition:
+  - an exact device census finds `175,720,871 / 180,468,969 = 97.3690%` unit-weight left entries and `521,365,183 / 541,508,924 = 96.2801%` unit-weight right entries, or `96.5523%` combined
+  - testing a warp-uniform all-one-tile branch is nevertheless slower (`0.798168s` versus matched scalar `0.732567s`): rare non-unit entries contaminate many tiles and the vote/branch overhead remains
+  - use the identity `w=1+delta` to form an exact alternative: BMMA counts every compatible pair once, then scalar correction joins add `delta_left * w_right` for the non-unit left side and `delta_right` for the non-unit right side. Compact layouts contain only `4,748,098` left entries (`2.6310%`) and `20,143,741` right entries (`3.7199%`); their probe-only construction takes `0.0089s` and `0.0259s`
+  - a two-launch formulation repeats the whole prefix-bucket traversal and takes `0.859223s` versus scalar `0.735677s`
+  - fuse the base BMMA count and both sparse corrections under one traversal. It remains exact and improves to `0.781098s`, but is still `6.16%` slower than its matched `0.735800s` scalar control. The fused kernel's 46 registers, scalar correction loops, and irregular non-unit tails consume the predicate-only saving
+  - delaying weight loads until a compatible output is known also fails: direct rises to `0.799249s` versus matched scalar `0.741769s`, with additional predicates and divergent loads outweighing reduced traffic
+- Gate and interpretation: the register-level formulation successfully fixes the first BMMA probe's largest mechanical defects and gets within about 6% of scalar, so Experiment 320 did not by itself rule out BMMA. However, none of the exact weighted formulations beats scalar at 8,192 records, and no work threshold exposes a profitable hybrid region. The prerequisite for the 250,000-record gate is therefore absent; do not spend another production-shaped run merely to confirm rejection.
+- Artifacts: preserve every eager, lazy-weight, unit-specialized, separate-correction, and fused-correction log; ptxas reports; the final native binary; and source snapshot under `../rectangle-free-data-v2/profiles/ibm-l40s-8x8-inline-bmma-20260817/`.
+- Outcome: reject inline PTX BMMA for the current weighted `8x8` prefix join and treat the BMMA branch as closed. Keep the exact research probe because it documents the fragment mapping and the unexpectedly strong unit-weight structure, but leave Experiment 319's scalar prefix kernel as production default. Future major work should remove comparisons or producer work rather than revisit tensor-core packaging.
+
+### Experiment 322: Adaptive row-gauge portfolio oracle for `8x8`
+- Goal: determine whether the accepted flat 14-bit prefix leaves a deployable algorithmic pruning win under row permutations. The production coordinate set is a `K4` on rows 0--3 plus edge `(3,4)`; its exact `S_8` orbit contains 1,120 distinct `K4+edge` gauges.
+- Add the CPU-only `prefix_portfolio_8x8_oracle`. It reuses the exact `8x4` support recurrence, reads complete checked `R8ORB01` shards, and assigns one gauge to an entire labelled right-prefix group including both selected and complement joins. This is deliberately less permissive than per-join selection: it preserves one right-layout construction and one reusable left layout per configuration.
+- Sampling and validation design:
+  - scan complete solve shards 0, 512, and 1023; retain the highest-incidence half of each group sample exactly and a deterministic hash sample of the remainder with inverse-probability weights
+  - keep up to four incident left prefixes per labelled right group and sample selected/complement support products deterministically
+  - train greedy portfolios on shards 0 and 512 and hold shard 1023 out completely; report the impossible per-group best of all 1,120 gauges as an upper bound
+  - project against Experiment 319's measured shard-0 wall decomposition, including another `0.662854s` left-layout build for every additional sequential gauge but assuming unchanged right-layout construction and suffix throughput
+- Convergence run: profile 1,024 right groups per shard and 8,192 support pairs per selected/complement component, for 3,072 groups and 6,658 unique half-prefix distributions. Distribution construction takes `3.778s`, profiling `1.444s`, and the complete three-shard diagnostic `12.989s` on the local 8-core/16-thread Ryzen 9700X.
+  - the estimated fixed-gauge retained fraction is `20.2364%` overall and `19.8233%` on held-out shard 1023, agreeing with Experiment 318's independent exact `20.4660%` sample and validating the estimator
+  - a single learned replacement gauge removes only `1.92%` of held-out fixed-gauge work; two remove `6.80%`; four remove `13.58%`; eight remove `18.51%`; sixteen remove `22.08%`
+  - the unconstrained 1,120-gauge oracle removes `29.81%` on the holdout, so the sixteen-member portfolio captures most, but not all, of the available gauge benefit
+  - after charging fifteen extra sequential left-layout builds, the sixteen-gauge arithmetic projection is `631.677s` per shard versus `769.346s`, or `1.21794x`; eight gauges project to `650.242s`, or `1.18317x`
+- Gate and qualification: the sixteen-gauge result passes the requested `20%` held-out suffix-work and `15%` projected complete-time thresholds. This remains an oracle rather than a production speedup: integration must choose a gauge cheaply for every right group, process configurations without duplicating right expansion, preserve heavy-first scheduling within each configuration, and measure fragmentation and producer overhead on a real L40S.
+- Artifacts: retain the smoke, 64-group, 256-group, and final 1,024-group logs under `../rectangle-free-data-v2/profiles/prefix-portfolio-8x8-20260817/`.
+- Outcome: accept adaptive row gauges as the next `8x8` production-integration candidate. Proceed to a bounded L40S implementation gate, but retain the fixed-gauge Experiment 319 solver as production default until a complete exact matched A/B demonstrates a material wall-time win.
+
+### Experiment 323: Deployable selector gate for the `8x8` gauge portfolio
+- Goal: close the gap between Experiment 322's best-of-portfolio oracle and a selector that can actually assign one gauge to each complete labelled right group without first computing every candidate's true suffix work.
+- Extend the CPU oracle with three independently evaluated selector models. All choices are made from portfolios trained on shards 0 and 512, while their realized work is measured by the separate 4,096-pair evaluation sample on held-out shard 1023.
+  - exact right-key lookup learns the best portfolio member from training-shard occurrences of the same labelled right prefix and uses the best global gauge for misses
+  - a right-only fallback minimizes the distribution's expected compatible work against uniform left-prefix bits, using up to 4,096 right support entries but no incident left layouts
+  - a sampled-pair selector uses an independent random stream and 8, 32, or 128 support pairs per selected/complement incident-left component; its choice is then scored only against the larger evaluation stream
+- Reuse census: complete scans find `3,710,316` distinct training right prefixes across shards 0 and 512. They cover `1,599,844 / 2,277,215 = 70.2544%` of shard 1023's complete labelled right-prefix set. On the weighted 1,024-group holdout sample, lookup coverage is `78.3203%`.
+- Real selector results for the sixteen-gauge portfolio:
+  - the best-of-16 oracle removes `22.0752%` of held-out suffix work, but cross-shard lookup realizes only `13.3380%`
+  - the right-only selector is anti-correlated with the real incident-left work and increases suffix work by `7.9299%`; reject it
+  - 8 independent support-pair samples are too noisy and increase work by `2.2865%`; 32 samples remove `14.4722%`; 128 samples remove `16.8791%`
+  - even assigning the 128-sample choices for free, preserving unchanged suffix throughput, and charging only fifteen additional `0.662854s` left-layout builds projects `666.422s` versus `769.346s`, or `1.15444x`. Lookup projects `1.11483x` and the 32-sample selector `1.12722x`
+- Cost qualification: a complete shard has about 2.77 million right groups. With up to four incident left prefixes, the 128-sample selector requires as many as 1,024 transformed support-pair probes per group before layout construction, plus sixteen candidate tests per probe. Its uncharged work and the inevitable sixteen-way batching/heavy-first fragmentation consume an already marginal `15.4%` ceiling; the original `20%` held-out-work gate is not met by any deployable selector tested.
+- Artifacts: add the full-overlap/lookup and independent 8/32/128-sample selector logs to `../rectangle-free-data-v2/profiles/prefix-portfolio-8x8-20260817/`.
+- Outcome: reject production integration of the adaptive gauge portfolio and do not provision an L40S for it. Experiment 322 identified a genuine mathematical oracle gap, but Experiment 323 shows that discovering the winning gauge cheaply is the bottleneck. Keep the fixed 14-bit Experiment 319 solver as production default; reconsider only if gauge IDs can be supplied essentially for free by a future corpus-generation pass or a substantially better static selector.
+
+### Experiment 324: Physically partition unit-weight work for predicate BMMA
+- Goal: repair Experiment 321's strongest remaining structural weakness. Instead of running BMMA over every pair and then repeating comparisons to apply sparse weight corrections, physically partition every occupied prefix bucket into unit- and non-unit-weight entries. Process unit x unit exactly once with predicate-only BMMA and process the three disjoint residual quadrants exactly once with the scalar weighted kernel. Require at least a `1.15x` join-stage speedup before a production-shaped 250,000-record run.
+- Implementation and exactness:
+  - extend the isolated `twocolour_8x8_inline_bmma_probe`; the Experiment 319 production solver remains unchanged
+  - histogram, scan, and scatter separate unit and non-unit layouts on the GPU while preserving the original prefix-bucket indices and keys
+  - launch the 34-register predicate-only inline-PTX BMMA kernel on unit x unit, then a separate 40-register/no-spill scalar residual kernel on unit x non-unit, non-unit x unit, and non-unit x non-unit; the four regions are disjoint and cover every compatible suffix pair exactly once
+  - add a device work census for the four regions and compare every one of the 16,384 output joins against the established weighted scalar result before timing
+- Host and provenance: provision a fresh standard IBM `gx3-24x120x1l40s` in `eu-de-2` from public image `ibm-ubuntu-24-04-4-minimal-amd64-6`, with one L40S (46,068 MiB), CUDA 12.8, and open NVIDIA driver 580.178.04. No Red Hat image or licensed Red Hat package is used. Source SHA-256 is `b4af942f6de9945bd6b55f015ea601fdd2ff4fab8e54557efcbd9dab96052d53`; solve-shard SHA-256 remains `8dda094f16ca6a3f39f98102ef54b3b34da8ac6b7101bee087af870d4996d9c2`.
+- Representative 8,192-record result:
+  - all synthetic fragment-mapping checks and all 16,384 selected/complement joins pass exactly on the same `4,690,516,122,762` direct-comparison workload as Experiment 321
+  - unit entries remain `175,720,871 / 180,468,969 = 97.3690%` on the left and `521,365,183 / 541,508,924 = 96.2801%` on the right; GPU construction of the two additional unit layouts takes `0.0144s` and `0.0434s`
+  - after the 14-bit prefix filter there are `976,854,752,651` physical suffix pairs. Unit x unit contains `692,349,307,587` (`70.8754%`), unit x non-unit `94,055,154,327`, non-unit x unit `183,765,096,152`, and non-unit x non-unit `6,685,194,585`; the scalar residual is therefore `29.1246%` of real work despite non-unit entries being only `3.4477%` of stored entries
+  - matched five-run medians are scalar `0.737338s`, predicate-only BMMA over the unpartitioned layout `0.528903s`, and the exact physically partitioned path `0.815407s`
+  - the partitioned path is `0.904258x` scalar throughput, or `10.59%` slower. It also trails Experiment 321's fused correction result, so eliminating duplicate suffix comparisons does not compensate for the second bucket traversal, fragmented unit tiles, and irregular residual work
+- Gate: fail the `1.15x` threshold decisively and do not run 250,000 records. Entry frequency was a misleading predictor because non-unit entries are concentrated in buckets that participate in disproportionately more compatible Cartesian work.
+- Artifacts: preserve the exact benchmark log, ptxas resource report, native binary, and source snapshot under `../rectangle-free-data-v2/profiles/ibm-l40s-8x8-unit-partition-bmma-20260817/`.
+- Outcome: reject physical unit/non-unit partitioning and leave the scalar 14-bit Experiment 319 prefix kernel as the future `8x8` production default. This closes the most plausible exact BMMA rescue: predicate tensor arithmetic is fast, but the weighted problem's work distribution prevents the dominant Cartesian region from becoming a sufficiently pure constant-weight matrix.
+
+### Experiment 325: Compatible-child enumeration for the `8x8` sparse hierarchy
+- Goal: revisit Experiment 318's comparison-saving hierarchy with a materially cheaper inner traversal. Keep each compatible 12-bit coarse pair warp-local, but replace its Cartesian occupied-child loop, division, descriptor loads, and rejection test with exact compatible-prefix enumeration through a dense child lookup. Sweep `12+4`, `12+6`, and `12+8` prefix bits and require at least a `10%` kernel win over flat 14-bit before a 250,000-record gate.
+- Implementation:
+  - retain the original hierarchy behind its existing build flag and add the isolated `HIERARCHY_COMPATIBLE_CHILDREN` variant plus a dedicated Make target; the Experiment 319 production solver remains unchanged
+  - allocate one 16-, 64-, or 256-element `uint16_t` child lookup per warp in shared memory, populate it from the occupied right children of the current coarse pair, and enumerate every submask of the left child's bitwise complement
+  - a lookup hit identifies one unique compatible occupied right child; the unchanged exact weighted suffix join processes it once. Lookup misses replace reads and tests of incompatible occupied child pairs
+  - all widths compile for native `sm_89` with 48 registers/thread, no spills, and respectively 4,420, 5,188, and 8,260 bytes shared memory/block
+- Host and provenance: provision a fresh IBM `gx3-24x120x1l40s` in `eu-de-2` from public Ubuntu image `ibm-ubuntu-24-04-4-minimal-amd64-6`, with one L40S (46,068 MiB), CUDA 12.8, and open NVIDIA driver 580.178.04. No Red Hat image or licensed Red Hat package is used. Source SHA-256 is `9d711f9595083e88d64acdd42b30463fbe1274eaf8f6227e2d5533ff696b6388`; solve-shard SHA-256 remains `8dda094f16ca6a3f39f98102ef54b3b34da8ac6b7101bee087af870d4996d9c2`.
+- Matched 8,192-record gate: every variant processes `4,690,516,122,762` direct pairs, reproduces all 16,384 selected/complement join results, and passes 32 independently rebuilt CPU joins. Five-run kernel means and exact work are:
+  - flat 14-bit: `976,854,752,651` suffix pairs (`20.8262%` retained), direct control `1.302048s`, prefix `0.726091s`
+  - `12+4`: `863,345,001,462` suffix pairs (`18.4062%` retained), direct control `1.302665s`, hierarchy `0.723711s`
+  - `12+6`: `785,182,284,772` suffix pairs (`16.7398%` retained), direct control `1.302431s`, hierarchy `0.761074s`
+  - `12+8`: `665,475,059,039` suffix pairs (`14.1877%` retained), direct control `1.301810s`, hierarchy `1.413468s`
+- Interpretation:
+  - compatible-child enumeration works mechanically: `12+4` removes another `11.62%` of flat-14 suffix comparisons and reaches essentially identical runtime, only `0.33%` faster (`1.00329x`) in this run
+  - the tie is far below the integration gate and within ordinary run variation. It also excludes producer cost: `12+4` needs 5.10 million left and 6.46 million right leaf descriptors versus flat-14's 2.99 million and 3.85 million total bucket descriptors, so a production-native hierarchical builder would make end-to-end performance worse unless the kernel had a material margin
+  - `12+6` removes `19.62%` of flat-14 suffix pairs but is `4.82%` slower; `12+8` removes `31.87%` but is `94.67%` slower. Compatible-value iteration, smaller/ragged suffix buckets, larger metadata, and warp imbalance overtake arithmetic savings as the child width grows
+  - the result explains the sparse-hierarchy gap rather than revealing another production win: the Cartesian child scan was removable overhead, but it was not the only or dominant cost at useful depths
+- Gate: reject all three variants and do not run 250,000 records. A kernel tie cannot justify a second representation, extra leaf metadata, a new GPU producer, and ongoing validation complexity.
+- Artifacts: preserve all exact logs, native binaries, ptxas reports, and the source snapshot under `../rectangle-free-data-v2/profiles/ibm-l40s-8x8-hierarchical-child-enumeration-20260817/`.
+- Outcome: retain compatible-child enumeration as opt-in research infrastructure but keep flat 14-bit Experiment 319 as the future `8x8` production default. The next serious optimization should not add more prefix levels; pursue offline gauge annotation if another bounded `8x8` experiment is desired.
+
+### Experiment 326: Row-factorized exact weighted BMMA
+- Goal: revisit the large gap between Experiment 321's fast predicate-only BMMA and its slower exact weighted form using a different algebraic accumulation.  For each `16x8` BMMA compatibility tile, replace one promoted product per compatible cell by `sum_i left_weight[i] * sum_j(compatible(i,j) * right_weight[j])`; retain each left tile across all right tiles so its left weight is multiplied only once. Require at least a `1.15x` join-stage speedup over scalar before any production-shaped run.
+- Exact implementation:
+  - extend only the isolated `twocolour_8x8_inline_bmma_probe`; the Experiment 319 production binary remains unchanged
+  - use the native PTX output ownership in which four consecutive lanes own one row's eight columns, reduce two conditional right-weight sums per lane within that subgroup, accumulate one right-weight total per retained left row, then perform 16 checked `uint32_t x uint32_t -> uint64_t` products per complete left tile
+  - a prefix bucket is a subset of one half-distribution, whose total surviving assignment weight is strictly below `2^32`; therefore the final implementation stores its row totals exactly in `uint32_t` while retaining `uint64_t` products and join sums
+  - validate both direct and cooperative fragment-loading variants against every one of the 16,384 established scalar join results before timing
+- Host and provenance: provision a fresh standard IBM `gx3-24x120x1l40s` in `eu-de-2` from public Ubuntu image `ibm-ubuntu-24-04-4-minimal-amd64-6`, with one L40S (46,068 MiB), CUDA 12.8, and open NVIDIA driver 580.178.04. No Red Hat image or licensed Red Hat package is used. Final source SHA-256 is `6f8bbf92580a80a9bfadc81e8c0246c0a3c84e7aedbca07ad7e8d2e502de9a0a`; solve-shard SHA-256 remains `8dda094f16ca6a3f39f98102ef54b3b34da8ac6b7101bee087af870d4996d9c2`.
+- Mechanical variants on the identical 8,192-record / 16,384-join workload:
+  - the first exact `uint64_t` subgroup-shuffle implementation uses 48 registers without spills and takes `0.855600s` versus `0.730245s` scalar; its four logical 64-bit reductions compile into too many shuffle operations
+  - replacing the shuffle chains by `__reduce_add_sync` over different four-lane masks is exact but serializes the subgroups and regresses catastrophically to `4.442355s`; reject this instruction mapping
+  - the final `uint32_t` subgroup-shuffle form reduces the direct kernel to 46 registers without spills and takes `0.758723s` versus a matched seven-run scalar median of `0.751214s`, or `0.990103x` scalar throughput. The cooperative-load form takes `0.834860s`
+- Interpretation: distributive row factorization is mathematically sound and the 32-bit formulation recovers almost the entire weighted-BMMA penalty, improving the first form by `11.34%`. It nevertheless only reaches parity with the already accepted scalar kernel. Four compatibility predicates, conditional right-weight additions, subgroup communication, and higher register use cost as much as the avoided per-cell products; the predicate-only `0.540125s` timing is not reachable once exact arbitrary weights are accumulated.
+- Gate: fail the requested `1.15x` join-stage threshold and do not run 250,000 records or integrate another production representation. A result within one percent of scalar cannot repay producer changes, validation complexity, or ordinary run variation.
+- Artifacts: preserve all three exact logs and the final source snapshot under `../rectangle-free-data-v2/profiles/ibm-l40s-8x8-row-factor-bmma-20260817/`.
+- Outcome: reject row-factorized weighted BMMA and again keep Experiment 319's scalar flat-14 kernel as the future `8x8` production default. This closes the remaining direct algebraic use of the predicate BMMA matrix: per-cell products, sparse corrections, physical weight partitions, and row-factorized accumulation have all failed matched exact gates. Proceed to the exact prefix-bucket tensor-rank census, which can remove Cartesian work if the observed distributions have low bit-cut ranks.
+
+### Experiment 327: Exact tensor-train rank census of weighted `8x8` prefix buckets
+- Goal: test whether the real weighted 42-bit suffix vectors left by the production flat-14 prefix admit low-rank tensor trains, and whether contracting those trains across the bitwise-disjointness operator can credibly replace the remaining Cartesian GPU join.
+- Add the CPU-only `prefix_bucket_tt_rank_census` target. It reads checked `R8ORB01` solve shards, reconstructs exact weighted selected/complement `8x4` distributions, applies the production 14/42 split, scores physical buckets by their incident sampled Cartesian work, and examines both the heaviest individual buckets and the heaviest actual bucket pairs.
+- Integrity and rank method:
+  - retain construction weights in `uint64_t`, check every packed weight against `UINT32_MAX`, and require every stored weight to be positive
+  - reconstruct complete 56-bit masks for eight sampled prefixes and compare both selected and complement supports against the independent unweighted recurrence; all sixteen checks pass exactly
+  - compute the complete unfolding-rank profile over GF(2) by degree-one bipartite peeling plus exact dense elimination of the residual core, capped only at the requested screening rank
+  - because many genuine buckets contain only even weights and disappear over GF(2), also compute ranks over the odd prime `2^31-1`; multiply the unfolding by a fixed dense projection before streaming elimination. This cannot increase rank, so every reported modular rank is a rigorous lower bound on rational rank. Projection can only under-report and therefore cannot manufacture a rejection
+  - test colour-major, production pair-interleaved and reversed pair-interleaved orders, lexicographic pair interleaving, and support-frequency orders. For real joins, force both sides to share one order and add joint-frequency orders; independently optimized orders are not used for the join conclusion
+- Representative shard-0 census over 64 stride-sampled records:
+  - build 246 selected/complement distributions containing 95,326 occupied prefix buckets and 7,566,930 weighted suffix entries; the sample represents `6,156,082,148` physical suffix comparisons
+  - at cap 128, 23 of the 24 highest-incident-work buckets have a tested order below rank 128. This superficially encouraging result is genuine rather than a parity artifact: the odd-prime ranks reproduce it
+  - raising the cap to 512 resolves the eight heaviest individual buckets to best observed maximum ranks `229, 52, 91, 91, 18, 12, 44, 16`. The important high-support bucket (3,976 entries) therefore needs rank at least 229 even under its independently best tested ordering; under the production pair-interleaved order its lower bound is 440
+- Shared-order contraction gate on the three heaviest actual joins:
+  - their Cartesian sizes are `8,015,616`, `8,015,616`, and `7,124,992` suffix comparisons
+  - at rank cap 256, both sides of the first two joins reach simultaneous same-cut rank products as high as 64,512; the third reaches the capped 65,536 under pair interleaving. Joint frequency order improves the shapes but does not make them small
+  - using the standard separable three-term contraction for the local compatibility matrix and the capped modular lower-rank profiles gives deliberately optimistic dense-TT work estimates. The best tested shared orders still require `169,225,527`, `165,240,831`, and `149,768,061` field operations, respectively: `21.11x`, `20.62x`, and `21.02x` more arithmetic than the direct comparisons
+  - this understates rather than overstates the obstacle where a rank hits 256. It also grants free TT construction and treats a modular multiply/add like the production kernel's much cheaper 64-bit mask AND/predicated weight product. Exact integer output would additionally require rational/integer factor control or multi-prime reconstruction
+- Performance: the 64-record/24-bucket rank-128 census takes `4.75s` and 296 MiB RSS locally. The final eight-bucket/shared-join rank-256 screen takes `73.83s` and 291 MiB RSS; this is an offline diagnostic, not proposed production work.
+- Artifacts: preserve the rank-128 census, rank-512 individual census, final rank-256 shared-join census, validation smoke log, timings, and checksums under `../rectangle-free-data-v2/profiles/prefix-bucket-tt-rank-20260817/`.
+- Outcome: reject conventional exact tensor trains as an `8x8` production join replacement. Some easy buckets are impressively compressible, but the actual costly joins require ranks in the hundreds and inflate even the optimistic dense contraction arithmetic by about 21x. A sparse/custom factor graph would need to exploit additional structure beyond TT rank and beat the existing 2.9-Tcomparison/s scalar GPU primitive by a very large margin; the measured TT structure alone does not justify such an implementation. Keep Experiment 319's flat-14 scalar solver unchanged.
+
+### Experiment 328: Exact weight-class BMMA
+- Goal: recover the measured speed of predicate-only inline-PTX BMMA without an arbitrary per-cell weight product. Partition every physical prefix bucket exactly by weight and evaluate
+  `sum_(r,s) r*s*N_disjoint(A_r,B_s)`, so each class pair is a pure predicate BMMA join followed by one constant-weight multiplication per lane. Require no more than 20% tile inflation in a metadata census and at least a `1.15x` exact join-stage speedup before production integration.
+- CPU metadata gate:
+  - extend `prefix_bucket_tt_rank_census` to retain exact weight-class counts and score the BMMA orientation independently for every class pair
+  - on 64 stride-sampled shard-0 records, five distinct weights and at most four classes per bucket produce `51,469,432` class tiles versus `51,084,807` unsplit predicate tiles, only `1.007529x` inflation
+  - on 1,024 records, ten distinct weights and at most seven classes per bucket produce `1,065,392,770` versus `1,057,327,457` tiles, `1.007628x`; class-pair descriptors grow from `29,049,858` compatible physical bucket pairs to `34,143,158`, or `1.17533x`
+  - this passes the 20% tile gate emphatically and invalidates the main concern from Experiment 324: exact non-unit weights are concentrated in work-heavy buckets, but they occupy very few distinct values within each bucket
+- Exact GPU implementation:
+  - add an isolated `weight-class` mode to `twocolour_8x8_inline_bmma_probe`; the Experiment 319 production solver remains unchanged
+  - use a checked 32-slot warp-local hash table to count each bucket's exact weights, scan class counts globally, then group all entries into contiguous equal-weight runs while preserving the one-to-one physical bucket order required by existing join descriptors
+  - fail loudly if any bucket exceeds 32 classes. The complete 8,192-record workload uses at most seven left and five right classes
+  - process every compatible class pair exactly once with predicate-only register-resident `m16n8k128 ... and.popc`, select the lower-padding `16x8` orientation independently per class pair, and multiply its compatible count by the promoted `uint64_t` class-weight product
+  - the kernel compiles natively for `sm_89` with 38 registers, 68 bytes shared memory, and no spills
+- Host and provenance: provision a fresh standard IBM `gx3-24x120x1l40s` in `eu-de-2` from public Ubuntu image `ibm-ubuntu-24-04-4-minimal-amd64-6`, with one L40S (46,068 MiB), CUDA 12.8, and open NVIDIA driver 580.178.04. No Red Hat image or licensed Red Hat software is used. Source SHA-256 is `71c792891ef48b72d041f448869c151f586147c7b8d8d21a3e634ef05a22a093`; solve-shard SHA-256 remains `8dda094f16ca6a3f39f98102ef54b3b34da8ac6b7101bee087af870d4996d9c2`.
+- Exact 128-record smoke gate:
+  - all 256 joins match the established weighted scalar output
+  - the GPU census reports `1.007835x` tile inflation and `1.125851x` class-pair inflation, agreeing with the independent CPU census
+  - scalar takes `0.115251s` and exact weight-class BMMA `0.111080s`, a small-sample `1.03755x` speedup
+- Representative 8,192-record gate on the same `4,690,516,122,762` direct-comparison workload used by Experiments 320--326:
+  - all 16,384 exact weighted join results match scalar in both independent runs
+  - the layouts contain 3,016,088 left and 4,203,219 right classes. Construction takes `0.0191s` and `0.0564s`, respectively
+  - `225,087,427` compatible physical bucket pairs expand to `262,990,084` class pairs (`1.168391x`), but independent orientation keeps BMMA tiles to `8,204,465,931` versus `8,148,815,530`, only `1.006829x` inflation
+  - the first seven-run medians are scalar `0.728084s`, predicate `0.532851s`, and exact class `0.579017s`: `1.25745x` faster than scalar
+  - an independent eleven-run repeat gives scalar `0.741253s`, predicate `0.541852s`, and exact class `0.587778s`: `1.26111x`. The exact formulation recovers about 77% of the predicate-only time gap
+- End-to-end qualification:
+  - including both measured class-layout builds on this single 8,192-record sample gives roughly `1.112x` over scalar, so the representation work must not be hidden
+  - a deliberately simple projection from Experiment 319's complete shard-0 decomposition uses 940 batches, charges `0.056395s` of recurring right grouping to every batch plus one `0.019142s` left build, and applies the conservative `1.25745x` kernel speedup. It predicts approximately `685.47s` versus `769.35s`, or `1.1224x` end to end
+  - production integration must measure rather than assume this projection. The temporary conversion duplicates a batch's entries before the original layout can be freed, so the device-memory batch cap must account for the peak and may create more batches; direct weight-aware prefix construction could eventually remove much of the projected 53-second grouping charge
+- Artifacts: preserve both CPU censuses, the exact 128-record gate, both 8,192-record runs and timings, native binary, ptxas report, hardware report, checksums, and source snapshot under `../rectangle-free-data-v2/profiles/ibm-l40s-8x8-weight-class-bmma-20260817/`.
+- Outcome: accept exact weight-class BMMA as an `8x8` production-integration candidate. Unlike the earlier BMMA variants it clears the join-stage gate repeatably and exactly, with almost no tile inflation. Keep Experiment 319's scalar flat-14 solver as the production default until a batched full-shard implementation includes grouping, peak-memory control, result restoration, and an exact matched end-to-end gate.
+
+### Experiment 329: Conversion-based weight-class BMMA production integration
+- Goal: move Experiment 328's exact kernel into the restartable `8x8` solve-shard path without hiding conversion cost or weakening the established scalar fallback. Require exact matched results at 128, 8,192, and 250,000 records; measure repeated-batch construction, conversion, join time, and temporary peak memory before attempting direct grouped production.
+- Implementation:
+  - add `twocolour_8x8_weight_class_bmma.cuh`, containing the checked 32-slot per-bucket weight census, exact grouping pass, native inline-PTX predicate BMMA kernel, and promoted `uint64_t(weight_left) * uint64_t(weight_right)` accumulation
+  - build and group the persistent left layout once, then release its ordinary entry/bucket arrays; for every right batch, build the ordinary flat-14 layout, convert it to the exact class representation, measure the duplicated-layout peak, release the ordinary layout, execute all heavy-first joins, and release the grouped batch
+  - retain the same physical prefix-bucket ordering and copy the existing `PrefixPair` descriptors into the grouped layout, so join scheduling and logical result restoration are unchanged
+  - default the native production CLI to `weight-class` while accepting an explicit final `scalar` argument. Modal pipeline version 5 exposes this fallback as `--solver prefix-scalar`, fingerprints and uploads the new header, and otherwise preserves the `RESULT` contract
+  - conservatively budget 48 device bytes per right entry during conversion, versus 28 for scalar, plus the existing 2-GiB reserve. This accounts for both 16-byte entry copies and class/bucket metadata at the temporary peak
+- Host and compilation: provision a fresh standard IBM `gx3-24x120x1l40s` in `eu-de-2` from public image `ibm-ubuntu-24-04-4-minimal-amd64-6`, with one L40S (46,068 MiB), CUDA 12.8, and open NVIDIA driver 580.178.04. No Red Hat image or licensed Red Hat software is used. The production BMMA kernel compiles for `sm_89` with 38 registers, 68 bytes shared memory, one barrier, and no spills.
+- Exact gates on solve shard 0:
+  - at 128 records, scalar and grouped production paths return the identical contribution `127976068295393315055206400`; independently rebuilding and validating all 256 selected/complement joins passes. The grouped layout observes at most three classes per right bucket
+  - at 8,192 records, both paths return contribution `6961871358394820335396454400` over exactly `4,690,516,122,762` direct suffix comparisons. Scalar join time is `0.717419s`; class BMMA is `0.586836s`, a `1.2225x` join-stage speedup. Charging the `0.057185s` right conversion and ordinary right construction gives `0.827221s` recurring layout-plus-join versus `0.904220s`, or `1.0931x`
+  - at 250,000 records, both paths return contribution `209204392463045470661758156800` over `145,930,033,739,504` comparisons. Scalar uses 31 batches and `21.939333s` of joins; grouped uses 32 batches, `18.531902s` of joins, and `1.520086s` of right conversion. Recurring right-layout/conversion/join time is `25.382751s` versus `27.707487s`, or `1.0916x`; the exact join stage alone improves `1.1839x`
+- Interpretation: the conversion-based implementation is exact, safely batched, and materially faster, but the end-to-end recurring gain is about 9% rather than Experiment 328's simple 12% full-shard projection. It pays a complete read/rewrite of every right entry and the stricter peak-memory budget can add batches. This validates the production plumbing and establishes the baseline for the requested direct grouped producer.
+- Outcome: accept as a correct production checkpoint with an explicit scalar escape hatch, but proceed immediately to produce weight-grouped layouts directly. The direct builder should remove the `1.520086s` conversion pass at 250,000 records, avoid duplicated entry storage, restore the 28-byte-class batching envelope where measured metadata permits, and then face a complete shard-0 exact/runtime gate before becoming the recommended future rerun path.
+
+### Experiment 330: Direct weight-grouped `8x8` production layouts
+- Goal: eliminate Experiment 329's temporary ordinary layout and complete read/rewrite conversion. Produce the exact `(prefix, weight class, suffix)` representation directly from canonical distributions, restore the less restrictive production batch envelope, and require an exact full shard-0 result plus a material wall-time win over Experiment 319.
+- Mathematical/producer construction:
+  - a labelled distribution is a row permutation of one canonical distribution, so row transformation changes its suffix masks but preserves every entry weight. Build each canonical distribution's exact weight alphabet once; the complete shard uses at most seven weights per distribution, well below the checked 32-slot bound
+  - for each labelled selected/complement description, histogram canonical entries directly by the existing 14-bit physical prefix, compact the occupied physical buckets, then histogram by the canonical source's exact weight ordinal
+  - globally scan the nonempty per-bucket weight slots to allocate exactly one `WeightClassMeta` per occupied class. Convert class counts in place to scatter cursors and scatter transformed suffixes directly into their final equal-weight runs
+  - keep the established `PrefixPair`/physical-bucket ordering contract, 32-bit checked entry/class offsets, promoted 64-bit weight products, heavy-first logical join ordering, and result restoration. Empty canonical distributions are represented exactly without manufacturing a weight class
+  - if a future shard exposes more than 32 distinct weights in one canonical source distribution, emit `DIRECT_WEIGHT_FALLBACK` and use the already validated conversion-based exact path for that shard rather than failing or truncating the alphabet
+  - the direct path makes three GPU passes over canonical source entries (prefix histogram, class histogram, final scatter), but never allocates or rereads an ordinary output entry array. Dense prefix maps and 32 checked candidate counters per occupied bucket are temporary and released before joins
+- Deployment: make `direct-weight-class` the no-argument production default. Modal pipeline version 6 maps `--solver prefix` to it, retains `--solver prefix-convert` for Experiment 329's implementation, `--solver prefix-scalar` for Experiment 319's flat-14 kernel, and `--solver direct` for the pre-prefix solver. All paths retain the same `RESULT` parser/contract.
+- Exact staged gates on solve shard 0:
+  - 128 records reproduce contribution `127976068295393315055206400` and pass all 256 independently rebuilt selected/complement joins. The canonical table contains 800 weight values total and at most seven in any source distribution
+  - 8,192 records reproduce contribution `6961871358394820335396454400` over `4,690,516,122,762` comparisons. Direct right production takes `0.209141s`, versus `0.183200 + 0.057185 = 0.240385s` for ordinary production plus conversion. Its join takes `0.567621s`, versus `0.586836s` conversion-based and `0.717419s` scalar
+  - 250,000 records reproduce contribution `209204392463045470661758156800` over `145,930,033,739,504` comparisons. Direct uses 31 batches rather than conversion's 32. Direct right production plus join takes `6.101873 + 17.693405 = 23.795278s`, versus conversion's `5.330763 + 1.520086 + 18.531902 = 25.382751s`, a further `1.0667x` recurring speedup
+  - the one-time canonical alphabet costs `1.335003s` and direct persistent-left production `0.632352s`, versus conversion's ordinary left plus grouping `0.371265 + 0.066751 = 0.438016s`. Consequently the 250,000-record total moves only from `36.811528s` to `36.520097s`; the optimization is deliberately aimed at full production shards where the recurring saving amortizes these costs
+- Complete shard-0 qualification:
+  - all `7,692,657` records, `2,765,567` right groups, and `4,476,686,214,612,789` logical suffix comparisons reproduce the established exact contribution `6440796914680148420415091507200`
+  - direct grouped production completes in `600.216708s`, versus Experiment 319's matched scalar `769.346226s`: `1.2818x` end-to-end and `169.129518s` saved on this shard
+  - join time falls from `668.680089s` to `480.139267s`, a `1.3927x` stage speedup. Direct recurring right production takes `97.239938s` versus scalar's `80.683110s`; the `16.556828s` extra producer cost is outweighed by `188.540822s` saved in exact joins
+  - the run uses the same 940 kernel-count-balanced batches as scalar, observes at most seven right classes, and finishes with `10,560,602,112` bytes free at the lowest post-build sampling point. No allocation fallback or memory-driven split occurs
+- Projection: applying shard 0 uniformly to 1,024 solve shards gives about `170.73` L40S-hours, versus `218.84` hours at the Experiment 319 rate, a saving near `48.11` L40S-hours. Actual campaign work varies by shard, so retain this as a planning estimate rather than a billing guarantee.
+- Outcome: accept direct exact weight-grouped BMMA as the recommended production `8x8` rerun path. It clears the exact full-shard gate and delivers the first large end-to-end BMMA win: approximately 28% more shard throughput than the previous best production solver, while preserving both conversion-based and scalar fallbacks for independent validation.
+
+### Experiment 331: Suffix-only weight-class layouts
+- Goal: remove the redundant per-entry weight from Experiment 330's grouped representation. Once a run is described by `WeightClassMeta`, every member has the metadata record's exact weight, so retaining a 32-bit weight and alignment padding in every 16-byte `PrefixEntry` duplicates information. Require exact direct and conversion results, a matched complete-shard A/B on one L40S, and a material end-to-end improvement before accepting the 8-byte representation.
+- Implementation:
+  - replace `DeviceWeightClassLayout::entries` with a contiguous `PrefixSuffix* suffixes`; for `8x8`, a checked `static_assert` fixes each suffix at 64 bits
+  - make both the ordinary-to-class conversion scatter and the direct grouped producer write suffixes only. The scalar `DevicePrefixLayout` and its `PrefixEntry` remain unchanged as an independent fallback
+  - load BMMA fragments directly from the 8-byte suffix array and continue taking the exact 32-bit class weight from `WeightClassMeta`. Products and accumulated results remain 64-bit
+  - reduce the conservative conversion-path peak estimate from 48 to 40 bytes per source entry. Retain the direct path's existing 28-byte planning estimate for this isolated gate; do not charge a more aggressive batch estimate before the later scratch-layout work
+  - advance the restartable production pipeline fingerprint to version 7; solver routing and result contracts are otherwise unchanged
+- Host and compilation: provision fresh standard IBM worker `<redacted-ibm-worker>`, profile `gx3-24x120x1l40s`, in `eu-de-2` from public image `ibm-ubuntu-24-04-4-minimal-amd64-6`. It has one L40S with 46,068 MiB, CUDA 12.8.93, and open NVIDIA driver 580.178.04; no Red Hat image or licensed Red Hat software is used. The worker is deliberately retained for the next optimization. The suffix BMMA kernel remains spill-free at 38 registers, 68 bytes shared memory, and one barrier. Direct suffix scatter is spill-free at 40 registers versus the old 38.
+- Exact gates:
+  - the complete shard-0 baseline and candidate both process `7,692,657` records, `2,765,567` right groups, and `4,476,686,214,612,789` logical comparisons; both verify the first 256 joins independently and return contribution `6440796914680148420415091507200`
+  - an independent conversion-path 8,192-record check verifies four rebuilt joins and returns the established contribution `6961871358394820335396454400`, proving that the fallback conversion producer also emits the exact suffix-only layout
+  - two warm 250,000-record direct runs return identical contribution `209204392463045470661758156800`; the first pair additionally verifies 256 independent joins in each representation
+- Complete shard-0 matched A/B:
+  - committed 16-byte baseline: direct right construction `97.177429s`, GPU joins `480.468984s`, total `606.628521s`, minimum free VRAM `10,560,602,112` bytes
+  - 8-byte suffix-only candidate: direct right construction `74.832635s`, GPU joins `448.331792s`, total `545.892763s`, minimum free VRAM `25,213,403,136` bytes
+  - this is a `1.29860x` producer speedup, `1.07168x` join speedup, and `1.11126x` end-to-end speedup. Recurring right construction plus joins improves `1.10414x`, so the acceptance does not depend on the baseline's colder factory phase
+  - persistent-left free VRAM rises from `22,063,480,832` to `31,056,068,608` bytes, a `8,992,587,776`-byte gain matching the removed eight bytes across about 1.124 billion entries. Both plans still contain 940 batches, but the larger entry budget changes some group boundaries and is a legitimate consequence of the compact layout
+- Warm 250,000-record repeat without CPU validation:
+  - baseline: right construction `6.101137s`, joins `17.845477s`, total `36.842429s`
+  - suffix-only: right construction `4.522618s`, joins `15.575402s`, total `32.818455s`
+  - speedups are `1.34903x` producer, `1.14575x` joins, `1.19149x` recurring producer-plus-join, and `1.12261x` end to end. These closely repeated stage values confirm that the full-shard win is not a cold-cache artifact
+- Artifacts: preserve full and 250,000-record logs, the conversion smoke log, both binaries, candidate source snapshots, ptxas output, hardware report, and checksums under `../rectangle-free-data-v2/profiles/ibm-l40s-8x8-suffix-only-20260817/`.
+- Outcome: accept suffix-only grouped entries as the new `8x8` production representation. It is exact in both construction paths, saves roughly 9 GiB for the persistent left layout on shard 0, raises the worst observed free-memory floor by about 13.65 GiB, and improves complete-shard throughput by 11.1%. Proceed next to variable-width candidate scratch as a separate commit and benchmark boundary.
+
+### Experiment 332: Variable-width direct-builder class scratch
+- Goal: remove the fixed 32-counter reservation for every physical prefix bucket in Experiment 331's direct grouped producer. A bucket inherits the exact weight alphabet of its canonical source distribution, whose measured maximum is seven, so allocate only `bucket_count * distribution_weight_count` counters while preserving identical classes, suffix order freedom, and join semantics.
+- Implementation:
+  - assign each labelled distribution a checked 32-bit `candidate_base` after the occupied-prefix census. Each bucket records `candidate_offset = candidate_base + bucket_ordinal * weight_count` in a compact 12-byte `DirectBucketAux`
+  - make class histogram, occupied-class census, cursor construction, and final suffix scatter index `candidate_offset + weight_ordinal` rather than `bucket * 32 + weight_ordinal`
+  - retain the existing checked maximum of 32 canonical weights as a future-geometry fallback boundary, but reject any aggregate scratch span exceeding `UINT32_MAX` rather than truncating an offset
+  - report exact versus legacy fixed candidate-slot counts for persistent-left and aggregate right construction. Advance the production pipeline fingerprint to version 8; scalar and conversion paths remain unchanged
+- Host and compilation: use the retained IBM `<redacted-ibm-worker>` Ubuntu worker from Experiment 331, with one L40S, CUDA 12.8.93, and open driver 580.178.04. All changed builder kernels compile without spills. `count_direct_classes` falls from 31 to 22 registers; histogram remains at 38, scatter at 40, and the unchanged BMMA join at 38 registers.
+- Exact staged gates:
+  - 8,192 records verify four independently rebuilt joins and reproduce contribution `6961871358394820335396454400`. Persistent-left scratch falls from `95,595,488` to `3,849,370` slots (`24.84x`); right scratch falls from `123,221,472` to `6,687,161` (`18.43x`)
+  - 250,000 records reproduce contribution `209204392463045470661758156800`. Against Experiment 331's immediately preceding suffix-only run, left construction falls from `0.596842s` to `0.328147s`, right construction from `4.522618s` to `3.785922s`, and total from `32.818455s` to `31.823123s`. The unchanged joins are `15.575402s` versus `15.513660s`, normal run variance
+- Complete shard-0 qualification:
+  - all `7,692,657` records, `2,765,567` right groups, `4,476,686,214,612,789` logical comparisons, and 256 independent validations reproduce exact contribution `6440796914680148420415091507200`
+  - persistent-left scratch falls from `414,496,032` fixed slots to `16,810,088` exact slots, a `24.66x` reduction. Across all 940 right batches, scratch falls from `41,585,545,472` fixed slots to `2,091,265,351`, a `19.89x` reduction
+  - right construction falls from `74.832635s` to `59.193464s`, a `1.26420x` stage speedup. GPU join time changes from `448.331792s` to `449.339248s`, a `0.225%` regression consistent with noise in an unchanged kernel and identical batch plan
+  - total time falls from `545.892763s` to `530.160732s`, a `1.02967x` end-to-end throughput improvement. Recurring right construction plus joins improves `1.02877x`; minimum post-build free VRAM remains `25,213,403,136` bytes because the compact scratch is released before that measurement
+- Artifacts: preserve exact 8,192-record, 250,000-record, and full-shard logs, binary, source snapshots, ptxas report, hardware report, and checksums under `../rectangle-free-data-v2/profiles/ibm-l40s-8x8-variable-scratch-20260817/`.
+- Outcome: accept variable-width candidate scratch. The 3.0% complete-shard throughput gain is modest but clean, exact, and complementary to suffix-only storage. The next independent representation experiment is the proposed 16-bit dense prefix map; its implementation must actually release the 32-bit histogram allocation before claiming a memory benefit.
+
+### Experiment 333: 16-bit distribution-local dense prefix map
+- Goal: halve the direct builder's dense prefix lookup after the 32-bit atomic histogram. Store a 16-bit bucket ordinal per labelled distribution and reconstruct the global bucket as `description.bucket_base + ordinal`, while actually freeing the wide histogram before class histogram and suffix scatter.
+- Prototype:
+  - retain 32-bit histogram counters for exact atomic accumulation, allocate an uninitialised 16-bit ordinal map, and have metadata compaction populate every occupied prefix with an ordinal in `0..16383`
+  - free the 32-bit histogram immediately after metadata construction. Class histogram and scatter read only occupied prefixes generated from the same source entries, so no sentinel or unoccupied lookup is required
+  - enforce at compile time that all distribution-local ordinals fit `uint16_t`. The changed kernels remain spill-free; class histogram falls from 38 to 37 registers, while serial metadata rises from 30 to 32
+- Exact IBM L40S gates on the retained Experiment 332 worker:
+  - 8,192 records verify four independent joins and reproduce contribution `6961871358394820335396454400`. Right construction is `0.141294s`, versus `0.138002s` for variable scratch with the wide in-place map, a `2.39%` regression
+  - 250,000 records reproduce contribution `209204392463045470661758156800`. Right construction regresses from `3.785922s` to `3.924072s` (`3.65%` slower); total regresses from `31.823123s` to `31.903686s`. Join time is unchanged within noise (`15.513660s` versus `15.500700s`)
+- Interpretation: halving the two lookup loads does not repay allocating a second dense array, populating it during serial metadata construction, the synchronising `cudaFree` of the wide histogram, and adding the distribution base in both entry passes. Variable-width scratch has already removed most of the allocation pressure that originally motivated this map, so its remaining value is smaller than anticipated.
+- Artifacts: preserve both exact logs, rejected binary, and rejected source snapshot under `../rectangle-free-data-v2/profiles/ibm-l40s-8x8-dense16-rejected-20260817/`.
+- Outcome: reject and revert the 16-bit dense map before the next production commit; do not run a full shard. Keep Experiment 332's in-place 32-bit count/map allocation as the production default.
+
+### Experiment 334: Production weight-class BMMA tail and hardware profile
+- Goal: identify whether the now-dominant exact weight-class BMMA join is limited by suffix memory traffic, block-tail imbalance, or instruction/tensor utilization before implementing another scheduling or layout change. Experiment 320's tail and Nsight measurements covered the older scalar kernel and cannot be assumed to describe the grouped BMMA path.
+- Instrumentation:
+  - extend the existing compile-time-only `PROFILE_PREFIX_TAILS` hook to `weight_class_prefix_joins`. Each block records `%globaltimer` at entry and exit; the host reports the aggregate time after the final block starts, worst batch drain, and longest-block fraction. Ordinary production builds retain the original kernel signature and execute no profiling instructions
+  - the profiled kernel remains spill-free at 38 registers/thread, 68 bytes shared memory, and one barrier, identical resource use to production apart from the two guarded timestamp stores
+  - collect low-overhead Nsight Systems GPU metrics at 10 kHz over an exact 250,000-record production run. A subsequent Nsight Compute detailed replay was attempted on both a middle production launch and the 8,192-record gate, but persistent device-state checkpointing consumed roughly 32 GiB and 18 GiB respectively and remained at 0%; terminate both without using them as evidence
+- Exact gates on the retained IBM Ubuntu L40S worker `<redacted-ibm-worker>`:
+  - 128 records verify four independently rebuilt joins and reproduce contribution `127976068295393315055206400`. A separate non-profile production compile passes the same exact smoke gate, confirming that the guarded extension does not alter the ordinary solver
+  - 250,000 records verify four joins and reproduce contribution `209204392463045470661758156800`. Profiled joins take `15.474333s`, essentially identical to Experiment 332's `15.513660s` control (`0.25%` difference). Across 500,000 blocks, aggregate drain is `13.156849%`, worst-batch drain `29.709885%`, and one block spans the complete launch
+  - the complete shard processes all `7,692,657` records and `15,385,314` selected/complement blocks and reproduces contribution `6440796914680148420415091507200`. Profiled joins take `455.240721s`, right construction `59.457597s`, and total `536.514032s`; the corresponding production control was `449.339248s`, `59.193464s`, and `530.160732s`. The roughly `1.3%` full-run join difference is a conservative bound on profiling/run variance rather than a claimed regression
+  - complete-shard aggregate drain is `5.443768%`; worst-batch drain is `29.283030%`, and the longest block again spans an entire batch. Erasing all measured drain would be the physically impossible upper bound of `24.782s`, only `4.619%` of complete wall time
+- Scheduling interpretation:
+  - the L40S has 142 SMs. At 38 registers and 256 threads, the kernel admits six blocks/SM, or 852 concurrently resident blocks. A normal 16,384-block batch therefore contains about `19.23` resident waves, whose unavoidable final-wave fraction is about `5.20%`
+  - the measured full-shard drain of `5.44%` is almost exactly this ordinary final-wave floor. Heavy-first ordering is doing its job: although an extreme block can live for the entire launch, it begins early and does not create a material excess tail. Blanket task flattening or heavy-join splitting cannot recover the quoted 4.62% ceiling and would add descriptors, blocks, and atomic result accumulation
+- Hardware result over the 31 BMMA launches in the 250,000-record run:
+  - `weight_class_prefix_joins` accounts for `80.6%` of traced GPU kernel time. During its 160,488 metric samples, GR active averages `99.99%`, SMs active `88.48%`, SM issue `60.05%`, tensor active `9.48%`, and compute warps in flight `87.78%`; unallocated warps in active SMs average only `1.55%`
+  - DRAM read and write bandwidth average only `4.55%` and `0.89%` of peak. The compact suffix stream is therefore not off-chip-bandwidth-bound, and another global-memory layout or cooperative DRAM staging experiment has no credible large ceiling
+  - the remaining gap is the mixed control/load/integer work around relatively infrequent BMMA instructions, not lack of occupancy or external bandwidth. This profile does not expose a safe standalone micro-optimization; any next join experiment should first quantify class-pair/tile shape and gate a narrowly adaptive execution rule rather than restructure every join
+- Artifacts: preserve exact smoke, 250,000-record, and complete-shard tail logs; production smoke; source and binaries; ptxas output; raw Nsight Systems report and kernel summary; sampled metric summary; hardware report; and the two documented rejected replay logs under `../rectangle-free-data-v2/profiles/ibm-l40s-8x8-bmma-profile-20260817/`.
+- Outcome: retain the current suffix-only, variable-scratch weight-class BMMA production kernel and its heavy-first one-block-per-join schedule. Reject suffix-memory tuning and blanket tail splitting on the measured evidence. The most defensible next diagnostic is a cheap exact census of BMMA tile occupancy and class-pair shapes, followed only if warranted by a scalar/BMMA threshold or extreme-task specialization; persistent builder buffers and integrated alphabet construction remain lower-risk but sub-1% end-to-end cleanup.
+
+### Experiment 335: BMMA-cost prefix search and `K4 ⊔ K2` production prefix
+- Goal: revisit the seven-coordinate `8x8` prefix now that exact weight-class BMMA, rather than scalar suffix comparisons, dominates production. Search prefix widths and coordinate sets using the kernel's true rounded, independently oriented `16x8` class-tile count, include bucket/class traversal and layout-size diagnostics, and require an exact production-shaped GPU win before replacing the established `K4`-plus-attached-edge prefix.
+- Exact offline census:
+  - refactor the weighted support recurrence in `prefix_bucket_tt_rank_census.cpp` so it constructs each full 56-bit weighted support once and can then bucket it under an arbitrary set of up to eight row-pair coordinates. The existing fixed-prefix rank census remains exact and uses the same shared implementation
+  - add `prefix_bmma_cost_census`, which uses BMI2 extraction to rebucket exact entries, retains exact per-bucket weight-class counts, and evaluates every compatible bucket/class pair with the production orientation rule `min(ceil(a/16)ceil(b/8), ceil(b/16)ceil(a/8))`. It also reports suffix cells, class pairs, compatible and tested physical bucket pairs, tile fill, and stored bucket/class metadata
+  - search a nested greedy order followed by exact one-edge swaps for widths 8 through 16 bits. The 64-record-per-shard search across checked solve shards 0, 512, and 1023 evaluates 870 distinct coordinate sets in `52.52s` on the local 8-core/16-thread host, using 645 MiB peak RSS. This is a bounded greedy/local search, not a claim to have enumerated every labelled graph
+  - before searching, reproduce Experiment 328's old production-prefix totals exactly on the same eight-record sample: `5,513,323` class tiles, `667,023,512` suffix cells, `155,583` class pairs, and `126,020` compatible bucket pairs
+- Width and shape result on the larger three-shard search:
+  - 8-bit prefix: no candidate beats the production-order four-coordinate prefix
+  - 10-bit prefix: the best local candidate uses `0.984753x` the matched-width tiles, but absolute tile work remains much higher than at 14 bits
+  - 12-bit prefix: the existing `K4` is already locally optimal
+  - 14-bit prefix: replace attached edge `(3,4)` by disjoint edge `(6,7)`, changing the coordinate graph from `K4` plus a pendant edge to `K4 ⊔ K2`. Exact class tiles fall from `193,971,270` to `187,949,712` (`0.968956x`), suffix cells from `22,986,743,542` to `22,500,471,086`, class pairs from `5,666,879` to `4,758,894`, compatible bucket pairs from `4,939,856` to `4,078,222`, and tested bucket pairs from `62,426,778` to `45,247,966`. Tile fill improves from `92.58%` to `93.53%`
+  - 16-bit prefix: the best local candidate reaches `179,835,182` tiles, but class pairs rise to `12,125,392`, tested bucket pairs to `160,023,304`, stored metadata rises sharply, and fill falls to `89.55%`. Reject it for the same control/fragmentation reason that made the earlier scalar 16-bit kernel regress; tile count alone is not the production objective
+- Independent cross-shard validation of `K4 ⊔ K2` on 256 records per shard gives tile ratios `0.977707`, `0.977941`, and `0.948212` on shards 0, 512, and 1023. The direction is stable and is not an artifact of the 64-record search set. After adoption, the shared weighted rank census and new cost census agree on the new default's exact eight-record totals and support reconstruction.
+- Exact IBM L40S gates on retained Ubuntu worker `<redacted-ibm-worker>`:
+  - implement the candidate by swapping only pair ranks 6 and 9 in the existing 14-bit split. Entry ABI, suffix width, builder, batch plan, class representation, BMMA kernel, heavy-first scheduling, results, and all checked arithmetic remain unchanged. The kernel remains spill-free at 38 registers, 68 bytes shared memory, and one barrier
+  - 128 records reproduce contribution `127976068295393315055206400` with four independent CPU validations. A separately compiled attached-edge control also passes, establishing both compile-time geometries
+  - alternating same-source 8,192-record runs reproduce contribution `6961871358394820335396454400`. Attached-edge BMMA times are `0.523304s` and `0.516970s`; `K4 ⊔ K2` times are `0.395819s` and `0.395008s`, a `1.31543x` join-stage speedup. The candidate's recurring right build rises only from about `0.139s` to `0.143s`
+  - at 250,000 records, both variants reproduce contribution `209204392463045470661758156800`; the candidate additionally verifies four CPU joins. BMMA time falls from `15.503433s` to `12.211704s` (`1.26956x`), while right construction rises from `3.785811s` to `3.963482s`. Complete time falls from `31.709149s` to `28.676900s`, a `1.10574x` throughput gain
+- Complete shard-0 qualification:
+  - all `7,692,657` records, `2,765,567` right groups, `4,476,686,214,612,789` logical comparisons, and 256 independent validations reproduce exact contribution `6440796914680148420415091507200`
+  - against Experiment 332's production control, BMMA joins fall from `449.339248s` to `375.652482s`, a `1.19616x` stage speedup and `16.40%` time reduction. Recurring right construction rises from `59.193464s` to `62.009233s` (`4.76%`), but is far smaller than the `73.687s` join saving
+  - complete time falls from `530.160732s` to `459.181957s`: `70.978775s` saved, `13.388%` less wall time, or `1.15458x` throughput. Minimum measured free VRAM remains essentially unchanged at `25,133,711,360` bytes
+  - aggregate right classes fall from `1,426,796,227` to `1,315,462,256` (`7.80%`); exact candidate scratch slots fall `11.44%`. The persistent-left layout has more buckets (`14,000,472` versus `12,953,001`), demonstrating why the real joined workload rather than standalone layout size is the necessary objective
+- Deployment: make `K4 ⊔ K2` the source and Makefile production default, retain `PREFIX_K4_ATTACHED_EDGE_CONTROL` and `twocolour_8x8_prefix_solve_k4edge_control` for exact regression comparison, update the shared census's production order, and advance the restartable production pipeline fingerprint to version 9. No Modal resources are launched; every GPU measurement uses the requested IBM Ubuntu L40S worker.
+- Projection: applying the matched complete-shard time uniformly to 1,024 solve shards gives about `130.61` L40S-hours, versus `150.80` hours after Experiment 332, saving roughly `20.19` L40S-hours. Work still varies across shards, so this remains a planning estimate.
+- Artifacts: preserve all search/refinement/cross-shard logs, exact CPU equivalence gates, attached/default GPU smokes, alternating 8,192-record runs, matched 250,000-record logs, complete exact shard log, binaries, source snapshots, ptxas and hardware reports, and checksums under `../rectangle-free-data-v2/profiles/ibm-l40s-8x8-bmma-prefix-k4k2-20260817/`.
+- Outcome: accept the BMMA-cost-optimized `K4 ⊔ K2` 14-bit prefix as the production default for a future `8x8` rerun. This is a high-level algorithmic/layout win: changing one coordinate removes enough physical-bucket and class traversal to improve complete-shard throughput by 15.5%, substantially exceeding what raw tile count alone predicted. Keep the new census as the gate for future prefix changes; do not pursue 16-bit prefixes or global class-task flattening on the present evidence.
+
+### Experiment 336: Exact production BMMA prefix-width sweep
+- Goal: test `bmma-sweep.md`'s strongest follow-up directly: now that traversal and control dominate tensor utilization, determine whether an 8-, 10-, or 12-bit prefix can beat the accepted 14-bit `K4 ⊔ K2` production solver despite requiring more rounded BMMA tiles. Preserve exact validation and compare matched recurring and complete timings rather than extrapolating from the offline census alone.
+- Implementation and host:
+  - add four named production-shaped Make targets, `twocolour_8x8_prefix_solve_bmma{8,10,12,14}`, selecting the nested partial-`K4`, `K4`-minus-edge, `K4`, and `K4 ⊔ K2` coordinate sets with four through seven row-pair coordinates. The builder, suffix-only grouped representation, variable-width scratch, weight classes, BMMA kernel, batching, and heavy-first schedule are otherwise identical
+  - print `prefix_pairs` and `prefix_bits` in every solver `INPUT` record so archived binaries and logs identify their geometry unambiguously
+  - use the retained IBM Ubuntu worker `<redacted-ibm-worker>`, its single L40S, CUDA 12.8.93, and the exact shard-0 corpus. All four kernels compile spill-free. No Modal resources are used, and the IBM worker remains running
+- Exactness gate: all four 128-record binaries independently validate four selected/complement CPU joins and reproduce contribution `127976068295393315055206400`. Every subsequent 8,192- and 250,000-record run also reproduces its matched exact contribution.
+- Alternating 8,192-record sweep, two runs per width:
+  - 8-bit GPU joins are `1.264820s` and `1.341213s` (median `1.303017s`); recurring right construction is about `0.1125s`
+  - 10-bit GPU joins are `0.840402s` and `0.878508s` (median `0.859455s`); recurring right construction is about `0.1129s`
+  - 12-bit GPU joins are `0.615139s` and `0.631256s` (median `0.623198s`); recurring right construction is about `0.1157s`
+  - 14-bit GPU joins are `0.395650s` and `0.392847s` (median `0.394249s`); recurring right construction is about `0.1428s`
+  - the ordering is monotone and stable under reversal. The 12-bit split saves only about `0.027s` of right construction but makes joins `1.581x` slower; advance only 12 and 14 bits to the larger gate
+- Alternating 250,000-record gate, two runs per finalist:
+  - 12-bit: median right construction `3.188569s`, GPU joins `17.392829s`, recurring construction plus join `20.581398s`, and total `32.897228s`
+  - 14-bit: median right construction `3.962904s`, GPU joins `12.231272s`, recurring construction plus join `16.194176s`, and total `28.704494s`
+  - 12-bit constructs the right layout `1.243x` faster, but 14-bit joins `1.422x` faster, improves recurring work `1.271x`, and improves end-to-end throughput `1.146x` (`12.75%` less wall time)
+- Cost-model diagnostic:
+  - an exact 256-record shard-0 census confirms the intended structural trade: as width rises from 8 to 14 bits, BMMA tiles fall `354,356,755 -> 235,674,300`, while tested bucket pairs rise `2,359,545 -> 66,454,665` and class pairs rise `476,274 -> 6,820,724`
+  - the proposed three-term aggregate linear fit is not identifiable from four highly correlated width points. A no-intercept least-squares fit assigns a negative coefficient to class-pair traversal and still misses the 12-bit time by about `0.101s`; adding an intercept exactly interpolates four points with condition number about `4.7e9` and likewise assigns a negative class coefficient. Such a model would rank unseen coordinate sets unreliably
+  - therefore do not rerun the coordinate search against this underdetermined model. The direct GPU sweep is decisive, and a future empirical model would require held-out per-batch or many same-width coordinate measurements rather than four aggregate widths
+- Artifacts: preserve source snapshots, all four native binaries and ptxas reports, checksums, exact smoke logs, alternating 8,192- and 250,000-record logs, and the matched exact census under `../rectangle-free-data-v2/profiles/ibm-l40s-8x8-bmma-width-sweep-20260817/`.
+- Outcome: retain the 14-bit `K4 ⊔ K2` production default. Reject narrower fixed prefixes for this BMMA solver: lower metadata and traversal do not repay the extra tensor/control work inside larger suffix classes. Do not run a complete 12-bit shard. Leave the six-edge adaptive portfolio gated on evidence from direct same-width GPU measurements, not the rejected aggregate model.
+
+### Experiment 337: Compact canonical weight ordinals and direct-builder cleanup
+- Goal: remove repeated exact-weight lookups and allocation churn from the accepted `8x8` direct weight-class producer, parallelise its remaining serial prefix scan, and verify each contribution on the retained IBM Ubuntu L40S worker.
+- Implementation:
+  - encode each canonical entry's distribution-local weight ordinal once as an exact `uint8_t`. The measured alphabet maximum is seven; construction retains the 32-class checked fallback. Direct production uploads eight-byte masks plus one-byte ordinals instead of masks plus four-byte weights, while class products remain `uint64_t`
+  - replace the one-lane scan of all 16,384 physical prefixes with a warp-ordered ballot and inclusive scan. Bucket and entry order are unchanged exactly
+  - retain direct-builder scratch, join/result buffers, and CUDA events at their high-water marks; introduce move-only CUDA buffer/event ownership so exceptional exits do not leak accepted production allocations
+  - resolve every edge's dense left ID once after loading instead of probing `unordered_map` during each recurring batch
+  - preserve compile-time wide-weight, serial-metadata, and workspace-reset controls for matched attribution
+- Exact IBM L40S gate:
+  - 128 records reproduce contribution `127976068295393315055206400` and independently validate four selected/complement joins
+  - all 250,000-record variants reproduce contribution `209204392463045470661758156800`
+  - optimized 16,384-edge candidate: canonical upload `3.991388s`, right construction `3.556332s`, BMMA joins `11.835279s`, total `27.010587s`
+  - wide-weight control: canonical upload `4.874144s`, right construction `3.604458s`, joins `11.906349s`, total `28.007722s`. Compact ordinals therefore remove about `0.88s` of startup and slightly improve the recurring builder
+  - serial-metadata control: right construction `3.771801s`, joins `11.986340s`, total `27.376488s`. The warp scan removes about `0.215s` of right construction (`5.7%`) on this gate
+  - workspace-reset control: right construction `3.587090s`, joins `12.018682s`, total `27.334578s`. Persistent scratch is exact and useful cleanup, but its isolated performance contribution is below run variation
+- Batch-size sweep on the unchanged Experiment 335 binary, forward and reverse:
+  - median GPU times for 8,192, 16,384, 32,768, and 65,536 edges are approximately `12.182s`, `11.945s`, `12.049s`, and `12.126s`
+  - 16,384 is the stable optimum on the 250,000-record gate, about `1.9%` faster than 8,192 in the join stage. Larger batches regress despite ample VRAM, showing that reduced final-wave overhead is offset by increased within-batch heterogeneity
+- Complete-shard confirmation at 16,384 edges per batch:
+  - all `7,692,657` records and 256 independently rebuilt joins reproduce exact contribution `6440796914680148420415091507200`
+  - batches fall from 940 to 471; canonical upload falls `5.505550s -> 4.580472s`, recurring right construction `62.009233s -> 52.915772s`, and BMMA joins `375.652482s -> 370.678622s`
+  - total falls `459.181957s -> 445.011109s`, saving `14.171s` or `3.09%` end-to-end. Minimum free VRAM remains `21,954,428,928` bytes
+- Outcome: accept compact ordinals, warp-parallel metadata, dense edge IDs, reusable ownership/workspaces, and 16,384 edges as the `8x8` production default. The complete exact shard confirms the combined improvement rather than relying on the smaller gate.
+
+### Experiment 338: Exact weight-class BMMA transfer to `7x9`
+- Goal: test whether the accepted exact weight-class BMMA representation is useful with the 10-bit-prefix, 32-bit-suffix `7x9` solver rather than assuming that its `8x8` result transfers.
+- Implementation:
+  - make the conversion and BMMA portion of the weight-class header geometry-generic through 64 suffix bits, while leaving the canonical direct producer behind its `8x8` interface guard
+  - add `twocolour_7x9_packed_weight_class`, which constructs the established exact prefix layouts, groups each physical bucket by equal weight, stores suffixes without redundant per-entry weights, and invokes the same exact `m16n8k128` predicate kernel with zero-padded high suffix words
+  - keep products and accumulated sums in `uint64_t`; the normal independent CPU validation remains enabled
+  - repair the production library boundary so both the ordinary `twocolour_7x9_packed_solve` target and the new target compile again. The canonical left builder had been hidden by `PREFIX_PRODUCTION_LIBRARY`, a latent checked-in build failure
+- Matched genuine-shard IBM L40S gate:
+  - use the archived `owner.s0108.orbits` work item with `287,201` records, resident `4,740,574,641`-entry universal cache, a 200M right-entry cap, and four independently rebuilt CPU joins
+  - both variants reproduce exact contribution `20993586450920256172408012800`
+  - scalar prefix: GPU joins `26.283863s`, recurring work-item total `41.553873s`, minimum free VRAM `6,599,081,984` bytes
+  - conversion weight-class BMMA: GPU joins `22.660073s`, recurring total `39.598099s`, minimum free VRAM `7,844,790,272` bytes
+  - BMMA improves the join stage by `1.1599x` (`13.79%`) and end-to-end recurring time by `1.0494x` (`4.71%`) while increasing free VRAM by about `1.16 GiB`
+- Interpretation: weight grouping is useful for `7x9`, but conversion overhead consumes most of the join saving. The next justified experiment is direct grouped production from packed canonical sources, followed by integration with the existing host-streamed producer/join pipeline needed by smaller GPUs.
+- Outcome: accept the exact conversion target as a validated benchmark and reusable implementation. Do not replace the current `7x9` production pipeline yet; require a direct grouped, pipelined end-to-end win first.
+
+### Experiment 339: Direct grouped-suffix producer for `7x9`
+- Goal: remove the temporary ordinary `PrefixEntry` layout and conversion pass from Experiment 338 without changing the exact grouped BMMA join.
+- Method:
+  - record each canonical 7x5 distribution's distinct weight alphabet during the universal-cache count pass
+  - pack the distribution-local weight ordinal into the existing high byte of each 64-bit resident cache entry, so the 37.92 GB cache does not grow
+  - construct prefix buckets, exact weight classes, and suffix-only runs directly on the GPU using variable-width candidate scratch and persistent high-water work buffers
+  - compare on IBM L40S using the same genuine `owner.s0108.orbits` sample (`287,201` records), 200,000,000-entry right cap, and four independent exact join checks
+- Correctness: conversion and direct producers both return contribution `20993586450920256172408012800`; all four independently rebuilt joins pass in both modes. The complete universal cache needs at most 12 weight classes per distribution, within the guarded 32-class encoding.
+- Warm recurring measurements:
+  - conversion producer: right layout `11.8252s`, GPU joins `22.660073s`, total `39.598099s`
+  - direct producer: right layout `10.4671s`, GPU joins `22.596933s`, total `37.652861s`
+  - direct construction removes `1.3581s` (`11.5%`) from right-layout work and `1.9452s` (`4.91%`) end-to-end. Join time is unchanged within noise, as expected
+- Memory: minimum free VRAM is `7,844,790,272` bytes for conversion and `7,756,709,888` for direct. The roughly 84 MiB direct-producer overhead is persistent scratch and the small ordinal metadata; the dominant resident cache remains unchanged at `37,924,597,128` bytes, so this is not a capacity optimization.
+- One-time cache construction was `54.70s` for conversion and `55.85s` for direct and is excluded from recurring time; the extra alphabet collection is lost in normal CPU run-to-run variation and is amortized across work items.
+- Outcome: accept direct grouped construction for the resident-cache `7x9` BMMA path. It realizes the proposed producer cleanup and a measured ~5% recurring improvement, but it does not accelerate the suffix join itself and is not a major algorithmic win.
+
+### Experiment 340: Prepared canonical-reference reuse in direct grouped builders
+- Goal: stop the right-layout builders from repeating canonical ownership work already performed by their batch planners. In particular, the `7x9` planner already records both universal distribution IDs and row maps, but the new direct producer repeated both 120-permutation five-column canonicalisations for every labelled right prefix.
+- Implementation:
+  - split the shared direct grouped builder around prepared selected/complement `CanonicalRef` pairs
+  - resolve the complete sorted `8x8` right-key list once by a linear merge with the canonical factory, retain exact right-index ranges with each batch, and pass the prepared references directly to the builder
+  - pass the existing `7x9` `PackedRawSourcePlan` distribution IDs and row maps directly to its resident-cache grouped builder instead of reconstructing them from raw keys
+- `8x8` IBM L40S gate:
+  - repeated 250,000-record candidate and control runs all reproduce contribution `209204392463045470661758156800` and four independent CPU joins
+  - right construction is unchanged within measurement resolution: paired values are `3.566276s` prepared versus `3.566804s` and `3.562926s` controls. The removed binary searches are negligible beside GPU expansion
+  - retain the prepared interface as exact ownership consolidation, but claim no `8x8` speedup
+- `7x9` genuine-shard IBM L40S gate:
+  - both paths process `287,201` records, `263,912` right prefixes in 162 batches, reproduce contribution `20993586450920256172408012800`, and pass all four independent joins
+  - control: right plan `3.72956s`, right layout `10.4702s`, GPU joins `22.633108s`, recurring total `37.691913s`
+  - prepared references: right plan `0.007559s`, right layout `6.95453s`, GPU joins `22.658250s`, recurring total `34.178225s`
+  - removing duplicate canonicalisation saves `3.5157s` of right construction and `3.5137s` (`9.32%`) end to end; unchanged GPU time isolates the producer win
+- One-time universal-cache construction remains approximately `55.9s` in both runs and is excluded as before.
+- Outcome: accept prepared-reference reuse. It is a substantial, exact `7x9` producer improvement and a useful shared ownership cleanup, while its `8x8` runtime effect is correctly recorded as neutral.
+
+### Experiment 341: BMMA left-bucket descriptor caching
+- Goal: transfer the scalar prefix kernel's within-task-chunk left-bucket cache to the current weight-class BMMA kernel, avoiding one uniform 16-byte descriptor load whenever consecutive Cartesian tasks retain the same left bucket.
+- Implementation and compilation: retain a cached left index and `PrefixBucket` inside each dynamically claimed task chunk. Native L40S compilation remains spill-free and unexpectedly falls from the previously recorded 38 registers to 36, with the same 68 bytes shared memory and one barrier.
+- Exact alternating 250,000-record gate on IBM L40S:
+  - both controls and both candidates reproduce contribution `209204392463045470661758156800` and four independent CPU joins
+  - control GPU joins are `11.842766s` and `12.037147s`, median `11.939957s`
+  - cached candidates are `12.079614s` and `12.147936s`, median `12.113775s`
+  - caching regresses the join by `1.46%`; right construction and memory are unchanged
+- Interpretation: the uniform descriptor load is already served efficiently by the cache/broadcast path. The extra index comparison and live bucket state execute for every task and cost more than the eliminated loads, despite the favorable register report.
+- Outcome: reject and revert BMMA left-bucket caching. Keep the direct uniform loads and do not extrapolate the scalar kernel's optimization to the grouped tensor path.
+
+### Experiment 342: Shared bit-image row permutation in direct grouped builders
+- Goal: remove the repeated generic pair-coordinate permutation from all three passes of the direct grouped producer. Every block transforms one labelled selected/complement distribution with one fixed row map, so compute that map's action on individual mask bits once per block and reuse it for every canonical entry.
+- Implementation:
+  - cooperatively build the exact image of all `2 * C(ROWS, 2)` source bits in a small shared table at block entry; this costs 448 bytes for `8x8` and 336 bytes for `7x9`
+  - transform each source mask by walking its set bits and ORing the corresponding precomputed image. Apply the same helper to packed and unpacked prefix histogram, weight-class histogram, and final suffix scatter kernels
+  - preserve the generic arithmetic transform behind `DIRECT_GENERIC_PAIR_PERMUTATION_CONTROL`. The shared transform is now the production default, but remains a compile-time representation change only: bucket geometry, ordinals, suffixes, exact weights, joins, and result accumulation are unchanged
+- Matched `8x8` 250,000-record gate on the retained IBM Ubuntu L40S:
+  - all four alternating runs reproduce contribution `209204392463045470661758156800` and four independent CPU joins
+  - generic right construction is `3.544409s` and `3.567586s` (median `3.555998s`); shared-image construction is `2.338774s` and `2.343037s` (median `2.340906s`), a `34.17%` reduction
+  - median joins are unchanged within noise (`11.923030s` generic versus `11.892466s` shared). Median total falls from `27.055494s` to `25.782518s`, a `4.71%` wall-time reduction
+- Genuine `7x9` gate with the warmed resident universal cache:
+  - the same `287,201`-record work item reproduces contribution `20993586450920256172408012800` and passes four independent joins
+  - prepared-reference right construction falls from `6.95453s` to `3.76922s`, a `45.80%` reduction; joins remain unchanged within noise (`22.658250s` versus `22.513018s`)
+  - recurring work-item total falls from `34.178225s` to `30.872172s`, a `9.67%` improvement. Combined with Experiment 340's removal of repeated canonicalisation, this is `18.09%` below the original `37.691913s` direct-builder control. The roughly 56-second one-time cache construction remains excluded
+- Complete exact `8x8` shard-0 qualification:
+  - all `7,692,657` records, `2,765,567` right groups, `4,476,686,214,612,789` logical comparisons, and 256 independent validations reproduce contribution `6440796914680148420415091507200`
+  - versus Experiment 337's accepted production baseline, right construction falls from `52.915772s` to `34.942151s`, a `33.97%` reduction (`1.5144x` faster). The unchanged BMMA joins are `370.678622s` versus `371.009648s`
+  - complete time falls from `445.011109s` to `426.138100s`, saving `18.873009s`, reducing wall time by `4.24%`, or improving shard throughput by `1.04428x`. The batch count and minimum free VRAM remain unchanged at 471 and `21,954,428,928` bytes
+- Outcome: accept the shared bit-image permutation as the direct grouped production default for both geometries. This is a producer-only optimization with exact full-shard evidence; retain the generic control for regression testing and future geometries.
+
+### Experiment 343: Memory-sized direct `7x9` right batches
+- Goal: remove avoidable launch tails and repeated right-layout overhead caused by the historical 200-million-entry cap. The direct grouped producer retains only one 32-bit suffix per entry plus sparse bucket/class metadata, whereas its inherited memory estimate still charged the peak of the old ordinary-layout conversion path.
+- Method:
+  - preserve the existing four-GiB device reserve and sweep conservative direct-layout charges of 12, 8, 6, and 5 bytes per logical right entry. The resulting memory cap is also bounded by `UINT32_MAX` and any explicit command-line cap
+  - make the direct executable request the memory-derived maximum by default; an explicit numeric cap still overrides it. Conversion and scalar executables retain their historical 200M default and accounting
+  - use the same genuine `287,201`-record `7x9` work item, warmed resident universal-cache semantics, shared row permutation, four independent CPU join validations, and IBM L40S throughout. Cache construction is one-time and excluded from recurring totals
+- Exact sweep:
+  - 200M control: 162 batches, right construction `3.77200s`, joins `22.55459s`, recurring total `30.89361s`, and `7,756,709,888` bytes minimum free
+  - inherited 12-byte memory cap: 367,995,562 entries and 88 batches; right construction `3.31345s`, joins `16.83814s`, total `24.71448s`, and `6,959,792,128` bytes free
+  - 8-byte cap: 551,993,344 entries and 59 batches; right construction `3.09528s`, joins `14.23958s`, total `21.97248s`, and `6,110,445,568` bytes free
+  - accepted 6-byte cap: 735,991,125 entries and 44 batches; right construction `2.99839s`, joins `12.76698s`, total `20.43382s`, and `5,256,904,704` bytes free
+  - aggressive 5-byte cap: 883,189,350 entries and 37 batches; total reaches `19.66848s`, but only `4,596,301,824` bytes remain. That is roughly 0.28 GiB above the intended four-GiB safety reserve on only one sampled shard, so reject it for production despite the additional 3.75% speedup
+  - every point returns contribution `20993586450920256172408012800` and passes all four independent joins
+- Result: the accepted six-byte plan cuts recurring total by `33.86%` versus the same-binary 200M control (`1.5119x` throughput), cuts join time by `43.39%`, and leaves about 0.90 GiB beyond the explicit reserve. Most of the join gain comes from fewer heterogeneous kernel-launch tails, not fewer mathematical comparisons.
+- Outcome: accept memory-sized batches with a six-byte direct-layout estimate and `UINT32_MAX` default request. Keep the estimate compile-time override for future hardware/corpus sweeps, retain explicit CLI caps for operational safety, and reject five bytes until a broader shard census proves its metadata and scratch envelope.
+
+### Experiment 344: Streamed direct-grouped producer/join overlap for `7x9`
+- Goal: combine the exact direct weight-grouped producer with the established host-cache pipeline for GPUs that cannot hold the 37.92-GB universal cache. Preserve prepared canonical references and overlap the next batch's CPU gather/H2D upload with the current batch's BMMA join.
+- Implementation:
+  - retain each prefetched chunk's logical source references, source offsets, row maps, and destination offsets; after its asynchronous upload completes, pass those sources directly to the grouped histogram/class/scatter builder
+  - refactor the resident and streamed producers through one exact source-description core. The streamed path never materialises the old ordinary `PrefixEntry` layout and never repeats canonicalisation
+  - cap logical batch entries by both free-VRAM accounting and the 4.5-GiB prefetch buffer's worst-case eight bytes per source entry. Source-aware ordering and per-chunk canonical deduplication reduce actual copied input further
+  - add `PACKED_PIPELINE_SERIAL_CONTROL`, which uses the identical batching, representation, and kernels but waits for the current join before gathering/uploading the next batch. This isolates overlap without comparing different solvers
+- Exact IBM L40S genuine-work-item gate:
+  - both serial and overlapped runs process `287,201` records in 54 batches, reproduce contribution `20993586450920256172408012800`, and pass four independent joins
+  - both cap logical batches at 603,979,776 entries. Across the work item, source-aware prefetch copies 3,654,673,202 canonical entries; the largest batch source is 167,378,737 entries (1.247 GiB), far below the fixed buffer
+  - serial control: joins `13.139741s`, recurring total `22.724686s`
+  - overlapped: joins `13.109435s`, recurring total `20.955130s`, with only `0.053257s` of measured prefetch wait. Logical gather and upload sum to `0.659986 + 1.166700 = 1.826686s`
+  - overlap saves `1.769556s`, or `7.79%` of recurring wall time, while leaving join time unchanged. It hides 96.9% of the separately measured gather/upload work after ordinary run variance
+- Hardware interpretation: the fully resident L40S path from Experiment 343 remains slightly faster (`20.433822s`, about 2.5%) because it avoids PCIe streaming and can use 736M-entry batches. The new target is therefore the preferred exact grouped path for 24-32GB GPUs, not a replacement for resident-cache operation on 48GB hardware.
+- Outcome: accept `twocolour_7x9_packed_direct_pipeline` as the streamed direct-grouped production target and retain the serial macro as a profiling control. The overlap is a useful 7x9 architecture win but does not apply to the resident `8x8` producer.
+
+### Experiment 345: BMMA-aware adaptive `8x8` row-gauge portfolio
+- Goal: revisit the rejected scalar retained-pair portfolio after the production kernel changed to weight-class BMMA and the accepted fixed prefix changed from `K4` plus an attached edge to `K4` plus a disjoint `K2`. Test all 420 row-labelled gauges using tensor tiles, class traversal, and physical-bucket traversal rather than Cartesian suffix pairs alone.
+- Diagnostic implementation:
+  - add `prefix_bmma_portfolio_8x8_oracle`, reusing the exact weighted `8x4` recurrence and grouped-bucket census. Aggregate both selected and complement joins by right group for every gauge in the exact `S_8` orbit of `K4 ⊔ K2`
+  - calibrate a positive two-term score from exact BMMA tiles and tested physical-bucket pairs against the measured 250,000-record L40S timings of the accepted disjoint-edge prefix (`12.211704s`) and attached-edge control (`15.503433s`). Continue reporting raw tile, bucket, class-pair, and suffix-cell changes so the fitted score cannot hide tradeoffs
+  - train greedy portfolios on deterministic 128-record stride samples from shards 0 and 512; hold shard 1023 out. Add `PREFIX_PAIR_MASK` so any exact seven-coordinate gauge can face the unchanged production GPU solver
+- Oracle result:
+  - all 420 candidates over 384 sampled right groups complete in `29.37s` locally
+  - on held-out shard 1023, learned portfolios of 1, 2, 4, 8, and 16 gauges reduce the calibrated score by `7.33%`, `19.86%`, `28.38%`, `33.10%`, and `37.07%`; the impossible all-420 oracle reaches `47.31%`
+  - the 16-way holdout choice reduces raw tiles `7.90%`, tested bucket pairs `72.87%`, and class pairs `50.96%`, while suffix cells fall only `5.81%`. This confirms that a scalar retained-comparison objective misses the dominant grouped-BMMA traversal tradeoff
+- Direct GPU falsification gate on the first 250,000 records of exact shard 0:
+  - the production control runs at `11.718962s` and `11.961873s` GPU time (median `11.840418s`) with `2.3373s` right construction
+  - the learned first gauge `0x804600e`, which the fitted model predicts to improve the combined training sample by `1.99%` and holdout by `7.33%`, instead takes `13.863831s` GPU (`17.09%` slower than the control median) and `2.653067s` construction
+  - the learned second member `0x400428b` takes `12.901552s` GPU (`8.96%` slower) and `2.451482s` construction. Both gauges reproduce contribution `209204392463045470661758156800` and pass four independent joins; 128-record smokes also pass
+- Interpretation: the two-gauge calibration is not transferable even within a fixed-width, fixed-graph-orbit family. It under-models launch/task distribution, bucket-size heterogeneity, and class traversal sufficiently to rank both leading static candidates in the wrong direction on a production-shaped GPU gate. The large best-of-group score therefore cannot support integration or a selector; the earlier selector-cost problem remains, now compounded by an unreliable offline objective.
+- Outcome: reject adaptive BMMA gauge integration on present evidence. Retain the exact oracle, arbitrary-mask compile path, and direct GPU gate as research infrastructure, but keep fixed `K4 ⊔ K2` as production. Reconsider only with per-group GPU-derived labels or a demonstrably predictive held-out runtime model; do not infer a 37% production win from the failed census score.
+
+### Experiment 346: Sparse occupied-prefix recording in the direct producer
+- Goal: replace the direct grouped builder's two warp-parallel scans of all 16,384 physical prefixes per labelled distribution with a sparse list recorded when each histogram counter first changes from zero.
+- Prototype: under an opt-in compile-time guard, append a 16-bit prefix through one extra atomic only on the first occurrence, use the resulting occupied count directly, and construct bucket metadata serially from the typically short list. Retain the dense 32-bit map for exact class histogram/scatter lookup; the sparse list therefore adds a transient two bytes per physical prefix.
+- Exact alternating 250,000-record IBM L40S gate:
+  - all four runs reproduce contribution `209204392463045470661758156800` and pass four independent joins
+  - control right construction is `2.336181s` and `2.341449s` (median `2.338815s`); sparse construction is `2.306495s` and `2.312431s` (median `2.309463s`), only `1.25%` faster or about 0.029s saved
+  - the sparse list reduces minimum free VRAM from `24,787,681,280` to `23,806,214,144` bytes, costing about 936 MiB on this gate
+  - because first-touch atomic order is nondeterministic, physical buckets and their class runs are no longer prefix-sorted. The mathematically unchanged join rises from a control median `11.794106s` to `11.987482s`, a repeatable `1.64%` regression; complete time likewise fails to improve
+- Scheduling context: do not add a separate multi-block work-balancing prototype. Experiment 334 already measured complete-shard BMMA drain at `5.44%`, essentially the `5.20%` unavoidable final-wave fraction for 16,384 blocks and 852 resident blocks, with an impossible zero-drain wall-time ceiling of only `4.62%`. The join kernel and batch geometry have not changed since that profile; disturbing deterministic bucket order here made scheduling worse rather than exposing a new tail win.
+- Outcome: reject and fully revert sparse first-touch recording. Keep the accepted dense histogram plus warp-parallel metadata scan: its small scan cost buys deterministic ordering, about 0.91 GiB less transient state at 250k, and faster joins. Retain only these measurements and archived rejected logs, not dead production code.
+
+### Experiment 347: Inline singleton weight-class buckets
+- Goal: remove the separate `WeightClassMeta` load and both class loops for the dominant singleton-bucket case in the exact `8x8` BMMA join. The complete shard-0 layout has only `14,287,803 - 14,000,472 = 287,331` excess left classes and `1,315,462,256 - 1,205,904,226 = 109,558,030` excess aggregate right classes, proving that at least `97.95%` of left buckets and `90.92%` of right buckets are singletons. Require an exact production-shaped speedup before changing the accepted representation.
+- Exact prototype:
+  - reuse the existing 16-bit `PrefixBucket::reserved` field as a positive singleton-weight tag when the exact weight fits `uint16_t`; otherwise preserve the separate class representation
+  - for an inline singleton, store its suffix offset/count directly in the bucket. Join singleton-by-singleton buckets without loading class metadata; handle mixed and multi-class pairs through the existing exact class traversal
+  - retain all 32-bit canonical weights, 64-bit promoted products/results, 12-byte bucket ABI, suffix-only entry layout, prefix order, task scheduler, and result restoration. Add `WEIGHT_CLASS_SEPARATE_METADATA_CONTROL` as a matched old-representation control
+- Exactness and compilation on the retained IBM Ubuntu L40S worker:
+  - a 128-record candidate validates all 128 requested edge checks and reproduces contribution `127976068295393315055206400`; all 8,192- and 250,000-record candidate/control runs reproduce their established contributions and four independent joins
+  - the unconstrained candidate grows from 38 to 48 registers without spills, reducing residency from six to five blocks per SM. Its two 8,192-record joins take `0.413690s` and `0.413070s`, versus `0.396309s` and `0.396443s` for the matched control, a `4.29%` regression
+  - adding `__launch_bounds__(256, 6)` restores six-block residency at 40 registers but introduces 20 bytes of spill stores and 16 bytes of spill loads. A second alternating 8,192-record gate is effectively tied/slightly worse: candidate median `0.397557s` versus control `0.394460s`
+- Decisive alternating 250,000-record gate:
+  - controls take `11.727569s` and `11.935327s` of GPU join time, median `11.831448s`; candidates take `12.107887s` and `12.178324s`, median `12.143106s`, a `2.63%` regression
+  - total wall medians are `25.684727s` control and `26.047317s` candidate, a `1.41%` regression. Right construction remains unchanged at approximately `2.34s`, isolating the loss to the join kernel
+- Interpretation: the class metadata and one-iteration loops are already cheap and cache-friendly. Encoding the common case saves loads dynamically, but the additional live bucket state and mixed-path control either lower occupancy or spill enough state to outweigh that saving. Singleton incidence alone is therefore not a sufficient optimization signal for this kernel.
+- Artifacts: preserve candidate/control binaries, sources, ptxas reports, exact smoke, both 8,192-record variants, and alternating 250,000-record logs under `../rectangle-free-data-v2/profiles/ibm-l40s-8x8-singleton-inline-20260818/`.
+- Outcome: reject and fully revert singleton inlining. Keep the production 38-register separate-class kernel unchanged. Proceed to a read-only adaptive compatible-prefix census, which targets the much larger incompatible physical-bucket traversal rather than already-efficient compatible class metadata.
+
+### Experiment 348: Adaptive compatible-prefix enumeration for weight-class BMMA
+- Goal: avoid much of the accepted 14-bit kernel's incompatible physical-bucket traversal without paying for enumeration where a sequential Cartesian scan is cheaper. Reuse the direct producer's still-resident dense right-prefix map, choose per left bucket between scanning every occupied right bucket and enumerating all submasks of the left prefix's complement, and require a large offline work reduction plus a direct exact GPU win.
+- Read-only exact census:
+  - extend `prefix_bmma_cost_census` to report the exact adaptive probe count `sum_left min(right_bucket_count, 2^(14-popcount(left_prefix)))`, corresponding 16-probe task chunks, and the fraction of left buckets choosing enumeration. Existing exact compatible pairs, suffix cells, class pairs, BMMA tiles, and prefix-search ranking are unchanged
+  - on 64 stride-sampled shard-0 records, probes fall to `5,971,018 / 13,821,554 = 43.20%` and modeled chunks to `389,821 / 863,892 = 45.12%`; `43.07%` of visited left buckets enumerate
+  - on 256 records from each of checked shards 0, 512, and 1023, probes fall to `109,221,995 / 199,311,318 = 54.80%` and chunks to `7,112,946 / 12,457,477 = 57.10%`; `41.04%` enumerate. This robust `45.20%` probe reduction clears the requested offline gate
+- Exact CUDA prototype:
+  - add a temporary opt-in kernel that assigns one complete left bucket to each dynamically scheduled warp. Enumeration probes the existing 32-bit dense right map and validates the returned global bucket range and exact prefix; Cartesian cases retain the sorted sequential scan. Every task is bounded by the occupied right-bucket count
+  - the 128-record candidate validates all 128 requested edge checks and reproduces contribution `127976068295393315055206400`; all later candidate/control runs reproduce the established 8,192-record contribution and four independent joins
+  - the natural kernel compiles at 43 registers without spills, versus production's 38. Alternating 8,192-record joins take `0.475451s` and `0.473024s`, versus controls `0.399702s` and `0.400689s`: an `18.50%` regression despite the large probe reduction
+- Bounded refinement sweep:
+  - require enumeration to be 2x, 4x, 8x, or 16x smaller than the right bucket list before selecting it. Matched 8,192-record times are respectively `0.476446s`, `0.493395s`, `0.471866s`, and `0.483134s`; none approaches the surrounding control median `0.399946s`
+  - `__launch_bounds__(256, 6)` produces a spill-free 38-register adaptive kernel, disproving occupancy as the sole explanation, but bias-1 runs regress further to `0.512344s` and `0.506876s` versus a surrounding control median `0.393695s`. Bias 8 takes `0.506995s`
+- Interpretation: one dense random lookup plus submask-state update and range/prefix validation costs much more than one coalesced, deterministic bucket descriptor load plus bitwise rejection. Per-left warp tasks also discard the accepted 16-pair chunk scheduler's regularity. Raw rejected-pair counts therefore substantially overstate the removable GPU cost, exactly as the older 7x9 compatible-prefix experiment suggested; the larger 14-bit rejection ratio does not reverse the result.
+- Gate: reject before 250,000 records. The best adaptive point is already about 18% slower in the exact 8,192-record gate, far outside run variation and the acceptance threshold.
+- Artifacts: preserve the three-shard census, exact logs, all bias/occupancy binaries and ptxas reports, and temporary source snapshots under `../rectangle-free-data-v2/profiles/ibm-l40s-8x8-adaptive-compatible-prefix-20260818/`.
+- Outcome: fully revert the CUDA prototype and retain only the generally useful read-only adaptive-probe fields in `prefix_bmma_cost_census`. Keep the sorted Cartesian physical-bucket traversal in production. Future work should target canonical-source locality in right construction or cache-safe join ordering, not dense compatible-prefix lookup.
+
+### Experiment 349: Canonical-source-ordered recurring right construction
+- Goal: exploit repeated immutable canonical `8x4` inputs during the three-pass direct grouped producer. Preserve every destination offset and logical `PrefixPair`, but launch descriptions consuming the same canonical source consecutively so its masks and compact weight ordinals remain cache-hot.
+- Complete shard-0 ownership census:
+  - `5,531,134` selected/complement right descriptions refer to only `25,207` canonical source distributions globally
+  - within the accepted 16,384-edge batch geometry, there are `584,575` unique source references, a `9.46x` description/source reuse factor. Only `1.25%` of descriptions currently have the same source as their predecessor; source sorting reduces source runs by `9.34x`
+  - exact labelled layout pairs still do not deduplicate: all `2,765,567` raw right prefixes have distinct `(selected source,row map,complement source,row map)` pairs. The experiment changes input locality only and cannot remove output expansion
+- Temporary exact implementation:
+  - assign destination entry offsets in unchanged logical right-key order, sort only the recurring right build descriptions by `(canonical source offset, count, row map)`, and retain a launch-to-logical permutation when constructing the host `PrefixPair` descriptors
+  - do not reorder the persistent left layout or any join descriptor. Histogram, metadata, class construction, scatter, suffix order freedom, heavy-first joins, and result restoration remain otherwise unchanged
+- Exact IBM L40S gates:
+  - 128 records reproduce contribution `127976068295393315055206400` and pass four independent joins
+  - alternating 8,192-record right construction is effectively identical: candidate median `0.083664s` versus control `0.083678s`; joins are likewise unchanged
+  - at 250,000 records, all four runs reproduce contribution `209204392463045470661758156800` and pass four independent joins. Right construction falls from control median `2.342399s` to `2.322937s`, only `0.83%` or `0.019462s`
+  - join medians are `11.833384s` control and `11.863627s` candidate, within ordinary variation/slightly worse. Recurring construction plus join is `14.175783s` control and `14.186563s` candidate; the candidate therefore has no measurable recurring win. Total medians differ by only `0.18%` in its favor because of unrelated factory/upload variation
+- Interpretation: the strong logical source reuse is already captured well enough by the GPU cache hierarchy. Canonical input reads are small beside repeated row transformation, dense histogram atomics, suffix scatter, and output writes; reducing source runs by more than ninefold barely moves the measured producer.
+- Artifacts: preserve exact logs, binary, ptxas report, and temporary source snapshots under `../rectangle-free-data-v2/profiles/ibm-l40s-8x8-canonical-source-order-20260818/`.
+- Outcome: reject and fully revert source-ordered construction. The sub-1% producer-stage change is far below the acceptance threshold and has effectively zero end-to-end value. Keep raw-right description order and avoid adding a launch/logical permutation to production.
+
+### Experiment 350: Heavy-band left-layout locality scheduling
+- Goal: exploit repeated persistent-left layouts without discarding the accepted global heavy-first schedule. Sort joins by exact work as before, then reorder only fixed-size contiguous work bands by `(left ID, selected/complement)` so simultaneously resident blocks are more likely to reuse left bucket/class/suffix cache lines.
+- Reuse census on complete solve shard 0:
+  - `7,692,657` edges use only `15,065` distinct left prefixes, mean `510.63` edges per left; the ten highest-incidence lefts occur between `51,853` and `144,962` times
+  - an edge-cap simulation of the accepted 16,384-edge batches touches about `1,407.4` distinct lefts per batch, suggesting roughly `11.6x` intra-batch reuse. Only `11.1%` of adjacent edges in raw right order already share a left
+- Exact temporary implementation: retain the first exact descending-work sort, divide its output into bands of 128, 256, 512, or 1,024 blocks, sort within each band by the dense left-layout ID plus component, and preserve the existing logical result permutation. No device representation, kernel instruction, batch boundary, or arithmetic changes.
+- IBM L40S 8,192-record sweep:
+  - all variants reproduce contribution `6961871358394820335396454400` and pass four independent joins; a separate 128-record smoke also passes
+  - surrounding controls have median GPU time `0.394693s`; bands 128, 256, 512, and 1,024 take `0.393753s`, `0.397200s`, `0.397786s`, and `0.394503s`, respectively. The apparent sub-quarter-percent changes at 128/1,024 are far below run variation
+- Production-shaped 250,000-record gate:
+  - surrounding controls take `11.746367s` and `11.952931s`, median `11.849649s`
+  - the 128-block band takes `11.828767s` and `11.947745s`, median `11.888256s`, or `0.33%` slower. The 1,024-block band takes `11.903491s`, also about `0.45%` slower than the control median
+  - all candidates reproduce contribution `209204392463045470661758156800` and pass four independent joins. Construction is unchanged; 128-band total median `25.765675s` is `0.16%` slower than control median `25.724764s`
+- Interpretation: global incidence substantially overstates cache reuse available to concurrent blocks. Each right join touches different compatible portions of a left layout, the existing L2 already has a high hit rate, and even narrow locality bands perturb exact heavy ordering enough to erase any residual benefit.
+- Artifacts: preserve all exact logs, four binaries, and the temporary source snapshot under `../rectangle-free-data-v2/profiles/ibm-l40s-8x8-left-locality-bands-20260818/`.
+- Outcome: reject and fully revert left-locality banding. Retain the simple exact heavy-first schedule; it remains the best measured block order and avoids another host-side key vector/sort. This completes the four new candidates from the review without changing the accepted production solver.
+
+### Experiment 351: Resident universal canonical cache across `8x8` solve shards
+- Goal: amortise the immutable canonical `8x4` distribution factory and its device upload across consecutive solve shards. The accepted complete shard-0 run spends `9.15-9.91s` constructing this factory and `4.37-4.53s` uploading it, about 3% of end-to-end time, even though every shard uses the same mathematical source universe.
+- Cross-shard source census:
+  - exhaustive enumeration starts from all `C(16+8-1,8) = 490,314` multisets of eight 4-bit row patterns and quotients them by all 24 column permutations. There are exactly `25,207` binary `8x4` row/column orbits
+  - complete shard 0 contains all `25,207` selected-or-complement canonical sources. It is therefore a mathematically universal seed, not merely a high-coverage empirical sample
+  - checked complete shards 1, 2, 3, 127, 511, and 1023 contain respectively `23,620`, `22,815`, `22,012`, `22,444`, `22,936`, and `21,819` sources; every source in every checked shard is present in shard 0, adding zero sources to the union
+  - raw labelled-prefix overlap is much lower: shard 0 directly contains only `53.44%`, `52.55%`, `56.28%`, `56.92%`, `54.52%`, and `57.77%` of those shards' raw prefixes. Reuse must therefore transfer each missing raw prefix's row permutation to a resident canonical source rather than rely on raw-key identity
+- Implementation:
+  - retain sorted canonical source keys alongside descriptor offsets in `CanonicalFactory`, allowing any raw prefix to be canonicalised and resolved against a pre-existing factory. Parallel resolution reports a clean error if a later shard requires a source absent from the seed
+  - accept comma-separated orbit paths in `twocolour_8x8_prefix_solve`; construct and upload one cache before the solve loop, retain it on the GPU, and rebuild only shard-specific left/right layouts. `PREFIX_CANONICAL_SEED` can point workers whose assigned list does not start at shard 0 to the universal shard-0 corpus
+  - preserve the single-path CLI and avoid an extra input read when the solved path is also the seed. Add path-qualified `INPUT`/`RESULT` records and explicit shared-cache/canonical-resolution timing
+  - production example: `PREFIX_CANONICAL_SEED=solve/s0000.orbits ./twocolour_8x8_prefix_solve solve/s0001.orbits,solve/s0002.orbits 0 0 16384 4 0 0 direct-weight-class`
+- Exact IBM L40S validation:
+  - a two-shard 1,000-record smoke passes all four independent joins in each shard. Shard 1 resolves against shard 0's cache with zero factory/upload time and reproduces contribution `893279092154692587621580800`
+  - the complete shared run reproduces shard-0 contribution `6440796914680148420415091507200`; total is `426.331820s` versus the prior accepted `426.138100s` (`+0.05%`, measurement noise), with GPU joins `370.298648s` versus `371.009648s`. The refactor therefore has no measurable cold-path regression
+  - warm complete shard 1 reproduces contribution `6218750460859864509471547392000`, passes four joins, and takes `392.652181s`: factory `0`, upload `0`, right construction `34.175893s`, and GPU joins `352.520671s`
+  - the same shard run cold in a fresh process takes `407.289103s`: factory `9.603216s`, upload `4.369765s`, right construction `34.460897s`, and GPU joins `352.486740s`. Retention saves `14.636922s`, or `3.59%` end to end (`1.0373x` throughput), while recurring GPU time is identical within `0.01%`
+- Scale and limits: one process solving all 1,024 shards would save about `4.16` L40S-hours after the first cache build. With 128 long-lived workers each handling eight shards, the seven warm shards per worker save about `3.64` aggregate GPU-hours. The optimisation does not remove per-shard raw-prefix resolution or labelled layout expansion; its measured ceiling is intentionally small but reliable.
+- Artifacts: preserve the complete cold and shared logs under `../rectangle-free-data-v2/profiles/ibm-l40s-8x8-shared-cache-20260818/`.
+- Outcome: accept resident canonical-cache reuse for future `8x8` runs. Seed from solve shard 0, assign multiple consecutive solve files to each long-lived GPU process, and keep all existing direct grouped/BMMA join, batching, and exact result contracts unchanged.
+
+### Experiment 352: GPU production/experiment code separation
+- Goal: reduce the active GPU review surface without deleting exact research artifacts, regression implementations, or historical CLIs. Preserve generated code and runtime behavior: this is source organisation, not an optimization experiment.
+- Standalone archive:
+  - move the six isolated census/probe programs into `archive/gpu/`: the 7x5 canonical census, 7x9 cache census, then-experimental four-owner solver, two 8x8 BMMA probes, and synthetic GPU benchmark
+  - these files total exactly `4,252` CUDA lines. Their original Make target names remain supported, and all six target configurations compile on the retained IBM Ubuntu L40S worker
+- Shared/legacy separation:
+  - extract `1,207` lines of geometry, orbit, distribution, canonicalisation, and exact join foundations into `twocolour_gpu_common.cuh`; reduce `twocolour_7x7_gpu.cu` to its `563`-line legacy standalone entry point
+  - remove the `#define main twocolour_legacy_main` inclusion trick. Newer prefix solvers include the shared header directly
+  - extract the final `609`-line historical prefix CLI from `twocolour_7x8_prefix_gpu.cu` into `legacy/gpu/twocolour_prefix_legacy_main.cu`. The reusable prefix implementation is now `3,358` lines, and all old standalone, packed-cache, hierarchy, and compatible-prefix Make targets compile through the wrapper
+  - update every tracked Modal build to upload the new shared header and include it in the 8x8 source fingerprint. Add correct incremental Make dependencies without changing `$<` recipes
+- Naming correction: rename active feature gates from `GPU_PREFIX_BUILDER_PROBE` and `UNIVERSAL_PACKED_CACHE_PROBE` to `GPU_PREFIX_BUILDER` and `PACKED_CANONICAL_CACHE`. Retain compatibility aliases for historical experiment commands. The old names had become actively dangerous to cleanup work because both facilities are now production dependencies.
+- Resulting review surfaces:
+  - current 8x8: `6,707` physical lines across CUDA utilities, common foundations, prefix library, direct weight-class/BMMA implementation, and solve orchestration
+  - current 7x9: `7,728` physical lines across its corresponding active files
+  - the combined unique active implementation is `8,692` lines because most of the mathematical and GPU machinery is shared. Legacy entry points add `1,174` isolated lines; archived standalone probes remain `4,252` lines
+- Validation on IBM L40S:
+  - legacy 7x7, legacy 7x8 prefix, legacy 8x8 hierarchy, legacy packed-cache, production 7x9 direct pipeline, and production 8x8 targets all compile after the splits
+  - the production 8x8 1,000-record exact smoke reproduces contribution `771497379010863056240640000` and passes four independent joins
+  - no kernel body, layout representation, arithmetic, launch geometry, batching rule, or result contract changes in this cleanup; no performance change is claimed
+- Boundary decision: retain the generic row-permutation control and exact scalar/conversion fallbacks for regression testing. Do not mechanically remove interleaved blocks solely because their historical macro contains `PROBE`: the packed canonical cache audit proved that some have become accepted production infrastructure.
+- Outcome: accept the structural cleanup. Future performance reviews should start from `GPU_CODE.md`; archived and legacy files are reproducibility surfaces, not production dependencies.
+
+### Experiment 353: Full-shard resident versus large-stream `7x9` on L40S
+- Goal: explain why production shard `s0076` was slower on the IBM L40S than the earlier Vast RTX 5090 campaign and test the streamed direct-grouped path with enough prefetch capacity to recover large right batches.
+- Diagnosis and correctness repair:
+  - the resident 37.92-GB universal cache left room for only `689,154,730` logical right entries on the 46,068-MiB L40S. Exact `s0076` therefore required 1,331 right batches, despite healthy grouped BMMA kernels
+  - the direct grouped builder incorrectly rejected an exact empty distribution because its weight alphabet was empty. Accept `(entry count, weight-class count) = (0,0)` and reject only disagreement between those zero states; construction, products, and accumulation remain otherwise unchanged
+- Matched full-shard method:
+  - compile the accepted streamed direct pipeline with a 20-GiB prefetch buffer, retain the universal cache in 120-GB host RAM, and preserve the four-GiB device reserve
+  - run the identical `s0076` orbit file, `UINT32_MAX` requested entry cap, 24 OpenMP threads, and four independent CPU join validations on the same IBM Ubuntu L40S worker
+  - exclude the one-time universal-cache build from both recurring shard totals. It takes `68.529519s` streamed versus approximately 55s resident and is amortised across the process
+- Exact result: both variants process `27,032,911` records, cover weight `70,133,973,983,220,000`, execute `10,584,181,212,375,360` direct comparisons, return contribution `19040643238023349838476574515200`, and pass all four validations.
+- Matched timings:
+  - resident cache: 1,331 batches, right construction `92.2638s`, BMMA joins `901.192653s`, recurring total `1109.327295s`, and `5,063,966,720` minimum free bytes
+  - 20-GiB streamed cache: 342 batches, effective cap `2,684,354,560`, right construction `83.3730s`, BMMA joins `839.845264s`, recurring total `1036.688358s`, and `12,162,826,240` minimum free bytes
+  - streaming cuts batches by `74.31%`, right construction by `9.64%`, joins by `6.81%`, and recurring wall time by `72.638937s` or `6.55%` (`1.0701x` throughput)
+  - source-aware prefetch copies at most `69,025,103` canonical entries (`0.514 GiB`) in one chunk. Across 342 batches, planning, gathering, and upload cost `1.999911s`, `0.861335s`, and `1.497772s`; measured pipeline wait is only `0.023009s`
+- Production integration:
+  - make the direct pipeline's prefetch capacity configurable with `PACKED_PREFETCH_MIB` while preserving the 4,608-MiB default; build the IBM binary with `PACKED_PREFETCH_MIB=20480`
+  - make the IBM supervisor's remote binary selectable, resume at `s0077`, retain atomic completed results, and continue automatic input synchronisation, result pulling, exact final aggregation, and instance shutdown
+  - at the current `£0.698134/hour` spot rate, the 51 shards remaining after `s0076` should save roughly `1.03` L40S-hours or `£0.72`, apart from shard-to-shard variation and preemption restarts
+- Outcome: use the 20-GiB streamed direct pipeline for the rest of this IBM L40S campaign. Full residency is not automatically faster when it starves the recurring right layout and creates excessive heterogeneous batch tails; the exact full-shard A/B justifies the streamed architecture here.
+
+### Experiment 354: Parallel `7x9` canonical-source planning
+- Goal: attribute and remove the large host-only interval between loading a full solve shard and launching its first right batch. The source planner canonicalised every selected/complement 7x5 right prefix serially, testing all 120 column permutations twice for each of 7.36 million unique prefixes in `s0076`.
+- Implementation:
+  - construct fixed-position `PackedRawSourcePlan` records with an OpenMP static parallel loop; the canonical cache is immutable, each output index is independent, and the existing exact canonicalisation and lookup routines are unchanged
+  - retain the memory-cap validation as a serial pass after parallel construction so failure remains deterministic
+  - report `right_source_plan_seconds`, `right_source_sort_seconds`, and `right_schedule_seconds` separately. The last includes source-aware sorting, batch assignment, and the linear edge/right ownership pass; the pre-existing `right_plan_seconds` continues to mean streamed per-batch source planning
+- Matched full-shard IBM L40S gate:
+  - use the identical `s0076` input, 20-GiB streamed direct grouped/BMMA binary, 24 OpenMP threads, 342 batches, `10,584,181,212,375,360` direct comparisons, and four independent CPU join validations from Experiment 353
+  - the candidate reproduces exact contribution `19040643238023349838476574515200` and all workload/memory counters. GPU joins are effectively identical: `839.823144s` candidate versus `839.845264s` control
+  - parallel canonical-source planning takes `6.95283s`; source-aware `std::sort` takes `2.90002s`; the complete batch/ownership schedule takes `3.49357s`
+  - recurring total falls from `1036.688358s` to `943.258473s`, saving `93.429885s` or `9.01%` end to end (`1.0991x` throughput)
+  - relative to the original resident-cache run, the combined large-stream and parallel-plan changes save `166.068822s`, reduce wall time by `14.97%`, and improve throughput by `1.1761x`
+- GPU-offload decision: reject a GPU canonicalisation/radix-sort prototype for now. After OpenMP, a mathematically impossible zero-cost replacement of source generation plus the whole downstream schedule can save only `10.4464s`, or `1.11%` of the new shard total. Real transfers, kernel work, and retained host batching reduce that ceiling further. Reconsider only if larger 7-row geometries make this phase grow materially or it can be fused with a broader device-resident scheduler.
+- Production integration: resume the IBM campaign at `s0078` with the exact parallel-plan binary; `s0076` and `s0077` remain atomically validated and locally pulled. With 50 shards remaining at promotion, the measured per-shard delta represents roughly `1.30` L40S-hours or `£0.91` at the current spot price, before shard variation and preemption.
+- Outcome: accept CPU-parallel source planning and the explicit timing fields. It is the large missed 7x9 host optimization; the measurement also removes the immediate justification for a bespoke GPU canonicaliser.
+
+### Experiment 355: Dense right IDs and batch-allocation ceilings for `7x9`
+- Goal: replace one `lower_bound` over the current batch's sorted right keys for every solve edge with an exact pre-resolved batch-local right-layout ID, then use explicit timings to decide whether persistent join/result or right-layout buffers warrant implementation.
+- Candidate:
+  - assign every global right key its batch-local ordinal after batch sorting, and record that ordinal for each edge during the existing linear edge/right ownership merge
+  - use the ordinal for O(1) checked right-pair access during descriptor construction. The candidate adds one `uint32_t` per edge (about 103 MiB on `s0076`) plus one per unique right key
+  - add separate accumulated timings for join planning/upload, result allocation/download, join/result frees, and right-layout frees. These diagnostics remain useful independently of the rejected representation
+- Matched exact full-shard IBM L40S gate:
+  - both variants use the accepted 20-GiB streamed, 24-thread parallel-plan path, process the same 27,032,911 records in 342 batches, execute `10,584,181,212,375,360` direct comparisons, reproduce contribution `19040643238023349838476574515200`, and pass four independent joins
+  - binary-search control: join planning `1.56812s`, right scheduling `3.34568s`, GPU `840.078182s`, total `943.370466s`
+  - dense IDs: join planning `0.888146s`, right scheduling `3.38363s`, GPU `841.012317s`, total `943.577791s`
+  - dense IDs make descriptor planning `43.36%` faster but save only `0.679974s`; their extra schedule work consumes about `0.03795s`. The resulting ideal net saving is about `0.642s`, only `0.068%` of a shard. Observed totals are reversed by the unrelated `0.934s` GPU variation
+- Allocation ceilings from the timed control:
+  - join upload (allocation plus mandatory copy) `0.724637s`, result allocation `0.070051s`, result download `0.084564s`, and join/result frees `0.172978s`
+  - even the impossible elimination of join upload plus result allocation plus both frees saves under `0.968s` (`0.103%`); actual persistent join/result buffers retain the copies and therefore have a substantially smaller ceiling
+  - right-layout frees total `2.32565s`. A persistent output arena could also remove some allocation work currently embedded in construction, but the measured free-side ceiling is only `0.247%`; deprioritise it unless later profiling exposes a larger allocation-side cost
+- Outcome: reject and revert dense right IDs; the 103-MiB edge-side array and ownership complexity are not justified by a sub-0.1% theoretical win. Also reject persistent join/result buffers on the measured ceiling. Retain the new timing fields, keep the simpler exact binary searches, and resume production at `s0079` with 79/128 results complete.
+
+### Experiment 356: Give the shared prefix implementation header identity
+- Goal: make the active GPU dependency graph honest. The reusable 3,358-line prefix implementation is textually included by both production solvers, but retained the misleading standalone name `twocolour_7x8_prefix_gpu.cu` after its historical CLI was extracted in Experiment 352.
+- Change:
+  - move the implementation to `twocolour_prefix_core.cuh`; production 7x9, production 8x8, and the isolated legacy wrapper now include that header directly
+  - retain `twocolour_7x8_prefix_gpu.cu` as a three-line compatibility forwarding unit so commands recorded by earlier experiments remain valid
+  - add the header to the common Make prerequisites, update the GPU code map, and make the tracked Modal 8x8 image upload and fingerprint the real header
+- Validation:
+  - `git diff --check` and Python bytecode compilation of the Modal driver pass
+  - an isolated build directory on the live IBM Ubuntu L40S worker successfully compiles 12 configurations: legacy 7x7, legacy 7x8 prefix, legacy 8x8 compatible hierarchy, legacy packed cache, production 7x9 direct pipeline, production 8x8, and all six archived CUDA probes
+  - the active 7x9 production process remains resident and is neither rebuilt nor interrupted
+- Scope: this is a source-identity cleanup only. Apart from a comment prepended to the moved header, the included implementation is byte-for-byte unchanged; no macro, kernel, layout, batching rule, or arithmetic changes.
+- Outcome: accept. Active reviews and new build integrations should use `twocolour_prefix_core.cuh`; the old `.cu` name is compatibility surface only.
+
+### Experiment 357: Isolate rejected `7x9` suffix-query prototypes
+- Goal: remove the adaptive Patricia/ZDD suffix-query experiment from the production 7x9 orchestration without losing the exact negative experiment or its historical profiling build.
+- Change:
+  - move the 160-line host Patricia/ZDD definitions into `gpu_experiments/twocolour_7x9_suffix_structures.cuh`
+  - move the 235-line heavy-bucket census, exact query checks, and timing report into the statement-level `gpu_experiments/twocolour_7x9_suffix_structure_profile.inc`
+  - leave two small includes behind `PROFILE_SUFFIX_STRUCTURES`; ordinary production preprocessing never opens either experiment module
+  - reduce `twocolour_7x9_packed_solve.cu` from 2,037 to 1,644 lines and the current 7x9 production review surface to 7,391 physical lines
+- Validation on the live IBM Ubuntu L40S worker:
+  - the accepted streamed direct-grouped/BMMA production configuration compiles
+  - the historical `PROFILE_PREFIX_BUCKET_PAIRS + PROFILE_SUFFIX_STRUCTURES` configuration also compiles, proving the relocated experiment remains reproducible
+  - the before/after production executables have byte-identical dumped GPU SASS; ELF hashes differ because moving source changes compiler source-location metadata
+  - the active 7x9 production process remains resident and is not interrupted
+- Outcome: accept as a zero-runtime-change cleanup. Keep the rejected query structures available for audit, but outside the normal production review surface.
+
+### Experiment 358: Isolate the rejected suffix-bitplane implementation
+- Goal: remove another self-contained rejected join implementation from the prefix core while retaining the exact historical control.
+- Change:
+  - move 212 lines of bitplane construction and disjoint-join CUDA kernels to `gpu_experiments/twocolour_suffix_bitplane_kernels.cuh`
+  - move the 65-line device index type, builder, and destructor to `gpu_experiments/twocolour_suffix_bitplane_layout.cuh`
+  - leave two includes behind `PROTOTYPE_SUFFIX_BITPLANES`; production preprocessing does not open either module
+  - reduce `twocolour_prefix_core.cuh` from 3,362 to 3,087 lines. The current physical review surfaces become 6,436 lines for 8x8 and 7,116 for 7x9
+- Validation on the live IBM Ubuntu L40S worker:
+  - production 7x9 direct-grouped/BMMA, production 8x8, and the historical `PROTOTYPE_SUFFIX_BITPLANES` configuration all compile
+  - dumped GPU SASS for both production solvers is byte-identical before and after the extraction
+  - the active production campaign is not interrupted
+- Boundary decision: do not mechanically extract the old hierarchical-prefix path in this pass. Its configuration fields, bucket metadata, construction kernels, and launch orchestration are interleaved throughout the core rather than forming a comparably self-contained module. A safe separation first requires an explicit layout/build policy interface; line-count reduction alone does not justify that refactor risk.
+- Outcome: accept the suffix-bitplane split. The normal core retains production scalar-prefix construction/join code and shared packed-cache infrastructure; rejected bitplane research remains reproducible outside the review surface.
+
+### Experiment 359: Consolidate direct weight-grouped layout construction
+- Goal: remove the remaining duplicated host-side histogram/scan/metadata/scatter pipeline from the 7x9 packed builder and 8x8 canonical builder without merging their geometry-specific source planning or CUDA entry decoders.
+- Change:
+  - add one templated `build_direct_weight_class_layout_from_descriptions` pipeline beside the shared direct-grouped kernels. It owns dense-prefix allocation, occupied-bucket counting, variable-width candidate allocation, metadata construction, class scans, output allocation, error checks, and timing
+  - retain small caller-supplied launch closures for the two exact source encodings: packed 7x9 entries and separate 8x8 mask/weight/ordinal arrays
+  - keep canonical-reference planning in the 8x8 wrapper and streamed/prefetched source planning in the 7x9 wrapper; these are genuinely different responsibilities
+  - remove 71 net production lines. The current physical review surfaces are 6,471 lines for 8x8, 7,045 for 7x9, and 8,009 unique lines combined
+  - replace stale Make prerequisites on the compatibility `twocolour_7x8_prefix_gpu.cu` shim with the real `twocolour_prefix_core.cuh`, so clean production build contexts no longer need the historical forwarding unit
+- Static/compile validation:
+  - both accepted production configurations compile on the live spot worker, and their dumped GPU SASS is byte-identical to the pre-consolidation binaries
+  - the complete 12-target matrix from Experiment 356 also compiles after the consolidation, covering legacy prefix/hierarchy/cache controls and all six archived CUDA programs
+  - the stopped Ubuntu L40S validation worker was started only for exact runtime checks; the active 7x9 campaign remained resident and untouched
+- Exact IBM L40S runtime gates:
+  - 8x8 shard-0 records `[0,1000)` execute `574,188,477,862` comparisons, reproduce contribution `771497379010863056240640000`, and pass four independent joins
+  - 7x9 shard-0 records `[0,10000)` execute `3,790,178,168,461` comparisons, reproduce contribution `6965240699339373171164774400`, and pass four independent joins
+  - the 7x9 smoke manifest is retained under `gpu_experiments/` for future structural refactors
+- Scope: this is consolidation, not a performance optimization. Kernel bodies, source order, class ordering, scan widths, launch geometry, and result arithmetic are unchanged; no speedup is claimed.
+- Outcome: accept. There is now one direct grouped-layout construction pipeline shared by both production geometries, with only the representation-specific source planning and three decoder launches remaining in their wrappers.
+
+### Experiment 360: Extract the historical two-level hierarchy
+- Goal: make the production prefix core completely independent of the rejected historical hierarchy while preserving both old hierarchy executables and their exact behavior.
+- Structure:
+  - move hierarchy configuration checks, `HierarchyBucket`, the two-level mask split, the complete CPU layout builder, the leaf-bucket join helper, and `hierarchy_disjoint_joins` into `legacy/gpu/twocolour_prefix_hierarchy.cuh`
+  - give the historical layout its own `HierarchyPackedLayouts` type and `build_hierarchy_prefix_layout` entry point. The legacy CLI selects this implementation through a typed adapter; the ordinary legacy prefix CLI continues to use the production `PackedLayouts` and `build_prefix_layout`
+  - add the hierarchy header as an explicit prerequisite of the two historical Make targets
+  - simplify the production layout builder to its single-level path and remove every `HIERARCHICAL_PREFIX`/`HIERARCHY_*` symbol, conditional field, alternate builder branch, and hierarchy kernel from `twocolour_prefix_core.cuh`
+- Review-surface result:
+  - the production prefix core falls from 3,087 to 2,712 lines, with zero hierarchy references
+  - the active physical surfaces become 6,096 lines for 8x8, 6,670 for 7x9, and 7,634 unique production lines combined
+  - the complete historical implementation is a self-contained 436-line legacy header rather than 375 interleaved production-core lines
+- Validation:
+  - production 7x9, production 8x8, ordinary legacy prefix, base hierarchy, and compatible-children hierarchy configurations compile on IBM L40S
+  - dumped GPU SASS for both production solvers and the compatible-children hierarchy binary is byte-identical to the pre-extraction binaries
+  - a matched old/new compatible-hierarchy run on 8x8 shard-0 records `[0,1000)` produces identical layout cardinalities: `40,740,510` left entries, `66,240,736` right entries, `320,141`/`220,923` parent buckets, and `3,760,323`/`2,081,725` leaf buckets
+  - both old and new runs execute 2,000 joins, pass all 32 independent validations, and report `exact=OK`
+  - the temporary validation L40S is stopped immediately afterward; the active 7x9 campaign remains untouched
+- Scope: source separation only. The historical builder order, bucket representation, launch geometry, join arithmetic, and result contract are unchanged; no performance claim is made.
+- Outcome: accept. Production reviews no longer need to reason about the abandoned two-level layout, while its exact executable remains reproducible through the existing Make target names.
+
+### Experiment 361: BMMA-aware `7x9` prefix width and coordinate geometry
+- Goal: revisit the production 10-bit prefix after the weight-class BMMA integration. Test whether a wider prefix or a different five-coordinate graph reduces physical BMMA suffix work enough to improve recurring end-to-end solve time.
+- Production-shaped width sweep on genuine owner shard `s0108`:
+  - all candidates use the streamed universal cache, direct weight-grouped builder, BMMA join, 4,608-MiB prefetch capacity, 24 OpenMP threads, and four exact CPU validations
+  - the 10-bit control takes `13.11-13.20s` of GPU work and `17.39-17.47s` recurring total across three runs
+  - 12 bits reduce GPU work only to `12.94-12.96s`, while right construction rises from `4.88s` to `5.84s`; recurring total regresses to `18.44-18.45s`
+  - 14 bits are decisively worse: `17.521063s` GPU, `8.22747s` right construction, and `26.932985s` recurring total. Its larger generic histograms require opt-in dynamic shared memory, which remains experiment-only and is not retained in the production core
+  - all widths process `287,201` records, execute `107,830,043,941,063` direct comparisons, reproduce contribution `20993586450920256172408012800`, and pass all validations
+- Same-width geometry search:
+  - the old five-pair graph is `{01,02,03,04,12}` (`PREFIX_PAIR_MASK=0x4f`), a triangle with two spokes. The candidate is `{01,02,03,12,13}` (`0xc7`), or `K4` minus edge `23`
+  - on `s0108`, two candidate runs take `11.749933s` and `11.790880s` of GPU work versus `13.124865s`, `13.112170s`, and `13.201959s` for controls, a stable approximately `10.6%` join reduction
+  - the candidate's right construction rises to approximately `6.04s`, so this small 54-batch shard improves by only about `1%` end to end. The full production shard is the necessary gate because its BMMA joins dominate wall time
+- Full-shard IBM L40S gate:
+  - use the exact `s0076` corpus, 20-GiB source-prefetch buffer, streamed universal cache, 24 OpenMP threads, 342 large batches, and the accepted parallel source planner. Exclude the one-time canonical-cache build (`64.404161s`) from recurring totals
+  - the candidate executes the same `10,584,181,212,375,360` direct comparisons, covers weight `70,133,973,983,220,000`, reproduces contribution `19040643238023349838476574515200`, and passes all four independent joins
+  - BMMA time falls from the Experiment 354 control's `839.823144s` to `757.040974s`, saving `82.782170s` or `9.86%`
+  - right construction rises from `83.3730s` to `114.238s`, costing `30.865s`; recurring wall time nevertheless falls from `943.258473s` to `892.035817s`, saving `51.222656s` or `5.43%` end to end (`1.0574x` throughput)
+- Production integration:
+  - make `K4` minus one edge the default 7-row prefix order. The 8-row branch and its accepted `K4` plus disjoint-edge geometry are unchanged
+  - permit the existing exact `PREFIX_PAIR_MASK` override for both 7- and 8-row builds, with compile-time population and bounds checks, so alternative coordinate sets remain reproducible without adding solver variants
+  - report active prefix-pair, prefix-bit, suffix-bit, and entry-width configuration at startup. Do not retain dedicated 10/12/14-bit targets or dynamic-shared-memory experiment machinery in the production surface
+- Validation and artifacts: the ordinary production target compiles and reproduces the exact `s0108` result with the new default; production 7x7 and 8x8 targets also compile. Logs and result records are preserved under `../rectangle-free-data-v2/profiles/ibm-l40s-review361/`.
+- Outcome: accept the BMMA-aware five-coordinate geometry. It is a measured `5.43%` full-shard improvement for future 7x9 solves, while the wider-prefix alternatives are rejected.
+
+### Experiment 362: Current-kernel four-owner shared-right scheduling for `7x9`
+- Goal: close the integration gap between the accepted four-owner reuse result from Experiment 316 and the current direct-grouped, suffix-only, BMMA production path. The old standalone target still used the historical scalar prefix layout, so its result did not establish a benefit after the later representation and kernel breakthroughs.
+- Current implementation:
+  - keep four compact left layouts resident, form the sorted union of their right keys, and build each union right layout once before joining it against every owner that references it
+  - use the production `K4`-minus-one-edge 10-bit prefix geometry, 32-bit suffix-only weight-class layout, direct GPU grouped builder, and exact BMMA join without a fallback representation
+  - retain the 20-GiB streamed canonical-source buffer and producer/join overlap; parallelise canonical source planning with OpenMP and resolve dense left IDs once
+  - write four ordinary result-v2 files. Each records one quarter of the shared tile resource time, so normal result aggregation recovers actual one-GPU time rather than quadrupling tile latency
+- Exact smoke gate on IBM L40S:
+  - use records `[0,10000)` from production shards `s0000` through `s0003`, 24 OpenMP threads, and four independent CPU join validations per owner
+  - both schedulers reproduce contributions `6965240699339373171164774400`, `6824873980232352630783590400`, `6794342973254334485436825600`, and `6620770709004502775428300800`
+  - only `1.005%` of right layouts overlap at this scale. The tile therefore takes `8.581563s` versus `8.028024s` summed control time: the expected negative control, proving that ownership should be used only for full solve shards with material overlap
+- Matched full-shard gate:
+  - run the complete `s0000`-`s0003` corpus on the same interruptible IBM Ubuntu L40S, with the same CUDA 12.8 build, 24 OpenMP threads, 20-GiB prefetch buffer, `UINT32_MAX` requested cap, and zero repeated CPU validations after the exact smoke
+  - exclude the one-time universal cache build (`56.397691s` control and `57.079117s` tile) from recurring totals
+  - both paths process `114,315,435` records, execute `43,702,888,091,751,051` direct comparisons, and reproduce all four previously known campaign contributions. Their aggregate contribution is `78041657830662424908917287833600`
+  - independent owners require 1,466 right batches and `3,692.847412s` recurring time (`3,132.097376s` BMMA, `449.5787s` right construction)
+  - the union contains `14,903,333` right keys versus `32,177,904` independently, or `53.6846%` raw reuse. The tile requires 592 shared batches and `3,469.357991s` recurring time (`3,180.065312s` BMMA, `221.554356s` right construction)
+  - right construction falls `50.72%` and source planning falls from `29.50361s` to `13.904318s`. Changed batch shapes make BMMA time `47.967936s` (`1.53%`) slower, but the net saving is `223.489421s`, or `6.052%` end to end (`1.0644x` throughput)
+  - peak operation leaves `8,035,631,104` device bytes free, so four left layouts plus the largest shared right batch fit safely on the 46,068-MiB L40S
+- Integration and operational decision:
+  - promote the source from the experiment archive to `twocolour_7x9_four_owner_solve.cu`; keep the existing `twocolour_7x9_packed_four_owner` Make target for command compatibility
+  - accept four-owner scheduling as an optional production mode for full shards. It is attractive on reliable/on-demand workers or when restart cost is acceptable, but one atomic tile couples roughly 58 minutes of work; the ordinary 15-minute single-owner path remains preferable on aggressively preemptible capacity without finer checkpointing
+  - a complete 128-shard L40S campaign projects from roughly `32.82` recurring GPU-hours independently to `30.84` hours in 32 four-owner tiles, before shard variation and cache/setup amortisation. With only 25 current shards remaining, the expected absolute saving is about 22 minutes
+- Artifacts: exact logs, result files, manifests, and SHA-256 checksums are preserved under `../rectangle-free-data-v2/profiles/ibm-l40s-7x9-four-owner-20260819/`. The temporary IBM instance, boot volume, floating IP, gateway, subnet, VPC, and SSH key were deleted after artifact transfer; an audit found zero virtual servers in all 13 IBM VPC regions.
+- Outcome: accept the integration. The high-level reuse still survives the newer BMMA pipeline, but its current measured value is a solid `6.05%` rather than a new order-of-magnitude win.
+
+### Experiment 363: Four-worker completion campaign for `7x9`
+- Goal: complete the 25 missing production shards `s0103` through `s0127` with the latest single-owner solver while bounding interruptible-instance loss and preserving results locally as they finish.
+- Provisioning:
+  - four Ubuntu 24.04 spot `gx3-24x120x1l40s` instances in `us-south-2`, each with one 46,068-MiB L40S, 24 vCPUs, 120 GiB RAM, and preemption policy `stop`
+  - the current `us-south` catalog price is approximately GBP 0.60184 per instance-hour; four-way wall time should remain close to the single-worker aggregate cost while cutting elapsed time by roughly four
+  - build CUDA 12.8 `sm_89` production binaries with a 20-GiB prefetch buffer. Copy one compiled artifact to all workers after compilation so every solve uses binary SHA-256 `ad787e5ce8ea92c34b879cfec9e9cec1ecf48d3d94cd974c5b5056cd51e6eefc`
+- Work balancing by corpus bytes:
+  - worker 0: `s0107 s0108 s0113 s0117 s0124 s0125`
+  - worker 1: `s0104 s0112 s0120 s0123 s0126 s0127`
+  - worker 2: `s0103 s0105 s0110 s0116 s0118 s0119 s0122`
+  - worker 3: `s0106 s0109 s0111 s0114 s0115 s0121`
+  - use independent single-owner shards rather than four-owner tiles because a spot interruption then loses at most one approximately 15-minute shard rather than an approximately 58-minute tile
+- Launch validation:
+  - all 25 uploaded orbit files match their local SHA-256 digests exactly
+  - all four universal caches report `136,758` distributions, `4,740,574,641` entries, maximum weight alphabet 12, and approximately 70.6-71.1 seconds construction time
+  - all four workers entered their first assigned shard with 100% GPU utilization
+- Supervision:
+  - `supervise_ibm_7x9_multi.py` verifies/resumes each worker's assigned inputs, restarts stopped spot instances, relaunches only missing work, pulls result-v2 files and logs into `../rectangle-free-data-v2/7x9-results-combined`, validates each completed assignment, and stops workers independently
+  - after all 128 results exist, run the existing full record/kernel/weight aggregate gates and stop every remaining worker
+- Status at launch on 2026-08-19: 103 of 128 shards were already present and structurally valid; four production solvers are active on the remaining 25. Final timing, cost, and aggregate values remain pending completion.
+
+### Experiment 364: Exact canonical disjointness-query ADD gate
+- Goal: test the proposed order-of-magnitude escape hatch for `8x8`: compile each canonical `8x4` weighted distribution `D` into a reusable exact circuit for `Q_D(U) = sum_{V: U&V=0} D(V)`, so labelled-right expansion and Cartesian suffix joins could potentially both disappear.
+- Exact construction:
+  - add the isolated CPU target `canonical_query_circuit_probe`, reusing the established `25,207` canonical prefix enumerator, weighted four-column distribution recurrence, and reduced weighted support ZDD from `twocolour_4x4_probe`
+  - transform the support ZDD into a reduced ordered algebraic decision diagram for `Q_D` using the exact recurrence `Q_x(1)=Q_0` and `Q_x(0)=Q_0+Q_1`; terminal values and ADD addition remain checked `uint64_t`
+  - every query follows exactly one ADD edge at each retained level rather than branching through a support diagram. A row-permuted labelled source can in principle reuse the same circuit through `Q_{pi D}(U)=Q_D(pi^-1 U)`
+  - hash-cons all terminals and internal nodes and memoise exact ADD addition. Cap both persistent nodes and the wider disposable Apply table so failed orders have bounded memory
+- Variable-order gate: test four materially different orders for every source: row-pair-major with the two colour planes adjacent, the production `K4 disjoint-union K2` pair order, source-weighted frequent bits first, and source-weighted rare bits first. For a fixed order the reduced ADD is canonical, so constructing it directly from the four-column DP could reduce build work but not its final node count.
+- Correctness:
+  - completed circuits validate 64 deterministic queries by direct weighted support scans for every order
+  - full weighted joins over as many as `30,480` queries agree with the independent branching support-ZDD oracle under all completed orders
+  - ASan/UBSan complete a 16-prefix, 100,000-node-cap run without an error; all exact order variants return the same join value
+- Structural census:
+  - 256 deterministic canonical prefixes, or 512 selected/complement distributions, have support minimum `0`, median `11,892`, p90 `59,136`, p99 `126,952`, and maximum `163,744`, consistent with the earlier independent four-column support census
+  - at a one-million-node cap, the median, p90, p99, and maximum sampled sources all hit the cap under all four orders. Their source support ZDDs can be as small as `1,849-8,365` nodes, so the blow-up is specifically in compiling all forbidden-mask answers, not in representing `D`
+  - repeat at a five-million-node cap on 64 deterministic prefixes: support median `10,560`, p90 `79,412`, p99 `128,144`, maximum `163,744`. Every median-or-heavier source again hits five million nodes under every order
+  - the five-million-node run peaks at `729,092 KiB` RSS. Even a packed 16-byte device node would make the observed lower bound about 80 MB per median circuit; multiplied by the roughly `22,000-25,207` canonical sources touched by a shard, this is already multiple terabytes before the circuits have finished
+- Small-source control:
+  - a p10 source with 512 support entries does compress. Its best frequent-first circuit has `2,265` nodes (`54,360` bytes in the deliberately unpacked CPU representation), answers `30,480` queries at average depth `16.648`, and reproduces join `7,215,648`
+  - the small circuit takes `0.006637s` for those queries versus `0.006075s` for the existing CPU support-ZDD oracle. This CPU timing is not a GPU prediction, but it confirms that the cases which compile cheaply are not automatically faster and are already the inexpensive end of the production join distribution
+- Reproduction: `make canonical_query_circuit_probe`; the decisive commands are `./canonical_query_circuit_probe 256 1000000` and `/usr/bin/time -f 'TIME wall=%e rss_kib=%M' ./canonical_query_circuit_probe 64 5000000`.
+- Interpretation: one-path query evaluation would be GPU-friendly, but the persistent exact function is far larger than the existing 565-million-entry canonical support cache precisely on the medium/heavy sources where query acceleration matters. Streaming multi-terabyte circuits would also restore the layout/I/O cost this proposal was meant to remove. An adaptive circuit only for tiny sources optimises cheap joins and cannot approach the required 15-20x global join reduction.
+- Outcome: reject reduced ordered ADD compilation as the canonical `Q_D` breakthrough and do not write a GPU evaluator. This closes the straightforward exact query-circuit prototype, including direct generative construction for the four tested orders. Reconsider only with a mathematically different circuit class or a proved variable-order/factorisation theorem that reduces medium-source node counts by well over two orders of magnitude; another heuristic ADD ordering sweep is not justified by the five-million-node lower bounds.
+
+### Experiment 365: Exact token-plane quotient identity and CPU gate
+- Goal: test the observation that globally complementing the inner binary colour swaps the two row-pair token planes and leaves every half-distribution invariant, then determine whether quotienting support by this involution can reduce not only the canonical cache but also the weighted-disjointness join.
+- Exact identity:
+  - let `S` exchange the two `PAIRS`-bit token planes. Complementing every inner assignment bit is a weight-preserving bijection, so `D_A(U) = D_A(S(U))` for every half-mask `A`
+  - retain one representative per support orbit, its original per-mask weight, and orbit size `o_U` in `{1,2}`. The exact contraction is
+    `J(D,E) = sum_[U],[V] o_U D(U) E(V) ([U&V=0] + [o_V=2][U&S(V)=0])`
+  - this asymmetric form avoids accumulating `2*J` and therefore preserves the production `uint64_t` join-result bound. It needs one relative-orientation predicate unless both orbits are non-fixed, when it needs two
+  - the production prefix coordinates use the same row pairs in both planes. Consequently `S` independently swaps the two prefix halves and the two suffix halves; row permutations also commute with `S`
+- Probe: add `token_plane_quotient_probe.cpp` and `make token_plane_quotient_probe`. It independently builds weighted target half-distributions, checks every support partner and weight, verifies the prefix/suffix swap algebra, and compares the orbit formula with direct Cartesian joins using `uint128` accumulation.
+- Deterministic 256-prefix result:
+  - `8x4`: 6,237,471 support entries, 15 fixed entries, 3,118,743 quotient entries, `1.999995x` reduction, maximum sampled support 132,368, and 32 exact joins
+  - `7x5`: 11,186,095 support entries, 65 fixed entries, 5,593,080 quotient entries, `1.999988x` reduction, maximum sampled support 244,326, and 32 exact joins
+  - both geometries report zero missing partners, weight mismatches, prefix mismatches, or join mismatches. ASan/UBSan also passes a 64-prefix/16-join run
+  - fixed supports occur at only a few parts per million, so the practical representation reduction is indistinguishable from two. Pairing by `(weight, orbit size)` raises the sampled maximum class alphabet only from 4 to 4 on `8x4` and from 6 to 7 on `7x5`; the established complete-cache maxima imply conservative ceilings of 14 and 24, still below the guarded 32-class implementation bound
+- Production implication:
+  - quotienting both join inputs makes the representative Cartesian product approximately one quarter as large; evaluating the two relative orientations leaves approximately half the current BMMA predicate work
+  - the 7x5 packed cache should fall from 4,740,574,641 entries / 35.32 GiB to approximately 2.3703 billion entries / 17.66 GiB. This also brings its global entry count below `2^32` and makes useful full residency on a 48-GB L40S plausible again
+  - the 8x4 canonical source, persistent labelled-left layout, and recurring right layouts should each lose approximately half their suffix entries. Applied only to the measured 370.68-second join stage of the current 445.01-second `8x8` shard, the mathematical ceiling is about 259.67 seconds or `1.714x` end to end; reduced construction and batching can improve that ceiling further
+- Outcome: accept the identity and exact quotient contraction. This is a production-grade optimization candidate, not merely a cache compression. Implement it first for the `8x8` direct-grouped BMMA path behind an explicit feature gate, preserve ordinary support as the independent oracle, and require exact 8,192-record and 250,000-record GPU A/B gates before a complete shard.
+
+### Experiment 366: Production `8x8` token-plane quotient
+- Goal: integrate Experiment 365's exact support quotient into the direct weight-grouped/BMMA solver and require matched exact GPU gates through one complete production shard before promotion.
+- Implementation:
+  - filter each canonical distribution to one representative of every token-plane orbit while retaining the original per-support weight; labelled row transforms may choose either representative because row permutations commute with the plane swap
+  - distinguish weight classes by `(weight, orbit size)` and carry the orbit size in the existing 16-byte `WeightClassMeta`; no suffix-entry width or metadata ABI grows
+  - split the plane swap across the paired prefix and suffix coordinates. For every class pair, BMMA evaluates the stored relative orientation and, when the right orbit is non-fixed, the swapped-right orientation; multiply their sum by the left orbit size
+  - retain 64-bit join accumulation and 128-bit outer products. The asymmetric orbit formula never forms `2*J`, and the ordinary full-support target remains available as `twocolour_8x8_prefix_solve_unquotiented_control`
+- Static and independent correctness gates:
+  - refine the CPU probe to reorient non-fixed representatives independently before exact joins, verifying that correctness is not an artefact of choosing the numerical minimum
+  - both production variants compile under CUDA 12.8/native `sm_89`; the current packed 7x9 production target also compiles against the extended shared builder interface
+  - 128-record, 8,192-record, and 250,000-record candidate/control runs reproduce identical contributions. The 250,000-record value is `209204392463045470661758156800`, with four independent scalar joins passing in every run
+- Complete matched IBM L40S gate:
+  - use the same production shard `s0000`, 24 OpenMP threads, 16,384-edge batches, two blocks per edge, direct weight-grouped BMMA kernel, and 256 independent scalar validations for both binaries
+  - both variants process `7,692,657` records and reproduce exact contribution `6440796914680148420415091507200`
+  - the canonical cache falls from `565,306,220` entries to `282,659,250`; this implies only `12,280` fixed supports. The persistent labelled-left layout falls from `1,124,081,023` to `562,042,125` entries
+  - right-layout construction falls from `35.111947s` to `17.743420s` (`1.979x`), while exact BMMA time falls from `376.725027s` to `239.534836s` (`1.573x`)
+  - complete solver time falls from `439.774492s` to `272.394320s`: `38.06%` less time or `1.6145x` throughput. Minimum free VRAM rises from `20.45 GiB` to `30.36 GiB`
+  - the quotient's reported `1,119,219,140,811,618` representative Cartesian pairs are approximately one quarter of the control's `4,476,686,214,612,789`; each non-fixed right class requires a second BMMA orientation, explaining why measured join time approaches a half-work rather than quarter-work limit
+- Projection: at 1,024 equal-cost solve shards, one L40S would require approximately `77.48` GPU-hours instead of `125.09`, saving about `47.61` L40S-hours before worker-level cache reuse, shard variation, and distributed orchestration overhead.
+- Production integration: enable `TOKEN_PLANE_QUOTIENT` in the ordinary `twocolour_8x8_prefix_solve` Make and tracked Modal builds, bump the Modal pipeline fingerprint, and keep the explicit unquotiented regression target. The packed 7x9 solver is unchanged pending a separate architecture-specific integration and measurement.
+- Artifacts: retain all exact candidate/control logs under `../rectangle-free-data-v2/profiles/ibm-l40s-8x8-token-plane-20260819/`.
+- Outcome: accept and promote. This is a measured mathematical and end-to-end breakthrough for a future `8x8` rerun, not merely a memory optimization.
+
+### Experiment 367: Exact `8x8` outer transposition quotient
+- Goal: extend the existing row/column/complement quotient by the square-grid symmetry `G -> G^T`, measure its exact corpus reduction, and integrate a production corpus transform without a global reshuffle.
+- Exact action on the existing corpus:
+  - transpose the labelled `8x8` mask, canonicalise it under `S_8 x S_8`, then apply the existing complement representative; call the resulting stored key `t(G)`
+  - `t` is an involution on the complement-paired corpus, preserves cell count and coefficient, and preserves `C(G)C(G^c)` because `C(G)=C(G^T)`
+  - retain a fixed point once; for every nonfixed pair retain the numerically smaller stored key with twice its old coefficient and discard the larger key
+  - the retained key stays in its original left-owned shard. Although only `8,591,512` source records (`0.1170%`) have a transpose partner with the same owner, no cross-shard shuffle is required
+- Complete exact census of all 1,024 source shards:
+  - input records: `7,343,033,248`
+  - fixed: `965,530`; lower: `3,671,033,859`; higher: `3,671,033,859`
+  - quotient records: `3,671,999,389`, a `1.999737056x` reduction
+  - lower and higher coefficient sums both equal `5,069,185,300,623,250,830`; fixed coefficient sum is `1,313,506,079,569,415`
+  - raw transposition is already row/column canonical for only `8,124,424` records, so canonicalisation after transposition is necessary
+  - all `8,388,608` sampled round trips pass the exact involution check; source census wall time is `1,335.067s` on 16 local workers
+- CPU and GPU gates:
+  - the optimized canonicaliser agrees with the independent reference canonicaliser on 256 samples; ASan/UBSan passes 1,024 samples
+  - a constructed closed 8,192-orbit gate contains both members of each nonfixed transpose pair. The 16,380-record control and 8,192-record quotient reproduce contribution `13899817317072037126216089600` exactly with 32 independent scalar joins
+  - on the IBM L40S, control/quotient GPU times are `0.500600s` and `0.251188s`, essentially the ideal `1.993x`
+  - the complete production shard `s0000` falls from `7,692,657` to `3,819,929` records. With the already-promoted token-plane support quotient, GPU time falls from `239.534836s` to `119.946582s` and total time from `272.394320s` to `139.707265s` (`1.950x` end to end)
+- Production materialisation:
+  - `binary_orbit_augment_8x8 solve-transpose-filter` validates ownership and exact coefficient bounds, writes a temporary file, then publishes each completed shard by atomic rename
+  - all 1,024 output shards were generated locally in `1,358.017s`, occupy about 55 GiB, contain between `3,094,869` and `4,351,557` records, preserve exact aggregate coefficient mass, and cover exactly `2^64` labelled masks
+  - a separate read-only pass re-canonicalises all `3,671,999,389` output records in `818.024s`: it finds exactly `965,530` fixed and `3,671,033,859` lower representatives, zero higher representatives, passes `8,388,608` involution checks, and independently recovers covered weight `2^64`
+  - the corpus is stored under `../rectangle-free-data-v2/8x8-transpose/solve`; exact generation logs are under its sibling `logs` directory and matched GPU artifacts are under `../rectangle-free-data-v2/profiles/ibm-l40s-8x8-transpose-20260819`
+- Projection: multiplying the full filtered-shard `s0000` time uniformly gives about `39.74` L40S-hours for 1,024 shards, down from the token-plane-only `77.48`-hour projection and the pre-token-quotient `125.09`-hour projection. Worker cache reuse and shard variation remain excluded.
+- Outcome: accept transposition as a production outer symmetry for `8x8`. It compounds cleanly with token-plane support quotienting and removes essentially half of all remaining outer records before any GPU layout or join work.
+
+### Experiment 368: Universal production token-plane quotient
+- Goal: promote the exact inner-colour plane-exchange quotient from the `8x8` BMMA solver to the distinct packed `7x9` path and the complete known `7x7` regression, making it the standard representation for every maintained production distribution join.
+- Shared representation:
+  - canonical factories retain one representative of each support orbit `{U,S(U)}`; grouped weight classes are keyed by `(weight, orbit size)` and the exact join evaluates the stored and swapped-right orientations before multiplying by the left orbit size
+  - the temporary `PrefixEntry` conversion path carries the size-two marker in the unused high bit of its checked 32-bit weight, then removes it when emitting `WeightClassMeta`; products and join sums remain explicitly 64-bit
+  - the packed 7x5 cache stores a separate compact orbit-size alphabet beside its weight alphabet and passes it into the direct grouped GPU builder. The measured maximum combined alphabet is 15, below the guarded 32-class limit
+- Complete 7x5 cache census:
+  - ordinary support: `4,740,574,641` entries / 35.32 GiB
+  - quotient support: `2,370,316,739` entries / 17.66 GiB, implying only `58,837` fixed supports and a `1.999975x` storage reduction
+  - on 24 IBM CPU threads the exact quotient count and pack passes take `25.6s` each; complete one-time cache construction remains about `54-58s`
+- Exact `7x9` gates:
+  - an 8,192-record candidate/control smoke reproduces contribution `5571672310728254642817024000` with 32 scalar joins. Representative Cartesian pairs fall from `3,276,494,931,686` to `819,291,302,668`; GPU time falls from `0.460502s` to `0.193806s`
+  - the four-owner path independently processes four adjacent 2,048-record ranges, passes eight scalar joins per owner, and reproduces the same aggregate smoke contribution
+  - complete production shard `s0107` reproduces contribution `18710514083537826632448978124800`. Its representative-pair count falls from `11,004,968,231,577,348` to `2,751,815,274,363,990`
+  - matched old 20-GiB streamed production takes `771.667s` GPU / `876.359s` total. Quotient support with the portable 4.5-GiB buffer takes `480.935133s` / `555.745881s`; the production 20-GiB buffer takes `466.004960s` / `528.099797s`
+  - the accepted 20-GiB result is `1.6559x` faster in CUDA and `1.6595x` end to end, cutting wall time by `39.74%`. A uniform 128-shard projection is `18.78` recurring L40S-hours before shard variation and four-owner reuse
+- Resident-cache recheck:
+  - quotienting makes full 7x5 cache residency operational on the 46-GiB L40S: the complete shard uses 121 batches and retains at least `9,361,031,168` free device bytes
+  - residency takes `466.243267s` GPU / `541.621443s` total. GPU time is indistinguishable from streaming, while its larger layouts raise right construction from `42.2438s` to `57.3101s`; it is `2.56%` slower overall than the 20-GiB streamed result
+  - retain the streamed architecture. Cache residency is now feasible but is not the performance winner
+- Complete matched `7x7` regression:
+  - both representations process all `33,642,660` orbit records and `16,821,330` joins, cover weight `2^49`, pass 256 scalar joins, and reproduce `T_4(7,7) = 701672004810879255876925440`
+  - hoist swapped-right masks from the Cartesian loop into shared-tile loading and compute the left orbit size once per left entry. This reduces quotient GPU time from `75.221649s` to `61.713403s`
+  - matched unquotiented time is `100.728582s` GPU / `112.038074s` total; final quotient time is `61.713403s` / `70.405268s`, or `1.6322x` in CUDA and `1.5913x` end to end. The resident left layout falls from `206,243,031` to `103,131,388` entries
+- Final shared-code regression: rebuild the promoted `8x8` target and rerun the 8,192-record transpose quotient. It passes all 32 scalar joins and again returns `13899817317072037126216089600`.
+- Production policy: the ordinary `8x8`, packed direct `7x9`, four-owner `7x9`, and canonical `7x7` Make targets enable quotient support by default and have no runtime full-support fallback. Historical/rejected kernels are not retrofitted; an explicit unquotiented `8x8` target remains only as a regression oracle.
+- Artifacts: retain the four complete `s0107` result records under `../rectangle-free-data-v2/profiles/ibm-l40s-7x9-token-plane-20260819/` and the regenerated checked `7x7` corpus at `../rectangle-free-data-v2/7x7.orbits`.
+- Outcome: accept universal quotient support. It provides a large exact speedup in both maintained architectures, halves their dominant support storage, and makes the previously oversized 7x5 cache device-resident even though measured streamed execution remains faster.
+
+### Experiment 369: Performance-aware `8x8` column splits
+- Goal: test whether choosing among all exact 4+4 column partitions can convert the large per-record BMMA-cost oracle into a production end-to-end improvement without losing the reuse created by fixed left ownership.
+- Tools:
+  - `column_split_8x8_oracle` builds the complete 25,207-source quotient cache, evaluates all 35 unordered vertical and 35 horizontal cuts in both execution directions, and reports exact prefix-bucket/BMMA-tile cost estimates for coupled and independently chosen selected/complement contractions
+  - `column_split_8x8_selector` chooses the split using the cheap exact-support proxy `n(A)n(B)+n(Ac)n(Bc)` over either all 70 cuts or a bounded vertical/horizontal portfolio
+  - `column_split_8x8_transform` applies a selected split exactly, checks its inverse, and can repartition records by the resulting left-owner hash
+- Stratified oracle census: train on 32 records from each of eight shards and test on 32 records from each of four held-out shards. Relative to the fixed vertical split, the best fixed cut scores `0.8815` on held-out data; exact vertical-or-horizontal choice scores `0.7038`; learned top-four cuts score `0.6287`; the support-product selector scores `0.5812`. A per-contraction oracle reaches `0.4252`, confirming substantial arithmetic opportunity.
+- Exact GPU gates:
+  - 8,192 records reproduce contribution `13899817317072037126216089600`; the all-70 selector cuts representative comparisons from `1,280,118,034,278` to `421,254,955,322` and CUDA time from approximately `0.250s` to `0.157s`
+  - 250,000 records reproduce contribution `419322064289037570734447001600`; comparisons fall from `38,992,005,394,073` to `12,776,481,516,225`, while CUDA falls from `7.649395s` to `4.864899s`
+- Decisive matched one-million-record reownership gate:
+  - use the first 250,000 records of `s0000`, `s0256`, `s0512`, and `s0768`, then repartition the same transformed records into four left-owned shards
+  - both variants cover weight `2733242241085105` and reproduce contribution `1747244497996238410882311782400`
+  - all-70 selection reduces comparisons from `157,038,919,200,618` to `52,266,401,364,128` (`3.0046x`) and CUDA from `31.545273s` to `20.242110s` (`35.83%`)
+  - recurring time excluding the shared one-time cache and validation falls only from `37.638165s` to `32.287469s` (`14.22%`, or `1.1657x`) because distinct left identities rise from `31,957` to `573,850` (`17.96x`), left layout rises from `0.428836s` to `2.746830s`, and right layout rises from `4.161649s` to `7.305557s`
+  - the bounded vertical/horizontal portfolio cuts comparisons by `42.44%` but takes `42.364269s` recurring, `12.56%` slower than the fixed split
+- Fixed-horizontal control: on a full production-shaped owner its CUDA time per record is `6.23%` lower than vertical, but recurring time per record is about `1.45%` higher. It is not a useful global replacement.
+- Projection: the all-70 selector fails the required 20-30% end-to-end gate and would require substantially more solve owners because it couples the chosen left key to columns formerly on the right. The bounded portfolio also regresses. Both costs compound operational complexity and corpus-generation work.
+- Artifacts: retain oracle, transform, selector, repartition, and IBM L40S logs under `../rectangle-free-data-v2/profiles/ibm-l40s-8x8-column-split-20260819/`.
+- Outcome: reject adaptive column splitting for production and retain the fixed vertical 4+4 split. The next high-level candidate should remove work inside the existing ownership scheme, starting with pair-specific bucket OR/AND terminal tests and coordinate projection.
+
+### Experiment 370: Pair-specific `8x8` suffix projection and hybrid-query gate
+- Goal: test the proposed ownership-preserving exact dispatcher inside the production fixed vertical split: terminal bucket/class summaries, pair-specific shared-coordinate projection, dense SOS or submask queries at small projected dimension, and BMMA on projected weighted supports otherwise.
+- Exact census:
+  - add `pair_projection_8x8_census`, mirroring the production seven-coordinate/14-bit prefix, token-plane support quotient, `(weight,orbit size)` classes, forward and swapped-right orientations, and orientation-aware BMMA tile count
+  - for each compatible class pair compute `M=OR(A)&OR(B)`. `M=0` is an exact all-compatible terminal; `AND(A)&AND(B)!=0` is an exact all-incompatible terminal
+  - for selected heavy pairs project both supports onto `M`, merge identical projections with exact multiplicity, regroup those multiplicities as weights, and recompute the exact BMMA tile count
+  - 32 projected joins agree with direct Cartesian disjointness counts; ASan/UBSan passes an independent two-record run
+- Stratified workload: sample 16 records from each of 16 evenly spaced transpose-quotient solve shards. The 256 records contain 508 distinct labelled half keys, 15,615,548 quotient supports, 288,094 buckets, and 297,563 classes. Their two contractions generate 8,925,919 compatible class-pair orientations, 17,838,336,471 representative comparisons, and 159,465,067 BMMA tiles.
+- Terminal result: all-compatible cases cover `0.1218%` of tiles and all-incompatible cases `0.3068%`; together they cover only `0.4286%`. Adding two 64-bit summaries to every 16-byte class descriptor and loading them in the hot loop cannot recover enough work to justify the traffic.
+- Hybrid transform result:
+  - a dense SOS transform has fewer scalar operations than raw Cartesian comparison count on tasks covering `25.70%` of tiles, but BMMA evaluates 128 predicates per tile
+  - requiring an 8x, 32x, and 128x scalar-operation advantage leaves only `5.754%`, `1.178%`, and `0.0542%` tile coverage respectively. Only 50 of 8.93 million tasks pass the 128x gate
+  - on the heaviest 65,536 tasks, dense SOS and submask-query operation counts are respectively `576.0x` and `7.75x` their raw Cartesian pair count after aggregation; generic query structures are not competitive
+- Projected-BMMA ceiling:
+  - the heaviest 262,144 nonterminal tasks, `2.94%` of task instances, cover `43.85%` of current tiles
+  - projection reduces their support entries from 123,816,741 to 63,422,602 and their regrouped BMMA tile count to `49.37%` of baseline
+  - even free projection would therefore save only `22.20%` of total join tiles. Applied to the measured `s0000` 119.95-second join in a 139.71-second solve, the zero-overhead end-to-end ceiling is below 20%; actual execution would additionally create 262,144 masks, read and project 123.8 million entries, sort/aggregate them, and construct fragmented weighted layouts for only 256 outer records
+  - useful work is consequently too broad for a small hot-source oracle and too pair-specific for cache reuse. Projecting more, smaller tasks increases construction volume with diminishing arithmetic return
+- GPU gate: do not implement one. The CPU structural gate already puts terminal cases and BMMA-competitive transforms far below a material threshold, while the optimistic projected-BMMA ceiling fails the requested end-to-end integration gate before charging any construction or dispatch cost.
+- Reproduction: `make pair_projection_8x8_census`; run the final 256-record command recorded in `../rectangle-free-data-v2/profiles/ibm-l40s-8x8-pair-projection-20260819/`. The census itself is CPU-only; the production IBM L40S worker remains unchanged and available.
+- Outcome: reject pair-specific projection, dense SOS, submask enumeration, and OR/AND terminal metadata for production `8x8`. Retain the census as a reproducible gate. A future breakthrough must share preprocessing across many joins or remove a much larger fraction of BMMA work without constructing per-pair layouts.
+
+### Experiment 371: Exact behavioral `8x4` distribution minimization
+- Goal: test whether non-isomorphic canonical half-masks produce identical or proportional weighted distributions, whether removing behaviorally invisible columns gives a useful row-equivariant cache quotient, and whether distribution stabilizers materially exceed half-mask stabilizers.
+- Complete normalized-vector census:
+  - add `behavioral_distribution_8x8_census` and enumerate all 25,207 canonical `8x4` half-masks, both selected and complement components, using the production weighted recurrence and token-plane quotient
+  - divide every nonzero sparse vector by its exact weight GCD, fingerprint its ordered `(mask,weight)` sequence twice, then rebuild and compare every multi-member fingerprint group entry-for-entry. Equal vectors cannot land in different groups; all possible hash collisions inside a group are split by exact comparison
+  - the 50,414 components contain 565,318,500 quotient representatives and form 44,501 exact normalized vectors. There are 5,913 duplicate components in 2,364 classes, maximum class size 110, and no hash collision
+  - for the production selected component alone, 25,207 source IDs become 23,557 literal vector IDs, but entries fall only from 282,659,250 to 280,003,049 (`0.940%`). Only 82 of 25,207 linked selected/complement pairs collapse (`0.325%`)
+  - GCD normalization is exact but mostly removes small scalar powers: 35,216 components have GCD 1, 12,656 have GCD 2, 2,044 have GCD 4, and only 392 nonzero components have another GCD
+- Exact structural quotient:
+  - an empty column contributes identity and a singleton column contributes scalar 2 without emitting a token. Remove those columns, retain the singleton exponent, and canonicalize the remaining column multiset under rows and columns
+  - this exact row-equivariant core reduces component IDs to 20,251 but cache representatives only to 273,140,654, a `3.3675%` reduction; heavy generic distributions dominate storage
+  - linked selected/complement cores number 24,978, so only 229 half sources (`0.9085%`) gain linked-pair reuse
+- Complete behavioral stabilizer census:
+  - for every one of the 25,207 selected distributions, enumerate all 40,320 row permutations. Weighted/unweighted row-pair marginals reject impossible automorphisms before exact sparse-vector lookup; structural-core automorphisms are accepted by construction
+  - original half-mask stabilizer sizes sum to 1,054,110; trivial-core stabilizers sum to 2,215,898 and are larger for 2,997 sources
+  - exact behavioral stabilizers sum to 4,229,594 and exceed the structural core for 52 sources, but all 52 are zero distributions. No nonzero distribution has a behavioral row automorphism beyond its trivial-column structural core
+  - the complete exact pass takes 26.40 seconds and 455 MiB RSS on 16 local threads
+- Zero-source follow-up: there are 55 selected zero sources. Across 1,048,576 records sampled evenly from 16 transpose-quotient solve shards, only 3,031 (`0.2891%`) touch a zero selected/complement half and can be discarded. This is below a useful production gate and is concentrated in complement-left layouts already shared within a shard.
+- Reproduction: `make behavioral_distribution_8x8_census`; `./behavioral_distribution_8x8_census 0` runs the complete stabilizer census. Logs are under `../rectangle-free-data-v2/profiles/8x8-behavioral-distributions-20260819/`.
+- Outcome: reject semantic cache minimization, behavioral double-coset integration, and zero-source filtering for production. Their exact ceilings are low and they add scale factors, source remapping, and new layout/cache metadata to a path whose dominant cost remains BMMA. Retain the census and the theorem-like empirical result that every nonzero `8x4` behavioral stabilizer equals the empty/singleton-column structural stabilizer.
+
+### Experiment 372: Mandatory production quotients and square-corpus cleanup
+- Goal: turn the two accepted exact symmetries into representation invariants, apply transposition to the known `7x7` regression, and reduce the maintained build surface to explicit optimized executables.
+- Token-plane representation cleanup:
+  - remove the `TOKEN_PLANE_QUOTIENT` feature gate from maintained CUDA code. Canonical factories now always retain one support representative, weight classes always carry orbit size, and joins always restore both relative plane orientations
+  - remove the unquotiented `8x8` GPU target. Independent scalar validation remains in the production solvers and historical controls remain recoverable from repository history
+  - make the accepted packed streaming/direct-weight-class pipeline intrinsic to the `7x9` source rather than a collection of Make flags
+- Square outer quotient:
+  - add a generic `square-transpose-filter` corpus operation and version square quotient files with `R7SQT01`/`R8SQT01`; maintained square solvers reject ordinary row/column-only corpus headers
+  - complete `7x7` filtering takes `3.760195s` on 16 local threads. It maps `33,642,660` row/column orbits to `16,853,750` transpose orbits: `64,840` fixed and `16,788,910` nonfixed pairs, preserving exact labelled weight `2^49`
+  - the exact `8x8` transpose corpus invariants are `3,671,999,389` records, `354,110,921` midpoint records, `217,940` self-complementary records, and covered weight `2^64`
+- Complete `7x7` L40S regression:
+  - process all `16,853,750` quotient records and `8,426,875` complement-paired joins, pass 256 independent scalar joins, and reproduce `T_4(7,7) = 701672004810879255876925440`
+  - representative comparisons are `44,115,784,634,360`; GPU time is `31.674291s` and total time is `37.127932s`
+  - relative to Experiment 368's token-plane-only `70.405268s`, adding the transpose quotient is `1.896x` faster end to end and almost exactly halves the remaining outer work
+- `8x8` regression: rebuild the quotient-only direct weight-grouped solver and run the versioned 8,192-record transpose gate. It passes 32 scalar joins and reproduces contribution `13899817317072037126216089600`; GPU time is `0.250096s`.
+- Production surface: `make gpu-production` builds only `twocolour_7x7_solve_gpu`, `twocolour_7x9_solve_gpu`, `twocolour_7x9_four_owner_gpu`, and `twocolour_8x8_solve_gpu`. The historical Modal `8x8` campaign script is archived because it predates mandatory transpose headers.
+- Outcome: accept. Token-plane quotienting is no longer optional in maintained code, and transpose quotienting is now an enforceable corpus contract for square production solvers.
+
+### Experiment 373: Quotient-only production-core consolidation
+- Goal: remove rejected runtime/compile-time alternatives from the maintained GPU implementation, separate reusable engines from executable entry points, and verify that cleanup preserves exact results.
+- Structural cleanup:
+  - make canonical distribution caching, structure-of-arrays storage, token-plane support quotienting, and heavy-first join scheduling unconditional shared behavior
+  - remove the raw distribution cache, AoS upload/expansion/join kernel, sparse `8x8` prefix fallback, scalar weight-class conversion fallback, and obsolete profiling/experimental branches from production files
+  - retain geometry/resource specialization only: seven-row packed-cache construction is compiled only for `7x7`/`7x9`, while `8x8` compiles only its direct grouped builder and BMMA join
+  - extract `twocolour_7x9_engine.cuh`; the single-owner executable is now a one-line wrapper and the four-owner scheduler includes the engine rather than another `.cu` translation unit
+  - the shared production review surface is 4,780 physical lines for `8x8`, 5,058 for single-owner `7x9`, and 5,621 for the optional four-owner entry point
+- Build gate: all four `make gpu-production` targets compile cleanly with CUDA 12 on the IBM L40S worker.
+- Exact GPU regressions:
+  - `8x8`, 8,192 transpose-quotient records: 32 scalar joins pass; contribution `13899817317072037126216089600`; `1,280,118,034,278` representative comparisons in `0.249979s` (`5.121 Tcomparison/s`)
+  - `7x9`, 8,192 records: 32 scalar joins pass; contribution `5571672310728254642817024000`; `819,291,302,668` representative comparisons in `0.189002s`; recurring solve time `7.02614s` after the shared cache build
+  - complete `7x7`: all `16,853,750` transpose records cover weight `2^49`, 256 scalar joins pass, and `T_4(7,7)=701672004810879255876925440`; GPU time is `30.061019s`, total `35.582115s`
+- Performance effect: unconditional heavy-first scheduling improves the complete `7x7` regression from Experiment 372's `31.674291s` GPU / `37.127932s` total to `30.061019s` / `35.582115s`, a further `5.1%` and `4.2%` reduction respectively.
+- Outcome: accept. The maintained executables now expose one exact optimized algorithm per geometry; remaining preprocessor controls select geometry or bounded resource sizes, not alternative mathematical representations.
+
+### Experiment 374: Production exactness and result-integrity hardening
+- Goal: resolve the actionable correctness/integrity findings from the post-cleanup static review without integrating performance ideas already rejected by measured experiments.
+- Input semantics:
+  - fix `read_edges` so `[START,END)` and `FILTER_MOD/FILTER_ID` are intersected; the former implementation silently widened every filtered range to the complete file
+  - replace the redundant second sort in `unique_rights` with a linear unique pass over the existing `(right,left)` order
+- Quotient invariants:
+  - reject `LHS_PER_THREAD != 1`, `PREFIX_LHS_PER_THREAD != 1`, `PREFIX_PAIR_COUNT > 7`, and nonpositive `PREFIX_TASK_CHUNK` at compile time; the removed configurations either omitted token-plane orbit restoration or exceeded the 32-bit physical-bucket task domain
+  - make the dormant scalar prefix join quotient-exact by decoding its weight/orbit marker, evaluating ordinary and plane-swapped right representatives, and restoring the left support-orbit multiplicity
+  - execute both the prefix/suffix split algebra and exhaustive row-map algebra checks at 7x9 and 8x8 startup
+- Validation coverage: mark exact CPU checks in deterministic jittered strata of each key-sorted workload rather than checking only the first joins. This retains the requested validation count while covering the full key range and adds no recurring lookup in the aggregation loop.
+- Result format 3:
+  - bind every 7x9 result to SHA-256 digests of the exact executable, compile-time algorithm configuration, canonical cache, and orbit corpus; hash a corpus only once when one manifest contains several ranges
+  - checksum the complete result payload, publish through a unique temporary file and a non-overwriting hard link, and hold an advisory per-result work claim
+  - make the four-owner solver restartable after partial publication: verified existing outputs are retained while missing members of the coupled tile are recomputed and published
+  - keep the completed version-2 campaign readable by the aggregator, label it explicitly as legacy provenance, and reject mixed v3 configuration/cache digests
+- Static/CPU validation:
+  - the new SHA-256 implementation reproduces the standard `abc` digest `ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad`
+  - Python bytecode compilation and `git diff --check` pass
+  - the updated aggregator reproduces all 128 historical 7x9 shards, `3,608,247,685` records/kernels, labelled weight `2^62`, covered weight `2^63`, and contribution `2504755357815289286302895662387200`; the full exact gate remains `OK`
+- Performance triage: do not re-integrate signature deduplication, compatible-prefix enumeration, or blanket multi-CTA splitting. Experiments 305/349 found negligible exact signature reuse, Experiment 348 measured compatibility-driven lookup 18.5% slower, and Experiment 334 bounded the complete heavy-tail ceiling below 4.62%. Cache serialization and transform-once construction remain operational or low-single-digit follow-ups, not order-of-magnitude candidates.
+- Outcome: accept the hardening changes. No mathematical result changes; future v3 checkpoints are self-identifying and non-overwriting, while the completed v2 campaign remains independently aggregatable.
+
+### Experiment 375: IBM L40S production-hardening regression matrix
+- Goal: exercise Experiment 374's exactness and restart contracts on real CUDA hardware before accepting the hardened production core.
+- Environment: temporary interruptible IBM `gx3-24x120x1l40s` worker in `us-south-2`, Ubuntu 24.04, NVIDIA `580.178.04`, CUDA `12.8.93`, and one 46,068-MiB L40S. All four `make gpu-production` executables build cleanly from commit `0adfa36`.
+- Versioned `8x8` gate:
+  - process 8,217 transpose-quotient records and reproduce contribution `14026555065393059175589478400`
+  - all 32 deterministic stratified CPU validations pass; `1,283,580,179,218` representative comparisons take `0.250281s` (`5.129 Tcomparison/s`)
+  - the production-default four validations reproduce the same result in `0.248643s` GPU / `9.544220s` total
+- Intersected range/filter and v3 integrity gate:
+  - run `[0,8192)` with filter `mod 7, id 3` against the 287,201-record owner file; exactly 1,406 records are accepted, proving the range is no longer widened to the whole corpus
+  - all 16 stratified scalar joins pass; contribution is `1965602232732552409497600` from `73,064,613,683` representative comparisons
+  - the result records exact executable, configuration, cache, and corpus SHA-256 digests; an immediate rerun reports `SKIP`/`ALL_COMPLETE`
+  - changing only the stored record count makes the solver reject the checkpoint with `existing result checksum mismatch` before cache construction; restoring the original file restores normal validation
+- Four-owner partial-publication gate:
+  - process four adjacent 1,000-record ranges, pass four scalar joins per owner, and reproduce aggregate contribution `6900349628170629498470400` from `289,509,944,732` comparisons
+  - retain the first three results, remove the fourth, and rerun: the solver validates and skips publication for the existing members, recomputes the coupled work, and republishes only the missing fourth result
+  - both the single-result and four-result aggregators accept the v3 checksums/provenance and recover the same exact totals
+- Complete known-result regression:
+  - process all `16,853,750` versioned `7x7` transpose records, covering labelled weight `2^49`
+  - all 256 deterministic stratified scalar joins pass and reproduce `T_4(7,7) = 701672004810879255876925440`
+  - `44,115,784,634,360` representative comparisons take `29.013240s` on the GPU; validation takes `7.258778s` and total wall time is `41.250107s`
+- Validation-cost observation: the deliberately broad 32/256-check regression settings add visible CPU time. Keep the production default of four exact checks; use the larger counts for release gates rather than throughput runs.
+- Reproduction and artifacts: tracked manifests are `gpu_experiments/regression374_range_filter.manifest` and `gpu_experiments/regression374_four_owner.manifest`; results and the pre-restart fourth-owner checkpoint are retained under `../rectangle-free-data-v2/profiles/ibm-l40s-regression374-20260819/`.
+- Resource cleanup: the temporary instance, boot volume, floating IPs, subnet, public gateway, security groups, SSH key, and VPC were deleted. IBM resource search finds no `rect-regression-374*` resources, and a read-only audit reports zero instances in all 13 VPC regions.
+- Outcome: pass. The hardened production binaries preserve exact results on all maintained geometries, the corrected work intersection is exercised directly, and v3 checkpoints detect tampering and resume safely after partial four-owner publication.
+
+### Experiment 376: One-time transformed-entry materialisation
+- Goal: remove the two remaining repeated row-map/prefix-suffix transforms in the direct grouped builder by materialising `(prefix,suffix,weight ordinal)` once and reusing it for prefix counts, class counts, and final scatter.
+- Candidate implementation:
+  - pack the complete temporary into one `uint64_t`: 47 significant bits for `7x9` and 61 for `8x8`, rather than using the proposed padded 8-/16-byte structs
+  - combine transformation, splitting, ordinal validation, temporary emission, and prefix histogramming in the first pass; the next two passes read only the packed temporary
+  - charge the temporary's eight bytes per logical entry in both batch planners and release it before the BMMA join
+  - remove the now-redundant packed/unpacked class-histogram and scatter kernels
+- Exact gates on an IBM L40S:
+  - the versioned 8,217-record `8x8` gate passes all 32 stratified scalar checks and reproduces contribution `14026555065393059175589478400` from `1,283,580,179,218` representative comparisons
+  - the 8,192-record `7x9` gate passes all 32 scalar checks and reproduces contribution `17578810395274613100134400` from `581,387,828,297` representative comparisons
+  - a 250,000-record versioned `8x8` gate passes eight scalar checks and reproduces contribution `838505359776938343182725939200` from `38,992,005,394,073` comparisons
+- Matched performance:
+  - five warmed `7x9` solves give median right-layout time `0.081230s` for production and `0.084905s` for materialisation, a `4.52%` regression. Median recurring total rises from `0.298904s` to `0.307290s` (`2.81%`)
+  - three 250,000-record `8x8` solves give median right-layout time `1.024615s` for production and `1.111494s` for materialisation, an `8.48%` regression. Mean warm recurring total rises from `8.855190s` to `9.044324s` (`2.14%`)
+  - BMMA work and results are unchanged. The regression is confined to construction: writing and rereading an eight-byte global-memory stream costs more than repeating the already optimized shared bit-image transform
+- Artifacts: exact and repeated-run logs plus v3 `7x9` result records are retained under `../rectangle-free-data-v2/profiles/ibm-l40s-transform-once-20260819/`.
+- Resource cleanup: delete the temporary spot instance, boot volume, floating IPs, subnet, public gateway, security group, SSH key, and VPC. IBM resource search finds no remaining `rect-transform-once-376*` resources and `us-south` has no instances.
+- Outcome: reject and revert. Keep the current recomputation-based builder for both geometries; do not add a feature flag or dormant fallback for the slower temporary representation.
+### Experiment 377: Remove dormant packed-cache paths from the production core
+
+- Goal: make the maintained prefix core describe only the active host-prefetch/direct-grouped production architecture, without retaining the abandoned resident-cache, staged-host, or ordinary-prefix packed builders.
+- Cleanup: remove `PackedUniversalCache::{device_entries,host_staging,device_staging,staging_bytes}`, four obsolete packed histogram/metadata/scatter kernels, three unused packed layout builders, and the nonfunctional universal-cache probe. Retire its Make target. Move the still-exact scalar prefix regression kernel and random-edge sampler to `legacy/gpu/twocolour_prefix_legacy_helpers.cuh` so historical prefix benchmarks do not enlarge the production include.
+- Surface change: `twocolour_prefix_core.cuh` falls by 1,030 lines; preserving 215 lines of exact scalar regression support under `legacy/gpu/` gives an approximately 815-line net reduction. The active `host_entries` plus pinned `host_prefetch`/`device_prefetch` pipeline and direct grouped BMMA builder are unchanged.
+- Validation: `git diff --check` and the production reachability census pass. On a temporary interruptible IBM Ubuntu 24.04 `gx3-24x120x1l40s` worker with CUDA 12.8, all four `make gpu-production` targets and the surviving legacy 7x7, 7x8, and streamed 7x9 prefix targets compile cleanly for `sm_89`.
+- Resource status: retain the temporary worker for Experiment 378's generalized
+  8x8 checkpoint/provenance validation, then destroy it with the rest of the
+  `rect-cleanup-377*` allocation.
+
+### Experiment 378: Shared v3 checkpointing for 8x8
+
+- Goal: give a future multi-worker `8x8` campaign the same self-identifying,
+  restart-safe result contract as the maintained `7x9` manifest solvers,
+  without duplicating geometry-independent integrity code.
+- Shared implementation: extract manifest parsing, exact range/filter work
+  identity, SHA-256 provenance, checksummed validation, advisory work claims,
+  and immutable hard-link publication into `gpu_result_checkpoint.hpp`.
+  Refactor both `7x9` entry points to use it while preserving their
+  `RECT7X9_PACKED_RESULT 3` schema.
+- `8x8` interface: replace comma-separated paths and the implicit
+  `PREFIX_CANONICAL_SEED` environment variable with an explicit canonical seed,
+  work manifest, and result directory. One process retains the canonical GPU
+  cache across all incomplete manifest items. Completely satisfied manifests
+  validate and exit before CUDA initialization.
+- `8x8` provenance: `RECT8X8_PREFIX_RESULT 3` binds each checkpoint to the
+  exact executable, compile-time geometry/prefix/BMMA configuration,
+  transpose- and token-plane-quotient invariants, canonical-seed contents,
+  orbit-corpus contents, and range/filter identity. The payload includes the
+  exact contribution, coverage totals, comparison count, cache/layout sizes,
+  memory high-water data, and timings.
+- CPU contract gate: `gpu_result_checkpoint_test` passes manifest parsing,
+  exclusive-claim, write/read validation, immutable-publication, configuration
+  mismatch, and payload-corruption tests (`CHECKPOINT_TEST exact=OK`).
+- IBM L40S exact gate: all four production CUDA targets compile with CUDA 12.8.
+  The current 8,217-record versioned transpose-quotient corpus passes eight
+  stratified scalar joins and reproduces contribution
+  `14026555065393059175589478400` from `1,283,580,179,218` representative
+  comparisons. The first run publishes a complete v3 checkpoint; an immediate
+  rerun validates it and returns `SKIP`/`ALL_COMPLETE` in `0.01s`, before cache
+  construction. A changed work identity is rejected rather than silently
+  reusing the result.
+- Resource cleanup: delete the temporary interruptible instance, boot volume,
+  floating IPs, subnet, public gateway, SSH key, and VPC. IBM resource search
+  finds no remaining `rect-cleanup-377*` resources; a read-only audit reports
+  zero VPC instances in every region.
+- Outcome: accept. Checkpoint/provenance behavior is now one maintained library
+  shared by `7x9` and `8x8`, while geometry-specific result payloads and magic
+  values remain explicit.
+
+### Experiment 379: Provider-neutral v3 campaign acceptance
+
+- Goal: close the gap between restart-safe per-work checkpoints and acceptance
+  of a complete independently hosted `7x9` or `8x8` calculation.
+- Implementation: add `aggregate_gpu_v3.py`, a geometry-aware reader for the
+  exact v3 result formats. It validates payload checksums, manifest identity,
+  mandatory token-plane/transposition representations, and SHA-256 provenance;
+  rejects unmanifested results and mixed configuration/cache identities; and
+  reports binary variants explicitly.
+- Exact work coverage: resolve every work item to a local corpus file and split
+  its record range at all manifest boundaries. Each resulting interval must be
+  covered either once without filtering or by exactly all owner IDs under one
+  common modulus. Gaps, overlaps, duplicate owners, mixed moduli, invalid
+  ranges, wrong geometry magic, truncated files, and file-size disagreement
+  fail closed.
+- Full gates: require every checkpoint plus exact totals of `3,608,247,685`
+  records, labelled weight `2^62`, and covered weight `2^63` for `7x9`; or
+  `3,671,999,389` transpose records, labelled weight
+  `10,139,684,107,326,071,075`, and covered weight `2^64` for `8x8`. Kernels
+  must equal records. The `7x9` rerun must additionally reproduce the known
+  contribution `2504755357815289286302895662387200`.
+- Artifact verification: optionally hash all local corpus files in parallel and
+  compare their digests with each result, and verify supplied solver binaries
+  and canonical cache/seed files against provenance. Emit a stable JSON report
+  alongside human-readable completion, aggregate-comparison, contribution, GPU
+  hours, solver hours, and weighted-throughput statistics.
+- Regression: eleven CPU tests pass valid partial aggregation, missing-result
+  reporting, interruption followed by exact completion, range overlap,
+  complete/incomplete filter partitions, checksum corruption, unmanifested
+  files, and mixed configuration rejection. The parser also accepts the real
+  Experiment 375 `7x9` range/filter v3 checkpoint unchanged. The historical
+  v2 aggregator still reproduces all 128 completed shards and its full gate.
+- Corpus readiness finding: the locally retained 55-GiB transpose-quotient
+  `8x8` corpus still carries its pre-versioning `R8ORB01` header, whereas the
+  cleaned production solver and new acceptance tool require `R8SQT01`. Do not
+  relabel it blindly; regenerate from the retained 110-GiB source corpus with
+  the exact transpose filter, or perform a complete transpose-representative
+  validation as part of a safe migration.
+- Outcome: accept the validator. New-provider campaigns now have an exact
+  partial-status and final-acceptance path; versioning the retained 8x8 corpus
+  is the remaining deployment prerequisite.
+
+### Cleanup review: consolidated production GPU surface (2026-08-19)
+
+- Goal: make the maintained quotient-only GPU implementation reflect only the
+  accepted algorithms, reduce geometry leakage between solvers, and remove
+  raw CUDA ownership and obsolete build controls without changing any exact
+  recurrence, representation, prefix coordinate, join, or checkpoint format.
+- Dead surface removed:
+  - delete the unreachable two- and four-LHS scalar kernels; the sole retained
+    scalar kernel implements the exact token-plane-orbit formula
+  - remove the unused 8x8 builder-chunk flag, the rejected BMMA prefix-width
+    Make targets, an uncalled direct-builder overload, two uncalled canonical
+    lookup helpers, duplicate scalar target aliases, and the obsolete
+    `twocolour_7x8_prefix_gpu.cu` forwarding unit
+  - fix prefix-pair count and BMMA task chunking as source constants; retain
+    only the 7x9 prefetch allocation as a build-time capacity control
+- Dependency consolidation:
+  - extract the scalar layout/expansion/join implementation to
+    `twocolour_7x7_engine.cuh`
+  - extract fixed shared prefix algebra to `twocolour_prefix_algebra.cuh`
+  - leave the seven-row device layout and 7x5 packed cache in
+    `twocolour_prefix_core.cuh`, move its CPU builder under `legacy/gpu/`, and
+    isolate seven-row left weight grouping in `twocolour_7x9_left_grouping.cuh`
+  - rename the genuinely shared BMMA implementation to
+    `twocolour_weight_class_bmma.cuh`
+- Ownership cleanup: add move-only pinned-buffer and CUDA-stream wrappers;
+  make the 7x9 packed cache and 8x8 canonical cache own all device resources;
+  remove duplicated manual teardown from both 7x9 entry points; and replace
+  the header-global direct-builder workspace with one workspace per solve.
+- Review-surface result: physical source falls from 4,316 to 3,016 lines for
+  8x8 and from 4,430 to 3,953 lines for single-owner 7x9. The independent 7x7
+  surface is 1,265 lines; optional four-owner 7x9 is 4,533 lines.
+- Build/repository cleanup: retire stale aliases and sweep targets, make the
+  clean list match actual targets, ignore common generated binaries, archive
+  the obsolete Modal tail-profiling script, and add `make gpu-code-dump` as the
+  deterministic source of the untracked external-review `code-dump.txt`.
+- Validation on the local non-CUDA host: `gpu_result_checkpoint_test` reports
+  `exact=OK`; all 11 `aggregate_gpu_v3` tests pass; Python compilation,
+  preprocessor-directive balance, `make -n gpu-production`, production
+  reachability, and `git diff --check` pass. This host has neither `nvcc` nor
+  CUDA headers, so the four-target CUDA compilation and small exact GPU smoke
+  remain the release gate on the next CUDA worker.
+
+### Experiment 380: Regenerated versioned 8x8 transpose corpus
+
+- Goal: replace the retained pre-versioning `R8ORB01` transpose corpus with an
+  independently regenerated `R8SQT01` corpus suitable for the v3 production
+  solver and campaign validator, without trusting a header-only migration.
+- Source and construction: rebuild `binary_orbit_augment_8x8` from commit
+  `45695fc` (generator SHA-256
+  `d452d5c2d9cb24221da77e26f0faf78abdb13a4cd074e433a1c9bf1920679a2e`) and
+  run `solve-transpose-filter` independently on all 1,024 retained ordinary
+  solve shards. Sixteen single-threaded generator processes consume
+  20,979.027 CPU-seconds in the exact filter; output completion times span
+  1,336.052 seconds.
+- Structural gates: obtain exactly 1,024 `R8SQT01` files and 1,024 generation
+  logs, with no temporary files or failure markers. The resulting corpus is
+  58,752,010,704 bytes. Every regenerated payload is byte-for-byte identical
+  to its independently retained legacy quotient payload after excluding only
+  the eight-byte version header.
+- Exact per-shard gate: all 1,024 files pass the current production
+  `solve-check-shard` implementation. The complete corpus contains
+  `3,671,999,389` records, including `354,110,921` midpoint and `217,940`
+  self-complementary records; labelled weight is
+  `10,139,684,107,326,071,075` and covered weight is exactly `2^64`.
+- Checker improvement: parallelize the expensive complete 8x8 checker by
+  shard, storing one exact total per worker item and reducing those totals in
+  deterministic shard order. On 16 logical CPUs the complete 58.75-GB check
+  takes 81.453 seconds and 1,282.67 CPU-seconds, a 15.7-fold wall-time speedup
+  over the implied serial work, while reproducing every exact global gate.
+- Campaign artifacts: promote the validated corpus to
+  `../rectangle-free-data-v2/8x8-transpose/solve/`; retain the recoverable
+  legacy corpus at `solve-legacy-r8orb01/`. Store the 1,024-file integrity list
+  in `corpus-v3.sha256`, the provider-neutral full-file work plan in
+  `work-v3.tsv`, and generation/check logs in `logs-versioned-20260819/`.
+- Outcome: accept. The complete local 8x8 transpose-quotient corpus now has the
+  required format identity, independent payload equivalence, exact per-shard
+  and global validation, and portable integrity/work manifests for a future
+  provider campaign.
+
+### Experiment 381: Universal 9x9 linear-state rank gate
+
+- Goal: test the proposed order-of-magnitude 9x9 algorithm that commutes the
+  complete outer-mask sum through the binary half-distribution contractions,
+  builds reachable linear spaces `V_k`, and contracts complement covariance
+  matrices in `S_9` multiplicity blocks.
+- Algebra audit: accept the universal paired-distribution identity, transition
+  recurrence, and final trace formula as exact. The risk is representation
+  size, not correctness: the full disjointness matrix need not be low rank,
+  while the method succeeds only if the generated `V_4` and `V_5` are highly
+  linearly dependent.
+- Probe: add `reachable_distribution_rank_probe.py`, which constructs exact
+  one-column squarefree distributions, streams degree-one through degree-three
+  commutative products through sparse modular Gaussian elimination, and
+  reports the symmetric-power ceiling. Add a separate exact `S_r` character
+  forecast using Murnaghan--Nakayama, plus CPU regression tests for known small
+  ranks and representation dimensions.
+- Degree-two result: multiplication is fully injective for every tested row
+  count through nine. For nine rows, both primes 1,000,003 and 1,000,033 give
+  `R_1=503` and `R_2=126,756=C(503+1,2)=C(504,2)`. The 131,328 raw column
+  multisets are `C(512+1,2)` before quotienting the nine degree-one relations.
+  Each run takes about 17.2 seconds and 9.05 GiB peak RSS. Equality with the
+  quotient-domain dimension proves the same full rank over the rationals.
+- Degree-three trend: stable large-prime ranks are `304/364` for four rows,
+  `3,424/3,654` for five, and `33,535/34,220` for six. The exact seven-row
+  modular rank is `300,849/302,621`, so at least 99.414% of the symmetric cube
+  survives. That run takes 602.165 seconds, peaks at 68,847,392 KiB RSS, and
+  retains 827,839,306 sparse basis nonzeros. A characteristic-specific rank
+  loss could only make the rational space larger.
+- Symmetry result: the no-relation `S_9` envelope has dimension 21,337,260 and
+  2,135,876,320 commutant entries at degree three. Degree four has dimension
+  2,699,163,390, largest multiplicity 1,864,762, and 23,066,444,763,935
+  commutant entries. The degree-four/degree-five cross space needed by `K` has
+  2,184,725,045,552,167 entries. Row block diagonalisation alone is therefore
+  nowhere near sufficient.
+- Interpretation: the outer-sum commutation is a genuine and correct change of
+  computation graph, but the measurements reject explicit bases for the
+  complete reachable spaces and generic dense contractions on their symmetry
+  multiplicity blocks. Higher-degree dependence becomes proportionally
+  *weaker* as rows increase; degree-four/five relations would need an abrupt
+  several-orders-of-magnitude collapse unsupported by the measurements. This
+  does not reject an implicit nonlinear representation of the one universal
+  aggregate state.
+- Detailed derivation, tables, caveats, and reproduction commands are in
+  `nine_by_nine_linear_state.md`.
+- Outcome: reject explicit `V_4`/`V_5` bases and dense multiplicity contractions
+  as a credible 9x9 production route. Preserve the universal identity as a
+  possible starting point only for a future nonlinear tensor-network,
+  decision-diagram, or implicit structured-operator method.
+
+### Experiment 382: Warp-tiled physical-prefix screening
+
+- Goal: test the remaining distinct compatible-prefix scheduling proposal.
+  Instead of assigning one warp to one physical bucket pair, let the lanes
+  screen 8, 16, or 32 consecutive right buckets, ballot the compatible lanes,
+  and then execute the unchanged collective weight-class BMMA contraction for
+  each survivor. Unlike Experiments 314 and 348, this retains sequential
+  coalesced right-bucket access and performs no dense lookup or submask walk.
+- Prototype: factor the exact class-pair contraction behind an opt-in tiled
+  kernel; stage the lane-screened right descriptors in 3,072 bytes of shared
+  memory so their lane-private fields need not remain live through BMMA. Keep
+  the production Cartesian kernel as the matched control. Build separate
+  uninstrumented 8/16/32-bucket binaries and one profiling binary reporting
+  screened, forward-compatible, swapped-compatible, and doubly-compatible
+  physical pairs. No candidate flag or fallback is retained after the gate.
+- Environment: temporary interruptible IBM Ubuntu 24.04
+  `gx3-24x120x1l40s` in `us-south-2`, one 46,068-MiB L40S, open NVIDIA
+  580.173.02 driver, CUDA 12.0, and 24 OpenMP workers. All variants compile
+  natively for `sm_89` without local-memory spills before launch bounds.
+- Exact workload: use the first 8,192 records of regenerated versioned
+  transpose shard `s0000`, yielding 16,384 selected/complement joins and
+  `1,280,118,034,278` representative comparisons. The profiling candidate
+  passes 32 independently rebuilt scalar joins; every timing binary passes
+  four and reproduces contribution
+  `13899817317072037126216089600` exactly.
+- Real screening census: the workload screens `974,363,651` physical bucket
+  pairs. Forward compatibility holds for `80,331,946`, swapped compatibility
+  for `82,209,758`, and both for `17,113,412`, leaving `145,428,292` in the
+  union. Thus `14.9255%` contribute in at least one orientation: rejection is
+  substantial, but materially less than the review's independent-uniform
+  estimate.
+- Alternating uninstrumented result:
+  - Cartesian controls take `0.247194s` and `0.248846s`, median `0.248020s`.
+  - Eight-bucket tiles take `0.286364s` and `0.286190s`, median `0.286277s`,
+    a `15.43%` regression.
+  - Sixteen-bucket tiles take `0.310717s` and `0.309067s`, median `0.309892s`,
+    a `24.95%` regression.
+  - Thirty-two-bucket tiles take `0.330863s` and `0.331347s`, median
+    `0.331105s`, a `33.50%` regression.
+- Hardware interpretation: with this CUDA compiler the unchanged control uses
+  46 registers, while every unbounded tiled kernel uses 64. Shared staging
+  improves the first 71-register form but cannot preserve the control's
+  residency. Forcing five resident blocks uses 48 registers plus a 40-byte
+  stack and takes `0.290373s`; forcing six uses 40 registers plus a 56-byte
+  stack and takes `0.326611s`. The spills make both refinements worse. More
+  fundamentally, the current deterministic loop rejects one uniform bucket
+  pair very cheaply; ballot iteration, shared staging, variable survivor
+  counts, and coarser queue tasks cost more than the saved screening issue.
+- Gate: stop before 250,000 records. The best exact candidate misses the
+  required 5% join improvement by more than 20 percentage points and is far
+  outside run variation. Remove the complete prototype, profiling ABI, build
+  targets, and temporary manifests so the production core remains one-path.
+- Artifacts: preserve exact logs, all candidate/control binaries, the rejected
+  source snapshot, hardware report, and SHA-256 manifest under
+  `../rectangle-free-data-v2/profiles/ibm-l40s-warp-screen-20260819/`.
+- Resource cleanup: destroy the interruptible instance, boot volume, floating
+  IPs, subnet, public gateway, SSH key, and VPC. A prefix-scoped audit reports
+  no remaining `rect-warpscreen-381*` resources.
+- Outcome: reject warp-tiled prefix screening. Together with Experiments 314
+  and 348, this closes compatible-prefix scheduling by CSR enumeration, dense
+  adaptive lookup, and coalesced lane-parallel screening. Retain the simple
+  Cartesian physical-bucket traversal as the measured production optimum.
+
+### Experiment 383: Direct production 7x4 left-layout construction
+
+- Goal: remove the remaining two-stage 7x9 left path. It first materialised a
+  conventional per-entry `(suffix, marked weight)` layout, then reread and
+  regrouped every physical bucket into the suffix-only weight-class format
+  consumed by the production BMMA kernel. The 7x9 right side and 8x8 already
+  construct that final representation directly.
+- Implementation: promote the formerly 8x8-owned canonical device cache and
+  direct-builder adapter to geometry-neutral `twocolour_canonical_device.cuh`.
+  Resolve each 7x4 left key to its selected/complement `CanonicalRef`, upload
+  the canonical masks plus exact `(weight, token-plane orbit size)` ordinals,
+  and emit suffixes, prefix buckets, and weight classes directly. This remains
+  the sole quotient representation and retains no production fallback.
+- Consolidation: delete the complete 176-line seven-row grouping adapter and
+  replace the 144-line 8x8-only adapter with one shared 142-line component.
+  Both 7x9 entry points and 8x8 now cross the same canonical-to-layout
+  boundary. All three production binaries plus the left-layout probe compile
+  natively for `sm_89` under CUDA 12.0.
+- Environment: temporary interruptible IBM Ubuntu 24.04
+  `gx3-24x120x1l40s` in `us-south-2`, one 46,068-MiB L40S, open NVIDIA
+  580.173.02 driver, CUDA 12.0, GCC 12, and 24 OpenMP workers.
+- Production-shaped isolated gate: read all 27,566,582 records of 7x9 shard
+  `s0107`, yielding 7,806 resident left keys and 14,607,213 canonical source
+  entries. Both paths produce exactly 100,433,801 suffix entries, 1,457,943
+  physical buckets, 1,549,986 weight classes, and a maximum of nine classes
+  per bucket.
+- Five-build timing: the old path's median `layout.total_seconds` is
+  `0.164869s`; the direct path's median is `0.124897s`, a `24.245%` reduction.
+  The absolute saving is only about 40 ms per resident owner, confirming that
+  this was a cleanup and memory-traffic improvement rather than a material
+  campaign-level speedup.
+- Independent end-to-end exact gate: solve the first 8,192 records of the same
+  shard with eight scalar validations. Control and candidate both report
+  labelled weight `10464202720440`, covered weight `20928405440880`,
+  `819291302668` direct comparisons, and contribution
+  `5571672310728254642817024000`. Candidate recurring work takes `3.320191s`
+  versus `3.339930s` for the single control run; the apparent `0.59%` saving is
+  not treated as a stable throughput claim.
+- Artifacts: retain the full isolated timing log and both self-identifying
+  result files under
+  `../rectangle-free-data-v2/profiles/ibm-l40s-direct-left-20260820/`.
+- Outcome: accept. The direct path is measurably faster, exact, and simpler;
+  its main value is removing a redundant production representation and making
+  7x9/8x8 layout construction share one maintained implementation.
+
+### Experiment 384: Versioned packed 7x5 cache artifact
+
+- Goal: remove the repeated two-pass construction of all 136,758 canonical
+  7x5 distributions and their 2,370,316,739 token-plane-quotient entries at
+  every 7x9 process startup, while preserving exact input provenance.
+- Implementation: add `twocolour_7x9_cache_build`, which publishes an
+  immutable `R7PCK01` artifact containing the catalog, weight/orbit classes,
+  17.66-GiB packed payload, source SHA-256, artifact digest, and 4-MiB payload
+  block digests. Solvers auto-detect either this artifact or the original
+  `R7ORB01` orbit census. Artifact metadata is validated eagerly; mapped
+  payload blocks are authenticated once, lazily, before their first gather.
+  Checkpoints bind to the canonical source digest, so changing only the cache
+  storage representation does not invalidate an exact result.
+- GPU memory policy: preserve the automatic shared policy introduced during
+  this work. A cache becomes fully device-resident only if its allocation
+  leaves 32 GiB of recurring workspace plus the safety reserve. This selects
+  streaming on the 46-GiB L40S and permits residency on 96-GiB devices. Both
+  single- and four-owner solvers support either mode.
+- Environment: temporary IBM Ubuntu 24.04 `gx3-24x120x1l40s` in
+  `us-south-2`, one 46,068-MiB L40S, CUDA 12.0, GCC 12, and 24 OpenMP
+  workers. The smoke workload is the first 8,192 records of production shard
+  `s0107`, with eight independent scalar validations.
+- Artifact construction: the existing exact reconstruction takes
+  `51.113323s` (`24.977719s` count plus `25.330828s` pack). Hashing the
+  payload takes `5.665591s`. Publishing 18,968,403,480 bytes to the slow IBM
+  boot volume takes `394.592168s`; this is a one-time staging cost, not a
+  per-solve cost. The artifact digest is
+  `99790cbce6ed888fb5a865880597470d615e3b079072883a6cad35562829d5f9`.
+- Cold-storage gate: reject mapped loading as an unconditional default. A
+  completely cold run was still faulting scattered pages after 193 seconds
+  and was stopped. A partially warmed run read 3.11 GiB from disk and took
+  `125.34s` wall, including `116.736048s` of logical gather, versus `59.74s`
+  wall for reconstruction and solve.
+- Warm gate: the immediate mapped rerun takes `16.15s` wall. Cache metadata
+  and CUDA staging take `2.959766s`; authenticated gathering takes
+  `7.608512s`; recurring solve work takes `10.393558s`. This is 3.70x faster
+  than the reconstructed process wall time. Payload validation is amortized
+  across every later shard handled by that process.
+- Exactness: reconstructed and both mapped runs report labelled weight
+  `10464202720440`, covered weight `20928405440880`,
+  `819291302668` direct comparisons, and contribution
+  `5571672310728254642817024000` exactly.
+- Four-owner regression: split the same range into four disjoint owners and
+  run the mapped streamed path. Its four independently checkpointed
+  contributions sum to the same exact value; the union contains 8,168 right
+  prefixes, issues all 8,192 kernels, and passes eight scalar validations.
+- Artifacts: preserve timing logs and all self-identifying smoke results under
+  `../rectangle-free-data-v2/profiles/ibm-l40s-packed-cache-20260820/`. The
+  reproducible 17.66-GiB cache artifact itself is not downloaded.
+- Outcome: accept as an explicit campaign optimization, with automatic
+  artifact-or-orbit input. Stage the artifact on local NVMe or reuse it among
+  long-lived workers; retain exact reconstruction for cold, slow storage.
+
+### Experiment 385: Universal-state weighted decision-diagram gate
+
+- Goal: test the remaining nonlinear interpretation of the universal identity
+  after Experiment 381 rejected explicit ambient reachable-space bases. Build
+  only the single state `P^k`, and in particular `F_3=P^3`, then attempt the
+  balanced identity `T_4(9,9)=tau(F_3 star F_3 star F_3)`.
+- Probe: add `universal_state_dd_probe.py`, an exact modular reduced
+  edge-weighted MDD with memoized squarefree convolution, hard resource caps,
+  and lexicographic, reverse, and balanced pair-site orders. Compare one
+  16-valued site per row pair with a colour-major binary-site baseline. Add
+  exhaustive small-grid regression tests; all modes and orders reproduce the
+  brute-force `(2,3)`, `(3,2)`, and `(3,3)` totals.
+- Five-row `F_3`: bundled lexicographic order finishes with 230,790 reachable
+  nodes, maximum width 75,282, 523,482 allocated nodes, 10.80 seconds, and
+  about 0.70 GiB peak RSS. The colour-major representation uses 258,125
+  reachable nodes and maximum width 22,177. Balanced pair ordering is worse,
+  at 304,833 reachable nodes and width 112,658. Primes 1,000,003 and 1,000,033
+  give identical structure counts.
+- Growth: bundled `F_3` reachable nodes increase 53.4x and maximum width 36.2x
+  from four to five rows. At six rows, all tested `F_3` representations exceed
+  a one-million allocated-node cap. At seven rows, even `P^2` exceeds it in
+  both bundled and colour-major modes. The literal balanced `F_3 star F_3`
+  Apply exceeds the same cap at only four rows.
+- Caveat: allocated nodes include memoized intermediates, so garbage
+  collection or compiled storage would raise the absolute limit. The large
+  completed-state sizes and row-to-row growth, rather than the Python cap
+  alone, reject the route. MDD width is not an exact tensor-train bond rank, so
+  this does not reject every hierarchical tensor representation.
+- Detailed derivation, results, limits, and reproduction commands are in
+  `nine_by_nine_universal_state_dd.md`.
+- Outcome: reject conventional ordered weighted ZDD/MDD storage of `F_3` as a
+  credible 9x9 route. A distinct tensor gate would have to demonstrate large
+  exact linear dependence among the tens of thousands of five-row residual
+  functions; ordinary decision-diagram sharing is already insufficient.
+
+### Experiment 386: Exact 6x30 hafnian CPU and CUDA gate
+
+- Goal: exploit saturation at the sharp six-row endpoint. Every valid column
+  at width 30 has multiplicities `2+2+1+1`, consumes two of the 60
+  `(colour,row-pair)` tokens, and the columns form a perfect matching of
+  `H=K_4 x KG(6,2)`. Therefore
+  `T_4(6,30)=30! * 2^30 * haf(A_H)`.
+- Implementation: add an independent finite-field CPU reference and CUDA
+  solver for the Glynn power-trace hafnian formula. Fixing one reference-pair
+  sign leaves `2^29=536,870,912` terms. Each term uses an upper-Hessenberg
+  similarity reduction, a degree-30 truncated La Budde recurrence, Newton
+  traces, and exact coefficient extraction. Ten 31-bit primes give a 310-bit
+  CRT modulus, above the rigorous `60! < 2^273` answer bound.
+- CPU arithmetic: 32-bit residues with Barrett reduction and OpenMP. On the
+  local 16-thread SMT machine, a 100,000-term sample modulo 2,147,483,647 took
+  `5.712455s`, or about 17,506 terms/s. One complete prime projects to about
+  8.52 hours; all ten would require about 85 machine-hours if run serially.
+- CUDA arithmetic: one cooperative CTA per sign term, a 60x60 matrix plus the
+  truncated characteristic-polynomial state in about 22.5 KiB shared memory,
+  and exact 32-bit Montgomery multiplication. Batched commuting Hessenberg
+  eliminations remove the ordered baseline's quadratic barrier count. On
+  Blackwell the kernel uses 48 registers, has no register spills, and supports
+  four resident CTAs per SM at the chosen shared-memory size.
+- Exactness: the CPU formula matches brute-force perfect-matching counts for
+  36 random/complete graphs at each of two primes and for the structured
+  two-colour endpoint. CPU and GPU target ranges agree bit-for-bit under three
+  primes, unrelated sign ranges, 1/16/376/752 CTAs, 128/256 threads, and
+  different chunk boundaries. The 65,536-term comparison modulo 2,147,483,579
+  gives residue `1808785296` on both implementations.
+- GPU performance: on a busy RTX PRO 6000 Blackwell, that 65,536-term sample
+  took `0.077928s`, versus `3.781045s` on the local 16-thread CPU, a 48.5x
+  observed speedup. Tuning selected 256 threads and 752 CTAs; repeated samples
+  reached about 0.84--0.87 million terms/s. This projects to roughly 10.3--10.6
+  minutes per prime, 1.7--1.8 GPU-hours for ten primes, or 25--30 minutes on
+  four comparable GPUs.
+- Production integrity: every result binds the algorithm, graph digest
+  `9563bf83042c9f9548261d3602279d3abec50417897b32f54e72b4816524a947`,
+  binary digest, prime, and exact term interval, with a payload SHA-256. CUDA
+  atomically republishes its cumulative exact interval after each bounded
+  chunk. The reducer rejects gaps/overlaps and performs CRT only after complete
+  prime coverage. A multi-GPU driver dynamically assigns primes and resumes
+  from retained interval prefixes.
+- Outcome: accept. The endpoint reduction is not merely feasible; one modern
+  GPU should finish the arithmetic in under two hours, and four GPUs should
+  make a complete independently checked computation a sub-hour task.
+
+### Experiment 387: Exact 6x29 defect expansion and residual hafnians
+
+- Goal: move one column below the saturated 6x30 endpoint without returning
+  to the outer-mask corpus. With 60 `(colour,row-pair)` tokens and width 29,
+  unused tokens plus support excess are exactly two.
+- Exact reduction: enumerate the columns with support larger than two and
+  aggregate their occupied-token unions under `S_6 x S_4`. The 83,071 raw
+  unions reduce to 29 residual queries: one sector `(excess,defects)=(0,0)`,
+  two `(1,1)`, one `(2,1)`, and 25 `(2,2)`. Their aggregate defect
+  coefficients are respectively 1, 840, 1,440, and 303,660.
+- Matching formulation: delete each defect union from
+  `H=K_4 x KG(6,2)`. Append `r=2-excess` labelled dummy vertices adjacent to
+  every residual original vertex. The desired fixed-cardinality matching
+  count is the augmented perfect-matching count divided by `r!`. The 29
+  augmented graph orders are one 62, two 58, one 56, and twenty-five 54.
+- Implementation: extract the proven CUDA Glynn/trace kernel into one
+  graph-order-generic core and instantiate it at 54, 56, 58, 60, and 62
+  vertices. Add a deterministic catalog builder, independent OpenMP CPU range
+  evaluator, authenticated checkpoint format, exact reducer, and dynamic
+  longest-job-first multi-GPU driver. The catalog digest is
+  `a2c9f8d9ef2cf9e35502189a713d59b3175e585316227af3609b9a7c417611a8`.
+- Exactness: the refactored order-60 kernel retains the known first-16-term
+  residue `2095133610`. CPU and GPU ranges `[12345,16441)` agree at all new
+  orders, giving residues `1036226810`, `1854469278`, `1938150658`, and
+  `399224820` under four different primes. Unit tests authenticate payloads,
+  check the defect sectors, and reproduce a synthetic complete nine-prime
+  reduction.
+- CRT bound: bounding every residual matching number by the corresponding
+  complete-graph matching number proves
+  `T_4(6,29) < 2^272`. This improves the generic `2^348` colouring bound and
+  reduces production from twelve primes to nine. Their product has 279 bits.
+- Performance: on RTX PRO 6000 Blackwell, representative sustained rates are
+  1.73, 1.89, 2.04, and 2.20 million terms/s at orders 62, 58, 56, and 54.
+  Full-query times are about 600--605s, 139--141s, 63.5s, and 30.1s. One prime
+  represents 3,422,552,064 sign terms; nine primes represent 30,802,968,576.
+- Campaign: run dynamically across eight spot RTX PRO 6000 GPUs on Verda.
+  The first worker was discontinued after completing the first eight heavy
+  queries; atomic interval files were already mirrored locally. A replacement
+  resumed the exact suffixes and completed all 29 queries under all nine
+  primes. Approximate total instance cost, including compilation and the
+  interrupted extra-prime work, was $5.5.
+- Result: CRT reconstructs the 224-bit integer
+  `T_4(6,29) = 17358733447918084452169454975226757275803964484580835695001600000000`.
+  All per-prime query covers are exact and nonoverlapping, every payload is
+  authenticated, and the CRT modulus exceeds the rigorous bound.
+- Artifacts: retain 266 relevant result/checkpoint pieces, the three excluded
+  partial-prime pieces, all per-job logs, both campaign logs, and the local
+  reduction under `../rectangle-free-data-v2/verda-6x29-hafnian/`.
+- Outcome: accept. The low-defect endpoint expansion makes 6x29 a modest
+  multi-GPU calculation and validates exact spot-resume across heterogeneous
+  residual hafnians.

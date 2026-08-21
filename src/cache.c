@@ -14,6 +14,18 @@ static inline GraphCacheValue* row_graph_cache_coeff_slot(const RowGraphCache* c
 #endif
 }
 
+#if !RECT_COUNT_K4
+static inline int row_graph_cache_value_fits(const GraphResult* value) {
+    for (int i = 0; i <= value->deg; i++) {
+        if (value->coeffs[i] < (PolyCoeff)INT64_MIN ||
+            value->coeffs[i] > (PolyCoeff)INT64_MAX) {
+            return 0;
+        }
+    }
+    return 1;
+}
+#endif
+
 static inline uint64_t cache_index_mix(uint64_t x) {
     x ^= x >> 33;
     x *= UINT64_C(0xff51afd7ed558ccd);
@@ -67,8 +79,8 @@ static inline void row_graph_cache_load_poly(const RowGraphCache* cache, int slo
 #else
     value->x_pow = cache->x_pows[slot];
     value->deg = cache->degs[slot];
-    memcpy(value->coeffs, row_graph_cache_coeff_slot(cache, slot),
-           ((size_t)value->deg + 1U) * sizeof(value->coeffs[0]));
+    const GraphCacheValue* coeffs = row_graph_cache_coeff_slot(cache, slot);
+    for (int i = 0; i <= value->deg; i++) value->coeffs[i] = (PolyCoeff)coeffs[i];
 #endif
 }
 
@@ -110,6 +122,9 @@ int row_graph_cache_lookup_rows(RowGraphCache* cache, uint64_t key_hash, uint32_
 void store_row_graph_cache_entry(RowGraphCache* cache, uint64_t key_hash, uint32_t key_n,
                                  const Graph* g, AdjWord row_mask,
                                  const GraphResult* value) {
+#if !RECT_COUNT_K4
+    if (!row_graph_cache_value_fits(value)) return;
+#endif
     int cache_idx = (int)(cache_index_mix(key_hash) & (uint64_t)cache->mask);
     int empty_slot = -1;
     int oldest_same_n_slot = -1;
@@ -158,8 +173,8 @@ void store_row_graph_cache_entry(RowGraphCache* cache, uint64_t key_hash, uint32
 #else
     cache->x_pows[best_slot] = value->x_pow;
     cache->degs[best_slot] = value->deg;
-    memcpy(row_graph_cache_coeff_slot(cache, best_slot), value->coeffs,
-           ((size_t)value->deg + 1U) * sizeof(value->coeffs[0]));
+    GraphCacheValue* coeffs = row_graph_cache_coeff_slot(cache, best_slot);
+    for (int i = 0; i <= value->deg; i++) coeffs[i] = (GraphCacheValue)value->coeffs[i];
 #endif
     cache->keys[best_slot].used = 1;
     row_graph_cache_touch_slot(cache, best_slot);
@@ -167,6 +182,9 @@ void store_row_graph_cache_entry(RowGraphCache* cache, uint64_t key_hash, uint32
 
 void store_row_graph_cache_entry_rows(RowGraphCache* cache, uint64_t key_hash, uint32_t key_n,
                                       const AdjWord* rows, const GraphResult* value) {
+#if !RECT_COUNT_K4
+    if (!row_graph_cache_value_fits(value)) return;
+#endif
     int cache_idx = (int)(cache_index_mix(key_hash) & (uint64_t)cache->mask);
     int empty_slot = -1;
     int oldest_same_n_slot = -1;
@@ -209,8 +227,8 @@ void store_row_graph_cache_entry_rows(RowGraphCache* cache, uint64_t key_hash, u
 #else
     cache->x_pows[best_slot] = value->x_pow;
     cache->degs[best_slot] = value->deg;
-    memcpy(row_graph_cache_coeff_slot(cache, best_slot), value->coeffs,
-           ((size_t)value->deg + 1U) * sizeof(value->coeffs[0]));
+    GraphCacheValue* coeffs = row_graph_cache_coeff_slot(cache, best_slot);
+    for (int i = 0; i <= value->deg; i++) coeffs[i] = (GraphCacheValue)value->coeffs[i];
 #endif
     cache->keys[best_slot].used = 1;
     row_graph_cache_touch_slot(cache, best_slot);

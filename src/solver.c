@@ -332,6 +332,66 @@ static void graph_choose_branch_edge(const Graph* g, int* u_out, int* v_out, int
     *max_deg_out = max_deg;
 }
 
+static int graph_choose_fill_nonedge(const Graph* g, int fill_limit,
+                                     int* u_out, int* v_out) {
+    int best_fill = INT_MAX;
+    int best_degree = INT_MAX;
+    int best_u = -1;
+    int best_v = -1;
+    uint64_t active = g->vertex_mask;
+
+    while (active) {
+        int pivot = __builtin_ctzll(active);
+        uint64_t neighbors = (uint64_t)g->adj[pivot] & g->vertex_mask;
+        int degree = __builtin_popcountll(neighbors);
+        int fill = 0;
+        int candidate_u = -1;
+        int candidate_v = -1;
+        uint64_t rem = neighbors;
+        while (rem) {
+            int u = __builtin_ctzll(rem);
+            uint64_t missing = neighbors & ~((uint64_t)g->adj[u]) &
+                               ~graph_row_mask(u + 1);
+            if (missing && candidate_u < 0) {
+                candidate_u = u;
+                candidate_v = __builtin_ctzll(missing);
+            }
+            fill += __builtin_popcountll(missing);
+            int cutoff = best_fill < fill_limit ? best_fill : fill_limit;
+            if (fill > cutoff) break;
+            rem &= rem - 1;
+        }
+
+        if (fill > 0 && fill <= fill_limit &&
+            (fill < best_fill || (fill == best_fill && degree < best_degree))) {
+            best_fill = fill;
+            best_degree = degree;
+            best_u = candidate_u;
+            best_v = candidate_v;
+            if (best_fill == 1) break;
+        }
+        active &= active - 1;
+    }
+
+    *u_out = best_u;
+    *v_out = best_v;
+    return best_fill;
+}
+
+static void graph_contract_vertices(Graph* g, int u, int v) {
+    uint64_t merged_nbrs =
+        ((uint64_t)g->adj[u] | (uint64_t)g->adj[v]) &
+        g->vertex_mask & ~((UINT64_C(1) << u) | (UINT64_C(1) << v));
+    g->adj[u] = (AdjWord)merged_nbrs;
+    uint64_t nbrs = merged_nbrs;
+    while (nbrs) {
+        int k = __builtin_ctzll(nbrs);
+        g->adj[k] |= (AdjWord)(UINT64_C(1) << u);
+        nbrs &= nbrs - 1;
+    }
+    remove_vertex(g, v);
+}
+
 #if RECT_COUNT_K4
 static int simplify_graph_count4(Graph* g, uint64_t* multiplier,
                                  SolveGraphOutcome* outcome, GraphResult* out_result) {
@@ -670,6 +730,19 @@ done:
         }
         int max_deg = -1, u = -1, v = -1;
         graph_choose_branch_edge(branch_g, &u, &v, &max_deg);
+        int use_addition_contraction = 0;
+        if (g_addition_contraction_fill_limit > 0) {
+            int fill_u = -1;
+            int fill_v = -1;
+            int fill = graph_choose_fill_nonedge(branch_g,
+                                                 g_addition_contraction_fill_limit,
+                                                 &fill_u, &fill_v);
+            if (fill <= g_addition_contraction_fill_limit && fill_u >= 0 && fill_v >= 0) {
+                u = fill_u;
+                v = fill_v;
+                use_addition_contraction = 1;
+            }
+        }
         if (PROFILE_BUILD && profile && branch_g->n >= 0 && branch_g->n <= MAX_GRAPH_VERTICES) {
             hard_pick_t += omp_get_wtime() - phase_t0;
         }
@@ -688,18 +761,39 @@ done:
             hard_sep_t += omp_get_wtime() - phase_t0;
         }
 
-        if (u != -1 && v != -1) {
-            // Deletion: remove edge (u,v)
-            Graph g_del = *branch_g;
-            g_del.adj[u] &= ~(1ULL << v);
-            g_del.adj[v] &= ~(1ULL << u);
-            GraphPoly p_del;
+        int solved_by_treewidth = 0;
+        if (g_treewidth_limit > 0 && branch_g->n >= g_treewidth_min_n) {
+            double treewidth_t0 = 0.0;
+            if (PROFILE_BUILD && profile) {
+                profile->treewidth_attempts_by_n[branch_g->n]++;
+                treewidth_t0 = omp_get_wtime();
+            }
+            solved_by_treewidth =
+                solve_graph_poly_treewidth(branch_g, g_treewidth_limit,
+                                           &res, NULL);
+            if (PROFILE_BUILD && profile) {
+                profile->treewidth_time_by_n[branch_g->n] += omp_get_wtime() - treewidth_t0;
+                if (solved_by_treewidth) profile->treewidth_successes_by_n[branch_g->n]++;
+            }
+        }
+
+        if (!solved_by_treewidth && u != -1 && v != -1) {
+            // First branch: delete an existing edge, or add a selected fill edge.
+            Graph g_first = *branch_g;
+            if (use_addition_contraction) {
+                g_first.adj[u] |= (AdjWord)(UINT64_C(1) << v);
+                g_first.adj[v] |= (AdjWord)(UINT64_C(1) << u);
+            } else {
+                g_first.adj[u] &= (AdjWord)~(UINT64_C(1) << v);
+                g_first.adj[v] &= (AdjWord)~(UINT64_C(1) << u);
+            }
+            GraphPoly p_first;
             if (PROFILE_BUILD && profile && branch_g->n >= 0 && branch_g->n <= MAX_GRAPH_VERTICES) {
                 phase_t0 = omp_get_wtime();
             }
-            solve_graph_poly(&g_del, cache, raw_cache, ws,
+            solve_graph_poly(&g_first, cache, raw_cache, ws,
                              local_canon_calls, local_cache_hits, local_raw_cache_hits,
-                             profile, &p_del);
+                             profile, &p_first);
             if (PROFILE_BUILD && profile && branch_g->n >= 0 && branch_g->n <= MAX_GRAPH_VERTICES) {
                 hard_del_t += omp_get_wtime() - phase_t0;
             }
@@ -709,17 +803,7 @@ done:
             if (PROFILE_BUILD && profile && branch_g->n >= 0 && branch_g->n <= MAX_GRAPH_VERTICES) {
                 phase_t0 = omp_get_wtime();
             }
-            uint64_t merged_nbrs =
-                ((uint64_t)g_cont.adj[u] | (uint64_t)g_cont.adj[v]) &
-                g_cont.vertex_mask & ~((UINT64_C(1) << u) | (UINT64_C(1) << v));
-            g_cont.adj[u] = (AdjWord)merged_nbrs;
-            uint64_t nbrs = merged_nbrs;
-            while (nbrs) {
-                int k = __builtin_ctzll(nbrs);
-                g_cont.adj[k] |= (AdjWord)(UINT64_C(1) << u);
-                nbrs &= nbrs - 1;
-            }
-            remove_vertex(&g_cont, v);
+            graph_contract_vertices(&g_cont, u, v);
             if (PROFILE_BUILD && profile && branch_g->n >= 0 && branch_g->n <= MAX_GRAPH_VERTICES) {
                 hard_cont_build_t += omp_get_wtime() - phase_t0;
                 phase_t0 = omp_get_wtime();
@@ -732,8 +816,12 @@ done:
                 hard_cont_solve_t += omp_get_wtime() - phase_t0;
             }
 
-            graph_poly_sub_ref(&p_del, &p_cont, &res);
-        } else {
+            if (use_addition_contraction) {
+                graph_poly_add_ref(&p_first, &p_cont, &res);
+            } else {
+                graph_poly_sub_ref(&p_first, &p_cont, &res);
+            }
+        } else if (!solved_by_treewidth) {
             graph_poly_one_ref(&res);
             for (int k = 0; k < branch_g->n; k++) graph_poly_mul_linear_ref(&res, 0, &res);
         }

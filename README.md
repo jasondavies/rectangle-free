@@ -39,6 +39,10 @@ The repository currently contains:
   State-space dynamic program for `T_4(5, n)` with row / colour
   canonicalisation.
 
+- `pairmask_transfer_probe.c`
+  Experimental fixed-4 transfer over row-pair histories. It is a research
+  probe for wider grids rather than the current production solver.
+
 ### Partition-based C solvers
 
 - `partition_poly`
@@ -55,6 +59,11 @@ The repository currently contains:
   Build target that compiles the same shared solver with `DEFAULT_ROWS=7`,
   `DEFAULT_COLS=7`, and `MAX_COLS=7`. This is the current 7-row polynomial
   executable in the tree.
+
+- `partition_poly_8`
+  Build target specialised for grids up to `8 x 8`. Keeping `MAX_COLS=8`
+  bounds conflict graphs at 32 vertices and avoids the larger graph/cache
+  representation required by the general 16-column executable.
 
 ### Helper scripts and data
 
@@ -131,6 +140,34 @@ make 5xn_count4
 ./5xn_count4
 ```
 
+The optional transfer probe supports two through eight rows:
+
+```bash
+make pairmask_transfer_probe
+./pairmask_transfer_probe 8 2
+./pairmask_transfer_probe 8 3 --ordered
+./pairmask_transfer_probe 8 4 --ordered 0
+./pairmask_transfer_probe 8 4 --contracted
+./pairmask_transfer_probe 8 5 --contracted 13 350
+```
+
+It uses an exact colored-incidence individualize/refine key for row/colour
+symmetry. It is intended for state-growth experiments rather than full `8x8`
+runs. The
+`--ordered` mode is a fixed-four recurrence: it memoises the exact
+number of ordered remaining columns from each available row-pair-token state.
+It decomposes the first column into exact row/colour orbits; an optional orbit
+index runs one independently checkpointable contribution. Contracted mode also
+accepts a second index selecting a deterministic canonical second-column shard,
+which is the intended unit for cluster jobs. The `--setpack`
+mode retains an unordered exact-depth comparator. The `--contracted` mode
+counts the final two columns together by subset convolution instead of
+materialising one-column terminal states. It is the low-memory experimental
+alternative and provides deterministic second-column shards. For throughput,
+compare it against `partition_count4`: on the current one-core `8x4` benchmark,
+`partition_count4` is substantially faster, while contracted transfer uses
+substantially less memory. See Experiment 213 in `experiments.md`.
+
 ## Building the partition-based solvers
 
 `partition_poly` and `partition_count4` require OpenMP.
@@ -147,8 +184,10 @@ This builds the tracked top-level executables:
 - `partition_count4`
 - `partition_poly`
 - `partition_poly_7`
+- `partition_poly_8`
 - `partition_poly_profile`
 - `partition_poly_7_profile`
+- `partition_poly_8_profile`
 
 On macOS with Apple clang, OpenMP usually also needs Homebrew `libomp`. The
 current `Makefile` uses `/opt/homebrew/opt/libomp` automatically on Darwin.
@@ -187,7 +226,8 @@ Partition hardness reorder is enabled by default. Use `--no-reorder` to
 restore the legacy partition IDs and task numbering.
 
 Profiling is selected at build time, not by a runtime `--profile` flag. Build
-`partition_poly_profile` or `partition_poly_7_profile` for a profiling binary;
+`partition_poly_profile`, `partition_poly_7_profile`, or
+`partition_poly_8_profile` for a profiling binary;
 only profiling builds accept `--task-times-out FILE`.
 
 For sharded runs:
@@ -253,6 +293,39 @@ Or pass the dimensions explicitly:
 ./partition_poly_7 7 7
 ```
 
+## Using `partition_poly_8`
+
+Build and run the specialised 8-row target with:
+
+```bash
+make partition_poly_8
+./partition_poly_8 8 5 --prefix-depth 2 --task-end 1
+```
+
+This target enables a bounded shared hard-graph cache by default. Set
+`RECT_HARD_CACHE_BITS=0` to disable it for low-reuse shards.
+It also dispatches connected residual graphs with at least 18 vertices and
+greedy min-fill width at most 5 to the tree-decomposition polynomial solver.
+Override this with `RECT_TREEWIDTH_LIMIT` and `RECT_TREEWIDTH_MIN_N`; a limit
+of `0` disables the dispatch.
+
+Repeated terminal graphs are combined before graph-polynomial evaluation. The
+default aggregation table has 4096 slots for a single-thread run and 1024 slots
+per worker for a multi-thread run. Set `RECT_TERMINAL_AGGREGATE_BITS` to choose
+a table size of `2^bits`, or to `0` to disable aggregation.
+
+For a faster host-specific production binary, build with profile-guided
+optimization:
+
+```bash
+make partition_poly_8_pgo
+```
+
+This runs an instrumented single-thread `8x5` task-0 training shard, then builds
+`partition_poly_8_pgo` from the resulting profile. It is intentionally not part
+of `make all`, because training takes longer and uses the normal 8-row cache
+memory. Re-run the target after changing compiler versions or relevant flags.
+
 ## Compile-time limits
 
 Current limits in the checked-in C sources:
@@ -260,6 +333,7 @@ Current limits in the checked-in C sources:
 - `partition_poly`: up to 8 rows and 16 columns.
 - `partition_count4`: same solver limits as `partition_poly`.
 - `partition_poly_7`: 7 rows and up to 7 columns.
+- `partition_poly_8`: 8 rows and up to 8 columns.
 
 These limits come from the current fixed-size structures and the size of the
 induced conflict graphs.

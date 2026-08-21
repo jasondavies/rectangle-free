@@ -1765,6 +1765,12 @@ static void solve_structure_with_row_orbit(const Graph* partial_graph, long long
     Poly weight;
     poly_scale_ref(weight_prod, mult_coeff * row_orbit, &weight);
     if (PROFILE_BUILD && profile) profile->build_weight_time += omp_get_wtime() - t0;
+    if (terminal_aggregator_defer(tls_terminal_aggregator, partial_graph, &weight,
+                                  cache, raw_cache, ws, local_canon_calls,
+                                  local_cache_hits, local_raw_cache_hits, profile)) {
+        poly_zero(out_result);
+        return;
+    }
 #endif
     GraphResult graph_result_small;
     solve_graph_poly(partial_graph, cache, raw_cache, ws,

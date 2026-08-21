@@ -133,6 +133,22 @@ typedef uint64_t AdjWord;
 #define DEFAULT_ADAPTIVE_WORK_BUDGET 0
 #endif
 
+#ifndef DEFAULT_TREEWIDTH_LIMIT
+#define DEFAULT_TREEWIDTH_LIMIT 0
+#endif
+
+#ifndef DEFAULT_TREEWIDTH_MIN_N
+#define DEFAULT_TREEWIDTH_MIN_N 18
+#endif
+
+#ifndef DEFAULT_TERMINAL_AGGREGATE_BITS
+#define DEFAULT_TERMINAL_AGGREGATE_BITS 0
+#endif
+
+#ifndef DEFAULT_TERMINAL_AGGREGATE_MULTI_BITS
+#define DEFAULT_TERMINAL_AGGREGATE_MULTI_BITS DEFAULT_TERMINAL_AGGREGATE_BITS
+#endif
+
 typedef __int128_t PolyCoeff;
 typedef uint16_t PrefixId;
 
@@ -160,7 +176,7 @@ typedef uint64_t GraphResult;
 typedef uint64_t GraphCacheValue;
 #else
 typedef GraphPoly GraphResult;
-typedef PolyCoeff GraphCacheValue;
+typedef int64_t GraphCacheValue;
 #endif
 
 typedef struct {
@@ -217,6 +233,8 @@ typedef struct {
     uint64_t next_stamp;
 } RowGraphCache;
 
+typedef struct TerminalAggregator TerminalAggregator;
+
 #define WL_CANON_ENUM_BUDGET_BUCKETS 18
 
 typedef struct {
@@ -244,6 +262,10 @@ typedef struct {
     long long wl_canon_enum_budget_exceeded;
     long long wl_canon_enum_budget_hist[WL_CANON_ENUM_BUDGET_BUCKETS];
     long long hard_graph_nodes;
+    long long terminal_aggregate_inputs;
+    long long terminal_aggregate_unique;
+    long long terminal_aggregate_hits;
+    long long terminal_aggregate_flushes;
     long long canon_prepare_calls_by_depth[MAX_COLS + 1];
     long long canon_prepare_accepts_by_depth[MAX_COLS + 1];
     long long stabilizer_sum_by_depth[MAX_COLS + 1];
@@ -263,6 +285,8 @@ typedef struct {
     long long solve_graph_connected_lookup_calls_by_n[MAX_GRAPH_VERTICES + 1];
     long long solve_graph_component_calls_by_n[MAX_GRAPH_VERTICES + 1];
     long long solve_graph_hard_misses_by_n[MAX_GRAPH_VERTICES + 1];
+    long long treewidth_attempts_by_n[MAX_GRAPH_VERTICES + 1];
+    long long treewidth_successes_by_n[MAX_GRAPH_VERTICES + 1];
     long long hard_graph_articulation_by_n[MAX_GRAPH_VERTICES + 1];
     long long hard_graph_k2_separator_by_n[MAX_GRAPH_VERTICES + 1];
     long long hard_graph_nodes_by_n_degree[MAX_GRAPH_VERTICES + 1][MAX_GRAPH_VERTICES + 1];
@@ -282,6 +306,7 @@ typedef struct {
     double wl_canon_enum_budget_time;
     double wl_canon_enum_search_time;
     double wl_canon_enum_rebuild_time;
+    double terminal_aggregate_time;
     double solve_graph_time_by_n[MAX_GRAPH_VERTICES + 1];
     double solve_graph_lookup_time_by_n[MAX_GRAPH_VERTICES + 1];
     double solve_graph_connected_lookup_time_by_n[MAX_GRAPH_VERTICES + 1];
@@ -289,6 +314,7 @@ typedef struct {
     double solve_graph_canon_hit_time_by_n[MAX_GRAPH_VERTICES + 1];
     double solve_graph_component_time_by_n[MAX_GRAPH_VERTICES + 1];
     double solve_graph_hard_miss_time_by_n[MAX_GRAPH_VERTICES + 1];
+    double treewidth_time_by_n[MAX_GRAPH_VERTICES + 1];
     double solve_graph_hard_miss_separator_time_by_n[MAX_GRAPH_VERTICES + 1];
     double solve_graph_hard_miss_pick_time_by_n[MAX_GRAPH_VERTICES + 1];
     double solve_graph_hard_miss_delete_time_by_n[MAX_GRAPH_VERTICES + 1];
@@ -508,11 +534,16 @@ extern int g_use_raw_cache;
 extern int g_use_wl_canon;
 extern int g_wl_canon_min_n;
 extern long long g_wl_canon_enum_limit;
+extern int g_addition_contraction_fill_limit;
+extern int g_treewidth_limit;
+extern int g_treewidth_min_n;
+extern int g_terminal_aggregate_bits;
 extern long long progress_last_reported;
 extern int g_adaptive_subdivide;
 extern int g_adaptive_max_depth;
 extern long long g_adaptive_work_budget;
 extern __thread ProfileStats* tls_profile;
+extern __thread TerminalAggregator* tls_terminal_aggregator;
 extern __thread GraphHardStats* tls_hard_graph_stats;
 extern __thread long long* tls_adaptive_work_counter;
 extern const char* g_task_times_out_path;
@@ -650,8 +681,23 @@ void graph_poly_normalize_ref(GraphPoly* p);
 void graph_poly_one_ref(GraphPoly* p);
 void graph_poly_mul_ref(const GraphPoly* a, const GraphPoly* b, GraphPoly* out);
 void graph_poly_mul_div_x_ref(const GraphPoly* a, const GraphPoly* b, GraphPoly* out);
+void graph_poly_add_ref(const GraphPoly* a, const GraphPoly* b, GraphPoly* out);
 void graph_poly_sub_ref(const GraphPoly* a, const GraphPoly* b, GraphPoly* out);
 void graph_poly_mul_linear_ref(const GraphPoly* a, int c, GraphPoly* out);
+int solve_graph_poly_treewidth(const Graph* g, int width_limit,
+                               GraphPoly* out, int* width_out);
+TerminalAggregator* terminal_aggregator_create(int bits, ResultAccum* total);
+void terminal_aggregator_flush(TerminalAggregator* aggregator,
+                               RowGraphCache* cache, RowGraphCache* raw_cache,
+                               GraphCanonWorkspace* ws, long long* local_canon_calls,
+                               long long* local_cache_hits, long long* local_raw_cache_hits,
+                               ProfileStats* profile);
+int terminal_aggregator_defer(TerminalAggregator* aggregator, const Graph* graph,
+                              const Poly* weight, RowGraphCache* cache,
+                              RowGraphCache* raw_cache, GraphCanonWorkspace* ws,
+                              long long* local_canon_calls, long long* local_cache_hits,
+                              long long* local_raw_cache_hits, ProfileStats* profile);
+void terminal_aggregator_destroy(TerminalAggregator* aggregator);
 int32_t* small_graph_poly_slot(int n, uint32_t mask);
 uint64_t graph_pack_upper_mask64(const Graph* g);
 static inline uint64_t graph_row_mask(int n) {

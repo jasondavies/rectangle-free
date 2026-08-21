@@ -17,10 +17,29 @@ PARTITION_PROFILE_CFLAGS ?= -DRECT_PROFILE=1
 PARTITION_POLY_DEFAULT_ADAPTIVE_CFLAGS ?= -DDEFAULT_ADAPTIVE_SUBDIVIDE=1 -DDEFAULT_ADAPTIVE_MAX_DEPTH=5 -DDEFAULT_ADAPTIVE_WORK_BUDGET=1000
 LDFLAGS ?= -lm $(OPENMP_LDFLAGS)
 PARTITION_POLY_7_CACHE_CFLAGS ?= -DRAW_CACHE_BITS=14 -DRAW_CACHE_PROBE=16 -DCACHE_PROBE=12 -DDEFAULT_HARD_CACHE_BITS=22 -DDEFAULT_HARD_CACHE_MAX_ENTRIES=2000000
-PARTITION_SHARED_SRCS := src/runtime.c src/partitions.c src/poly.c src/graph.c src/cache.c src/main.c src/solver.c src/canon.c
+PARTITION_POLY_8_CACHE_CFLAGS ?= -DDEFAULT_HARD_CACHE_BITS=22 -DDEFAULT_HARD_CACHE_MAX_ENTRIES=2000000 -DDEFAULT_TREEWIDTH_LIMIT=5 -DDEFAULT_TREEWIDTH_MIN_N=18 -DDEFAULT_TERMINAL_AGGREGATE_BITS=12 -DDEFAULT_TERMINAL_AGGREGATE_MULTI_BITS=10
+PARTITION_POLY_8_PGO_DIR := $(CURDIR)/.partition_poly_8_pgo
+PARTITION_SHARED_SRCS := src/runtime.c src/partitions.c src/poly.c src/graph.c src/cache.c src/main.c src/solver.c src/treewidth.c src/aggregate.c src/canon.c
 
 NVCC ?= nvcc
-NVCCFLAGS ?= -O3 -arch=sm_89 -std=c++17 -I./inspiration/cpads/include
+PACKED_PREFETCH_MIB ?= 4608
+NVCCFLAGS ?= -O3 -arch=sm_89 -std=c++17
+
+.PHONY: gpu-production
+gpu-production: twocolour_7x7_solve_gpu twocolour_7x9_solve_gpu \
+		twocolour_7x9_four_owner_gpu twocolour_7x9_cache_build \
+		twocolour_8x8_solve_gpu
+
+.PHONY: gpu-code-dump
+gpu-code-dump:
+	python3 make_gpu_code_dump.py
+
+gpu_result_checkpoint_test: gpu_result_checkpoint_test.cpp \
+		gpu_result_checkpoint.hpp sha256.hpp
+	$(CXX) -O2 -std=c++17 -o $@ $<
+
+gpu-campaign-test:
+	python3 -m unittest -v test_aggregate_gpu_v3.py
 
 CFLAGS_5XN ?= -O3 -march=native -std=c11
 
@@ -30,7 +49,7 @@ LDFLAGS += -flto
 CFLAGS_5XN += -flto
 endif
 
-all: 5xn_count4 partition_count4 partition_poly partition_poly_7 partition_poly_profile partition_poly_7_profile small_graph_lookup_gen
+all: 5xn_count4 partition_count4 partition_poly partition_poly_7 partition_poly_8 partition_poly_profile partition_poly_7_profile partition_poly_8_profile small_graph_lookup_gen
 
 5xn_count4: 5xn_count4.c
 	$(CC) $(CFLAGS_5XN) -o $@ $<
@@ -50,10 +69,291 @@ partition_poly_7: $(PARTITION_SHARED_SRCS)
 partition_poly_7_profile: $(PARTITION_SHARED_SRCS)
 	$(CC) $(PARTITION_CFLAGS) $(PARTITION_PROFILE_CFLAGS) $(PARTITION_POLY_DEFAULT_ADAPTIVE_CFLAGS) $(PARTITION_POLY_7_CACHE_CFLAGS) -DMAX_ROWS=7 -DMAX_COLS=7 -DDEFAULT_ROWS=7 -DDEFAULT_COLS=7 -DCACHE_BITS=18 -o $@ $(PARTITION_SHARED_SRCS) $(LDFLAGS)
 
+partition_poly_8: $(PARTITION_SHARED_SRCS)
+	$(CC) $(PARTITION_CFLAGS) $(PARTITION_POLY_DEFAULT_ADAPTIVE_CFLAGS) $(PARTITION_POLY_8_CACHE_CFLAGS) -DMAX_ROWS=8 -DMAX_COLS=8 -DDEFAULT_ROWS=8 -DDEFAULT_COLS=8 -DCACHE_BITS=18 -o $@ $(PARTITION_SHARED_SRCS) $(LDFLAGS)
+
+partition_poly_8_pgo: $(PARTITION_SHARED_SRCS)
+	$(RM) -r $(PARTITION_POLY_8_PGO_DIR)
+	mkdir -p $(PARTITION_POLY_8_PGO_DIR)
+	$(CC) $(PARTITION_CFLAGS) -fprofile-generate=$(PARTITION_POLY_8_PGO_DIR) $(PARTITION_POLY_DEFAULT_ADAPTIVE_CFLAGS) $(PARTITION_POLY_8_CACHE_CFLAGS) -DMAX_ROWS=8 -DMAX_COLS=8 -DDEFAULT_ROWS=8 -DDEFAULT_COLS=8 -DCACHE_BITS=18 -o $@ $(PARTITION_SHARED_SRCS) $(LDFLAGS) -fprofile-generate=$(PARTITION_POLY_8_PGO_DIR)
+	OMP_NUM_THREADS=1 RECT_PROGRESS_STEP=1000000 ./$@ 8 5 --prefix-depth 2 --task-start 0 --task-end 1 >/dev/null
+	$(CC) $(PARTITION_CFLAGS) -fprofile-use=$(PARTITION_POLY_8_PGO_DIR) -fprofile-correction $(PARTITION_POLY_DEFAULT_ADAPTIVE_CFLAGS) $(PARTITION_POLY_8_CACHE_CFLAGS) -DMAX_ROWS=8 -DMAX_COLS=8 -DDEFAULT_ROWS=8 -DDEFAULT_COLS=8 -DCACHE_BITS=18 -o $@ $(PARTITION_SHARED_SRCS) $(LDFLAGS) -fprofile-use=$(PARTITION_POLY_8_PGO_DIR) -fprofile-correction
+
+partition_poly_8_profile: $(PARTITION_SHARED_SRCS)
+	$(CC) $(PARTITION_CFLAGS) $(PARTITION_PROFILE_CFLAGS) $(PARTITION_POLY_DEFAULT_ADAPTIVE_CFLAGS) $(PARTITION_POLY_8_CACHE_CFLAGS) -DMAX_ROWS=8 -DMAX_COLS=8 -DDEFAULT_ROWS=8 -DDEFAULT_COLS=8 -DCACHE_BITS=18 -o $@ $(PARTITION_SHARED_SRCS) $(LDFLAGS)
+
 small_graph_lookup_gen: small_graph_lookup_gen.c
 	$(CC) $(CFLAGS_5XN) -o $@ $<
 
-clean:
-	rm -f 5xn_count4 partition_count4 partition_poly partition_poly_7 partition_poly_profile partition_poly_7_profile small_graph_lookup_gen
+right_prefix_overlap_census: right_prefix_overlap_census.cpp
+	$(CXX) -O3 -march=native -std=c++17 $(OPENMP_CFLAGS) -o $@ $<
 
-.PHONY: all clean 5xn_count4 partition_count4 partition_poly partition_poly_profile partition_poly_7 partition_poly_7_profile small_graph_lookup_gen
+prefix_hierarchy_8x8_census: prefix_hierarchy_8x8_census.cpp
+	$(CXX) -O3 -march=native -std=c++17 $(OPENMP_CFLAGS) -o $@ $<
+
+pairmask_transfer_probe: pairmask_transfer_probe.c
+	$(CC) $(CFLAGS_5XN) -o $@ $<
+
+completion_oracle_probe: completion_oracle_probe.c
+	$(CC) $(CFLAGS_5XN) -o $@ $<
+
+c4free_zdd_probe: c4free_zdd_probe.c
+	$(CC) $(CFLAGS_5XN) -o $@ $<
+
+clique_pivoter_probe: clique_pivoter_probe.c
+	$(CC) $(CFLAGS_5XN) $(OPENMP_CFLAGS) -o $@ $< $(OPENMP_LDFLAGS)
+
+column_tensor_rank_probe: column_tensor_rank_probe.c
+	$(CC) $(CFLAGS_5XN) -o $@ $<
+
+twobit_decomposition_probe: twobit_decomposition_probe.c
+	$(CC) $(CFLAGS_5XN) -o $@ $<
+
+binary_prefix_orbit_probe: binary_prefix_orbit_probe.c
+	$(CC) $(CFLAGS_5XN) -o $@ $<
+
+twobit_orbit_contraction_probe: twobit_orbit_contraction_probe.c
+	$(CC) $(CFLAGS_5XN) -o $@ $<
+
+twobit_full_orbit_probe: twobit_full_orbit_probe.c
+	$(CC) $(CFLAGS_5XN) -o $@ $<
+
+twocolour_prefix_distribution_probe: twocolour_prefix_distribution_probe.c
+	$(CC) $(CFLAGS_5XN) -o $@ $<
+
+binary_orbit_burnside_probe: binary_orbit_burnside_probe.c
+	$(CC) $(CFLAGS_5XN) -o $@ $<
+
+twocolour_7x5_canonical_census: archive/gpu/twocolour_7x5_canonical_census.cu \
+		twocolour_7x7_gpu.cu twocolour_7x7_engine.cuh \
+		twocolour_gpu_common.cuh
+	$(NVCC) -O3 -std=c++17 -arch=sm_89 -Xcompiler=-fopenmp -o $@ $<
+
+binary_orbit_augment: binary_orbit_augment.c
+	$(CC) $(CFLAGS_5XN) -o $@ $<
+
+binary_orbit_augment_6x9: binary_orbit_augment.c
+	$(CC) $(CFLAGS_5XN) -DORBIT_ROWS=6 -DORBIT_MAX_COLUMNS=9 \
+		-DORBIT_ROW_BITS=10 -DORBIT_MAGIC='"R6ORB01"' -o $@ $<
+
+binary_orbit_augment_7x8: binary_orbit_augment.c
+	$(CC) $(CFLAGS_5XN) -DORBIT_ROWS=7 -DORBIT_MAX_COLUMNS=8 \
+		-DORBIT_ROW_BITS=8 -DORBIT_MAGIC='"R7ORB01"' -o $@ $<
+
+binary_orbit_augment_7x9: binary_orbit_augment.c
+	$(CC) $(CFLAGS_5XN) -DORBIT_ROWS=7 -DORBIT_MAX_COLUMNS=9 \
+		-DORBIT_ROW_BITS=9 -DORBIT_MAGIC='"R7ORB09"' -o $@ $<
+
+binary_orbit_augment_8x8: binary_orbit_augment.c
+	$(CC) $(CFLAGS_5XN) $(OPENMP_CFLAGS) \
+		-DORBIT_ROWS=8 -DORBIT_MAX_COLUMNS=8 \
+		-DORBIT_ROW_BITS=8 -DORBIT_MAGIC='"R8ORB01"' \
+		-o $@ $< $(OPENMP_LDFLAGS)
+
+s8_prefix_module_probe: s8_prefix_module_probe.c
+	$(CC) $(CFLAGS_5XN) -o $@ $<
+
+symmetric_kernel_rank_probe: symmetric_kernel_rank_probe.c
+	$(CC) $(CFLAGS_5XN) -o $@ $<
+
+twocolour_3x3_sampler: twocolour_3x3_sampler.c
+	$(CC) $(CFLAGS_5XN) -o $@ $<
+
+twocolour_4x4_probe: twocolour_4x4_probe.c
+	$(CC) $(CFLAGS_5XN) -o $@ $<
+
+canonical_query_circuit_probe: canonical_query_circuit_probe.c \
+		twocolour_4x4_probe.c
+	$(CC) $(CFLAGS_5XN) -o $@ $<
+
+token_plane_quotient_probe: token_plane_quotient_probe.cpp
+	$(CXX) -O3 -march=native -std=c++17 -o $@ $<
+
+six_by_thirty_matching_probe: six_by_thirty_matching_probe.cpp
+	$(CXX) -O3 -march=native -std=c++17 $(OPENMP_CFLAGS) -o $@ $< $(OPENMP_LDFLAGS)
+
+six_by_thirty_hafnian: six_by_thirty_hafnian.cpp sha256.hpp
+	$(CXX) -O3 -march=native -std=c++17 $(OPENMP_CFLAGS) -o $@ $< $(OPENMP_LDFLAGS)
+
+six_by_thirty_hafnian_gpu: six_by_thirty_hafnian_gpu.cu hafnian_gpu_core.cuh sha256.hpp
+	$(NVCC) $(NVCCFLAGS) -std=c++17 -o $@ $<
+
+six_by_twenty_nine_hafnian_cpu: six_by_twenty_nine_hafnian_cpu.cpp \
+		six_by_twenty_nine_catalog.hpp sha256.hpp
+	$(CXX) -O3 -march=native -std=c++17 $(OPENMP_CFLAGS) -o $@ $< $(OPENMP_LDFLAGS)
+
+six_by_twenty_nine_hafnian_gpu: six_by_twenty_nine_hafnian_gpu.cu \
+		six_by_twenty_nine_catalog.hpp hafnian_gpu_core.cuh sha256.hpp
+	$(NVCC) $(NVCCFLAGS) -std=c++17 -o $@ $<
+
+.PHONY: six-by-twenty-nine-hafnian-test
+six-by-twenty-nine-hafnian-test: six_by_twenty_nine_hafnian_cpu
+	./six_by_twenty_nine_hafnian_cpu --query 0 --prime 2147483647 --begin 0 --end 16 --threads 1 | \
+		grep -q 'residue=791700040.*exact=OK'
+	python3 -m unittest -v test_six_by_twenty_nine_hafnian.py
+
+.PHONY: six-by-thirty-hafnian-test
+six-by-thirty-hafnian-test: six_by_thirty_hafnian
+	./six_by_thirty_hafnian --self-test
+	python3 -m unittest -v test_six_by_thirty_hafnian.py
+
+twocolour_gpu_64.bin: twocolour_4x4_probe
+	./twocolour_4x4_probe 1024 0 64 -1 0 $@
+
+twocolour_gpu_bench: archive/gpu/twocolour_gpu_bench.cu
+	$(NVCC) -O3 -std=c++17 -arch=sm_89 -lineinfo -o $@ $<
+
+twocolour_7x7_solve_gpu: twocolour_7x7_gpu.cu twocolour_7x7_engine.cuh \
+		twocolour_gpu_common.cuh
+	$(NVCC) $(NVCCFLAGS) -Xcompiler=-fopenmp -o $@ $<
+
+twocolour_7x7_prefix_gpu: legacy/gpu/twocolour_prefix_legacy_main.cu \
+		legacy/gpu/twocolour_prefix_legacy_helpers.cuh \
+		legacy/gpu/twocolour_prefix_legacy_layout.cuh \
+		twocolour_prefix_core.cuh twocolour_prefix_algebra.cuh
+	$(NVCC) -O3 -std=c++17 -arch=sm_89 -Xcompiler=-fopenmp \
+		-o $@ $<
+
+twocolour_6x9_gpu: twocolour_7x7_gpu.cu twocolour_7x7_engine.cuh \
+		twocolour_gpu_common.cuh
+	$(NVCC) -O3 -std=c++17 -arch=sm_89 -Xcompiler=-fopenmp \
+		-DGRID_ROWS=6 -DGRID_COLUMNS=9 -DLEFT_COLUMNS=4 -DRIGHT_COLUMNS=5 \
+		-DORBIT_ROW_BITS=10 -DORBIT_MAGIC='"R6ORB01"' -o $@ $<
+
+twocolour_7x8_gpu: twocolour_7x7_gpu.cu twocolour_7x7_engine.cuh \
+		twocolour_gpu_common.cuh
+	$(NVCC) -O3 -std=c++17 -arch=sm_89 -Xcompiler=-fopenmp \
+		-DGRID_ROWS=7 -DGRID_COLUMNS=8 -DLEFT_COLUMNS=4 -DRIGHT_COLUMNS=4 \
+		-DORBIT_ROW_BITS=8 -DORBIT_MAGIC='"R7ORB01"' -o $@ $<
+
+twocolour_7x8_prefix_gpu: legacy/gpu/twocolour_prefix_legacy_main.cu \
+		legacy/gpu/twocolour_prefix_legacy_helpers.cuh \
+		legacy/gpu/twocolour_prefix_legacy_layout.cuh \
+		twocolour_prefix_core.cuh twocolour_prefix_algebra.cuh
+	$(NVCC) -O3 -std=c++17 -arch=sm_89 -Xcompiler=-fopenmp \
+		-DGRID_ROWS=7 -DGRID_COLUMNS=8 -DLEFT_COLUMNS=4 -DRIGHT_COLUMNS=4 \
+		-DORBIT_ROW_BITS=8 -DORBIT_MAGIC='"R7ORB01"' -o $@ $<
+
+twocolour_7x9_prefix_gpu: legacy/gpu/twocolour_prefix_legacy_main.cu \
+		legacy/gpu/twocolour_prefix_legacy_helpers.cuh \
+		legacy/gpu/twocolour_prefix_legacy_layout.cuh \
+		twocolour_prefix_core.cuh twocolour_prefix_algebra.cuh
+	$(NVCC) -O3 -std=c++17 -arch=sm_89 -Xcompiler=-fopenmp \
+		-DGPU_PREFIX_BUILDER \
+		-DSTREAMED_RIGHT_PREFIX_PROBE \
+		-DGRID_ROWS=7 -DGRID_COLUMNS=9 -DLEFT_COLUMNS=4 -DRIGHT_COLUMNS=5 \
+		-DORBIT_ROW_BITS=9 -DORBIT_MAGIC='"R7ORB09"' -o $@ $<
+
+twocolour_7x9_solve_gpu: twocolour_7x9_packed_solve.cu \
+		twocolour_7x9_engine.cuh \
+		twocolour_canonical_device.cuh \
+		twocolour_weight_class_bmma.cuh gpu_cuda_utils.cuh \
+		twocolour_prefix_core.cuh twocolour_prefix_algebra.cuh \
+		twocolour_gpu_common.cuh gpu_memory_policy.hpp \
+		gpu_result_checkpoint.hpp sha256.hpp
+	$(NVCC) $(NVCCFLAGS) -Xcompiler=-fopenmp \
+		'-DPACKED_PREFETCH_BYTES=(UINT64_C($(PACKED_PREFETCH_MIB))<<20)' \
+		-o $@ $<
+
+twocolour_7x9_cache_build: twocolour_7x9_cache_build.cu \
+		twocolour_prefix_core.cuh twocolour_prefix_algebra.cuh \
+		twocolour_gpu_common.cuh gpu_cuda_utils.cuh gpu_memory_policy.hpp sha256.hpp
+	$(NVCC) $(NVCCFLAGS) -Xcompiler=-fopenmp -o $@ $<
+
+twocolour_7x9_four_owner_gpu: twocolour_7x9_four_owner_solve.cu \
+		twocolour_7x9_engine.cuh twocolour_canonical_device.cuh \
+		twocolour_weight_class_bmma.cuh \
+		gpu_cuda_utils.cuh twocolour_prefix_core.cuh \
+		twocolour_prefix_algebra.cuh twocolour_gpu_common.cuh \
+		gpu_memory_policy.hpp gpu_result_checkpoint.hpp sha256.hpp
+	$(NVCC) $(NVCCFLAGS) -Xcompiler=-fopenmp \
+		'-DPACKED_PREFETCH_BYTES=(UINT64_C($(PACKED_PREFETCH_MIB))<<20)' \
+		-o $@ $<
+
+twocolour_8x8_solve_gpu: twocolour_8x8_prefix_solve.cu \
+		twocolour_weight_class_bmma.cuh twocolour_canonical_device.cuh \
+		gpu_cuda_utils.cuh \
+		twocolour_prefix_algebra.cuh twocolour_gpu_common.cuh \
+		gpu_memory_policy.hpp gpu_result_checkpoint.hpp sha256.hpp
+	$(NVCC) $(NVCCFLAGS) -Xcompiler=-fopenmp -o $@ $<
+
+prefix_portfolio_8x8_oracle: prefix_portfolio_8x8_oracle.cpp \
+		prefix_hierarchy_8x8_census.cpp
+	$(CXX) -O3 -std=c++17 -fopenmp -march=native -o $@ $<
+
+prefix_bucket_tt_rank_census: prefix_bucket_tt_rank_census.cpp \
+		prefix_hierarchy_8x8_census.cpp
+	$(CXX) -O3 -std=c++17 -fopenmp -march=native -o $@ $<
+
+prefix_bmma_cost_census: prefix_bmma_cost_census.cpp \
+		prefix_bucket_tt_rank_census.cpp prefix_hierarchy_8x8_census.cpp
+	$(CXX) -O3 -std=c++17 -fopenmp -march=native -o $@ $<
+
+prefix_bmma_portfolio_8x8_oracle: prefix_bmma_portfolio_8x8_oracle.cpp \
+		prefix_bmma_cost_census.cpp prefix_bucket_tt_rank_census.cpp \
+		prefix_hierarchy_8x8_census.cpp
+	$(CXX) -O3 -std=c++17 -fopenmp -march=native -o $@ $<
+
+column_split_8x8_oracle: column_split_8x8_oracle.cpp \
+		prefix_bmma_cost_census.cpp prefix_bucket_tt_rank_census.cpp \
+		prefix_hierarchy_8x8_census.cpp
+	$(CXX) -O3 -std=c++17 -fopenmp -march=native -o $@ $<
+
+column_split_8x8_transform: column_split_8x8_transform.cpp
+	$(CXX) -O3 -std=c++17 -o $@ $<
+
+column_split_8x8_selector: column_split_8x8_selector.cpp \
+		prefix_hierarchy_8x8_census.cpp
+	$(CXX) -O3 -std=c++17 -fopenmp -march=native -o $@ $<
+
+pair_projection_8x8_census: pair_projection_8x8_census.cpp \
+		prefix_bmma_cost_census.cpp prefix_bucket_tt_rank_census.cpp \
+		prefix_hierarchy_8x8_census.cpp
+	$(CXX) -O3 -std=c++17 -fopenmp -march=native -o $@ $<
+
+behavioral_distribution_8x8_census: behavioral_distribution_8x8_census.cpp \
+		prefix_bmma_cost_census.cpp prefix_bucket_tt_rank_census.cpp \
+		prefix_hierarchy_8x8_census.cpp
+	$(CXX) -O3 -std=c++17 -fopenmp -march=native -o $@ $<
+
+twocolour_3x4_probe: twocolour_3x4_probe.c
+	$(CC) $(CFLAGS_5XN) -o $@ $<
+
+twocolour_7x7_solve: twocolour_7x7_solve.c
+	$(CC) $(CFLAGS_5XN) -o $@ $<
+
+CLEAN_BINS := 5xn_count4 partition_count4 partition_poly partition_poly_7 \
+	partition_poly_8 partition_poly_8_pgo partition_poly_profile \
+	partition_poly_7_profile partition_poly_8_profile small_graph_lookup_gen \
+	right_prefix_overlap_census prefix_hierarchy_8x8_census \
+	pairmask_transfer_probe completion_oracle_probe c4free_zdd_probe \
+	clique_pivoter_probe column_tensor_rank_probe twobit_decomposition_probe \
+	binary_prefix_orbit_probe twobit_orbit_contraction_probe \
+	twobit_full_orbit_probe twocolour_prefix_distribution_probe \
+	binary_orbit_burnside_probe twocolour_7x5_canonical_census \
+	binary_orbit_augment binary_orbit_augment_6x9 binary_orbit_augment_7x8 \
+	binary_orbit_augment_7x9 binary_orbit_augment_8x8 s8_prefix_module_probe \
+	symmetric_kernel_rank_probe twocolour_3x3_sampler twocolour_4x4_probe \
+	canonical_query_circuit_probe token_plane_quotient_probe \
+	six_by_thirty_matching_probe \
+	six_by_thirty_hafnian \
+	six_by_thirty_hafnian_gpu \
+	six_by_twenty_nine_hafnian_cpu \
+	six_by_twenty_nine_hafnian_gpu \
+	twocolour_gpu_64.bin twocolour_gpu_bench twocolour_7x7_solve_gpu \
+	twocolour_7x7_prefix_gpu twocolour_6x9_gpu twocolour_7x8_gpu \
+	twocolour_7x8_prefix_gpu twocolour_7x9_prefix_gpu \
+	twocolour_7x9_solve_gpu twocolour_7x9_four_owner_gpu \
+	twocolour_7x9_cache_build \
+	twocolour_8x8_solve_gpu prefix_portfolio_8x8_oracle \
+	prefix_bucket_tt_rank_census prefix_bmma_cost_census \
+	prefix_bmma_portfolio_8x8_oracle column_split_8x8_oracle \
+	column_split_8x8_transform column_split_8x8_selector \
+	pair_projection_8x8_census behavioral_distribution_8x8_census \
+	twocolour_3x4_probe twocolour_7x7_solve gpu_result_checkpoint_test
+
+clean:
+	$(RM) $(CLEAN_BINS)
+	$(RM) -r $(PARTITION_POLY_8_PGO_DIR)
+
+.PHONY: all clean gpu-campaign-test

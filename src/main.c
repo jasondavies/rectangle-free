@@ -253,6 +253,58 @@ static int init_problem_and_run_config(const MainOptions* opts, RunConfig* cfg) 
                     parse_ll_or_die(wl_enum_limit_env, "RECT_WL_CANON_ENUM_LIMIT");
             }
         }
+        {
+            const char* fill_limit_env = getenv("RECT_ADDITION_CONTRACTION_FILL_LIMIT");
+            if (fill_limit_env && *fill_limit_env) {
+                g_addition_contraction_fill_limit =
+                    (int)parse_ll_or_die(fill_limit_env,
+                                         "RECT_ADDITION_CONTRACTION_FILL_LIMIT");
+                if (g_addition_contraction_fill_limit < 0) {
+                    fprintf(stderr,
+                            "RECT_ADDITION_CONTRACTION_FILL_LIMIT must be non-negative\n");
+                    return 0;
+                }
+#if !RECT_COUNT_K4
+            } else if (g_rows >= 8) {
+                g_addition_contraction_fill_limit = 2;
+#endif
+            }
+        }
+        {
+            const char* treewidth_limit_env = getenv("RECT_TREEWIDTH_LIMIT");
+            if (treewidth_limit_env && *treewidth_limit_env) {
+                g_treewidth_limit =
+                    (int)parse_ll_or_die(treewidth_limit_env, "RECT_TREEWIDTH_LIMIT");
+            }
+            if (g_treewidth_limit < 0 || g_treewidth_limit > 6) {
+                fprintf(stderr, "RECT_TREEWIDTH_LIMIT must be in [0, 6]\n");
+                return 0;
+            }
+            const char* treewidth_min_n_env = getenv("RECT_TREEWIDTH_MIN_N");
+            if (treewidth_min_n_env && *treewidth_min_n_env) {
+                g_treewidth_min_n =
+                    (int)parse_ll_or_die(treewidth_min_n_env, "RECT_TREEWIDTH_MIN_N");
+            }
+            if (g_treewidth_min_n < 0 || g_treewidth_min_n > MAX_GRAPH_VERTICES) {
+                fprintf(stderr,
+                        "RECT_TREEWIDTH_MIN_N must be in [0, MAX_GRAPH_VERTICES]\n");
+                return 0;
+            }
+        }
+        {
+            const char* aggregate_bits_env = getenv("RECT_TERMINAL_AGGREGATE_BITS");
+            if (aggregate_bits_env && *aggregate_bits_env) {
+                g_terminal_aggregate_bits =
+                    (int)parse_ll_or_die(aggregate_bits_env,
+                                         "RECT_TERMINAL_AGGREGATE_BITS");
+            } else if (omp_get_max_threads() > 1) {
+                g_terminal_aggregate_bits = DEFAULT_TERMINAL_AGGREGATE_MULTI_BITS;
+            }
+            if (g_terminal_aggregate_bits < 0 || g_terminal_aggregate_bits > 18) {
+                fprintf(stderr, "RECT_TERMINAL_AGGREGATE_BITS must be in [0, 18]\n");
+                return 0;
+            }
+        }
     }
 
     if (opts->task_start < 0) {
@@ -270,6 +322,15 @@ static int init_problem_and_run_config(const MainOptions* opts, RunConfig* cfg) 
         printf("WL canonical min n: %d, enum limit: %lld\n",
                g_wl_canon_min_n, g_wl_canon_enum_limit);
     }
+    printf("Addition-contraction fill limit: %d%s\n",
+           g_addition_contraction_fill_limit,
+           g_addition_contraction_fill_limit > 0 ? " (enabled)" : " (disabled)");
+    printf("Treewidth polynomial solver: limit=%d, min n=%d%s\n",
+           g_treewidth_limit, g_treewidth_min_n,
+           g_treewidth_limit > 0 ? " (enabled)" : " (disabled)");
+    printf("Terminal graph aggregation: bits=%d%s\n",
+           g_terminal_aggregate_bits,
+           g_terminal_aggregate_bits > 0 ? " (enabled)" : " (disabled)");
     g_effective_prefix_depth = cfg->prefix_depth;
     cfg->graph_poly_len = RECT_COUNT_K4 ? 1 : (g_cols * (g_rows / 2) + 1);
 
@@ -696,6 +757,9 @@ static void execute_run_tasks(const RunConfig* run, double start_time, Execution
 #else
         ResultAccum* thread_total = &exec->thread_totals[tid];
 #endif
+        TerminalAggregator* terminal_aggregator =
+            terminal_aggregator_create(g_terminal_aggregate_bits, thread_total);
+        tls_terminal_aggregator = terminal_aggregator;
 
         if (g_cols == 1) {
             #pragma omp for schedule(runtime)
@@ -780,6 +844,11 @@ static void execute_run_tasks(const RunConfig* run, double start_time, Execution
                                                start_time, &pending_completed, task_timing,
                                                queue_subtask_timing);
                 }
+
+                terminal_aggregator_flush(terminal_aggregator, &ctx.cache, &ctx.raw_cache,
+                                          &ctx.ws, &ctx.local_canon_calls,
+                                          &ctx.local_cache_hits, &ctx.local_raw_cache_hits,
+                                          profile);
 
                 ws = ctx.ws;
                 memset(&ctx.ws, 0, sizeof(ctx.ws));
@@ -879,6 +948,11 @@ static void execute_run_tasks(const RunConfig* run, double start_time, Execution
             }
         }
 
+        terminal_aggregator_flush(terminal_aggregator, &cache, &raw_cache, &ws,
+                                  &local_canon_calls, &local_cache_hits,
+                                  &local_raw_cache_hits, profile);
+        terminal_aggregator_destroy(terminal_aggregator);
+        tls_terminal_aggregator = NULL;
         flush_completed_tasks(total_tasks, progress_report_step, start_time, &pending_completed);
         tls_profile = NULL;
 
@@ -963,6 +1037,10 @@ static void aggregate_execution_summary(const ExecutionState* exec, ExecutionSum
                 src->wl_canon_enum_budget_hist[b];
         }
         summary->profile.hard_graph_nodes += src->hard_graph_nodes;
+        summary->profile.terminal_aggregate_inputs += src->terminal_aggregate_inputs;
+        summary->profile.terminal_aggregate_unique += src->terminal_aggregate_unique;
+        summary->profile.terminal_aggregate_hits += src->terminal_aggregate_hits;
+        summary->profile.terminal_aggregate_flushes += src->terminal_aggregate_flushes;
         summary->profile.canon_prepare_time += src->canon_prepare_time;
         summary->profile.canon_commit_time += src->canon_commit_time;
         summary->profile.partial_append_time += src->partial_append_time;
@@ -977,6 +1055,7 @@ static void aggregate_execution_summary(const ExecutionState* exec, ExecutionSum
         summary->profile.wl_canon_enum_budget_time += src->wl_canon_enum_budget_time;
         summary->profile.wl_canon_enum_search_time += src->wl_canon_enum_search_time;
         summary->profile.wl_canon_enum_rebuild_time += src->wl_canon_enum_rebuild_time;
+        summary->profile.terminal_aggregate_time += src->terminal_aggregate_time;
         if (src->hard_graph_max_n > summary->profile.hard_graph_max_n) {
             summary->profile.hard_graph_max_n = src->hard_graph_max_n;
         }
@@ -1012,6 +1091,8 @@ static void aggregate_execution_summary(const ExecutionState* exec, ExecutionSum
                 src->solve_graph_connected_lookup_calls_by_n[n];
             summary->profile.solve_graph_component_calls_by_n[n] += src->solve_graph_component_calls_by_n[n];
             summary->profile.solve_graph_hard_misses_by_n[n] += src->solve_graph_hard_misses_by_n[n];
+            summary->profile.treewidth_attempts_by_n[n] += src->treewidth_attempts_by_n[n];
+            summary->profile.treewidth_successes_by_n[n] += src->treewidth_successes_by_n[n];
             summary->profile.hard_graph_articulation_by_n[n] += src->hard_graph_articulation_by_n[n];
             summary->profile.hard_graph_k2_separator_by_n[n] += src->hard_graph_k2_separator_by_n[n];
             summary->profile.solve_graph_time_by_n[n] += src->solve_graph_time_by_n[n];
@@ -1022,6 +1103,7 @@ static void aggregate_execution_summary(const ExecutionState* exec, ExecutionSum
             summary->profile.solve_graph_canon_hit_time_by_n[n] += src->solve_graph_canon_hit_time_by_n[n];
             summary->profile.solve_graph_component_time_by_n[n] += src->solve_graph_component_time_by_n[n];
             summary->profile.solve_graph_hard_miss_time_by_n[n] += src->solve_graph_hard_miss_time_by_n[n];
+            summary->profile.treewidth_time_by_n[n] += src->treewidth_time_by_n[n];
             summary->profile.solve_graph_hard_miss_separator_time_by_n[n] +=
                 src->solve_graph_hard_miss_separator_time_by_n[n];
             summary->profile.solve_graph_hard_miss_pick_time_by_n[n] +=
@@ -1085,6 +1167,15 @@ static void print_execution_report(const RunConfig* run, const ExecutionState* e
                total_profile->partial_append_calls, total_profile->partial_append_time);
         printf("  build_structure_weight: %lld calls, %.3fs\n",
                total_profile->solve_structure_calls, total_profile->build_weight_time);
+        if (g_terminal_aggregate_bits > 0) {
+            printf("  terminal aggregation: inputs %lld, unique %lld, grouped hits %lld, "
+                   "flushes %lld, %.3fs\n",
+                   total_profile->terminal_aggregate_inputs,
+                   total_profile->terminal_aggregate_unique,
+                   total_profile->terminal_aggregate_hits,
+                   total_profile->terminal_aggregate_flushes,
+                   total_profile->terminal_aggregate_time);
+        }
         printf("  solve_graph_poly: %lld calls, %.3fs\n",
                total_profile->solve_graph_calls, total_profile->solve_graph_time);
         long long canonical_graph_calls = total_profile->canon_key_calls;
@@ -1224,6 +1315,18 @@ static void print_execution_report(const RunConfig* run, const ExecutionState* e
                    total_profile->solve_graph_hard_miss_contract_build_time_by_n[n],
                    total_profile->solve_graph_hard_miss_contract_solve_time_by_n[n],
                    total_profile->solve_graph_hard_miss_store_time_by_n[n]);
+        }
+        if (g_treewidth_limit > 0) {
+            printf("  Treewidth solver by simplified n:\n");
+            for (int n = 0; n <= MAX_GRAPH_VERTICES; n++) {
+                long long attempts = total_profile->treewidth_attempts_by_n[n];
+                long long successes = total_profile->treewidth_successes_by_n[n];
+                if (attempts == 0) continue;
+                printf("    n=%d: successes %lld/%lld (%.1f%%), time %.3fs\n",
+                       n, successes, attempts,
+                       100.0 * (double)successes / (double)attempts,
+                       total_profile->treewidth_time_by_n[n]);
+            }
         }
         if (g_profile_separators) {
             printf("  Hard-miss separator detection by simplified n:\n");

@@ -18,11 +18,16 @@ int g_use_raw_cache = 1;
 int g_use_wl_canon = 1;
 int g_wl_canon_min_n = 8;
 long long g_wl_canon_enum_limit = 16;
+int g_addition_contraction_fill_limit = 0;
+int g_treewidth_limit = DEFAULT_TREEWIDTH_LIMIT;
+int g_treewidth_min_n = DEFAULT_TREEWIDTH_MIN_N;
+int g_terminal_aggregate_bits = DEFAULT_TERMINAL_AGGREGATE_BITS;
 long long progress_last_reported = 0;
 int g_adaptive_subdivide = DEFAULT_ADAPTIVE_SUBDIVIDE;
 int g_adaptive_max_depth = DEFAULT_ADAPTIVE_MAX_DEPTH;
 long long g_adaptive_work_budget = DEFAULT_ADAPTIVE_WORK_BUDGET;
 __thread ProfileStats* tls_profile = NULL;
+__thread TerminalAggregator* tls_terminal_aggregator = NULL;
 __thread GraphHardStats* tls_hard_graph_stats = NULL;
 __thread long long* tls_adaptive_work_counter = NULL;
 const char* g_task_times_out_path = NULL;
@@ -43,11 +48,66 @@ static uint64_t g_hard_miss_log_records = 0;
 static const unsigned char HARD_GRAPH_CACHE_FILE_MAGIC[8] =
     {'R', 'H', 'C', 'A', 'C', 'H', '1', 0};
 
+#if RECT_COUNT_K4
+typedef GraphResult HardGraphCacheValue;
+
+static inline int hard_graph_cache_value_from_result(const GraphResult* src,
+                                                     HardGraphCacheValue* dst) {
+    *dst = *src;
+    return 1;
+}
+
+static inline void hard_graph_cache_value_to_result(const HardGraphCacheValue* src,
+                                                    GraphResult* dst) {
+    *dst = *src;
+}
+
+static inline void hard_graph_cache_value_copy(HardGraphCacheValue* dst,
+                                               const HardGraphCacheValue* src) {
+    *dst = *src;
+}
+#else
+typedef struct {
+    uint8_t x_pow;
+    uint8_t deg;
+    int64_t coeffs[MAX_GRAPH_VERTICES + 1];
+} HardGraphCacheValue;
+
+static inline int hard_graph_cache_value_from_result(const GraphResult* src,
+                                                     HardGraphCacheValue* dst) {
+    dst->x_pow = src->x_pow;
+    dst->deg = src->deg;
+    for (int i = 0; i <= src->deg; i++) {
+        if (src->coeffs[i] < (PolyCoeff)INT64_MIN ||
+            src->coeffs[i] > (PolyCoeff)INT64_MAX) {
+            return 0;
+        }
+        dst->coeffs[i] = (int64_t)src->coeffs[i];
+    }
+    return 1;
+}
+
+static inline void hard_graph_cache_value_to_result(const HardGraphCacheValue* src,
+                                                    GraphResult* dst) {
+    dst->x_pow = src->x_pow;
+    dst->deg = src->deg;
+    for (int i = 0; i <= src->deg; i++) dst->coeffs[i] = (PolyCoeff)src->coeffs[i];
+}
+
+static inline void hard_graph_cache_value_copy(HardGraphCacheValue* dst,
+                                               const HardGraphCacheValue* src) {
+    dst->x_pow = src->x_pow;
+    dst->deg = src->deg;
+    memcpy(dst->coeffs, src->coeffs,
+           ((size_t)src->deg + 1U) * sizeof(src->coeffs[0]));
+}
+#endif
+
 typedef struct HardGraphCacheEntry {
     struct HardGraphCacheEntry* next;
     uint64_t hash;
     uint64_t sig[GRAPH_SIG_WORDS];
-    GraphResult value;
+    HardGraphCacheValue value;
     uint8_t n;
 } HardGraphCacheEntry;
 
@@ -75,6 +135,7 @@ typedef struct {
     atomic_uint_fast64_t hits;
     atomic_uint_fast64_t stores;
     atomic_uint_fast64_t skipped_stores;
+    atomic_uint_fast64_t skipped_wide_stores;
     atomic_uint_fast64_t duplicate_stores;
     atomic_uint_fast64_t loaded_entries;
     atomic_uint_fast64_t saved_entries;
@@ -347,7 +408,7 @@ static HardGraphCacheEntry* hard_graph_cache_alloc_entry(int* capacity_full) {
 
 static int hard_graph_cache_insert_signature_fresh(uint64_t hash, int n,
                                                    const uint64_t sig[GRAPH_SIG_WORDS],
-                                                   const GraphResult* value,
+                                                   const HardGraphCacheValue* value,
                                                    int* capacity_full) {
     HardGraphCache* cache = &g_hard_graph_cache;
     *capacity_full = 0;
@@ -358,8 +419,8 @@ static int hard_graph_cache_insert_signature_fresh(uint64_t hash, int n,
     uint64_t bucket = hard_graph_cache_index_mix(hash) & cache->mask;
     entry->next = cache->buckets[bucket];
     entry->hash = hash;
-    memcpy(entry->sig, sig, sizeof(uint64_t) * GRAPH_SIG_WORDS);
-    entry->value = *value;
+    memcpy(entry->sig, sig, (size_t)hard_graph_cache_sig_words(n) * sizeof(uint64_t));
+    hard_graph_cache_value_copy(&entry->value, value);
     entry->n = (uint8_t)n;
     cache->buckets[bucket] = entry;
     return 1;
@@ -367,7 +428,7 @@ static int hard_graph_cache_insert_signature_fresh(uint64_t hash, int n,
 
 static int hard_graph_cache_insert_signature(uint64_t hash, int n,
                                              const uint64_t sig[GRAPH_SIG_WORDS],
-                                             const GraphResult* value,
+                                             const HardGraphCacheValue* value,
                                              int count_duplicate_store,
                                              int* capacity_full) {
     HardGraphCache* cache = &g_hard_graph_cache;
@@ -393,8 +454,8 @@ static int hard_graph_cache_insert_signature(uint64_t hash, int n,
     }
     entry->next = cache->buckets[bucket];
     entry->hash = hash;
-    memcpy(entry->sig, sig, sizeof(uint64_t) * GRAPH_SIG_WORDS);
-    entry->value = *value;
+    memcpy(entry->sig, sig, (size_t)hard_graph_cache_sig_words(n) * sizeof(uint64_t));
+    hard_graph_cache_value_copy(&entry->value, value);
     entry->n = (uint8_t)n;
     cache->buckets[bucket] = entry;
     if (cache->use_locks) pthread_mutex_unlock(lock);
@@ -508,10 +569,18 @@ static int hard_graph_cache_load_file(const char* path) {
         }
         if (eof) break;
         records++;
+        HardGraphCacheValue compact_value;
+        if (!hard_graph_cache_value_from_result(&value, &compact_value)) {
+            atomic_fetch_add_explicit(&g_hard_graph_cache.skipped_wide_stores, 1,
+                                      memory_order_relaxed);
+            continue;
+        }
         int capacity_full = 0;
         int insert_status = fast_load
-            ? hard_graph_cache_insert_signature_fresh(hash, n, sig, &value, &capacity_full)
-            : hard_graph_cache_insert_signature(hash, n, sig, &value, 0, &capacity_full);
+            ? hard_graph_cache_insert_signature_fresh(hash, n, sig, &compact_value,
+                                                      &capacity_full)
+            : hard_graph_cache_insert_signature(hash, n, sig, &compact_value, 0,
+                                                &capacity_full);
         if (insert_status > 0) {
             loaded++;
             continue;
@@ -619,6 +688,7 @@ int hard_graph_cache_init_from_env(void) {
     atomic_store_explicit(&cache->hits, 0, memory_order_relaxed);
     atomic_store_explicit(&cache->stores, 0, memory_order_relaxed);
     atomic_store_explicit(&cache->skipped_stores, 0, memory_order_relaxed);
+    atomic_store_explicit(&cache->skipped_wide_stores, 0, memory_order_relaxed);
     atomic_store_explicit(&cache->duplicate_stores, 0, memory_order_relaxed);
     atomic_store_explicit(&cache->loaded_entries, 0, memory_order_relaxed);
     atomic_store_explicit(&cache->saved_entries, 0, memory_order_relaxed);
@@ -651,7 +721,7 @@ int hard_graph_cache_lookup(uint64_t hash, const Graph* g, GraphResult* out) {
     if (cache->use_locks) pthread_mutex_lock(lock);
     for (HardGraphCacheEntry* entry = cache->buckets[bucket]; entry; entry = entry->next) {
         if (hard_graph_cache_entry_matches(entry, hash, g->n, sig)) {
-            *out = entry->value;
+            hard_graph_cache_value_to_result(&entry->value, out);
             if (cache->use_locks) pthread_mutex_unlock(lock);
             atomic_fetch_add_explicit(&cache->hits, 1, memory_order_relaxed);
             return 1;
@@ -665,10 +735,17 @@ void hard_graph_cache_store(uint64_t hash, const Graph* g, const GraphResult* va
     HardGraphCache* cache = &g_hard_graph_cache;
     if (!cache->enabled) return;
 
+    HardGraphCacheValue compact_value;
+    if (!hard_graph_cache_value_from_result(value, &compact_value)) {
+        atomic_fetch_add_explicit(&cache->skipped_wide_stores, 1, memory_order_relaxed);
+        return;
+    }
+
     uint64_t sig[GRAPH_SIG_WORDS];
     hard_graph_cache_signature(g, sig);
     int capacity_full = 0;
-    int insert_status = hard_graph_cache_insert_signature(hash, g->n, sig, value, 1, &capacity_full);
+    int insert_status =
+        hard_graph_cache_insert_signature(hash, g->n, sig, &compact_value, 1, &capacity_full);
     if (insert_status <= 0) {
         if (capacity_full) {
             atomic_fetch_add_explicit(&cache->skipped_stores, 1, memory_order_relaxed);
@@ -701,6 +778,8 @@ void hard_graph_cache_close(void) {
     uint64_t stores = atomic_load_explicit(&cache->stores, memory_order_relaxed);
     uint64_t skipped_stores =
         atomic_load_explicit(&cache->skipped_stores, memory_order_relaxed);
+    uint64_t skipped_wide_stores =
+        atomic_load_explicit(&cache->skipped_wide_stores, memory_order_relaxed);
     uint64_t duplicate_stores =
         atomic_load_explicit(&cache->duplicate_stores, memory_order_relaxed);
     uint64_t loaded_entries =
@@ -709,9 +788,11 @@ void hard_graph_cache_close(void) {
         atomic_load_explicit(&cache->saved_entries, memory_order_relaxed);
     double hit_rate = lookups ? (100.0 * (double)hits / (double)lookups) : 0.0;
     printf("Hard graph cache hits: %llu/%llu (%.1f%%), stores=%llu, skipped stores=%llu, "
+           "wide skips=%llu, "
            "duplicate stores=%llu, loaded=%llu, saved=%llu\n",
            (unsigned long long)hits, (unsigned long long)lookups, hit_rate,
            (unsigned long long)stores, (unsigned long long)skipped_stores,
+           (unsigned long long)skipped_wide_stores,
            (unsigned long long)duplicate_stores, (unsigned long long)loaded_entries,
            (unsigned long long)saved_entries);
 

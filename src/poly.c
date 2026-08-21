@@ -315,13 +315,16 @@ void graph_poly_mul_div_x_ref(const GraphPoly* a, const GraphPoly* b, GraphPoly*
     if (r != out) graph_poly_copy_live(out, r);
 }
 
-void graph_poly_sub_ref(const GraphPoly* a, const GraphPoly* b, GraphPoly* out) {
+static void graph_poly_addsub_ref(const GraphPoly* a, const GraphPoly* b,
+                                  int subtract_b, GraphPoly* out) {
     GraphPoly tmp;
     GraphPoly* r = out;
     if (out == a || out == b) r = &tmp;
     if (graph_poly_is_zero(a)) {
         *r = *b;
-        for (int i = 0; i <= r->deg; i++) r->coeffs[i] = -r->coeffs[i];
+        if (subtract_b) {
+            for (int i = 0; i <= r->deg; i++) r->coeffs[i] = -r->coeffs[i];
+        }
         if (r != out) *out = *r;
         return;
     }
@@ -340,11 +343,19 @@ void graph_poly_sub_ref(const GraphPoly* a, const GraphPoly* b, GraphPoly* out) 
     for (int i = 0; i <= r->deg; i++) {
         PolyCoeff av = (i >= shift_a && i - shift_a <= a->deg) ? a->coeffs[i - shift_a] : 0;
         PolyCoeff bv = (i >= shift_b && i - shift_b <= b->deg) ? b->coeffs[i - shift_b] : 0;
-        r->coeffs[i] = av - bv;
+        r->coeffs[i] = subtract_b ? av - bv : av + bv;
     }
     while (r->deg > 0 && r->coeffs[r->deg] == 0) r->deg--;
     if (r->coeffs[0] == 0) graph_poly_normalize_ref(r);
     if (r != out) *out = *r;
+}
+
+void graph_poly_add_ref(const GraphPoly* a, const GraphPoly* b, GraphPoly* out) {
+    graph_poly_addsub_ref(a, b, 0, out);
+}
+
+void graph_poly_sub_ref(const GraphPoly* a, const GraphPoly* b, GraphPoly* out) {
+    graph_poly_addsub_ref(a, b, 1, out);
 }
 
 void graph_poly_mul_linear_ref(const GraphPoly* a, int c, GraphPoly* out) {
