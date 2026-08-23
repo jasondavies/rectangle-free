@@ -229,8 +229,8 @@ the time used by every GPU and is therefore distinct from elapsed wall time.
 | --- | --- | ---: | ---: |
 | Full 7x7 chromatic polynomial | Distributed CPU cluster | About 200,000 core-hours | Historical distributed run |
 | `T_4(7,7)` independent check | 1 L40S | 30.1 GPU-seconds | 35.6 seconds |
-| `T_4(8,8)` | 1,024 one-GPU shards; heterogeneous GPUs and variable concurrency | 335.3 GPU-hours | 19.6 GPU-minutes per shard on average |
-| `T_4(7,9)` independent check | 128 shards; up to 8 RTX PRO 6000 GPUs | 28.64 GPU-hours | About 5 hours |
+| `T_4(8,8)` independent check | 1,024 shards; 8 L40S GPUs | 29.07 GPU-hours | About 4.1 hours |
+| `T_4(7,9)` independent check | 128 shards; 8 L40S GPUs | 13.85 GPU-hours | About 2 hours |
 | `T_4(6,30)` | 8 RTX PRO 6000 GPUs | 0.79 GPU-hours | About 10 minutes |
 | `T_4(6,29)` | 8 RTX PRO 6000 GPUs; interrupted and resumed | 4.14 GPU-hours | About 39 minutes including setup |
 
