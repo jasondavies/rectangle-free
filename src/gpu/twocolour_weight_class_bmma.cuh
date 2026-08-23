@@ -195,6 +195,81 @@ weight_class_predicate_join(
     return sum;
 }
 
+static __device__ __forceinline__ unsigned long long
+weight_class_fragment_count(PtxFragmentA a, PtxFragmentB b) {
+    uint32_t d0, d1, d2, d3;
+    weight_class_inline_bmma_16x8(
+        a.bits0, a.bits1, b.bits, d0, d1, d2, d3);
+    unsigned long long sum = 0;
+    sum += a.valid0 && b.valid0 && d0 == 0;
+    sum += a.valid0 && b.valid1 && d1 == 0;
+    sum += a.valid1 && b.valid0 && d2 == 0;
+    sum += a.valid1 && b.valid1 && d3 == 0;
+    return sum;
+}
+
+// Evaluate both token-plane orientations in one traversal when both physical
+// prefixes are compatible.  The lower-padding orientation is unchanged; the
+// operand unaffected by token-plane exchange is loaded once per tile pair.
+static __device__ __forceinline__ unsigned long long
+weight_class_predicate_join_dual(
+    const PrefixSuffix* __restrict__ left_suffixes, PrefixBucket left,
+    const PrefixSuffix* __restrict__ right_suffixes, PrefixBucket right,
+    unsigned lane) {
+    uint64_t forward_tiles = uint64_t((left.count + 15) / 16) *
+                             ((right.count + 7) / 8);
+    uint64_t reverse_tiles = uint64_t((right.count + 15) / 16) *
+                             ((left.count + 7) / 8);
+    const bool reverse = reverse_tiles < forward_tiles ||
+        (reverse_tiles == forward_tiles && right.count < left.count);
+    unsigned long long sum = 0;
+    if (!reverse) {
+        for (uint32_t left_base = 0; left_base < left.count;
+             left_base += 16) {
+            uint32_t left_count = min(uint32_t(16), left.count - left_base);
+            PtxFragmentA a = load_weight_class_ptx_a(
+                left_suffixes, left.entry_offset, left_count, left_base, lane,
+                false);
+            for (uint32_t right_base = 0; right_base < right.count;
+                 right_base += 8) {
+                uint32_t right_count = min(uint32_t(8),
+                                           right.count - right_base);
+                PtxFragmentB b = load_weight_class_ptx_b(
+                    right_suffixes, right.entry_offset, right_count,
+                    right_base, lane, false);
+                sum += weight_class_fragment_count(a, b);
+                b = load_weight_class_ptx_b(
+                    right_suffixes, right.entry_offset, right_count,
+                    right_base, lane, true);
+                sum += weight_class_fragment_count(a, b);
+            }
+        }
+    } else {
+        for (uint32_t right_base = 0; right_base < right.count;
+             right_base += 16) {
+            uint32_t right_count = min(uint32_t(16),
+                                       right.count - right_base);
+            PtxFragmentA a = load_weight_class_ptx_a(
+                right_suffixes, right.entry_offset, right_count, right_base,
+                lane, false);
+            PtxFragmentA swapped_a = load_weight_class_ptx_a(
+                right_suffixes, right.entry_offset, right_count, right_base,
+                lane, true);
+            for (uint32_t left_base = 0; left_base < left.count;
+                 left_base += 8) {
+                uint32_t left_count = min(uint32_t(8),
+                                          left.count - left_base);
+                PtxFragmentB b = load_weight_class_ptx_b(
+                    left_suffixes, left.entry_offset, left_count, left_base,
+                    lane, false);
+                sum += weight_class_fragment_count(a, b);
+                sum += weight_class_fragment_count(swapped_a, b);
+            }
+        }
+    }
+    return sum;
+}
+
 __global__ void weight_class_prefix_joins(
     const PrefixSuffix* __restrict__ left_suffixes,
     const PrefixSuffix* __restrict__ right_suffixes,
@@ -246,16 +321,24 @@ __global__ void weight_class_prefix_joins(
                         PrefixBucket right_entries_bucket{
                             right_class.entry_offset, right_class.count, 0, 0};
                         unsigned long long compatible = 0;
-                        if (forward_prefix) {
-                            compatible += weight_class_predicate_join(
+                        if (forward_prefix && swapped_prefix &&
+                            right_class.orbit_size == 2) {
+                            compatible += weight_class_predicate_join_dual(
                                 left_suffixes, left_entries_bucket,
                                 right_suffixes, right_entries_bucket, lane);
-                        }
-                        if (right_class.orbit_size == 2 && swapped_prefix) {
-                            compatible += weight_class_predicate_join(
-                                left_suffixes, left_entries_bucket,
-                                right_suffixes, right_entries_bucket, lane,
-                                true);
+                        } else {
+                            if (forward_prefix) {
+                                compatible += weight_class_predicate_join(
+                                    left_suffixes, left_entries_bucket,
+                                    right_suffixes, right_entries_bucket, lane);
+                            }
+                            if (right_class.orbit_size == 2 &&
+                                swapped_prefix) {
+                                compatible += weight_class_predicate_join(
+                                    left_suffixes, left_entries_bucket,
+                                    right_suffixes, right_entries_bucket, lane,
+                                    true);
+                            }
                         }
                         sum += compatible * uint64_t(left_class.orbit_size) *
                                uint64_t(left_class.weight) *

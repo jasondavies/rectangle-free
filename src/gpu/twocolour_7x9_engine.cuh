@@ -258,7 +258,7 @@ static PackedRunProvenance packed_run_provenance(
                   << ";task_chunk=" << PREFIX_TASK_CHUNK
                   << ";threads=" << THREADS
                   << ";token_plane_quotient=1"
-                  << ";join=weight_class_bmma";
+                  << ";join=weight_class_bmma_dual_plane";
     return PackedRunProvenance{
         "RECT7X9_PACKED_RESULT", "7x9", sha256_file(executable),
         sha256_string(configuration.str()), canonical_cache_sha256};

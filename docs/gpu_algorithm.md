@@ -232,7 +232,9 @@ checks all narrowed representations and promotes weights before multiplication.
 For quotient layouts, a weight class additionally records the common support
 orbit size.  The kernel evaluates the stored relative orientation and, for a
 non-fixed right orbit, the swapped-right orientation, then multiplies by the
-left orbit size exactly as in the formula above.
+left orbit size exactly as in the formula above.  When both prefix
+orientations are compatible, the two contractions share one tile traversal
+and reuse the operand unchanged by token-plane exchange.
 
 ## 6. Geometry-specific execution plans
 

@@ -12888,3 +12888,74 @@
   `4x4`—but its own orbit count accelerates far too quickly.  GPU canonical
   sort/reduce could improve the six-row wall time without changing the
   already-fatal state lower bound.
+
+### Experiment 396: RTX 4090 BMMA hot-loop and CPU setup pass
+
+- Goal: close the remaining production review candidates on an Ada RTX 4090:
+  remove BMMA tail-validity checks, fuse the ordinary and token-plane-swapped
+  contractions, compact the CPU distribution map, and replace row-wise cell
+  counting with one packed-key population count.
+- Environment: one on-demand Vast RTX 4090 with 24,564 MiB, native `sm_89`,
+  CUDA 12.8, driver 580.159.03, and an observed 400-W power limit.  A first
+  offer failed before container creation and a second exposed a CUDA
+  12.8/535-driver mismatch before its first allocation; both were destroyed
+  immediately.  The successful worker ran for 1,195 seconds at
+  `$0.30778/hour`.  All three instances were destroyed, no volumes remain,
+  and the account balance fell from about `$0.41` to `$0.26365`.
+- Full-tile fast path:
+  - branch once per `16x8` tile and omit the four output-validity predicates
+    on complete tiles;
+  - both control and candidate compile at 46 registers with no spills;
+  - five alternating 8,192-record runs give median GPU times `0.265673s`
+    control and `0.273241s` candidate, a `2.85%` regression;
+  - reject and remove the branch.
+- Tagged padding: reserve two unused BMMA K coordinates so valid A/B rows use
+  disjoint tags while padded rows use both, theoretically making every padded
+  dot product nonzero.  The source-level suffix-word mapping is not the PTX
+  fragment's complete logical K mapping: both tested unused-word placements
+  fail independent CPU validation and count padded outputs.  Reject rather
+  than retain architecture-fragile fragment code.
+- Dual token-plane contraction:
+  - when both physical prefixes are compatible and the right support orbit
+    has size two, choose the existing minimum-padding orientation once and
+    evaluate ordinary and plane-swapped representatives in one tile traversal;
+  - in the normal orientation each A fragment is reused across both B
+    orientations; in the reversed orientation each B fragment is reused
+    across both A orientations;
+  - the integrated kernel falls from 46 to 42 registers, with 68 bytes shared
+    memory, one barrier, and no spills;
+  - five alternating 8,192-record runs give median GPU times `0.268339s`
+    control and `0.239611s` fused, a `10.70%` time reduction or `1.120x`
+    throughput;
+  - two alternating 250,000-record controls take `7.804568s` and `7.822606s`;
+    fused runs take `6.986308s` and `6.992643s`, a `10.55%` median reduction
+    or `1.118x` throughput;
+  - every qualification reproduces contribution
+    `419322064289037570734447001600` and passes eight independently rebuilt
+    CPU joins.  Accept the fused routine unconditionally, without a feature
+    flag or fallback.
+- CPU cleanup:
+  - use positive `MapEntry::weight` as the occupied marker, reducing the map
+    entry from 24 to 16 bytes;
+  - replace seven/eight row-wise popcounts with one `__builtin_popcountll` on
+    the packed orbit key;
+  - on alternating 8,192-record runs the compact map reduces median canonical
+    factory time from `3.007579s` to `2.736115s`, `9.03%`;
+  - on the 250,000-record qualification, factory time is `5.256658s` versus
+    a `5.643693s` median for the preceding fused binary, `6.86%` lower.  Input
+    loading falls from roughly `0.0366s` to `0.0320s`; this is a useful clean
+    hot-loop simplification but negligible end to end.
+- Six-byte 7x5 cache gate: packing the 17.66-GiB quotient payload to 13.25 GiB
+  leaves only about 10.7 GiB on a 24-GiB GPU before the persistent left layout,
+  builder metadata, and safety reserve.  It would therefore force smaller
+  right batches than host streaming.  Experiment 344 already hides 96.9% of
+  gather/upload work, and Experiment 353 showed that starving right-batch
+  capacity outweighs residency.  Reject six-byte device-cache integration as
+  a 4090 throughput optimization; retain it only as a possible future disk or
+  host-RAM storage format.
+- Artifacts: control, rejected, fused, and integrated binaries plus all build
+  and run logs are stored under
+  `../rectangle-free-data-v2/profiles/vast-4090-bmma-dual-20260823/`.
+- Outcome: accept dual-orientation BMMA fusion and the two CPU cleanups.  The
+  main 8x8 join stage improves by about 10.6% on a consumer Ada GPU while the
+  maintained production core remains one exact path.

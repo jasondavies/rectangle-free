@@ -84,7 +84,7 @@ static gpu_checkpoint::RunProvenance prefix_8x8_run_provenance(
                   << ";threads=" << THREADS
                   << ";orbit_magic=" << ORBIT_MAGIC
                   << ";transpose_quotient=1;token_plane_quotient=1"
-                  << ";join=weight_class_bmma";
+                  << ";join=weight_class_bmma_dual_plane";
     return gpu_checkpoint::run_provenance(
         "RECT8X8_PREFIX_RESULT", "8x8", executable, configuration.str(),
         canonical_seed);

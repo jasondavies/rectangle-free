@@ -58,8 +58,9 @@ struct Increment {
 struct MapEntry {
     uint64_t mask = 0;
     uint64_t weight = 0;
-    bool used = false;
 };
+static_assert(sizeof(MapEntry) == 16,
+              "distribution-map entries must remain compact");
 
 struct Distribution {
     std::vector<Entry> entries;
@@ -171,14 +172,14 @@ class Map {
     void add(uint64_t mask, uint64_t weight) {
         if ((count_ + 1) * 10 >= entries_.size() * 7) rehash();
         size_t slot = size_t(mix64(mask)) & (entries_.size() - 1);
-        while (entries_[slot].used) {
+        while (entries_[slot].weight) {
             if (entries_[slot].mask == mask) {
                 entries_[slot].weight += weight;
                 return;
             }
             slot = (slot + 1) & (entries_.size() - 1);
         }
-        entries_[slot] = MapEntry{mask, weight, true};
+        entries_[slot] = MapEntry{mask, weight};
         count_++;
     }
 
@@ -188,7 +189,7 @@ class Map {
   private:
     void insert_raw(const MapEntry& entry) {
         size_t slot = size_t(mix64(entry.mask)) & (entries_.size() - 1);
-        while (entries_[slot].used) slot = (slot + 1) & (entries_.size() - 1);
+        while (entries_[slot].weight) slot = (slot + 1) & (entries_.size() - 1);
         entries_[slot] = entry;
         count_++;
     }
@@ -198,7 +199,7 @@ class Map {
         entries_.assign(old.size() * 2, MapEntry{});
         count_ = 0;
         for (const MapEntry& entry : old) {
-            if (entry.used) insert_raw(entry);
+            if (entry.weight) insert_raw(entry);
         }
     }
 
@@ -261,7 +262,7 @@ static Distribution build_distribution(PrefixKey prefix, int columns, bool compl
         }
         Map next(std::max<size_t>(16, current.entries().size()));
         for (const MapEntry& entry : current.entries()) {
-            if (!entry.used) continue;
+            if (!entry.weight) continue;
             for (const Increment& increment : g_increments[active]) {
                 if (entry.mask & increment.mask) continue;
                 next.add(entry.mask | increment.mask, entry.weight * increment.weight);
@@ -272,7 +273,7 @@ static Distribution build_distribution(PrefixKey prefix, int columns, bool compl
     Distribution result;
     result.entries.reserve(current.count());
     for (const MapEntry& entry : current.entries()) {
-        if (!entry.used) continue;
+        if (!entry.weight) continue;
         if (entry.weight > UINT32_MAX) {
             throw std::overflow_error("distribution weight exceeds uint32_t");
         }
@@ -539,13 +540,7 @@ static PrefixKey right_prefix(uint64_t key) {
 }
 
 static int cell_count(uint64_t key) {
-    int result = 0;
-    const uint64_t row_mask = (UINT64_C(1) << ROW_BITS) - 1U;
-    for (int row = 0; row < ROWS; row++) {
-        result += __builtin_popcount(unsigned(key & row_mask));
-        key >>= ROW_BITS;
-    }
-    return result;
+    return __builtin_popcountll(key);
 }
 
 static std::vector<Edge> read_edges(const std::string& path, uint64_t start,
