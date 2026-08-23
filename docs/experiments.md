@@ -13045,3 +13045,42 @@
   kernel as the Blackwell production path.  A future dual-only isolation would
   be the sole remaining narrow variant, not a reason to retain this machinery
   in production.
+
+### Experiment 399: isolated dual-orientation NVFP4 packing
+
+- Goal: isolate the only unresolved part of Experiment 398: pack the ordinary
+  and token-plane-swapped 32-bit suffix predicates into the lower and upper
+  halves of one seven-row NVFP4 K=64 dot product, while leaving every
+  single-orientation join on the accepted production path.
+- Candidate cleanup: use one validity pair for both orientations and dedicated
+  dual-only A/B loaders.  The low 32 coordinates carry the ordinary mask and
+  the high 32 carry the swapped mask.  UE4M3 scales `1,1,64,64` produce the
+  exact integer `ordinary_popcount + 64 * swapped_popcount`, whose two zero
+  predicates are recovered without overlap.
+- Static result with CUDA 13.0 on RTX PRO 6000 Blackwell:
+  - static OMMA sites fall from 22 to 16;
+  - the production kernel uses 47 registers/thread and the candidate 48;
+  - neither kernel spills.
+- Hardware gate: one four-GPU RTX PRO 6000 Blackwell spot VM on Verda.  Two
+  GPUs ran control and two candidate concurrently, then the assignments were
+  reversed to remove per-GPU clock bias.  The resident 7x5 cache gives four
+  right batches per 250,000-record run, with no host gather or H2D source
+  traffic in the recurring path.
+- Exactness: all eight runs of each variant represented
+  `23,951,709,903,589` direct comparisons, passed eight independently rebuilt
+  CPU joins, and reproduced contribution
+  `171174419814658954524700262400`.
+- Timing:
+  - eight control GPU times range from `3.124167s` to `3.189190s`, median
+    `3.1415245s`;
+  - eight dual-packed times range from `3.174151s` to `3.232522s`, median
+    `3.2028705s`;
+  - dual-only packing is therefore `1.95%` slower in GPU time.  Median complete
+    work-item time likewise regresses from `5.625711s` to `5.735367s`, `1.95%`.
+- Interpretation: halving the dual predicate's OMMA count is insufficient to
+  repay nonuniform scale setup and packed-result decoding.  The role-swapped
+  measurements make the small regression robust to GPU-to-GPU variation.
+- Artifacts: build logs and all run logs are retained under
+  `../rectangle-free-data-v2/profiles/verda-rtxpro6000-dual32-20260823/`.
+- Outcome: reject and remove dual-orientation-only packing.  The existing
+  one-predicate NVFP4 implementation remains the Blackwell production kernel.
