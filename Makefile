@@ -324,6 +324,10 @@ $(BUILD_DIR)/pair_projection_8x8_census: research/probes/pair_projection_8x8_cen
 		research/probes/prefix_hierarchy_8x8_census.cpp
 	$(CXX) -O3 -std=c++17 -fopenmp -march=native -o $@ $<
 
+$(BUILD_DIR)/demanded_query_reuse_8x8_census: research/probes/demanded_query_reuse_8x8_census.cpp \
+		research/probes/prefix_bucket_tt_rank_census.cpp research/probes/prefix_hierarchy_8x8_census.cpp
+	$(CXX) -O3 -std=c++17 -fopenmp -march=native -o $@ $<
+
 $(BUILD_DIR)/behavioral_distribution_8x8_census: research/probes/behavioral_distribution_8x8_census.cpp \
 		research/probes/prefix_bmma_cost_census.cpp research/probes/prefix_bucket_tt_rank_census.cpp \
 		research/probes/prefix_hierarchy_8x8_census.cpp
@@ -374,6 +378,7 @@ BUILD_TARGETS := 5xn_count4 partition_count4 partition_poly partition_poly_7 \
 	prefix_bmma_portfolio_8x8_oracle column_split_8x8_oracle \
 	column_split_8x8_transform column_split_8x8_selector \
 	pair_projection_8x8_census behavioral_distribution_8x8_census \
+	demanded_query_reuse_8x8_census \
 	universal_state_symmetry_probe twocolour_3x4_probe twocolour_7x7_solve \
 	gpu_result_checkpoint_test
 

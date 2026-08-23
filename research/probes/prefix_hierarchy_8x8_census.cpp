@@ -222,7 +222,9 @@ static std::vector<SampleRecord> read_stride_sample(const std::string& path,
     input.read(magic, sizeof(magic));
     input.read(reinterpret_cast<char*>(&columns), sizeof(columns));
     input.read(reinterpret_cast<char*>(&count), sizeof(count));
-    if (!input || std::memcmp(magic, "R8ORB01", 7) || columns != COLUMNS)
+    const bool recognised = !std::memcmp(magic, "R8ORB01", 7) ||
+                            !std::memcmp(magic, "R8SQT01", 7);
+    if (!input || !recognised || columns != COLUMNS)
         throw std::runtime_error("invalid 8x8 solve file");
     sample_count = std::min(sample_count, count);
     std::vector<SampleRecord> result;

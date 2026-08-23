@@ -13128,3 +13128,70 @@
 - Outcome: reject and remove the Ada U4 candidate.  Retain the existing B1
   BMMA path on Ada; the experiment closes the broader two-32-bit U4 route, not
   merely the dual-orientation special case.
+
+### Experiment 401: demanded canonical-query reuse census for `8x8`
+
+- Goal: test the remaining exact query-cache route without compiling the full
+  function `Q_D(U) = sum_[V disjoint U] D(V)`.  Whole join signatures almost
+  never repeat, but individual queries could in principle repeat across
+  different left distributions.  Cache only the `(right source D, query U)`
+  values actually demanded by the outer workload and require at least `4x`
+  reuse concentrated in a practically sized hot set before implementing a GPU
+  evaluator.
+- Exact canonical key:
+  - express every left support representative in the canonical right source's
+    row coordinates using the production left/right row maps;
+  - quotient the query mask by token-plane exchange, under which every
+    distribution is invariant;
+  - report a second, stronger quotient under every row automorphism of the
+    canonical right half mask.  These maps are generated exactly by matching
+    all 24 column-permuted row-pattern multisets, and `Q_D(U)=Q_D(hU)` for each
+    resulting `h`;
+  - weight reuse by the right source's full support size.  This is the exact
+    number of predicates in a flat support scan and an optimistic proxy for
+    work avoidable by a cached answer; it deliberately does not claim to equal
+    rounded prefix/weight-class BMMA tiles.
+- Probe: add `demanded_query_reuse_8x8_census` as an isolated CPU target.  It
+  reads either `R8ORB01` or versioned transpose-quotient `R8SQT01` files,
+  rebuilds the weighted canonical distributions, validates canonical-to-raw
+  row transformations, checks sampled automorphism-quotiented queries by
+  direct weighted support scans, and reports occurrence, support-scan, reuse,
+  threshold, and ideal static-cache-capacity statistics.
+- Scaling control on transpose solve shard `s0000`:
+  - at 1,024 stride-sampled records, the workload issues `27,788,692` query
+    demands.  Plane-only canonicalization leaves `27,788,628` unique keys:
+    only 64 keys repeat and the ideal support-scan saving is `0.00102%`;
+  - adding exact half-mask row automorphisms leaves `25,074,672` unique keys,
+    an occurrence reuse of only `1.1082x` and an ideal support-scan reduction
+    of `8.2273%`.  Only 70 keys occur at least 16 times and none occurs 64
+    times.
+- Decisive stratified census: sample 128 records from each of 16 evenly spaced
+  transpose solve shards, for 2,048 records, 4,096 selected/complement joins,
+  4,375 canonical sources, and `57,027,016` actual query demands.
+  - token-plane quotienting alone produces `57,026,731` unique keys.  The 285
+    repeated keys save only `0.001858%` of flat support-scan predicates;
+  - 2,865 right sources have mean half-mask row-automorphism group size 6 and
+    maximum 144.  Using all of them leaves `51,367,860` unique keys, giving
+    `1.1102x` occurrence reuse and only `1.0934x` ideal flat-scan speedup;
+  - 46,183,677 keys remain singletons.  Only 193,292 keys occur at least four
+    times, 2,323 at least eight times, 42 at least 16 times, and none at least
+    64 times;
+  - the optimal one-million-result static cache needs about 22.9 MiB but saves
+    only `5.5443%` of baseline scan work.  Caching every repeated key needs
+    about 118.7 MiB even for this small sample and raises the saving only to
+    `8.5427%`.  A cache containing every sampled result is about 1.15 GiB.
+- Correctness and cost: the final stratified run completes in 8.46 seconds and
+  peaks at about 4.11 GiB RSS on 16 local threads.  An independent ASan/UBSan
+  build completes an eight-record run without an error.  All row-map,
+  token-plane, and direct weighted-query checks pass.
+- Interpretation: demanded query answers are effectively unique once the
+  right source is part of the key.  Right-source automorphisms expose a modest
+  within-query-family aggregation, not a reusable hot answer set; realizing
+  even its optimistic 8.5% flat-scan ceiling would require right-specific left
+  transformations and millions of values, while the production prefix/BMMA
+  kernel already avoids much of a flat scan.
+- Outcome: reject persistent demanded-answer caching and a hot-query GPU cache
+  for `8x8`.  Do not proceed to the factorized-source evaluator on the premise
+  of amortizing `Q_D(U)` across repeated queries.  A factorized backend that
+  beats BMMA on each essentially unique query remains logically open, but this
+  census removes reuse as its source of a multi-fold gain.
