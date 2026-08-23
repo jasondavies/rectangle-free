@@ -408,6 +408,7 @@ static std::vector<std::string> split_paths(const std::string& value) {
 
 }  // namespace
 
+#ifndef PAIR_PROJECTION_8X8_CENSUS_NO_MAIN
 int main(int argc, char** argv) {
     try {
         if (argc < 2 || argc > 4) {
@@ -618,3 +619,4 @@ int main(int argc, char** argv) {
         return 1;
     }
 }
+#endif

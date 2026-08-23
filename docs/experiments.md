@@ -13195,3 +13195,66 @@
   of amortizing `Q_D(U)` across repeated queries.  A factorized backend that
   beats BMMA on each essentially unique query remains logically open, but this
   census removes reuse as its source of a multi-fold gain.
+
+### Experiment 402: exact weight-class bitset-index gate for `8x8`
+
+- Goal: test a materially different suffix backend made possible by exact
+  weight-class grouping.  For each block of 64 equal-weight right suffixes,
+  split the 42 suffix bits into six seven-bit chunks and build
+  `lookup[chunk][query]`, a 64-bit word marking entries disjoint from that
+  query chunk.  One left suffix then needs six lookups, five ANDs, and one
+  population count instead of a Cartesian predicate tile.  The
+  token-plane-swapped orientation reuses the same index by swapping the left
+  query.
+- Probe: add `weight_class_bitset_8x8_census`, traversing the exact production
+  prefix buckets, ordinary/swapped quotient orientations, and weight classes.
+  Compare current `m16n8k128` tile counts with an intentionally optimistic
+  bitset instruction model:
+  - 12 core instructions per 32-query warp and indexed 64-entry block;
+  - 846 instructions to build all six 128-word lookup tables, using bit-plane
+    ballots plus a one-AND subset recurrence;
+  - no charge for addressing, synchronization, reductions, weighted
+    accumulation, table traffic, or the lower throughput of serialized integer
+    operations relative to tensor instructions.
+  The probe reports zero-setup, per-pair setup, globally persistent, and
+  selectively persistent policies.  Failure under this model is a decisive
+  structural rejection rather than a timing prediction.
+- Class structure on 256 records stratified across 16 transpose solve shards:
+  503 unique half keys produce 270,756 physical classes containing 14,344,814
+  quotient supports.  Mean class size is 52.98 and the maximum is 5,556.
+  Only 19.93% of classes contain at least 64 entries, although they contain
+  66.45% of supports.  Both sides contain at least 64 entries for only 33.73%
+  of current BMMA tiles.
+- Modeled join result over 7,450,485 exact class orientations and 135,013,137
+  current BMMA tiles:
+  - indexing every right class, even with free construction, costs `1.7822x`
+    the current tensor-instruction count; indexing every left costs `1.7006x`;
+  - choosing the better indexed side independently for every pair still costs
+    `1.4312x` if used unconditionally;
+  - an impossible oracle that uses the lookup only on winning pairs and pays
+    no setup has ratio `0.91953`, an absolute ceiling of only 8.05% modeled
+    savings;
+  - just 1.85% of class pairs, covering 6.59% of tiles, offer at least 25%
+    zero-setup instruction reduction;
+  - building an index per class pair costs `49.60x`.  Persisting indices for
+    every encountered class costs `2.79x` for fixed-right and `2.98x` for
+    fixed-left operation;
+  - selectively retaining only classes whose accumulated modeled savings
+    repay setup leaves the best policy, fixed-left, at ratio `0.96455`: 3.55%
+    savings and about 9.1 MiB of tables in this sample.  Fixed-right saves only
+    0.42%; a per-pair role oracle fragments reuse and saves 1.55%.
+- Scaling control: 64 records from shard `s0000` gives the same conclusion.
+  The free-setup hybrid ceiling is 8.17%, while the best selectively amortised
+  policy saves 3.25% under the same optimistic assumptions.
+- Interpretation: large classes do account for substantial work, but the
+  lookup requires a serialized 12-instruction chain for every query warp and
+  64-entry block.  Against a single tensor instruction per BMMA tile, its
+  asymptotic advantage is too small and most real class pairs are below that
+  asymptotic regime.  Actual CUDA would add shared/global table traffic,
+  synchronization, reductions, weighted accumulation, and integer-pipeline
+  latency, making the already small optimistic ceiling unattainable.
+- Outcome: reject the weight-class bitset-index kernel without spending GPU
+  budget.  Retain BMMA/NVFP4 as the generic suffix backend.  This closes the
+  64-entry chunk-table variant; it does not reject a future query structure
+  that removes substantially more than one tensor tile per dozen dependent
+  scalar operations.
