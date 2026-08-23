@@ -8,7 +8,7 @@
 
 #include "twocolour_prefix_core.cuh"
 
-#include "twocolour_weight_class_bmma.cuh"
+#include "twocolour_weight_class_join.cuh"
 #include "twocolour_canonical_device.cuh"
 
 #include <filesystem>
@@ -258,7 +258,7 @@ static PackedRunProvenance packed_run_provenance(
                   << ";task_chunk=" << PREFIX_TASK_CHUNK
                   << ";threads=" << THREADS
                   << ";token_plane_quotient=1"
-                  << ";join=weight_class_bmma_dual_plane";
+                  << ";join=" << WEIGHT_CLASS_JOIN_FINGERPRINT;
     return PackedRunProvenance{
         "RECT7X9_PACKED_RESULT", "7x9", sha256_file(executable),
         sha256_string(configuration.str()), canonical_cache_sha256};

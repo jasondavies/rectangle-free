@@ -353,4 +353,4 @@ The production entry points are
 mathematical primitives live in
 [`twocolour_gpu_common.cuh`](../src/gpu/twocolour_gpu_common.cuh),
 [`twocolour_prefix_core.cuh`](../src/gpu/twocolour_prefix_core.cuh), and
-[`twocolour_weight_class_bmma.cuh`](../src/gpu/twocolour_weight_class_bmma.cuh).
+[`twocolour_weight_class_join.cuh`](../src/gpu/twocolour_weight_class_join.cuh).

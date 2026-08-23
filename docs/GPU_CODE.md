@@ -10,8 +10,8 @@ The active exact GPU implementation is intentionally split by responsibility:
   mask transformations, and shared layout descriptors.
 - `src/gpu/twocolour_prefix_core.cuh`: seven-row packed 7x5 cache construction and
   prefetch pipeline.
-- `src/gpu/twocolour_weight_class_bmma.cuh`: direct weight-grouped layouts and
-  the BMMA join shared by 7x9 and 8x8.
+- `src/gpu/twocolour_weight_class_join.cuh`: direct weight-grouped layouts and
+  the architecture-native exact join shared by 7x9 and 8x8.
 - `src/gpu/twocolour_canonical_device.cuh`: geometry-neutral canonical device cache
   and direct grouped-layout adapter shared by 7x9 and 8x8.
 - `src/gpu/twocolour_8x8_prefix_solve.cu`: production 8x8 orchestration.
@@ -112,6 +112,19 @@ The 8x8 invocation is:
 ```text
 build/twocolour_8x8_solve_gpu CANONICAL_SEED.orbits WORK.tsv RESULTS_DIR \
     [BATCH_EDGES=auto] [VERIFY_JOINS=4]
+```
+
+The shared weighted-disjointness kernel uses B1 `and.popc` BMMA on Ampere and
+Ada. Consumer/workstation Blackwell SM120 lowers that legacy PTX to a slower
+sequence of integer MMA instructions, so a native SM120 build instead encodes
+each suffix bit as the exactly representable NVFP4 values 0 or 1 and tests
+whether the resulting FP32 dot product is zero. The maximum dot product is only
+42, so this remains exact. Build SM120 with the architecture-specific cubin
+form (not the `-arch` shortcut):
+
+```bash
+make NVCCFLAGS='-O3 -std=c++17 -gencode arch=compute_120a,code=sm_120a' \
+    gpu-production
 ```
 
 The default `auto` removes the historical 16,384-edge ceiling; device-memory

@@ -1,5 +1,5 @@
-#ifndef TWCOLOUR_WEIGHT_CLASS_BMMA_CUH
-#define TWCOLOUR_WEIGHT_CLASS_BMMA_CUH
+#ifndef TWCOLOUR_WEIGHT_CLASS_JOIN_CUH
+#define TWCOLOUR_WEIGHT_CLASS_JOIN_CUH
 
 #include <thrust/device_ptr.h>
 #include <thrust/scan.h>
@@ -8,10 +8,13 @@
 static_assert(sizeof(PrefixSuffix) <= sizeof(uint64_t),
               "grouped suffix storage supports masks through 64 bits");
 
-// Exact production representation for weight-class BMMA.  Physical prefix
-// buckets retain their order and prefix, but their spans index WeightClassMeta
-// records.  Each class record in turn names a contiguous run of equal-weight
-// suffix entries.
+static constexpr const char* WEIGHT_CLASS_JOIN_FINGERPRINT =
+    "weight_class_arch_native_dual_plane_v1";
+
+// Exact production representation for the architecture-native join. Physical
+// prefix buckets retain their order and prefix, but their spans index
+// WeightClassMeta records. Each class record in turn names a contiguous run of
+// equal-weight suffix entries.
 struct WeightClassMeta {
     uint32_t entry_offset;
     uint32_t count;
@@ -270,6 +273,241 @@ weight_class_predicate_join_dual(
     return sum;
 }
 
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200
+
+// Spread eight logical bits into eight FP4 E2M1 nibbles.  E2M1 code 0x2 is
+// exactly +1.0, while zero remains 0x0.
+static __device__ __forceinline__ uint32_t weight_class_fp4_byte(
+    uint32_t bits) {
+    bits &= 0xffU;
+    bits = (bits | (bits << 12)) & 0x000f000fU;
+    bits = (bits | (bits << 6)) & 0x03030303U;
+    bits = (bits | (bits << 3)) & 0x11111111U;
+    return bits << 1;
+}
+
+struct WeightClassFp4A {
+    uint32_t bits0;
+    uint32_t bits1;
+    uint32_t bits2;
+    uint32_t bits3;
+    bool valid0;
+    bool valid1;
+};
+
+struct WeightClassFp4B {
+    uint32_t bits0;
+    uint32_t bits1;
+    bool valid0;
+    bool valid1;
+};
+
+static __device__ __forceinline__ WeightClassFp4A
+load_weight_class_fp4_a(
+    const PrefixSuffix* __restrict__ suffixes, uint32_t offset,
+    uint32_t count, uint32_t base, unsigned lane, bool swap_planes) {
+    const unsigned group = lane >> 2;
+    const unsigned word = lane & 3U;
+    const uint32_t row0 = group;
+    const uint32_t row1 = group + 8;
+    WeightClassFp4A fragment{};
+    fragment.valid0 = row0 < count;
+    fragment.valid1 = row1 < count;
+    uint64_t suffix0 = fragment.valid0
+        ? uint64_t(suffixes[offset + base + row0]) : 0;
+    uint64_t suffix1 = fragment.valid1
+        ? uint64_t(suffixes[offset + base + row1]) : 0;
+    if (swap_planes) {
+        suffix0 = swap_suffix_token_planes(suffix0);
+        suffix1 = swap_suffix_token_planes(suffix1);
+    }
+    fragment.bits0 = weight_class_fp4_byte(uint32_t(suffix0 >> (8 * word)));
+    fragment.bits1 = weight_class_fp4_byte(uint32_t(suffix1 >> (8 * word)));
+    fragment.bits2 = weight_class_fp4_byte(
+        uint32_t(suffix0 >> (8 * (word + 4))));
+    fragment.bits3 = weight_class_fp4_byte(
+        uint32_t(suffix1 >> (8 * (word + 4))));
+    return fragment;
+}
+
+static __device__ __forceinline__ WeightClassFp4B
+load_weight_class_fp4_b(
+    const PrefixSuffix* __restrict__ suffixes, uint32_t offset,
+    uint32_t count, uint32_t base, unsigned lane, bool swap_planes) {
+    const unsigned group = lane >> 2;
+    const unsigned word = lane & 3U;
+    const uint32_t output0 = 2 * word;
+    const uint32_t output1 = output0 + 1;
+    WeightClassFp4B fragment{};
+    uint64_t suffix = group < count
+        ? uint64_t(suffixes[offset + base + group]) : 0;
+    if (swap_planes) suffix = swap_suffix_token_planes(suffix);
+    fragment.bits0 = weight_class_fp4_byte(uint32_t(suffix >> (8 * word)));
+    fragment.bits1 = weight_class_fp4_byte(
+        uint32_t(suffix >> (8 * (word + 4))));
+    fragment.valid0 = output0 < count;
+    fragment.valid1 = output1 < count;
+    return fragment;
+}
+
+static __device__ __forceinline__ unsigned long long
+weight_class_fp4_fragment_count(
+    WeightClassFp4A a, WeightClassFp4B b, unsigned lane) {
+    float d0 = 0.0f;
+    float d1 = 0.0f;
+    float d2 = 0.0f;
+    float d3 = 0.0f;
+    // NVFP4 UE4M3 encodes 1.0 as 0x38.  The 4X scale ABI consumes A
+    // selectors from lanes 0/1 of each four-lane group and B from lane 0.
+    const unsigned thread_in_group = lane & 3U;
+    const uint32_t unit_scales = UINT32_C(0x38383838);
+    const uint32_t scale_a = thread_in_group < 2 ? unit_scales : 0;
+    const uint32_t scale_b = thread_in_group == 0 ? unit_scales : 0;
+    asm volatile(
+        "mma.sync.aligned.m16n8k64.row.col.kind::mxf4nvf4.block_scale."
+        "scale_vec::4X.f32.e2m1.e2m1.f32.ue4m3 "
+        "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3}, "
+        "{%10}, {0,0}, {%11}, {0,0};\n"
+        : "+f"(d0), "+f"(d1), "+f"(d2), "+f"(d3)
+        : "r"(a.bits0), "r"(a.bits1), "r"(a.bits2), "r"(a.bits3),
+          "r"(b.bits0), "r"(b.bits1), "r"(scale_a), "r"(scale_b));
+    unsigned long long sum = 0;
+    sum += a.valid0 && b.valid0 && d0 == 0.0f;
+    sum += a.valid0 && b.valid1 && d1 == 0.0f;
+    sum += a.valid1 && b.valid0 && d2 == 0.0f;
+    sum += a.valid1 && b.valid1 && d3 == 0.0f;
+    return sum;
+}
+
+static __device__ __forceinline__ unsigned long long
+weight_class_predicate_join_fp4(
+    const PrefixSuffix* __restrict__ left_suffixes, PrefixBucket left,
+    const PrefixSuffix* __restrict__ right_suffixes, PrefixBucket right,
+    unsigned lane, bool swap_right = false) {
+    bool swap_left = false;
+    uint64_t forward_tiles = uint64_t((left.count + 15) / 16) *
+                             ((right.count + 7) / 8);
+    uint64_t reverse_tiles = uint64_t((right.count + 15) / 16) *
+                             ((left.count + 7) / 8);
+    if (reverse_tiles < forward_tiles ||
+        (reverse_tiles == forward_tiles && right.count < left.count)) {
+        const PrefixSuffix* temporary_suffixes = left_suffixes;
+        left_suffixes = right_suffixes;
+        right_suffixes = temporary_suffixes;
+        PrefixBucket temporary_bucket = left;
+        left = right;
+        right = temporary_bucket;
+        swap_left = swap_right;
+        swap_right = false;
+    }
+    unsigned long long sum = 0;
+    for (uint32_t left_base = 0; left_base < left.count; left_base += 16) {
+        uint32_t left_count = min(uint32_t(16), left.count - left_base);
+        WeightClassFp4A a = load_weight_class_fp4_a(
+            left_suffixes, left.entry_offset, left_count, left_base, lane,
+            swap_left);
+        for (uint32_t right_base = 0; right_base < right.count;
+             right_base += 8) {
+            uint32_t right_count = min(uint32_t(8),
+                                       right.count - right_base);
+            WeightClassFp4B b = load_weight_class_fp4_b(
+                right_suffixes, right.entry_offset, right_count, right_base,
+                lane, swap_right);
+            sum += weight_class_fp4_fragment_count(a, b, lane);
+        }
+    }
+    return sum;
+}
+
+static __device__ __forceinline__ unsigned long long
+weight_class_predicate_join_fp4_dual(
+    const PrefixSuffix* __restrict__ left_suffixes, PrefixBucket left,
+    const PrefixSuffix* __restrict__ right_suffixes, PrefixBucket right,
+    unsigned lane) {
+    uint64_t forward_tiles = uint64_t((left.count + 15) / 16) *
+                             ((right.count + 7) / 8);
+    uint64_t reverse_tiles = uint64_t((right.count + 15) / 16) *
+                             ((left.count + 7) / 8);
+    const bool reverse = reverse_tiles < forward_tiles ||
+        (reverse_tiles == forward_tiles && right.count < left.count);
+    unsigned long long sum = 0;
+    if (!reverse) {
+        for (uint32_t left_base = 0; left_base < left.count;
+             left_base += 16) {
+            uint32_t left_count = min(uint32_t(16), left.count - left_base);
+            WeightClassFp4A a = load_weight_class_fp4_a(
+                left_suffixes, left.entry_offset, left_count, left_base,
+                lane, false);
+            for (uint32_t right_base = 0; right_base < right.count;
+                 right_base += 8) {
+                uint32_t right_count = min(uint32_t(8),
+                                           right.count - right_base);
+                WeightClassFp4B b = load_weight_class_fp4_b(
+                    right_suffixes, right.entry_offset, right_count,
+                    right_base, lane, false);
+                sum += weight_class_fp4_fragment_count(a, b, lane);
+                b = load_weight_class_fp4_b(
+                    right_suffixes, right.entry_offset, right_count,
+                    right_base, lane, true);
+                sum += weight_class_fp4_fragment_count(a, b, lane);
+            }
+        }
+    } else {
+        for (uint32_t right_base = 0; right_base < right.count;
+             right_base += 16) {
+            uint32_t right_count = min(uint32_t(16),
+                                       right.count - right_base);
+            WeightClassFp4A a = load_weight_class_fp4_a(
+                right_suffixes, right.entry_offset, right_count, right_base,
+                lane, false);
+            WeightClassFp4A swapped_a = load_weight_class_fp4_a(
+                right_suffixes, right.entry_offset, right_count, right_base,
+                lane, true);
+            for (uint32_t left_base = 0; left_base < left.count;
+                 left_base += 8) {
+                uint32_t left_count = min(uint32_t(8),
+                                          left.count - left_base);
+                WeightClassFp4B b = load_weight_class_fp4_b(
+                    left_suffixes, left.entry_offset, left_count, left_base,
+                    lane, false);
+                sum += weight_class_fp4_fragment_count(a, b, lane);
+                sum += weight_class_fp4_fragment_count(swapped_a, b, lane);
+            }
+        }
+    }
+    return sum;
+}
+
+#endif
+
+static __device__ __forceinline__ unsigned long long
+weight_class_selected_join(
+    const PrefixSuffix* __restrict__ left_suffixes, PrefixBucket left,
+    const PrefixSuffix* __restrict__ right_suffixes, PrefixBucket right,
+    unsigned lane, bool swap_right = false) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200
+    return weight_class_predicate_join_fp4(
+        left_suffixes, left, right_suffixes, right, lane, swap_right);
+#else
+    return weight_class_predicate_join(
+        left_suffixes, left, right_suffixes, right, lane, swap_right);
+#endif
+}
+
+static __device__ __forceinline__ unsigned long long
+weight_class_selected_join_dual(
+    const PrefixSuffix* __restrict__ left_suffixes, PrefixBucket left,
+    const PrefixSuffix* __restrict__ right_suffixes, PrefixBucket right,
+    unsigned lane) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200
+    return weight_class_predicate_join_fp4_dual(
+        left_suffixes, left, right_suffixes, right, lane);
+#else
+    return weight_class_predicate_join_dual(
+        left_suffixes, left, right_suffixes, right, lane);
+#endif
+}
+
 __global__ void weight_class_prefix_joins(
     const PrefixSuffix* __restrict__ left_suffixes,
     const PrefixSuffix* __restrict__ right_suffixes,
@@ -323,18 +561,18 @@ __global__ void weight_class_prefix_joins(
                         unsigned long long compatible = 0;
                         if (forward_prefix && swapped_prefix &&
                             right_class.orbit_size == 2) {
-                            compatible += weight_class_predicate_join_dual(
+                            compatible += weight_class_selected_join_dual(
                                 left_suffixes, left_entries_bucket,
                                 right_suffixes, right_entries_bucket, lane);
                         } else {
                             if (forward_prefix) {
-                                compatible += weight_class_predicate_join(
+                                compatible += weight_class_selected_join(
                                     left_suffixes, left_entries_bucket,
                                     right_suffixes, right_entries_bucket, lane);
                             }
                             if (right_class.orbit_size == 2 &&
                                 swapped_prefix) {
-                                compatible += weight_class_predicate_join(
+                                compatible += weight_class_selected_join(
                                     left_suffixes, left_entries_bucket,
                                     right_suffixes, right_entries_bucket, lane,
                                     true);

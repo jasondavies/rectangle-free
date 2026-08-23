@@ -111,8 +111,19 @@ Build the maintained CUDA production surface with:
 make gpu-production
 ```
 
-The default CUDA target is `sm_89`; override `NVCCFLAGS` for another GPU
-architecture.
+The default CUDA target is `sm_89`. On an RTX 50-series or RTX PRO Blackwell
+GPU, build the architecture-specific SM120 cubin with:
+
+```bash
+make NVCCFLAGS='-O3 -std=c++17 -gencode arch=compute_120a,code=sm_120a' \
+    gpu-production
+```
+
+The production join selects its exact native tensor backend at compile time:
+B1 `and.popc` BMMA on Ampere/Ada and an NVFP4 zero-versus-one dot product on
+SM120. Do not replace the SM120 `-gencode` pair with `-arch=sm_120a`: that
+shortcut also emits base `compute_120` PTX, for which the architecture-specific
+NVFP4 block-scale instruction is invalid.
 
 ## Quick examples
 

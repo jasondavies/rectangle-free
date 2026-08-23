@@ -12188,8 +12188,9 @@
   - leave the seven-row device layout and 7x5 packed cache in
     `twocolour_prefix_core.cuh`, move its CPU builder under `legacy/gpu/`, and
     isolate seven-row left weight grouping in `twocolour_7x9_left_grouping.cuh`
-  - rename the genuinely shared BMMA implementation to
-    `twocolour_weight_class_bmma.cuh`
+  - rename the genuinely shared BMMA implementation to the former
+    `twocolour_weight_class_bmma.cuh` (renamed again to the backend-neutral
+    `twocolour_weight_class_join.cuh` in Experiment 397)
 - Ownership cleanup: add move-only pinned-buffer and CUDA-stream wrappers;
   make the 7x9 packed cache and 8x8 canonical cache own all device resources;
   remove duplicated manual teardown from both 7x9 entry points; and replace
@@ -12959,3 +12960,50 @@
 - Outcome: accept dual-orientation BMMA fusion and the two CPU cleanups.  The
   main 8x8 join stage improves by about 10.6% on a consumer Ada GPU while the
   maintained production core remains one exact path.
+
+### Experiment 397: native NVFP4 disjointness on consumer Blackwell
+
+- Goal: determine whether consumer Blackwell has a better exact backend than
+  the legacy B1 `m16n8k128.and.popc` instruction used by the production
+  weight-class join.
+- Environment: one on-demand Vast RTX 5090 with 32,607 MiB VRAM, CUDA 13.0,
+  driver 580.159.03, native architecture-specific `sm_120a` cubins, and 32
+  effective EPYC host cores. The provisioned rate was `$0.38/hour`, including
+  disk. Benchmark checkpoints are retained under
+  `../rectangle-free-data-v2/profiles/vast-5090-blackwell-backends-20260823/`;
+  the instance was destroyed after the measurements.
+- Exact candidates:
+  - control: the accepted dual-plane B1 BMMA join;
+  - scalar: assign four cells of each `16x8` logical tile to each lane and test
+    suffix intersection with ordinary integer `AND`;
+  - NVFP4: encode every suffix bit as E2M1 `0` or `+1`, issue the SM120
+    block-scaled `m16n8k64` FP4 MMA with unit UE4M3 scales, and accept a pair
+    precisely when its FP32 dot product is zero. Every dot product is an
+    integer at most 42 and is therefore represented exactly.
+- Compilation detail: `-arch=sm_120a` also emits base `compute_120` PTX, which
+  correctly rejects the architecture-specific block-scale instruction. The
+  required form is
+  `-gencode arch=compute_120a,code=sm_120a`.
+- SASS and resource result:
+  - B1 expands to `IMMA.16832.U8.U8` sequences and uses 78 registers/thread;
+  - scalar uses 48 registers/thread;
+  - NVFP4 emits native
+    `OMMA.SF.16864.F32.E2M1.E2M1.UE4M3.4X` and uses 47 registers/thread;
+  - none of the three kernels spills.
+- Matched 250,000-record gate: every run uses the same seven right batches,
+  represents `38,992,005,394,073` direct support comparisons, reproduces exact
+  contribution `419322064289037570734447001600`, and the qualification runs
+  pass eight independently rebuilt CPU joins. Median cumulative GPU times are
+  `12.911777s` for B1, `7.434558s` for scalar, and `6.216812s` for NVFP4.
+  Thus NVFP4 reduces join time by `51.85%` (`2.077x` throughput) versus B1 and
+  by `16.38%` (`1.196x` throughput) versus scalar.
+- Portability check: all maintained production targets compile for the exact
+  SM120 cubin. A native `sm_89` build still emits
+  `BMMA.168128.AND.POPC`, uses the accepted 42-register kernel, and contains no
+  FP4 instruction.
+- Outcome: select NVFP4 automatically for SM120 device compilation and retain
+  B1 BMMA automatically on earlier supported architectures. Remove the scalar
+  experiment and feature flags. Rename the shared header from the
+  backend-specific `twocolour_weight_class_bmma.cuh` to
+  `twocolour_weight_class_join.cuh` so the production surface exposes one
+  architecture-native exact join rather than parallel solver variants.

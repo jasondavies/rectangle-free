@@ -13,7 +13,7 @@ FILES = [
     "src/gpu/twocolour_7x7_engine.cuh",
     "src/gpu/twocolour_prefix_algebra.cuh",
     "src/gpu/twocolour_prefix_core.cuh",
-    "src/gpu/twocolour_weight_class_bmma.cuh",
+    "src/gpu/twocolour_weight_class_join.cuh",
     "src/gpu/twocolour_canonical_device.cuh",
     "src/gpu/gpu_result_checkpoint.hpp",
     "src/common/sha256.hpp",

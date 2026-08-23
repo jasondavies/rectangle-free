@@ -260,7 +260,7 @@ $(BUILD_DIR)/twocolour_7x9_prefix_gpu: legacy/gpu/twocolour_prefix_legacy_main.c
 $(BUILD_DIR)/twocolour_7x9_solve_gpu: src/gpu/twocolour_7x9_packed_solve.cu \
 		src/gpu/twocolour_7x9_engine.cuh \
 		src/gpu/twocolour_canonical_device.cuh \
-		src/gpu/twocolour_weight_class_bmma.cuh src/gpu/gpu_cuda_utils.cuh \
+		src/gpu/twocolour_weight_class_join.cuh src/gpu/gpu_cuda_utils.cuh \
 		src/gpu/twocolour_prefix_core.cuh src/gpu/twocolour_prefix_algebra.cuh \
 		src/gpu/twocolour_gpu_common.cuh src/gpu/gpu_memory_policy.hpp \
 		src/gpu/gpu_result_checkpoint.hpp src/common/sha256.hpp
@@ -275,7 +275,7 @@ $(BUILD_DIR)/twocolour_7x9_cache_build: src/gpu/twocolour_7x9_cache_build.cu \
 
 $(BUILD_DIR)/twocolour_7x9_four_owner_gpu: src/gpu/twocolour_7x9_four_owner_solve.cu \
 		src/gpu/twocolour_7x9_engine.cuh src/gpu/twocolour_canonical_device.cuh \
-		src/gpu/twocolour_weight_class_bmma.cuh \
+		src/gpu/twocolour_weight_class_join.cuh \
 		src/gpu/gpu_cuda_utils.cuh src/gpu/twocolour_prefix_core.cuh \
 		src/gpu/twocolour_prefix_algebra.cuh src/gpu/twocolour_gpu_common.cuh \
 		src/gpu/gpu_memory_policy.hpp src/gpu/gpu_result_checkpoint.hpp src/common/sha256.hpp
@@ -284,7 +284,7 @@ $(BUILD_DIR)/twocolour_7x9_four_owner_gpu: src/gpu/twocolour_7x9_four_owner_solv
 		-o $@ $<
 
 $(BUILD_DIR)/twocolour_8x8_solve_gpu: src/gpu/twocolour_8x8_prefix_solve.cu \
-		src/gpu/twocolour_weight_class_bmma.cuh src/gpu/twocolour_canonical_device.cuh \
+		src/gpu/twocolour_weight_class_join.cuh src/gpu/twocolour_canonical_device.cuh \
 		src/gpu/gpu_cuda_utils.cuh \
 		src/gpu/twocolour_prefix_algebra.cuh src/gpu/twocolour_gpu_common.cuh \
 		src/gpu/gpu_memory_policy.hpp src/gpu/gpu_result_checkpoint.hpp src/common/sha256.hpp
