@@ -13007,3 +13007,41 @@
   backend-specific `twocolour_weight_class_bmma.cuh` to
   `twocolour_weight_class_join.cuh` so the production surface exposes one
   architecture-native exact join rather than parallel solver variants.
+
+### Experiment 398: packing two 32-bit predicates into one NVFP4 MMA
+
+- Goal: exploit the unused upper half of the seven-row `m16n8k64` NVFP4 dot
+  product.  A seven-row suffix has 32 bits, so two independent suffix masks can
+  occupy the lower and upper 32 coordinates of one K=64 instruction.
+- Exact encoding: duplicate an A mask into both K halves, place two B masks in
+  the corresponding halves, and scale the upper half by 64 with the four-way
+  UE4M3 block-scale vector.  Each FP32 accumulator is then exactly
+  `popcount(A & B0) + 64 * popcount(A & B1)`.  Both counts are at most 32, so
+  the two predicates can be recovered exactly.  A second variant used the two
+  halves for the ordinary and token-plane-swapped predicates.
+- Static result: the unrestricted packed kernel compiled for `sm_120a` without
+  spills and reduced the number of static OMMA sites from 22 to 6.  CUDA 13.0
+  used 40 registers/thread versus 47 for the accepted single-predicate NVFP4
+  control.
+- Matched 250,000-record RTX 5090 gate:
+  - every run represented `23,951,709,903,589` direct comparisons and produced
+    exact contribution `171174419814658954524700262400`;
+  - the accepted control's median cumulative GPU time was `5.080310s`;
+  - unrestricted two-mask packing took `6.160976s`, a `21.27%` regression;
+  - an adaptive variant used packing only when it reduced single-orientation
+    tile count, while always fusing the two token-plane orientations.  Its
+    three GPU times were `6.153131s`, `6.151520s`, and `6.166885s` (median
+    `6.153131s`), still `21.12%` slower than control.
+- Interpretation: the instruction-count reduction is real, but constructing
+  two logical fragments, applying nonuniform scale vectors, and decoding the
+  packed FP32 accumulator costs more than the eliminated OMMA operations.
+  Weight-class grouping also makes many physical tiles too small to exploit
+  the second 32-bit slot.  The adaptive result remaining essentially identical
+  to unrestricted packing shows that the simple tile-count gate does not
+  recover the loss.  Both candidates included dual-orientation packing, so
+  this budget-limited gate does not independently time that narrow component.
+- Outcome: reject and remove the combined two-32-bit implementation; it misses
+  the integration gate by a wide margin.  Keep the simpler one-predicate NVFP4
+  kernel as the Blackwell production path.  A future dual-only isolation would
+  be the sole remaining narrow variant, not a reason to retain this machinery
+  in production.
