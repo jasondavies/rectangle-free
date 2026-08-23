@@ -13084,3 +13084,47 @@
   `../rectangle-free-data-v2/profiles/verda-rtxpro6000-dual32-20260823/`.
 - Outcome: reject and remove dual-orientation-only packing.  The existing
   one-predicate NVFP4 implementation remains the Blackwell production kernel.
+
+### Experiment 400: two exact 32-bit predicates in one Ada U4 MMA
+
+- Goal: determine whether seven-row Ada kernels can use the otherwise idle
+  upper half of `mma.sync.m16n8k64.s32.u4.u4.s32` to outperform the production
+  B1 `m16n8k128.and.popc` join.
+- Exact encoding: place one 32-bit intersection in each K half.  Low-half
+  nibbles use `1 * 1`; high-half nibbles use `8 * 8`, so every accumulator is
+  exactly `a + 64*b`, where `0 <= a,b <= 32`.  Decode the two disjointness
+  predicates as `(d & 63) == 0` and `d < 64`.  Single-orientation joins pack
+  two groups of eight right entries; dual-orientation joins pack the ordinary
+  and token-plane-swapped masks.
+- Static SM89 result with CUDA 13.0:
+  - the candidate emits native `IMMA.16864.U4.U4`, not an emulated sequence;
+  - the production B1 kernel uses 40 registers/thread and the U4 candidate 39;
+  - neither kernel spills.
+- Hardware gate: one on-demand Verda RTX 6000 Ada, after two spot leases were
+  reclaimed during the control.  The matched four-owner workload contains
+  four stratified two-million-record ranges, 56 identical right batches, and
+  `764,589,611,469,401` direct support comparisons.  Both variants run at the
+  same 300-W power limit with the same packed 7x5 cache and batch cap.
+- Exactness: both variants pass four independently rebuilt CPU joins per
+  owner and reproduce the same four contributions, totaling
+  `5459801986831701237650069299200`.
+- Timing:
+  - production B1: `117.638243s` cumulative join time and `184.481014s` tile
+    time, or `6.499` represented Tcomparisons/s;
+  - packed U4: `150.804332s` cumulative join time and `204.686245s` tile time,
+    or `5.070` represented Tcomparisons/s;
+  - U4 therefore takes `28.19%` longer in the join stage and `10.95%` longer
+    end to end.  The end-to-end comparison is conservative: as the second
+    run, U4 benefits from warmer host pages and spends about 13 seconds less
+    outside the join, yet still loses overall.
+- Interpretation: halving the logical tensor-instruction count does not halve
+  Ada execution cost.  Bit-to-nibble expansion, the larger U4 fragments, and
+  two-result decoding outweigh the saved B1 operations; small weight classes
+  also leave many packed slots unused.  Native SASS and lower register use
+  rule out compilation quality and occupancy as the explanation.
+- Artifacts: build logs, SASS, resource reports, telemetry, exact checkpoints,
+  and run logs are retained under
+  `../rectangle-free-data-v2/profiles/verda-rtx6000ada-u4-ab-20260823/`.
+- Outcome: reject and remove the Ada U4 candidate.  Retain the existing B1
+  BMMA path on Ada; the experiment closes the broader two-32-bit U4 route, not
+  merely the dual-orientation special case.
