@@ -13258,3 +13258,68 @@
   64-entry chunk-table variant; it does not reject a future query structure
   that removes substantially more than one tensor tile per dozen dependent
   scalar operations.
+
+### Experiment 403: Isomorphism-quotiented residual outer-sum gate
+
+- Goal: revisit elimination of the binary outer-mask corpus rather than
+  another suffix kernel.  Experiments 381, 385, and 389--395 already reject
+  explicit universal linear spaces, conventional weighted decision diagrams,
+  ordinary tensor networks, full row/colour support-orbit closure,
+  stabilizer-enumerated `F3` contraction, explicit densest-two-colour pairs,
+  labelled residual deletion-contraction, two-cell separators, and the
+  rectangle-closure lattice.  The remaining concrete omission identified by
+  Experiment 394 was exact isomorphism aggregation of the contracted
+  residual hypergraphs in the dense-first formulation.
+- Exact formulation: fix one dense `C4`-free direct-colour class `A`.  Cells
+  outside `A` are vertices and surviving rectangles are hyperedges.  The
+  contribution of the other three colours is the weak hypergraph chromatic
+  count `P_H(3)`.  Deletion-contraction removes the explicit second colour
+  class and therefore genuinely commutes that part of the outer sum.
+- Implementation: extend `dense_residual_hypergraph_probe` with an opt-in
+  `--canonical-isomorphism` mode.  After edge minimization and isolated-cell
+  removal, encode each state as a bipartite incidence graph with separate
+  vertex and hyperedge colour classes, use nauty to obtain an exact canonical
+  graph, rebuild a sorted canonical hyperedge key, and memoize by that key.
+  Arbitrary hypergraph isomorphism preserves `P_H(3)`, so this quotient is
+  stronger than retaining the original grid coordinates or only the
+  automorphism group of `A`.
+- Validation:
+  - both labelled and canonical modes match brute-force ternary colourings on
+    every fixed first mask through `2x3` and on all synthetic component,
+    articulation, and two-separator fixtures;
+  - ASan/UBSan passes the complete self-test;
+  - independent moduli `2^61-1` and 1,000,003 agree between modes on `6x6`.
+- Scaling on square restrictions of the unique 29-cell `9x9` dense class:
+  - `5x5`: canonicalization reduces 1,081 memoized states to 444 (`2.43x`)
+    and 3,184 recursive calls to 1,227.  The exact residue remains 195,898,920.
+    The tiny runtime rises from 0.00357s to 0.00450s;
+  - `6x6`: states fall from 1,939,905 to 612,533 (`3.17x`) and calls from
+    5,831,706 to 1,732,361.  The exact residue remains 1,067,239,905,888.
+    Canonical mode spends 2.47s in nauty but narrowly improves complete time
+    from 5.78s to 5.63s;
+  - `7x7`: both modes still reach the same ten-million-state cap without a
+    root value.  Canonicalization reduces calls only from 31,767,751 to
+    29,975,421 (`5.64%`) and component/separator activity by similarly modest
+    factors.  It performs 29,975,421 nauty calls, spends 45.70s inside nauty,
+    and raises total time from 39.41s to 116.35s.
+- Interpretation: small residuals contain many accidental isomorphisms, but
+  generic contracted states rapidly lose symmetry.  By seven rows, exact
+  canonical aggregation changes memo-hit structure without delaying the
+  ten-million-state explosion.  Faster canonicalization could recover the
+  constant-factor runtime loss but cannot supply the orders-of-magnitude state
+  reduction required for `9x9`, much less sum over 2,036,791 dense first-class
+  orbits with the necessary size refinement.
+- Broader outer-sum conclusion: all exact rearrangements examined reduce to
+  evaluating the four-colour rectangle-hypergraph chromatic invariant in a
+  different basis—binary outer masks, four-colour token unions, direct colour
+  classes, or rectangle closures.  The outer sum can be removed algebraically,
+  but every explicit or conventionally compressed replacement state tested so
+  far grows faster than the present `8x8` orbit corpus.  A genuine
+  order-of-magnitude continuation now requires a new invariant-specific
+  circuit or decomposition theorem, not generic isomorphism, tensor, DD,
+  separator, or GPU throughput machinery.
+- Outcome: reject generic isomorphism-quotiented residual
+  deletion-contraction as a production outer-sum replacement.  Retain the
+  exact opt-in probe as the closed gate.  For near-term `8x8` performance,
+  continue optimizing the existing quotient corpus; for `9x9`, require a new
+  mathematical representation before provisioning GPUs.

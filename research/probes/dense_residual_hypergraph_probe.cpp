@@ -7,8 +7,11 @@
 // prime without enumerating the second colour class.
 
 // This is intentionally a feasibility probe rather than a production
-// solver.  It uses labelled hypergraph states, exact edge subsumption,
-// connected-component factorisation, and memoised deletion-contraction.
+// solver.  It uses exact edge subsumption, connected-component factorisation,
+// memoised deletion-contraction, and an optional exact isomorphism quotient of
+// every residual hypergraph through a coloured incidence graph.
+
+#include <nauty/nauty.h>
 
 #include <algorithm>
 #include <array>
@@ -115,13 +118,85 @@ struct Statistics {
     uint64_t removed_supersets = 0;
     uint64_t maximum_edges = 0;
     uint64_t maximum_vertices = 0;
+    uint64_t canonical_calls = 0;
+    uint64_t canonical_changes = 0;
+    double canonical_seconds = 0;
+};
+
+class HypergraphCanonicalizer {
+public:
+    Edges canonical(unsigned vertices, const Edges& edges,
+                    Statistics& statistics) {
+        if (edges.empty()) return edges;
+        const int vertex_count = static_cast<int>(vertices);
+        const int edge_count = static_cast<int>(edges.size());
+        const int nodes = vertex_count + edge_count;
+        if (nodes > 256)
+            throw std::runtime_error("nauty incidence graph exceeds probe bound");
+        const int words = SETWORDSNEEDED(nodes);
+        std::vector<graph> input(static_cast<size_t>(words) * nodes);
+        std::vector<graph> output(static_cast<size_t>(words) * nodes);
+        EMPTYGRAPH(input.data(), words, nodes);
+        for (int index = 0; index < edge_count; index++) {
+            Mask members = edges[static_cast<size_t>(index)];
+            const int edge_node = vertex_count + index;
+            while (members) {
+                unsigned vertex = static_cast<unsigned>(__builtin_ctzll(members));
+                ADDONEEDGE(input.data(), static_cast<int>(vertex), edge_node,
+                           words);
+                members &= members - 1;
+            }
+        }
+
+        std::vector<int> labels(static_cast<size_t>(nodes));
+        std::vector<int> partition(static_cast<size_t>(nodes), 1);
+        std::vector<int> orbits(static_cast<size_t>(nodes));
+        for (int node = 0; node < nodes; node++) labels[node] = node;
+        partition[static_cast<size_t>(vertex_count - 1)] = 0;
+        partition[static_cast<size_t>(nodes - 1)] = 0;
+
+        static DEFAULTOPTIONS_GRAPH(options);
+        options.getcanon = TRUE;
+        options.defaultptn = FALSE;
+        statsblk nauty_stats{};
+        auto started = std::chrono::steady_clock::now();
+        densenauty(input.data(), labels.data(), partition.data(), orbits.data(),
+                   &options, &nauty_stats, words, nodes, output.data());
+        statistics.canonical_seconds += std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - started).count();
+        statistics.canonical_calls++;
+        if (nauty_stats.errstatus)
+            throw std::runtime_error("nauty hypergraph canonicalisation failed");
+
+        Edges result;
+        result.reserve(edges.size());
+        for (int edge_node = vertex_count; edge_node < nodes; edge_node++) {
+            const setword* row = GRAPHROW(output.data(), edge_node, words);
+            Mask edge = 0;
+            for (int vertex = 0; vertex < vertex_count; vertex++) {
+                if (ISELEMENT(row, vertex)) edge |= Mask{1} << vertex;
+            }
+            if (__builtin_popcountll(edge) < 2)
+                throw std::runtime_error("canonical incidence edge is invalid");
+            result.push_back(edge);
+        }
+        std::sort(result.begin(), result.end(), [](Mask left, Mask right) {
+            unsigned left_size = static_cast<unsigned>(__builtin_popcountll(left));
+            unsigned right_size = static_cast<unsigned>(__builtin_popcountll(right));
+            return left_size != right_size ? left_size < right_size : left < right;
+        });
+        if (result != edges) statistics.canonical_changes++;
+        return result;
+    }
 };
 
 class Solver {
 public:
-    Solver(uint64_t prime, uint64_t state_cap, double time_cap, bool overlap_heuristic = true)
+    Solver(uint64_t prime, uint64_t state_cap, double time_cap,
+           bool overlap_heuristic = true, bool canonical_isomorphism = false)
         : prime_(prime), state_cap_(state_cap), time_cap_(time_cap),
           started_(std::chrono::steady_clock::now()), overlap_heuristic_(overlap_heuristic),
+          canonical_isomorphism_(canonical_isomorphism),
           inverse_three_(checked_inverse(3, prime)),
           inverse_six_(checked_inverse(6, prime)) {
         memo_.reserve(static_cast<size_t>(std::min<uint64_t>(state_cap, 4'000'000)));
@@ -134,6 +209,10 @@ public:
         if (state.edges.empty()) {
             ++stats_.terminals;
             return mul_mod(factor, pow_mod(3, state.vertices, prime_), prime_);
+        }
+        if (canonical_isomorphism_) {
+            state.edges = canonicalizer_.canonical(
+                state.vertices, state.edges, stats_);
         }
         return mul_mod(factor, solve_core(state.vertices, state.edges), prime_);
     }
@@ -585,9 +664,11 @@ private:
     double time_cap_;
     std::chrono::steady_clock::time_point started_;
     bool overlap_heuristic_;
+    bool canonical_isomorphism_;
     uint64_t inverse_three_;
     uint64_t inverse_six_;
     Statistics stats_;
+    HypergraphCanonicalizer canonicalizer_;
     std::unordered_map<Edges, uint64_t, EdgeVectorHash> memo_;
 };
 
@@ -664,6 +745,33 @@ uint64_t brute_force(unsigned vertices, const Edges& edges, uint64_t prime) {
 }
 
 void self_test() {
+    {
+        Edges first = {0b0111, 0b1100, 0b1001};
+        std::array<unsigned, 4> image = {2, 0, 3, 1};
+        Edges permuted;
+        for (Mask edge : first) {
+            Mask mapped = 0;
+            while (edge) {
+                unsigned vertex = static_cast<unsigned>(__builtin_ctzll(edge));
+                mapped |= Mask{1} << image[vertex];
+                edge &= edge - 1;
+            }
+            permuted.push_back(mapped);
+        }
+        auto edge_order = [](Mask left, Mask right) {
+            unsigned left_size = static_cast<unsigned>(__builtin_popcountll(left));
+            unsigned right_size = static_cast<unsigned>(__builtin_popcountll(right));
+            return left_size != right_size ? left_size < right_size : left < right;
+        };
+        std::sort(first.begin(), first.end(), edge_order);
+        std::sort(permuted.begin(), permuted.end(), edge_order);
+        Statistics statistics;
+        HypergraphCanonicalizer canonicalizer;
+        if (canonicalizer.canonical(4, first, statistics) !=
+            canonicalizer.canonical(4, permuted, statistics)) {
+            throw std::runtime_error("isomorphic canonical keys differ");
+        }
+    }
     struct StructuralCase {
         unsigned vertices;
         Edges edges;
@@ -678,12 +786,17 @@ void self_test() {
         {4, {0b0111, 0b1011}, true},
     };
     for (const StructuralCase& test : structural_cases) {
-        Solver solver(kDefaultPrime, 1'000'000, 0);
-        uint64_t actual = solver.solve(test.vertices, test.edges);
         uint64_t expected = brute_force(test.vertices, test.edges, kDefaultPrime);
-        if (actual != expected) throw std::runtime_error("structural self-test mismatch");
-        if (test.requires_two_separator && !solver.statistics().two_separator_splits) {
-            throw std::runtime_error("two-separator self-test did not exercise factorisation");
+        for (bool canonical : {false, true}) {
+            Solver solver(kDefaultPrime, 1'000'000, 0, true, canonical);
+            uint64_t actual = solver.solve(test.vertices, test.edges);
+            if (actual != expected)
+                throw std::runtime_error("structural self-test mismatch");
+            if (test.requires_two_separator &&
+                !solver.statistics().two_separator_splits) {
+                throw std::runtime_error(
+                    "two-separator self-test did not exercise factorisation");
+            }
         }
     }
     for (unsigned columns = 2; columns <= 3; ++columns) {
@@ -696,11 +809,13 @@ void self_test() {
                     (first >> (row * columns)) & ((uint64_t{1} << columns) - 1));
             }
             auto [vertices, edges] = rectangle_hypergraph(rows, columns, first_rows);
-            Solver solver(kDefaultPrime, 1'000'000, 0);
-            uint64_t actual = solver.solve(vertices, edges);
             uint64_t expected = brute_force(vertices, edges, kDefaultPrime);
-            if (actual != expected) {
-                throw std::runtime_error("self-test mismatch");
+            for (bool canonical : {false, true}) {
+                Solver solver(kDefaultPrime, 1'000'000, 0, true, canonical);
+                uint64_t actual = solver.solve(vertices, edges);
+                if (actual != expected) {
+                    throw std::runtime_error("self-test mismatch");
+                }
             }
         }
     }
@@ -717,12 +832,17 @@ int main(int argc, char** argv) try {
     double time_cap = 60;
     bool run_self_test = false;
     bool overlap_heuristic = true;
+    bool canonical_isomorphism = false;
     std::vector<uint16_t> first_rows;
 
     for (int index = 1; index < argc; ++index) {
         std::string_view option = argv[index];
         if (option == "--self-test") {
             run_self_test = true;
+            continue;
+        }
+        if (option == "--canonical-isomorphism") {
+            canonical_isomorphism = true;
             continue;
         }
         if (++index >= argc) throw std::runtime_error("missing value for " + std::string(option));
@@ -753,9 +873,11 @@ int main(int argc, char** argv) try {
               << " first_cells=" << rows * columns - vertices
               << " residual_vertices=" << vertices
               << " rectangle_edges=" << edges.size()
+              << " canonical_isomorphism=" << canonical_isomorphism
               << " prime=" << prime << '\n';
 
-    Solver solver(prime, state_cap, time_cap, overlap_heuristic);
+    Solver solver(prime, state_cap, time_cap, overlap_heuristic,
+                  canonical_isomorphism);
     try {
         uint64_t answer = solver.solve(vertices, std::move(edges));
         std::cout << "status=complete residue=" << answer;
@@ -773,6 +895,9 @@ int main(int argc, char** argv) try {
               << " articulation_splits=" << stats.articulation_splits
               << " two_separator_splits=" << stats.two_separator_splits
               << " removed_supersets=" << stats.removed_supersets
+              << " canonical_calls=" << stats.canonical_calls
+              << " canonical_changes=" << stats.canonical_changes
+              << " canonical_seconds=" << stats.canonical_seconds
               << " max_vertices=" << stats.maximum_vertices
               << " max_edges=" << stats.maximum_edges << '\n';
     return 0;

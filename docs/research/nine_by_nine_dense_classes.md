@@ -236,6 +236,17 @@ two-separator splits, and takes 38.95s instead of 25.30s.  `A29` still exceeds
 two million states and slows from 5.32s to 8.64s.  Two-cell separators are
 therefore rejected as the missing asymptotic compression.
 
+The remaining generic quotient—canonicalizing every contracted residual
+hypergraph up to arbitrary isomorphism—has now also been tested.  A nauty
+incidence-graph key reduces the `5x5` and `6x6` memo tables by factors 2.43 and
+3.17, respectively, while preserving the exact residues under two moduli.
+This gain disappears at the decisive scale: labelled and canonical `7x7`
+runs both reach ten million states without closing.  Canonicalization reduces
+recursive calls by only 5.64% and increases wall time from 39.41s to 116.35s.
+Generic contracted states have already lost almost all useful symmetry by
+seven rows, so exact isomorphism aggregation does not reopen the dense-first
+route to `9x9`.
+
 ## Reproduction
 
 ```text
@@ -254,4 +265,7 @@ python3 research/probes/dense_residual_completion_sample.py \
 ./build/dense_residual_hypergraph_probe \
   --first 181,086,118,142,124,0c8,0b0,02b,055 \
   --state-cap 10000000 --time-cap 120
+./build/dense_residual_hypergraph_probe \
+  --rows 7 --columns 7 --first 001,006,018,042,024,048,030 \
+  --state-cap 10000000 --time-cap 240 --canonical-isomorphism
 ```

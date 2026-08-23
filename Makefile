@@ -105,7 +105,7 @@ $(BUILD_DIR)/dense_c4free_pair_probe: research/probes/dense_c4free_pair_probe.cp
 	$(CXX) -O3 -march=native -std=c++17 -o $@ $<
 
 $(BUILD_DIR)/dense_residual_hypergraph_probe: research/probes/dense_residual_hypergraph_probe.cpp
-	$(CXX) -O3 -march=native -std=c++17 -o $@ $<
+	$(CXX) -O3 -march=native -std=c++17 -o $@ $< -lnauty
 
 $(BUILD_DIR)/rectangle_closure_lattice_probe: research/probes/rectangle_closure_lattice_probe.cpp
 	$(CXX) -O3 -march=native -std=c++17 -o $@ $< -lnauty
