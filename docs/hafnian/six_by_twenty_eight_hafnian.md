@@ -59,11 +59,14 @@ python3 tools/reduce_six_by_twenty_eight_hafnian.py \
   --directory /path/to/results
 ```
 
-The production kernel always uses a conflict-free `N+1` shared-memory matrix
-stride and occupancy-derived complete CTA waves.  On one RTX PRO 6000, the
-exact workload projects to approximately 102 GPU-hours, excluding campaign
-interruptions and final independent validation.
+Orders 48--58 use exact Gray-code rank-two updates and a fraction-free
+generalized-Lanczos rebuild.  One batch inversion and warp product scans
+replace one inversion per basis column; a whole checkpoint falls back to the
+independent Gray-order Hessenberg kernel if any chain is non-cyclic.  Orders
+60 and 64 always use that independent kernel.  On one RTX PRO 6000, the exact
+workload currently projects to approximately 25--26 GPU-hours, excluding
+campaign interruptions and final independent validation.
 
-The finite-field Glynn/trace/Hessenberg kernel and launch policy are shared
-with the 6x29 and 6x30 solvers.  Only the geometry-specific defect catalogs,
-coefficients, and exact final reductions remain separate.
+The independent finite-field Glynn/trace/Hessenberg fallback is shared with
+the 6x29 and 6x30 solvers.  The Gray-chain core and the geometry-specific
+defect catalog, coefficients, and exact final reduction are specific to 6x28.

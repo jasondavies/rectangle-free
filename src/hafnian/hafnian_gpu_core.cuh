@@ -324,7 +324,14 @@ __global__ void hafnian_terms_kernel(
             }
             __syncthreads();
             unsigned pivot=scalar[0];
-            if(pivot==N)continue;
+            // The next iteration lets lane zero overwrite scalar[0].  When
+            // this column has no pivot, the later elimination barriers are
+            // skipped, so an explicit barrier is required after every
+            // thread has consumed the current value.
+            if(pivot==N) {
+                __syncthreads();
+                continue;
+            }
             if(pivot!=column+1) {
                 for(unsigned j=threadIdx.x;j<N;j+=blockDim.x) {
                     uint32_t temporary=matrix[pivot*MATRIX_STRIDE+j];

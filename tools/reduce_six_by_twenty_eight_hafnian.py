@@ -11,7 +11,7 @@ from pathlib import Path
 
 
 FORMAT = "six-by-twenty-eight-hafnian-v2"
-ALGORITHM = "glynn-gray-lanczos-residual-fixed-field-cuda-v2"
+ALGORITHM = "glynn-gray-fraction-free-lanczos-fixed-field-cuda-v3"
 CATALOG_SHA256 = "feb6a22408c51627ab8b8cdf91da1d4707f64f324fae02dd6ef082c774e68b2d"
 QUERY_COUNT = 36_398
 PRIMES = (

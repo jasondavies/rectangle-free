@@ -14359,3 +14359,67 @@
   persistent worker.  Keep the sequential, locally owned factor object; a
   more complex producer/arena pipeline would not materially change the
   approximately 29-GPU-hour campaign.
+
+### Experiment 423: Fraction-free Gray Lanczos
+
+- Goal: replace the one field inversion per Lanczos column by one inversion
+  per complete basis rebuild while preserving the exact rank-two Gray update.
+- If `w_j` is the unnormalised basis, `h_j=<w_j,w_j>`, and `s_j` is its
+  recurrence scale, the division-free recurrence is
+
+  ```text
+  w_(j+1) = s_j A w_j - h_(j-1) s_(j-1) a_j w_j - h_j^2 w_(j-1)
+  s_0 = h_0
+  s_j = h_j h_(j-1) s_(j-1).
+  ```
+
+  The stored basis remains unnormalised.  After one batch inversion of all
+  `h_j`, the inverse-basis coefficient `c_j/h_j`, normalized metric
+  `h_j/c_j^2`, diagonal, and subdiagonal are recovered exactly, where
+  `c_j=product_(i<j) s_i`.  This avoids an otherwise losing `N^2` physical
+  basis rescale.
+- A first serial post-processing implementation was exact but only 3--8%
+  faster than the former kernel.  The products satisfy
+  `s_j=h_j*(product_(i<j) h_i)^2`, so all batch-inverse and normalization
+  products were replaced by two-segment warp scans.  Inverse prefixes are
+  obtained directly from the already available suffix products.
+- Complete order-48 domains on one RTX PRO 6000 Blackwell:
+
+  | prime | former s | fraction-free s | speedup |
+  |---:|---:|---:|---:|
+  | 2,147,483,647 | 0.6808 | 0.6088 | 1.118x |
+  | 2,147,483,629 | 0.7347 | 0.6154 | 1.194x |
+  | 2,147,483,587 | 0.7295 | 0.6143 | 1.187x |
+  | 2,147,483,579 | 0.7287 | 0.6132 | 1.188x |
+
+  Every residue matches the former production binary.  A complete order-54
+  Montgomery domain falls from 7.0759 s to 6.0440 s (`1.171x`).  All tested
+  chains report zero failures except the same known non-cyclic order-52 case.
+- Re-tuning nearby chain lengths rejects 5/6 and 7/8 in favour of the existing
+  order-48/order-50--58 lengths 6/7.  Full order-54 runs put chain 7 about
+  0.3% ahead of chain 8; order-48 retains a clearer lead for chain 6.
+- Production uses the fraction-free recurrence unconditionally, with no
+  legacy Lanczos mode.  Result provenance is now
+  `glynn-gray-fraction-free-lanczos-fixed-field-cuda-v3`.  The workload-weighted
+  projection is approximately 25--26 RTX PRO 6000 GPU-hours, pending a fresh
+  complete campaign, versus 28.8--29.0 hours before this experiment and
+  87.29 hours before Gray updates.
+
+### Experiment 424: Exact fallback synchronization audit
+
+- While validating the fraction-free backend, repeated runs of a known
+  non-cyclic order-52 query exposed nondeterministic results in the independent
+  fixed-prime fallback.  The runtime-Montgomery control and the Mersenne field
+  were deterministic, which made this latent race easy to miss in the earlier
+  forced-fallback gate.
+- Cause: if a Hessenberg column has no pivot, every thread skipped the later
+  elimination barriers.  Lane zero could begin the next column and overwrite
+  the shared pivot ordinal while other lanes were still reading the previous
+  value.  Add an explicit block barrier before that uniform `continue`.
+- Three repeated million-term fixed-prime runs now return the same residue
+  `1,034,330,483`, equal to the runtime-Montgomery control.  The full Gray
+  path reports the expected 149,797 failed chains, recomputes the whole chunk,
+  and returns that same residue deterministically.  CUDA racecheck falls from
+  27 reported hazards to zero.
+- Outcome: accept the barrier fix in the shared 6x28/6x29/6x30 independent
+  hafnian core.  It is a correctness repair, not an optional optimization.

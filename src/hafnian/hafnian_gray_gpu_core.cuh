@@ -250,6 +250,28 @@ __device__ void apply_tridiagonal_update(
 }
 
 template<class Mod>
+__device__ __forceinline__ uint32_t warp_inclusive_product(
+    uint32_t value,Mod mod) {
+    const unsigned lane=threadIdx.x&31;
+    for(unsigned offset=1;offset<32;offset<<=1) {
+        const uint32_t other=__shfl_up_sync(0xffffffff,value,offset);
+        if(lane>=offset)value=hafnian_mul(value,other,mod);
+    }
+    return value;
+}
+
+template<class Mod>
+__device__ __forceinline__ uint32_t warp_inclusive_reverse_product(
+    uint32_t value,Mod mod) {
+    const unsigned lane=threadIdx.x&31;
+    for(unsigned offset=1;offset<32;offset<<=1) {
+        const uint32_t other=__shfl_down_sync(0xffffffff,value,offset);
+        if(lane+offset<32)value=hafnian_mul(value,other,mod);
+    }
+    return value;
+}
+
+template<class Mod>
 __device__ bool generalized_lanczos(
     const uint32_t* dense,const uint32_t* old_diagonal,const uint32_t* old_beta,
     const uint32_t* low0,const uint32_t* low1,uint32_t delta,
@@ -264,44 +286,173 @@ __device__ bool generalized_lanczos(
         previous[row]=0;
     }
     __syncwarp();
-    uint32_t norm=dot_metric(current,current,old_metric,rank,mod);
-    if(!norm)return false;
-    if(lane==0)new_beta[0]=0;
-    __syncwarp();
+    uint32_t previous_norm=0,previous_scale=0;
     for(unsigned column=0;column<rank;++column) {
         for(unsigned row=lane;row<rank;row+=32)
             basis[size_t(row)*rank+column]=current[row];
+        const uint32_t norm=dot_metric(current,current,old_metric,rank,mod);
+        if(!norm)return false;
         if(dense)apply_dense(dense,current,applied,rank,mod);
         else apply_tridiagonal_update(old_diagonal,old_beta,old_metric,
             low0,low1,delta,current,applied,rank,mod);
         const uint32_t numerator=dot_metric(current,applied,old_metric,rank,mod);
+        uint32_t scale=0,middle=0,norm_squared=0;
         if(lane==0) {
-            inverse_new_metric[column]=hafnian_power(norm,mod.p-2,mod);
             new_metric[column]=norm;
-            new_diagonal[column]=hafnian_mul(
-                numerator,inverse_new_metric[column],mod);
+            new_diagonal[column]=numerator;
+            if(column==0)scale=norm;
+            else {
+                const uint32_t common=hafnian_mul(
+                    previous_norm,previous_scale,mod);
+                scale=hafnian_mul(norm,common,mod);
+                middle=hafnian_mul(common,numerator,mod);
+            }
+            if(column==0)middle=numerator;
+            norm_squared=hafnian_mul(norm,norm,mod);
         }
-        __syncwarp();
-        for(unsigned row=lane;row<rank;row+=32) {
-            uint32_t value=hafnian_sub_mod(applied[row],
-                hafnian_mul(new_diagonal[column],current[row],mod),mod.p);
-            if(column)value=hafnian_sub_mod(value,
-                hafnian_mul(new_beta[column],previous[row],mod),mod.p);
-            next[row]=value;
+        scale=__shfl_sync(0xffffffff,scale,0);
+        middle=__shfl_sync(0xffffffff,middle,0);
+        norm_squared=__shfl_sync(0xffffffff,norm_squared,0);
+        if(column+1<rank) {
+            for(unsigned row=lane;row<rank;row+=32) {
+                uint32_t value=hafnian_sub_mod(
+                    hafnian_mul(scale,applied[row],mod),
+                    hafnian_mul(middle,current[row],mod),mod.p);
+                if(column)value=hafnian_sub_mod(value,
+                    hafnian_mul(norm_squared,previous[row],mod),mod.p);
+                next[row]=value;
+            }
+            __syncwarp();
+            for(unsigned row=lane;row<rank;row+=32) {
+                previous[row]=current[row];current[row]=next[row];
+            }
+            __syncwarp();
         }
-        __syncwarp();
-        if(column+1==rank)break;
-        const uint32_t next_norm=dot_metric(next,next,old_metric,rank,mod);
-        if(!next_norm)return false;
-        if(lane==0)new_beta[column+1]=hafnian_mul(
-            next_norm,inverse_new_metric[column],mod);
-        __syncwarp();
-        for(unsigned row=lane;row<rank;row+=32) {
-            previous[row]=current[row];current[row]=next[row];
-        }
-        __syncwarp();
-        norm=next_norm;
+        previous_norm=norm;previous_scale=scale;
     }
+
+    // Batch-invert every norm and derive all normalisation coefficients with
+    // warp product scans.  The upper lane segment is padded by multiplicative
+    // identities, so this covers every maintained rank (at most 64).
+    const unsigned upper_column=lane+32;
+    const uint32_t norm0=lane<rank?new_metric[lane]:mod.one;
+    const uint32_t norm1=upper_column<rank?new_metric[upper_column]:mod.one;
+    const uint32_t prefix0=warp_inclusive_product(norm0,mod);
+    const uint32_t local_prefix1=warp_inclusive_product(norm1,mod);
+    const uint32_t total0=__shfl_sync(0xffffffff,prefix0,31);
+    const uint32_t total1=__shfl_sync(0xffffffff,local_prefix1,31);
+    const uint32_t prefix1=hafnian_mul(total0,local_prefix1,mod);
+    uint32_t inverse_total=lane==0?
+        hafnian_power(hafnian_mul(total0,total1,mod),mod.p-2,mod):0;
+    inverse_total=__shfl_sync(0xffffffff,inverse_total,0);
+
+    const uint32_t suffix0=warp_inclusive_reverse_product(norm0,mod);
+    const uint32_t suffix1=warp_inclusive_reverse_product(norm1,mod);
+    const uint32_t shifted_prefix0=__shfl_up_sync(0xffffffff,prefix0,1);
+    const uint32_t shifted_prefix1=__shfl_up_sync(0xffffffff,prefix1,1);
+    const uint32_t shifted_suffix0=__shfl_down_sync(0xffffffff,suffix0,1);
+    const uint32_t shifted_suffix1=__shfl_down_sync(0xffffffff,suffix1,1);
+    const uint32_t before0=lane?shifted_prefix0:mod.one;
+    const uint32_t before1=lane?shifted_prefix1:total0;
+    const uint32_t after0=hafnian_mul(
+        lane+1<32?shifted_suffix0:mod.one,total1,mod);
+    const uint32_t after1=lane+1<32?shifted_suffix1:mod.one;
+    const uint32_t inverse_norm0=hafnian_mul(
+        hafnian_mul(before0,after0,mod),inverse_total,mod);
+    const uint32_t inverse_norm1=hafnian_mul(
+        hafnian_mul(before1,after1,mod),inverse_total,mod);
+
+    // s_j = h_j (product_{i<j} h_i)^2 and c_j = product_{i<j} s_i.
+    // Both c_j and its inverse are therefore another pair of product scans.
+    const uint32_t inverse_prefix0=hafnian_mul(after0,inverse_total,mod);
+    const uint32_t inverse_prefix1=hafnian_mul(after1,inverse_total,mod);
+    const uint32_t inverse_total0=__shfl_sync(0xffffffff,inverse_prefix0,31);
+    const uint32_t shifted_inverse_prefix0=
+        __shfl_up_sync(0xffffffff,inverse_prefix0,1);
+    const uint32_t shifted_inverse_prefix1=
+        __shfl_up_sync(0xffffffff,inverse_prefix1,1);
+    const uint32_t prior_prefix0=lane?shifted_prefix0:mod.one;
+    const uint32_t prior_prefix1=lane?shifted_prefix1:total0;
+    const uint32_t prior_inverse_prefix0=lane?
+        shifted_inverse_prefix0:mod.one;
+    const uint32_t prior_inverse_prefix1=lane?
+        shifted_inverse_prefix1:inverse_total0;
+    const uint32_t scale0=hafnian_mul(norm0,
+        hafnian_mul(prior_prefix0,prior_prefix0,mod),mod);
+    const uint32_t scale1=hafnian_mul(norm1,
+        hafnian_mul(prior_prefix1,prior_prefix1,mod),mod);
+    const uint32_t inverse_scale0=hafnian_mul(inverse_norm0,
+        hafnian_mul(prior_inverse_prefix0,prior_inverse_prefix0,mod),mod);
+    const uint32_t inverse_scale1=hafnian_mul(inverse_norm1,
+        hafnian_mul(prior_inverse_prefix1,prior_inverse_prefix1,mod),mod);
+    const uint32_t scale_prefix0=warp_inclusive_product(scale0,mod);
+    const uint32_t scale_local_prefix1=warp_inclusive_product(scale1,mod);
+    const uint32_t scale_total0=__shfl_sync(0xffffffff,scale_prefix0,31);
+    const uint32_t scale_prefix1=hafnian_mul(scale_total0,scale_local_prefix1,mod);
+    const uint32_t inverse_scale_prefix0=
+        warp_inclusive_product(inverse_scale0,mod);
+    const uint32_t inverse_scale_local_prefix1=
+        warp_inclusive_product(inverse_scale1,mod);
+    const uint32_t inverse_scale_total0=
+        __shfl_sync(0xffffffff,inverse_scale_prefix0,31);
+    const uint32_t inverse_scale_prefix1=hafnian_mul(
+        inverse_scale_total0,inverse_scale_local_prefix1,mod);
+    const uint32_t shifted_scale_prefix0=
+        __shfl_up_sync(0xffffffff,scale_prefix0,1);
+    const uint32_t shifted_scale_prefix1=
+        __shfl_up_sync(0xffffffff,scale_prefix1,1);
+    const uint32_t shifted_inverse_scale_prefix0=
+        __shfl_up_sync(0xffffffff,inverse_scale_prefix0,1);
+    const uint32_t shifted_inverse_scale_prefix1=
+        __shfl_up_sync(0xffffffff,inverse_scale_prefix1,1);
+    const uint32_t basis_scale0=lane?shifted_scale_prefix0:mod.one;
+    const uint32_t basis_scale1=lane?shifted_scale_prefix1:scale_total0;
+    const uint32_t inverse_basis_scale0=lane?
+        shifted_inverse_scale_prefix0:mod.one;
+    const uint32_t inverse_basis_scale1=lane?
+        shifted_inverse_scale_prefix1:inverse_scale_total0;
+
+    const uint32_t shifted_inverse_norm0=
+        __shfl_up_sync(0xffffffff,inverse_norm0,1);
+    const uint32_t shifted_inverse_norm1=
+        __shfl_up_sync(0xffffffff,inverse_norm1,1);
+    const uint32_t shifted_inverse_scale0=
+        __shfl_up_sync(0xffffffff,inverse_scale0,1);
+    const uint32_t shifted_inverse_scale1=
+        __shfl_up_sync(0xffffffff,inverse_scale1,1);
+    const uint32_t last_inverse_norm0=
+        __shfl_sync(0xffffffff,inverse_norm0,31);
+    const uint32_t last_inverse_scale0=
+        __shfl_sync(0xffffffff,inverse_scale0,31);
+    const uint32_t previous_inverse_norm0=lane?shifted_inverse_norm0:0;
+    const uint32_t previous_inverse_scale0=lane?shifted_inverse_scale0:0;
+    const uint32_t previous_inverse_norm1=lane?
+        shifted_inverse_norm1:last_inverse_norm0;
+    const uint32_t previous_inverse_scale1=lane?
+        shifted_inverse_scale1:last_inverse_scale0;
+    if(lane<rank) {
+        new_beta[lane]=lane?hafnian_mul(hafnian_mul(
+            norm0,previous_inverse_norm0,mod),hafnian_mul(
+            previous_inverse_scale0,previous_inverse_scale0,mod),mod):0;
+        new_diagonal[lane]=hafnian_mul(
+            new_diagonal[lane],inverse_norm0,mod);
+        new_metric[lane]=hafnian_mul(norm0,hafnian_mul(
+            inverse_basis_scale0,inverse_basis_scale0,mod),mod);
+        inverse_new_metric[lane]=hafnian_mul(
+            inverse_norm0,basis_scale0,mod);
+    }
+    if(upper_column<rank) {
+        new_beta[upper_column]=hafnian_mul(hafnian_mul(
+            norm1,previous_inverse_norm1,mod),hafnian_mul(
+            previous_inverse_scale1,previous_inverse_scale1,mod),mod);
+        new_diagonal[upper_column]=hafnian_mul(
+            new_diagonal[upper_column],inverse_norm1,mod);
+        new_metric[upper_column]=hafnian_mul(norm1,hafnian_mul(
+            inverse_basis_scale1,inverse_basis_scale1,mod),mod);
+        inverse_new_metric[upper_column]=hafnian_mul(
+            inverse_norm1,basis_scale1,mod);
+    }
+    __syncwarp();
     return true;
 }
 
