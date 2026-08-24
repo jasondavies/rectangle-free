@@ -14100,3 +14100,75 @@
   recurrence, transposed rebuild matrix, chain length 6, and 32-wave grid.
   CUDA 13.0 compiles the maintained 6x28 solver and research probe for both
   `sm_89` and `sm_120`.
+
+### Experiment 417: One exact Gray chain per warp
+
+- Goal: remove the structural inefficiency exposed after experiment 416.  A
+  two-warp chain averaged only 18.8 active lanes and spent 37.1% of its cycles
+  at CTA barriers, even though its global state was cache-resident.
+- Organization: each lane now owns rows `lane` and `lane+32` when present.
+  All metric reductions, dense/tridiagonal applications, basis transfers,
+  characteristic recurrences, and square-root recurrences use warp shuffles
+  and `__syncwarp`; there are no CTA barriers in the compiled kernel.  Two
+  independent chains share one 64-thread CTA but no algebraic state.  The hot
+  four-vector workspace remains shared, while metrics, tridiagonal data,
+  basis, rebuild matrix, and future factors are per-chain global scratch.
+- Matched million-term result before register tuning:
+
+  | order | two-warp Gray ms | warp-chain ms | warp-chain gain |
+  |---:|---:|---:|---:|
+  | 48 | 129.2 | 99.1 | 1.304x |
+  | 50 | 133.5 | 104.1 | 1.282x |
+
+  Both paths reproduce the optimized independent kernel exactly with zero
+  breakdowns.
+- Register gate: the natural order-48 specialization uses 80 registers and is
+  limited to 12 CTAs/SM.  `__launch_bounds__(64,16)` constrains it to 64
+  registers with no local-memory spills, reaches 16 CTAs/SM, and improves the
+  million-term time by another 3--4%.  Gates at 18 and 20 CTAs/SM regress.
+  Order 50 also selects the 16-CTA point.  Use chain 6 at order 48 and chain 7
+  at order 50; 144,384 logical chain slots remain within roughly 0.2% of the
+  larger-grid minimum.
+- Fixed inverse chain: the production exponents have the hexadecimal forms
+  `7ffffffd`, `7fffffeb`, `7fffffc1`, and `7fffffb9`.  A specialized radix-16
+  addition chain initializes `a^7`, reuses `a^15`, and needs only 42--43
+  Montgomery multiplies, versus 46--47 for radix 4.  It saves approximately
+  1.5--2% in the complete Gray kernel and about 1% in the independent
+  fallback.  The generic radix-4 path remains for other compile-time primes.
+- Complete-domain result with warp chains, 64-register launch bound, direct
+  square-root recurrence, and radix-16 inverses:
+
+  | order | prime | independent s | Gray s | speedup |
+  |---:|---:|---:|---:|---:|
+  | 48 | 2,147,483,647 | 2.3066 | 0.7602 | 3.0342x |
+  | 48 | 2,147,483,629 | 2.2277 | 0.7535 | 2.9565x |
+  | 48 | 2,147,483,587 | 2.2141 | 0.7551 | 2.9321x |
+  | 48 | 2,147,483,579 | 2.2044 | 0.7604 | 2.8990x |
+  | 50 | 2,147,483,647 | 4.8016 | 1.6323 | 2.9416x |
+  | 50 | 2,147,483,629 | 4.8208 | 1.6366 | 2.9456x |
+  | 50 | 2,147,483,587 | 4.8087 | 1.6355 | 2.9401x |
+  | 50 | 2,147,483,579 | 4.8267 | 1.6401 | 2.9429x |
+
+  Every listed run covers the complete sign domain, matches exactly, and has
+  zero breakdowns.
+- Updated profile: the barrier stall disappears.  Despite only 43.6% achieved
+  occupancy at the unconstrained 80-register point, issue-slot utilization
+  rises from 47.3% to 59.8%, and warp cycles per issued instruction fall from
+  17.25 to 8.77.  Fewer independent warps do more useful work because every
+  chain is free of cross-warp synchronization.
+- Rejected follow-ups:
+  - Pairing the two chains with Montgomery's batch-inversion trick halves
+    exponentiations but reintroduces CTA barriers and regresses 5--6%.
+  - Carrying the original-coordinate dense matrix between consecutive chains
+    reduces edge-matrix reads, but its read/modify/write updates and contiguous
+    scheduling regress 7--11%, including on complete domains.
+- Conservative campaign projection: use the new rates only at orders 48 and
+  50 and leave all larger orders at their old cost.  The estimate falls from
+  `87.29` to approximately `34.92` RTX PRO 6000 GPU-hours, a `2.500x`
+  whole-campaign improvement and a saving of about 52.37 GPU-hours.  The
+  radix-16 and direct-square-root improvements to fallback orders are again
+  excluded from this projection.
+- Outcome: accept warp-per-chain execution, the 16-CTA launch bound, chain
+  lengths 6/7, and the specialized inverse chain.  The next step is production
+  integration with Gray-order checkpoint semantics and exact per-chunk
+  fallback, rather than another unprofiled arithmetic rewrite.

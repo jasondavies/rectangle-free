@@ -11,6 +11,10 @@
 #define HAFNIAN_DIRECT_SQRT_RECURRENCE 1
 #endif
 
+#ifndef HAFNIAN_RADIX16_INVERSE
+#define HAFNIAN_RADIX16_INVERSE 1
+#endif
+
 struct HafnianMontgomery {
     uint32_t p=0,negative_inverse=0,one=0;
 };
@@ -141,6 +145,42 @@ __device__ inline uint32_t hafnian_power(
         }
         return result;
     }
+#if HAFNIAN_RADIX16_INVERSE
+    if constexpr(P==2147483647U||P==2147483629U||
+            P==2147483587U||P==2147483579U) {
+        const uint32_t a2=hafnian_mul(a,a,mod);
+        const uint32_t a3=hafnian_mul(a2,a,mod);
+        const uint32_t a4=hafnian_mul(a2,a2,mod);
+        const uint32_t a7=hafnian_mul(a3,a4,mod);
+        const uint32_t a8=hafnian_mul(a4,a4,mod);
+        const uint32_t a15=hafnian_mul(a7,a8,mod);
+        uint32_t result=a7;
+        auto step=[&](uint32_t digit_power) {
+            result=hafnian_mul(result,result,mod);
+            result=hafnian_mul(result,result,mod);
+            result=hafnian_mul(result,result,mod);
+            result=hafnian_mul(result,result,mod);
+            result=hafnian_mul(result,digit_power,mod);
+        };
+        if constexpr(P==2147483647U) {
+            const uint32_t a5=hafnian_mul(a4,a,mod);
+            const uint32_t a13=hafnian_mul(a8,a5,mod);
+            step(a15);step(a15);step(a15);step(a15);step(a15);step(a15);step(a13);
+        } else if constexpr(P==2147483629U) {
+            const uint32_t a14=hafnian_mul(a7,a7,mod);
+            const uint32_t a11=hafnian_mul(a8,a3,mod);
+            step(a15);step(a15);step(a15);step(a15);step(a15);step(a14);step(a11);
+        } else if constexpr(P==2147483587U) {
+            const uint32_t a12=hafnian_mul(a8,a4,mod);
+            step(a15);step(a15);step(a15);step(a15);step(a15);step(a12);step(a);
+        } else {
+            const uint32_t a11=hafnian_mul(a8,a3,mod);
+            const uint32_t a9=hafnian_mul(a8,a,mod);
+            step(a15);step(a15);step(a15);step(a15);step(a15);step(a11);step(a9);
+        }
+        return result;
+    }
+#endif
     constexpr uint32_t INVERSE_EXPONENT=P-2;
     uint32_t a2=hafnian_mul(a,a,mod);
     uint32_t a3=hafnian_mul(a2,a,mod);
