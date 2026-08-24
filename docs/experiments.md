@@ -14259,3 +14259,36 @@
   non-cyclic block Lanczos has a ceiling of only about 2.7 GPU-hours; the
   dominant research target returns to reducing the inversion/dependency cost
   inside the already successful order-48/50 warp-chain kernel.
+
+### Experiment 420: Exact inversion backends
+
+- Goal: reduce the serial field inversions in generalized Lanczos.  Every
+  inverse previously used a fixed 42--43-multiply radix-16 Fermat chain while
+  the other warp lanes waited.
+- Rejected binary-GCD backend: decode the Montgomery residue, run the binary
+  extended Euclidean algorithm with shifts/adds/subtracts, and re-encode with
+  `R^2`.  It reproduces all four production primes exactly, including a
+  four-prime Gray-kernel matrix, but a matched million-term order-48 run is
+  0.10498 s versus 0.09824 s for the old chain: `6.9%` slower.  Variable
+  control and repeated halving corrections cost more than the dependent
+  Montgomery multiplies on Blackwell.  Remove the implementation and flag.
+- Accepted fixed addition chains: an offline exact addition-chain search for
+  exponents `7ffffffd`, `7fffffeb`, `7fffffc1`, and `7fffffb9` finds chains of
+  37, 38, 37, and 37 multiplies.  They construct `a^255`, reuse it to form
+  `a^(2^16-1)` and `a^(2^24-1)`, and append a prime-specific seven-bit tail.
+  This replaces the previous 42--43-multiply radix-16 chains with straight-line
+  code and no runtime dispatch.
+- Complete order-48 domains on one RTX PRO 6000 Blackwell:
+
+  | prime | new chain s | old chain s | speedup |
+  |---:|---:|---:|---:|
+  | 2,147,483,647 | 0.73341 | 0.75761 | 1.0330x |
+  | 2,147,483,629 | 0.73052 | 0.74811 | 1.0241x |
+  | 2,147,483,587 | 0.72548 | 0.74906 | 1.0325x |
+  | 2,147,483,579 | 0.72568 | 0.75400 | 1.0390x |
+
+  All four complete residues match the former production binary exactly.
+- Outcome: accept the 37--38-multiply chains and retain the generic radix-4
+  implementation only for compile-time primes outside the production CRT
+  schedule.  Treat the gain as roughly 3%; it lowers the extended 30.4-hour
+  projection by approximately another 0.8 GPU-hours, to about 29.6 hours.

@@ -11,10 +11,6 @@
 #define HAFNIAN_DIRECT_SQRT_RECURRENCE 1
 #endif
 
-#ifndef HAFNIAN_RADIX16_INVERSE
-#define HAFNIAN_RADIX16_INVERSE 1
-#endif
-
 struct HafnianMontgomery {
     uint32_t p=0,negative_inverse=0,one=0;
 };
@@ -130,9 +126,9 @@ __device__ __forceinline__ uint32_t hafnian_mul(
     return hafnian_montgomery_mul(a,b,mod);
 }
 
-// All device inversions use exponent P-2.  A fixed radix-4 chain needs only
-// two saved powers and 46--47 multiplies for the production primes, versus
-// roughly 60 for binary square-and-multiply.
+// All device inversions use exponent P-2.  The four production exponents have
+// fixed 37--38-multiply addition chains; other compile-time primes retain the
+// generic radix-4 path below.
 template<uint32_t P>
 __device__ inline uint32_t hafnian_power(
     uint32_t a,uint32_t exponent,HafnianMontgomeryConstant<P> mod) {
@@ -145,42 +141,60 @@ __device__ inline uint32_t hafnian_power(
         }
         return result;
     }
-#if HAFNIAN_RADIX16_INVERSE
     if constexpr(P==2147483647U||P==2147483629U||
             P==2147483587U||P==2147483579U) {
-        const uint32_t a2=hafnian_mul(a,a,mod);
-        const uint32_t a3=hafnian_mul(a2,a,mod);
-        const uint32_t a4=hafnian_mul(a2,a2,mod);
-        const uint32_t a7=hafnian_mul(a3,a4,mod);
-        const uint32_t a8=hafnian_mul(a4,a4,mod);
-        const uint32_t a15=hafnian_mul(a7,a8,mod);
-        uint32_t result=a7;
-        auto step=[&](uint32_t digit_power) {
-            result=hafnian_mul(result,result,mod);
-            result=hafnian_mul(result,result,mod);
-            result=hafnian_mul(result,result,mod);
-            result=hafnian_mul(result,result,mod);
-            result=hafnian_mul(result,digit_power,mod);
+        auto square_n=[&](uint32_t value,unsigned count) {
+#pragma unroll
+            for(unsigned i=0;i<count;++i)value=hafnian_mul(value,value,mod);
+            return value;
         };
+        uint32_t a255=0,tail=0;
         if constexpr(P==2147483647U) {
+            const uint32_t a4=square_n(a,2);
             const uint32_t a5=hafnian_mul(a4,a,mod);
-            const uint32_t a13=hafnian_mul(a8,a5,mod);
-            step(a15);step(a15);step(a15);step(a15);step(a15);step(a15);step(a13);
+            const uint32_t a10=hafnian_mul(a5,a5,mod);
+            const uint32_t a15=hafnian_mul(a5,a10,mod);
+            const uint32_t a120=square_n(a15,3);
+            const uint32_t a125=hafnian_mul(a5,a120,mod);
+            const uint32_t a250=hafnian_mul(a125,a125,mod);
+            a255=hafnian_mul(a5,a250,mod);tail=a125;
         } else if constexpr(P==2147483629U) {
-            const uint32_t a14=hafnian_mul(a7,a7,mod);
-            const uint32_t a11=hafnian_mul(a8,a3,mod);
-            step(a15);step(a15);step(a15);step(a15);step(a15);step(a14);step(a11);
+            const uint32_t a2=hafnian_mul(a,a,mod);
+            const uint32_t a4=hafnian_mul(a2,a2,mod);
+            const uint32_t a6=hafnian_mul(a2,a4,mod);
+            const uint32_t a7=hafnian_mul(a,a6,mod);
+            const uint32_t a9=hafnian_mul(a2,a7,mod);
+            const uint32_t a16=hafnian_mul(a7,a9,mod);
+            const uint32_t a25=hafnian_mul(a9,a16,mod);
+            const uint32_t a41=hafnian_mul(a16,a25,mod);
+            const uint32_t a82=hafnian_mul(a41,a41,mod);
+            const uint32_t a107=hafnian_mul(a25,a82,mod);
+            const uint32_t a214=hafnian_mul(a107,a107,mod);
+            a255=hafnian_mul(a41,a214,mod);tail=a107;
         } else if constexpr(P==2147483587U) {
-            const uint32_t a12=hafnian_mul(a8,a4,mod);
-            step(a15);step(a15);step(a15);step(a15);step(a15);step(a12);step(a);
+            const uint32_t a4=square_n(a,2);
+            const uint32_t a5=hafnian_mul(a4,a,mod);
+            const uint32_t a10=hafnian_mul(a5,a5,mod);
+            const uint32_t a15=hafnian_mul(a5,a10,mod);
+            const uint32_t a60=square_n(a15,2);
+            const uint32_t a65=hafnian_mul(a5,a60,mod);
+            const uint32_t a130=hafnian_mul(a65,a65,mod);
+            const uint32_t a195=hafnian_mul(a65,a130,mod);
+            a255=hafnian_mul(a60,a195,mod);tail=a65;
         } else {
-            const uint32_t a11=hafnian_mul(a8,a3,mod);
-            const uint32_t a9=hafnian_mul(a8,a,mod);
-            step(a15);step(a15);step(a15);step(a15);step(a15);step(a11);step(a9);
+            const uint32_t a2=hafnian_mul(a,a,mod);
+            const uint32_t a3=hafnian_mul(a,a2,mod);
+            const uint32_t a24=square_n(a3,3);
+            const uint32_t a27=hafnian_mul(a3,a24,mod);
+            const uint32_t a54=hafnian_mul(a27,a27,mod);
+            const uint32_t a57=hafnian_mul(a3,a54,mod);
+            const uint32_t a228=square_n(a57,2);
+            a255=hafnian_mul(a27,a228,mod);tail=a57;
         }
-        return result;
+        const uint32_t a65535=hafnian_mul(square_n(a255,8),a255,mod);
+        const uint32_t a16777215=hafnian_mul(square_n(a65535,8),a255,mod);
+        return hafnian_mul(square_n(a16777215,7),tail,mod);
     }
-#endif
     constexpr uint32_t INVERSE_EXPONENT=P-2;
     uint32_t a2=hafnian_mul(a,a,mod);
     uint32_t a3=hafnian_mul(a2,a,mod);
