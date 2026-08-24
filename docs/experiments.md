@@ -14292,3 +14292,8 @@
   implementation only for compile-time primes outside the production CRT
   schedule.  Treat the gain as roughly 3%; it lowers the extended 30.4-hour
   projection by approximately another 0.8 GPU-hours, to about 29.6 hours.
+- Launch-bound follow-up: forcing 17 rather than 16 CTAs/SM reduces the
+  order-48 specialization from 64 to 56 registers but introduces a 16-byte
+  stack frame.  Matched million-term time regresses from 0.09450 to 0.09665 s
+  (`2.3%`).  Retain the spill-free 16-CTA launch bound; the 18/20-CTA points
+  were already rejected in experiment 417.
