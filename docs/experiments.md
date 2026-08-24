@@ -14590,6 +14590,10 @@
   symmetric LDL computes only one triangle and needs no general pivot
   inversions.  In alternating complete-domain runs this is another 5% over
   the unit-pivot LDU implementation.
+- A lower-triangle-only builder is exact but about 1.1% slower than writing the
+  tiny dense 6x6 workspace.  Reduced lane participation costs more than the
+  redundant cache-resident stores; retain the regular full-matrix build and
+  symmetric-only Schur updates.
 - Complete full-rank order-48 domains on one RTX PRO 6000 Blackwell:
 
   | prime | former v3 s | resolvent v4 s | speedup |
