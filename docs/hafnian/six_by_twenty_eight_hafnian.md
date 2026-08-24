@@ -47,7 +47,12 @@ python3 tools/run_six_by_twenty_eight_hafnian_gpu.py \
 The driver constructs one persistent task list per GPU, schedules expensive
 queries first, reuses device allocations, and writes an authenticated range
 checkpoint after every chunk.  Re-running the command resumes the exact
-covered prefixes.  The reducer can also be invoked directly:
+covered prefixes.  The production default is `2^24` terms per checkpoint:
+one publication for the dominant order-48 queries and approximately 10--15
+seconds of maximum recomputation for an interrupted order-64 query on the
+measured RTX PRO 6000.  Override it with `--chunk-terms` when a provider has
+different interruption or filesystem characteristics.  The reducer can also
+be invoked directly:
 
 ```sh
 python3 tools/reduce_six_by_twenty_eight_hafnian.py \

@@ -96,7 +96,9 @@ def main() -> int:
     )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--gpus", default="0")
-    parser.add_argument("--chunk-terms", type=int, default=1 << 20)
+    # One result publication per common N=48 query, while retaining roughly
+    # 10--15-second recovery granularity for the rare N=64 queries.
+    parser.add_argument("--chunk-terms", type=int, default=1 << 24)
     parser.add_argument("--blocks", type=int, default=0)
     parser.add_argument("--threads", type=int, default=256)
     parser.add_argument("--dry-run", action="store_true")

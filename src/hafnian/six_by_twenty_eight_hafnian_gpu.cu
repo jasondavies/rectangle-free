@@ -78,7 +78,10 @@ struct Task {
 
 struct Options {
     Task task;
-    uint64_t chunk_terms=UINT64_C(1)<<20;
+    // N=48 queries contain only 2^23 terms, so the production default writes
+    // them once.  At the slow N=64 end this remains a roughly 10--15 second
+    // interruption window on the measured RTX PRO 6000 worker.
+    uint64_t chunk_terms=UINT64_C(1)<<24;
     unsigned blocks=0,threads=256;
     std::string batch;
     bool list=false,self_test=false,run=false;
