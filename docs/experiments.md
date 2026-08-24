@@ -13761,9 +13761,15 @@
   64 is neutral.  The maintained binary therefore specializes only orders 48
   and 50 and uses the existing runtime Montgomery kernel for orders 52--64.
   This is an internal deterministic dispatch, not a user-visible tuning flag.
-- Launch retune: after specialization changes the register limit, 224 threads
-  per CTA is `1.0136x` faster than 256 at order 48 and `1.0131x` faster at
-  order 50 in alternating runs.  The default now selects 224 threads for
+- Fixed inverse chain: the specialized kernels replace binary exponentiation
+  by a compile-time radix-4 chain for `p-2`.  It uses only two saved powers,
+  reduces each inverse from roughly 59--61 to 46--47 Montgomery multiplies,
+  retains 40 registers, and improves complete-term throughput by `1.0831x`
+  at order 48 and `1.0806x` at order 50.  All 32 order/prime residue fixtures
+  retain exact parity after this change.
+- Launch retune: after specialization and the inverse chain, 224 threads per
+  CTA is `1.0156x` faster than 256 at order 48 and `1.0151x` faster at order
+  50 in alternating runs.  The default now selects 224 threads for
   orders 48/50 and retains 256 for larger orders; an explicit diagnostic
   override remains available.
 - Nsight explanation at order 48: specialization reduces registers per thread
@@ -13774,10 +13780,10 @@
   DRAM-bound.
 - Exact catalog weighting: the campaign contains 1,063,130,234,880 31-bit
   sign terms, of which 960,654,999,552 (90.36%) are at orders 48 and 50.
-  Matched rates project 105.09 GPU-hours for the runtime control and 93.47
+  Matched rates project 105.09 GPU-hours for the runtime control and 87.29
   GPU-hours for the hybrid production binary, an exact workload-weighted
-  `1.1243x` speedup.  Relative to the earlier approximately 102-GPU-hour
-  estimate, the normalized estimate is about 90.7 GPU-hours; use 93.5 hours
+  `1.2038x` speedup.  Relative to the earlier approximately 102-GPU-hour
+  estimate, the normalized estimate is about 84.7 GPU-hours; use 87.3 hours
   as the more conservative current matched projection.
 - Production/provenance: the result algorithm becomes
   `glynn-trace-hessenberg-residual-fixed-montgomery-cuda-v3`, and the reducer

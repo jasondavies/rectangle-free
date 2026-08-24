@@ -122,6 +122,38 @@ __device__ __forceinline__ uint32_t hafnian_mul(
     return hafnian_montgomery_mul(a,b,mod);
 }
 
+// All device inversions use exponent P-2.  A fixed radix-4 chain needs only
+// two saved powers and 46--47 multiplies for the production primes, versus
+// roughly 60 for binary square-and-multiply.
+template<uint32_t P>
+__device__ inline uint32_t hafnian_power(
+    uint32_t a,uint32_t exponent,HafnianMontgomeryConstant<P> mod) {
+    if(exponent!=P-2) {
+        uint32_t result=mod.one;
+        while(exponent) {
+            if(exponent&1)result=hafnian_mul(result,a,mod);
+            a=hafnian_mul(a,a,mod);
+            exponent>>=1;
+        }
+        return result;
+    }
+    constexpr uint32_t INVERSE_EXPONENT=P-2;
+    uint32_t a2=hafnian_mul(a,a,mod);
+    uint32_t a3=hafnian_mul(a2,a,mod);
+    uint32_t result=a;
+#pragma unroll
+    for(int shift=28;shift>=0;shift-=2) {
+        result=hafnian_mul(result,result,mod);
+        result=hafnian_mul(result,result,mod);
+        constexpr uint32_t MASK=3;
+        uint32_t digit=(INVERSE_EXPONENT>>shift)&MASK;
+        if(digit==1)result=hafnian_mul(result,a,mod);
+        else if(digit==2)result=hafnian_mul(result,a2,mod);
+        else if(digit==3)result=hafnian_mul(result,a3,mod);
+    }
+    return result;
+}
+
 template<class Mod>
 __device__ inline uint32_t hafnian_power(
     uint32_t a,uint32_t exponent,Mod mod) {
