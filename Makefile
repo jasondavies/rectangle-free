@@ -122,6 +122,13 @@ $(BUILD_DIR)/hafnian_int8_sign_probe: research/gpu/hafnian_int8_sign_probe.cu \
 		src/hafnian/six_by_twenty_eight_catalog.hpp src/common/sha256.hpp
 	$(NVCC) $(NVCCFLAGS) -std=c++17 -o $@ $<
 
+$(BUILD_DIR)/hafnian_gray_update_gpu_probe: \
+		research/gpu/hafnian_gray_update_gpu_probe.cu \
+		src/hafnian/hafnian_gpu_core.cuh \
+		src/hafnian/six_by_twenty_eight_catalog.hpp \
+		src/hafnian/six_by_twenty_nine_catalog.hpp src/common/sha256.hpp
+	$(NVCC) $(NVCCFLAGS) -std=c++17 -o $@ $<
+
 $(BUILD_DIR)/hafnian_blocked_hessenberg_probe: research/probes/hafnian_blocked_hessenberg_probe.cpp
 	$(CXX) -O3 -march=native -std=c++17 -o $@ $<
 

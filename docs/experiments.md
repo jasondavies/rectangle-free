@@ -13885,3 +13885,72 @@
   production solver or its conservative `87.3` GPU-hour estimate until the
   complete 31-bit and optional INT8 chain kernels are timed against the current
   fixed-Montgomery kernel.
+
+### Experiment 414: Complete CUDA Gray-chain hafnian gate
+
+- Goal: implement the complete exact 31-bit CUDA version of experiment 413
+  and compare it directly with the maintained fixed-prime Hessenberg kernel.
+  The comparison includes reduced-matrix construction, generalized Lanczos,
+  all characteristic-polynomial and Newton recurrences, sign accumulation,
+  and device result reduction.  It does not infer performance from a matrix
+  update microbenchmark.
+- Probe: add `hafnian_gray_update_gpu_probe`.  One two-warp CTA owns a short
+  Gray chain.  It periodically constructs `K_s`, applies the intervening
+  rank-two changes, and keeps exact Montgomery residues throughout.  A
+  power-of-two prefix of Gray indices is a permutation of the same ordinary
+  sign indices, so its final residue can be compared directly with the
+  production kernel without a second oracle kernel.
+- First layout and correction: retaining every lazy basis consumed 50.2 KiB
+  at chain 4 and 69.4 KiB at chain 6.  Longer chains fell to one two-warp CTA
+  per SM and achieved only about `0.205x` production throughput.  Carrying all
+  *future* rank-two factors through each basis as soon as that basis is built
+  performs the same matrix-vector products but permits the basis to be
+  discarded immediately.  Moving the rebuild matrix to a per-CTA global
+  scratch leaves only one basis in shared memory.  At order 48, chain 6 then
+  uses 14,156 bytes, sustains six CTAs/SM, and improves from `0.203x` to
+  approximately parity.
+- Low-level fusion: compute the two metric projections of each rank-two apply
+  in one block reduction, and transfer both factor vectors through a basis in
+  one pass.  This removes roughly half of those CTA synchronization points.
+- Exactness on one RTX PRO 6000 Blackwell with CUDA 13.0:
+  - chain lengths 1, 2, 4, 6, and 8 reproduce the production residue;
+  - five order-48 queries and one order-50 query have zero breakdowns;
+  - the complete 8,388,608-term order-48 domain matches independently under
+    all four production primes, again with zero breakdowns.
+- Matched million-term order-48 result at `2^31-1` after fusion:
+
+  | chain | production ms | Gray ms | speedup |
+  |---:|---:|---:|---:|
+  | 2 | 308.39 | 338.82 | 0.9102x |
+  | 4 | 308.45 | 307.26 | 1.0039x |
+  | 6 | 308.29 | 307.50 | 1.0026x |
+  | 8 | 308.48 | 305.12 | 1.0110x |
+
+  On complete order-48 domains, chain 8 is only `1.004--1.012x` faster across
+  the four primes.  A lower-rank (`r=46`) query gains `1.037x`, confirming that
+  the reduction is real but modest for the mostly full-rank workload.
+- Order-50 counterexample: chain 8 takes 333.84 ms per million terms versus
+  317.67 ms for production (`0.9516x`).  Shorter chains are worse.  Since
+  orders 48 and 50 dominate the campaign, this does not justify a second
+  production/restart path for an approximately one-percent best-case gain.
+- Profile: the shared-scratch version has 38 registers/thread but only eight
+  active warps/SM (16.7% occupancy), with 28.2% compute and negligible DRAM
+  throughput; it is latency-limited.  Globalizing only the rebuild matrix
+  raises residency to 12--14 warps/SM.  The remaining sequential Lanczos
+  recurrences and inversions prevent the CPU's approximately `2x` arithmetic
+  advantage from becoming a material GPU advantage.  The Nsight report is
+  retained outside the repository under
+  `../rectangle-free-data-v2/profiles/verda-rtxpro6000-hafnian-gray-20260824/`.
+- Exact FP16 MMA remains a possible separate arithmetic probe: centered
+  residues below 2,048 are exactly representable, and reducing after 16
+  products keeps the FP32 accumulator within its exact-integer range.  It
+  would, however, require roughly two to three times the 31-bit prime images,
+  while the present Gray recurrence exposes mostly dependent matrix-vector
+  operations rather than large MMA tiles.  Do not infer a campaign gain from
+  FP16 throughput alone; require a complete prime-image-weighted kernel gate.
+- Outcome: reject Gray-chain updates as a 6x28 production backend on RTX PRO
+  6000.  Retain the exact CUDA probe and the eager-factor-carry technique as
+  research artifacts.  Keep the maintained fixed-prime solver and its
+  conservative `87.3` GPU-hour campaign projection unchanged.  Do not pursue
+  INT8 MMA for this chain: the 31-bit version is already at parity, while the
+  measured small-prime CRT multiplier is `3.042x`.
