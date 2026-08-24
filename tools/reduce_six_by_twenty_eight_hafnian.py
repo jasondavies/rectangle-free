@@ -116,7 +116,7 @@ def main() -> int:
             raise ValueError(f"{path}: invalid matrix stride")
         if gray_enabled not in (0, 1):
             raise ValueError(f"{path}: invalid Gray mode")
-        expected_chain = {48: 6, 50: 7}.get(vertices, 0)
+        expected_chain = 6 if vertices == 48 else (7 if vertices <= 58 else 0)
         if gray_enabled:
             if (gray_chain != expected_chain or gray_slots <= 0 or
                     gray_active_blocks <= 0 or gray_chunks <= 0):

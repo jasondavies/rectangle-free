@@ -99,10 +99,13 @@ def main() -> int:
     # One result publication per common N=48 query, while retaining roughly
     # 10--15-second recovery granularity for the rare N=64 queries.
     parser.add_argument("--chunk-terms", type=int, default=1 << 24)
-    parser.add_argument("--blocks", type=int, default=0)
+    parser.add_argument(
+        "--blocks", type=int, default=0,
+        help="Gray chain slots (fallback CTAs for non-Gray orders); 0 autotunes",
+    )
     parser.add_argument(
         "--threads", type=int, default=0,
-        help="threads per CTA; 0 selects the measured order-specific default",
+        help="fallback threads per CTA; Gray-enabled orders use 64; 0 autotunes",
     )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()

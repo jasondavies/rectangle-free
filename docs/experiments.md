@@ -14212,3 +14212,50 @@
   conservative campaign estimate remains approximately 34.92 RTX PRO 6000
   GPU-hours (`2.50x` below the 87.29-GPU-hour baseline), because it still
   assigns all orders above 50 their pre-optimization cost.
+
+### Experiment 419: Extend Gray chains through order 58
+
+- Goal: capture the remaining catalog work that is already known to be
+  cyclic under scalar generalized Lanczos.  The exact census from experiment
+  413 accepts 701/706 order-52 queries and every order-54, 56, and 58 query;
+  only orders 60 and 64 are uniformly unsuitable.
+- A runtime-Montgomery prototype used chain 7 at orders 52--58.  Chains 6,
+  7, and 8 differ by less than 0.5% on matched million-term ranges; retain 7
+  as the slight aggregate winner.  One known non-cyclic order-52 query
+  generated failures in every chain, triggered the whole-chunk independent
+  fallback, and reproduced the exact control residue.
+- Complete-domain result at prime `2,147,483,647` on one RTX PRO 6000
+  Blackwell:
+
+  | order | terms | Gray s | independent s | speedup | failures |
+  |---:|---:|---:|---:|---:|---:|
+  | 52 | 33,554,432 | 3.8264 | 15.2738 | 3.9917x | 0 |
+  | 54 | 67,108,864 | 7.9945 | 33.6813 | 4.2130x | 0 |
+  | 56 | 134,217,728 | 16.4032 | 68.0104 | 4.1462x | 0 |
+  | 58 | 268,435,456 | 35.0246 | 153.1303 | 4.3710x | 0 |
+
+  Every complete-domain residue matches the independent kernel exactly.
+- Fixed-prime specialization is also beneficial in the Gray kernel, despite
+  having regressed in the old independent kernel above order 50.  Alternating
+  million-term A/B tests reduce runtime by 11.6%, 11.5%, 10.7%, and 11.0% at
+  orders 52, 54, 56, and 58 respectively.  A persistent 16-case matrix over
+  all four orders and all four production primes matches the runtime control
+  exactly with zero failures.
+- Production policy: use compile-time Montgomery and Gray chains at every
+  order from 48 through 58; retain the runtime-Montgomery independent kernel
+  at orders 60 and 64.  This remains an internal deterministic dispatch, not
+  another runtime tuning flag.  Arbitrary checkpoint boundaries retain the
+  global Gray-index semantics introduced in experiment 418.
+- Projection: combining the complete-domain Gray timings at orders 48--58,
+  the exact adaptive-prime census, measured current independent rates at
+  orders 60/64, and the known non-cyclic fallback fraction gives about 30.4
+  RTX PRO 6000 GPU-hours.  This is approximately `2.87x` below the 87.29-hour
+  baseline and about 4.5 hours below the deliberately conservative
+  experiment-418 projection.
+- Validation: the final production binary emits the expected v2 provenance,
+  passes the four-order/four-prime matrix, is accepted by the v2 partial
+  reducer, and compiles with CUDA 13 for both `sm_89` and `sm_120`.
+- Outcome: accept the extended fixed-prime Gray dispatch.  Further work on
+  non-cyclic block Lanczos has a ceiling of only about 2.7 GPU-hours; the
+  dominant research target returns to reducing the inversion/dependency cost
+  inside the already successful order-48/50 warp-chain kernel.

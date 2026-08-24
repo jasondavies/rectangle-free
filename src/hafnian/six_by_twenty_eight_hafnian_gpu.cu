@@ -90,6 +90,8 @@ struct Options {
     // interruption window on the measured RTX PRO 6000 worker.
     uint64_t chunk_terms=UINT64_C(1)<<24;
     // Zero selects the measured order-specific production launch geometry.
+    // At Gray-enabled orders, a nonzero value is the number of logical warp
+    // chain slots; the exact fallback grid remains occupancy-derived.
     unsigned blocks=0,threads=0;
     std::string batch;
     bool list=false,self_test=false,run=false;
@@ -214,6 +216,7 @@ std::string run_query(const Query& query,const Catalog& catalog,const Task& task
     const std::string& binary_digest) {
     static_assert(N==48||N==50||N==52||N==54||N==56||N==58||N==60||N==64);
     constexpr unsigned HALF=N/2;
+    constexpr unsigned GRAY_CHAIN=N==48?6:(N<=58?7:0);
     constexpr uint64_t TOTAL_TERMS=UINT64_C(1)<<(HALF-1);
     if(query.vertices!=N)throw std::runtime_error("query/kernel order mismatch");
     uint64_t end=task.end?task.end:TOTAL_TERMS;
@@ -245,7 +248,8 @@ std::string run_query(const Query& query,const Catalog& catalog,const Task& task
 
     constexpr size_t independent_shared_bytes=hafnian_shared_bytes<N>();
     unsigned threads=options.threads?options.threads:(N<=50?224U:256U);
-    // Use complete residency waves.  The old fixed 4*SM grid leaves a severe
+    // Use complete residency waves for the independent fallback.  The old
+    // fixed 4*SM grid leaves a severe
     // 3+1 tail for N=64, whereas two full waves remain balanced for every N.
     unsigned recommended_blocks=hafnian_recommended_blocks<N,ActiveMod>(
         threads,workspace.multiprocessors);
@@ -257,8 +261,8 @@ std::string run_query(const Query& query,const Catalog& catalog,const Task& task
     hafnian_gray::RankFactor gray_factor;
     hafnian_gray::DeviceFactors gray_factors;
 #if !defined(HAFNIAN_RUNTIME_MONTGOMERY_CONTROL)
-    if constexpr(N==48||N==50) {
-        constexpr unsigned CHAIN=N==48?6:7;
+    if constexpr(N>=48&&N<=58) {
+        constexpr unsigned CHAIN=GRAY_CHAIN;
         if(options.threads&&options.threads!=hafnian_gray::THREADS)
             throw std::runtime_error(
                 "orders 48 and 50 use a fixed 64-thread Gray kernel");
@@ -314,7 +318,7 @@ std::string run_query(const Query& query,const Catalog& catalog,const Task& task
             query.defect_coefficient,query.matching_bound_power,N,
             N+1,binary_digest.c_str(),task.prime,task.begin,
             covered_end,TOTAL_TERMS,partial,blocks,threads,
-            unsigned(gray_enabled),gray_enabled?(N==48?6U:(N==50?7U:0U)):0U,
+            unsigned(gray_enabled),gray_enabled?GRAY_CHAIN:0U,
             gray_slots,
             gray_grid_blocks,gray_active_blocks,gray_chunks,
             gray_failures_total,gray_fallback_chunks,
@@ -333,9 +337,9 @@ std::string run_query(const Query& query,const Catalog& catalog,const Task& task
         unsigned sum_count=blocks;
         bool fallback=!gray_enabled;
 #if !defined(HAFNIAN_RUNTIME_MONTGOMERY_CONTROL)
-        if constexpr(N==48||N==50) {
+        if constexpr(N>=48&&N<=58) {
             if(gray_enabled) {
-                constexpr unsigned CHAIN=N==48?6:7;
+                constexpr unsigned CHAIN=GRAY_CHAIN;
                 hafnian_cuda_check(cudaMemset(
                     workspace.gray_failures,0,sizeof(uint32_t)),
                     "clear Gray failure counter");
@@ -418,7 +422,12 @@ std::string dispatch_fixed_small(const Query& query,const Catalog& catalog,
     switch(query.vertices) {
         case 48:return run_query<48,Mod>(query,catalog,task,options,workspace,binary_digest);
         case 50:return run_query<50,Mod>(query,catalog,task,options,workspace,binary_digest);
-        default:throw std::runtime_error("fixed-prime specialization is only used at orders 48 and 50");
+        case 52:return run_query<52,Mod>(query,catalog,task,options,workspace,binary_digest);
+        case 54:return run_query<54,Mod>(query,catalog,task,options,workspace,binary_digest);
+        case 56:return run_query<56,Mod>(query,catalog,task,options,workspace,binary_digest);
+        case 58:return run_query<58,Mod>(query,catalog,task,options,workspace,binary_digest);
+        default:throw std::runtime_error(
+            "fixed-prime specialization is only used at orders 48 through 58");
     }
 }
 
@@ -429,7 +438,7 @@ std::string dispatch(const Query& query,const Catalog& catalog,const Task& task,
     return dispatch_mod<HafnianMontgomery>(
         query,catalog,task,options,workspace,binary_digest);
 #else
-    if(query.vertices>50)
+    if(query.vertices>58)
         return dispatch_mod<HafnianMontgomery>(
             query,catalog,task,options,workspace,binary_digest);
     switch(task.prime) {
