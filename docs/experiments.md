@@ -13461,3 +13461,59 @@
   checkpoint/reduction machinery, benchmark representative order-48 and
   order-64 queries on the intended GPU and obtain explicit approval for a
   roughly 338-GPU-hour campaign.
+
+### Experiment 406: Four-colour-plane contraction and degree-bound gates
+
+- Goal: test whether the special product graph `H=K4 x KG(6,2)` permits all
+  36,398 residual hafnians to share one dramatically cheaper colour-plane
+  contraction, and replace the complete-graph CRT bound by a degree-sensitive
+  certified bound.
+- Exact colour-plane formulation: each colour part contains the 15 row-pair
+  vertices of `KG(6,2)`.  For equal-size subsets `S,T`, define
+  `P(S,T)=per(KG(6,2)[S,T])`.  A perfect matching of `H` partitions each
+  colour part among its three partner colours and multiplies the six
+  corresponding `P` values.  All degree blocks together contain
+  `sum_k C(15,k)^2=C(30,15)=155,117,520` entries, or 620,470,080 bytes per
+  32-bit prime.  This table itself is manageable and reusable.
+- Exact smaller-row rank gate: construct every permanental-compound entry and
+  take modular ranks at 1,000,003.  Every degree block for four rows has full
+  rank.  For five rows, the central blocks are already close to full rank;
+  for example degrees four and five have ranks 210/210 and 252/252.  A full
+  modular rank proves the corresponding integer matrix is full rank, while a
+  deficient modular rank is used only as a lower bound.
+- Six-row density gate: 5,000 deterministic exact-permanent samples give
+  nonzero densities 42.42%, 56.34%, 73.52%, 86.70%, and 94.86% in degrees
+  four through eight.  Thus the blocks relevant to balanced colour sectors
+  are not sparse.  Random principal submatrices of dimensions 1,024 in each
+  of degrees four, five, and six all have modular rank 1,024, proving an exact
+  bond-rank lower bound of at least 1,024.
+- Contraction-width gate: there are 136 colour-pair count sectors.  The
+  balanced `(5,5,5)` sector has 756,756 legal local partitions at each colour
+  vertex.  Contracting just two adjacent colour vertices through their dense
+  permanent block exposes
+  `756,756^2=572,679,643,536` external assignment pairs before the remaining
+  two vertices are included.  Low-rank factorization cannot remove this
+  intermediate cheaply: the measured bond rank is already at least 1,024 and
+  the census has not reached the full 3,003-dimensional degree-five block.
+- Outcome for the proposed algorithm: reject the conventional explicit,
+  sparse, and low-rank four-colour-plane subset contractions.  Deliberately
+  do not build the 620-MB six-row table or attempt the complete 6x30
+  reproduction, because the predeclared contraction gate fails by orders of
+  magnitude.  A future method would require a new analytic fast transform for
+  these permanental compounds, not another tensor contraction ordering.
+- Certified CRT improvement: apply [Friedland's exact degree
+  bound](https://arxiv.org/abs/0803.0864)
+  `pm(G) <= product_v (deg(v)!)^(1/(2 deg(v)))` to every residual graph.
+  To avoid floating-point certification, upper-bound each factorial by an
+  exact power of two over the common denominator
+  `lcm(2,4,...,36)=24,504,480`, include all choices of unmatched tokens, and
+  sum the 36,398 orbit-weighted query bounds as a six-limb integer.  The new
+  rigorous colouring bound is
+  `35964727916152696849926956532781440366855865959654450565081989120000000`
+  (235 bits), versus 269 bits from complete residual graphs.  The first eight
+  existing 31-bit primes have a 248-bit product, 12,576 times this bound, so
+  eight primes are sufficient instead of nine.
+- Campaign impact: the independent-hafnian projection falls from about 338
+  to 301 GPU-hours.  Eight equal GPUs fall from about 42.3 to 37.6 ideal wall
+  hours before interruptions and validation.  This is a guaranteed 11.1%
+  saving, not the hoped-for order-of-magnitude algorithmic improvement.

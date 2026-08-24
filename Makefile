@@ -190,12 +190,22 @@ $(BUILD_DIR)/six_by_twenty_eight_defect_census: research/probes/six_by_twenty_ei
 	$(CXX) -O3 -march=native -std=c++17 $(OPENMP_CFLAGS) -o $@ $< \
 		$(OPENMP_LDFLAGS) -lnauty
 
+$(BUILD_DIR)/colour_plane_permanent_probe: research/probes/colour_plane_permanent_probe.cpp
+	$(CXX) -O3 -march=native -std=c++17 -o $@ $<
+
 .PHONY: six-by-twenty-eight-census-test
 six-by-twenty-eight-census-test: six_by_twenty_eight_defect_census
 	./$(BUILD_DIR)/six_by_twenty_eight_defect_census --slack 1 --threads 2 --raw \
 		| grep -q 'raw_unions=83071 symmetry_orbits=29.*exact=OK'
 	./$(BUILD_DIR)/six_by_twenty_eight_defect_census --slack 2 --threads 2 --graph-isomorphism \
 		| grep -q 'symmetry_orbits=36398 graph_orbits=36398.*exact=OK'
+	./$(BUILD_DIR)/six_by_twenty_eight_defect_census --slack 2 --threads 2 \
+		| grep -q 'DEFECT28_FRIEDLAND_BOUND .*required_31bit_primes=8 exact=OK'
+
+.PHONY: colour-plane-permanent-test
+colour-plane-permanent-test: colour_plane_permanent_probe
+	./$(BUILD_DIR)/colour_plane_permanent_probe --samples 500 --rank-sample 128 \
+		| grep -q 'maximum_local_assignments=756756.*sampled_bond_rank=128 exact=OK'
 
 $(BUILD_DIR)/six_by_thirty_hafnian: src/hafnian/six_by_thirty_hafnian.cpp src/common/sha256.hpp
 	$(CXX) -O3 -march=native -std=c++17 $(OPENMP_CFLAGS) -o $@ $< $(OPENMP_LDFLAGS)
@@ -385,6 +395,7 @@ BUILD_TARGETS := 5xn_count4 partition_count4 partition_poly partition_poly_7 \
 	symmetric_kernel_rank_probe twocolour_3x3_sampler twocolour_4x4_probe \
 	canonical_query_circuit_probe token_plane_quotient_probe \
 	six_by_thirty_matching_probe six_by_twenty_eight_defect_census \
+	colour_plane_permanent_probe \
 	six_by_thirty_hafnian \
 	six_by_thirty_hafnian_gpu \
 	six_by_twenty_nine_hafnian_cpu \

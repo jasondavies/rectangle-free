@@ -238,6 +238,28 @@ struct BigUInt {
         }
         if (carry) throw std::overflow_error("BigUInt addition overflow");
     }
+    void shift_left(unsigned bits) {
+        if (!bits) return;
+        const unsigned words = bits / 64;
+        const unsigned remainder = bits % 64;
+        if (words >= limbs.size())
+            throw std::overflow_error("BigUInt shift overflow");
+        std::array<uint64_t, 6> shifted{};
+        for (size_t source = 0; source < limbs.size(); source++) {
+            const size_t destination = source + words;
+            if (destination >= limbs.size()) {
+                if (limbs[source])
+                    throw std::overflow_error("BigUInt shift overflow");
+                continue;
+            }
+            shifted[destination] |= limbs[source] << remainder;
+            if (remainder && destination + 1 < limbs.size())
+                shifted[destination + 1] |= limbs[source] >> (64 - remainder);
+            else if (remainder && (limbs[source] >> (64 - remainder)))
+                throw std::overflow_error("BigUInt shift overflow");
+        }
+        limbs = shifted;
+    }
     unsigned bit_length() const {
         for (size_t index = limbs.size(); index-- > 0;)
             if (limbs[index])
@@ -260,6 +282,74 @@ struct BigUInt {
         return std::string(reversed.rbegin(), reversed.rend());
     }
 };
+
+uint64_t binomial(unsigned n, unsigned k) {
+    if (k > n) return 0;
+    k = std::min(k, n - k);
+    uint64_t result = 1;
+    for (unsigned i = 1; i <= k; i++) result = result * (n - k + i) / i;
+    return result;
+}
+
+unsigned ceil_log2_factorial(unsigned degree) {
+    uint64_t value = factorial(degree);
+    if (value <= 1) return 0;
+    const unsigned floor = 63U - unsigned(__builtin_clzll(value));
+    return (value & (value - 1)) ? floor + 1 : floor;
+}
+
+BigUInt friedland_colouring_bound(const Geometry& geometry,
+                                  const std::vector<Record>& orbit,
+                                  unsigned slack) {
+    // lcm(2,4,...,36).  This makes the sum of the exponents
+    // ceil(log2(d!))/(2d) exact as a rational number.
+    constexpr uint64_t EXPONENT_DENOMINATOR = 24504480;
+    std::array<uint64_t, TOKENS> neighbours{};
+    for (unsigned left = 0; left < TOKENS; left++) {
+        const unsigned left_colour = left / PAIRS;
+        auto [a, b] = geometry.pairs[left % PAIRS];
+        for (unsigned right = 0; right < TOKENS; right++) {
+            const unsigned right_colour = right / PAIRS;
+            auto [c, d] = geometry.pairs[right % PAIRS];
+            if (left_colour != right_colour && a != c && a != d &&
+                b != c && b != d)
+                neighbours[left] |= UINT64_C(1) << right;
+        }
+    }
+
+    BigUInt total;
+    const uint64_t full = (UINT64_C(1) << TOKENS) - 1;
+    for (const Record& record : orbit) {
+        auto [excess, count] = sector_of(record.key);
+        const unsigned unmatched = 2 * slack - excess;
+        const unsigned matching_edges = 30 - slack - count;
+        const uint64_t remaining = full & ~occupied_from_key(record.key);
+        const unsigned vertices = unsigned(__builtin_popcountll(remaining));
+        uint64_t exponent_numerator = 0;
+        uint64_t scan = remaining;
+        while (scan) {
+            const unsigned vertex = unsigned(__builtin_ctzll(scan));
+            scan &= scan - 1;
+            const unsigned degree = unsigned(__builtin_popcountll(
+                neighbours[vertex] & remaining));
+            if (degree)
+                exponent_numerator +=
+                    uint64_t(ceil_log2_factorial(degree)) *
+                    (EXPONENT_DENOMINATOR / (2 * degree));
+        }
+        const unsigned exponent = unsigned(
+            (exponent_numerator + EXPONENT_DENOMINATOR - 1) /
+            EXPONENT_DENOMINATOR);
+
+        BigUInt query(record.coefficient);
+        query.multiply(binomial(vertices, unmatched));
+        for (unsigned factor = 2; factor <= 28; factor++)
+            query.multiply(factor);
+        query.shift_left(matching_edges + exponent);
+        total.add(query);
+    }
+    return total;
+}
 
 struct MatchingLimit : std::runtime_error {
     using std::runtime_error::runtime_error;
@@ -556,6 +646,13 @@ int run_orbit_census(const Geometry& geometry,
     std::cout << "DEFECT28_BOUND value=" << colouring_bound.decimal()
               << " bits=" << bound_bits
               << " required_31bit_primes=" << (bound_bits + 30) / 31
+              << " exact=OK\n";
+    const BigUInt friedland_bound =
+        friedland_colouring_bound(geometry, orbit, options.slack);
+    const unsigned friedland_bits = friedland_bound.bit_length();
+    std::cout << "DEFECT28_FRIEDLAND_BOUND value="
+              << friedland_bound.decimal() << " bits=" << friedland_bits
+              << " required_31bit_primes=" << (friedland_bits + 30) / 31
               << " exact=OK\n";
     std::printf("DEFECT28_DONE mode=orbit slack=%u width=%u"
                 " symmetry_orbits=%" PRIu64 " graph_orbits=%" PRIu64
