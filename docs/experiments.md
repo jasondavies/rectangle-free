@@ -13729,3 +13729,62 @@
   sequential non-tensor work dominate the complete kernel.  Retain the exact
   probe and its algebraic validation; keep the maintained 31-bit solver and
   its approximately 102-GPU-hour projection unchanged.
+
+### Experiment 412: Fixed-prime Montgomery specialization
+
+- Goal: reduce the dominant 31-bit production arithmetic before launching the
+  complete 6x28 campaign.  The CRT schedule uses only the four fixed primes
+  `2^31-1`, `2^31-19`, `2^31-61`, and `2^31-69`.
+- Rejected first candidate: replace Montgomery multiplication with two exact
+  pseudo-Mersenne folds.  A host gate checks 8,000,256 boundary and random
+  products, and 32 GPU ranges spanning every order and prime reproduce the
+  Montgomery residues exactly.  Nevertheless, the runtime reducer is about
+  7.8% slower.  Compile-time folding makes `2^31-1` 5.8% faster but leaves the
+  other three primes about 11% slower.  Do not retain this backend.
+- Accepted candidate: make the modulus, Montgomery inverse, and encoded one
+  compile-time constants.  The production binary contains four specialized
+  kernels and selects one once per task; there is no arithmetic-branch cost
+  inside a kernel.  An exact host test checks 8,000,256 products against both
+  runtime Montgomery and ordinary `% p`.  Twelve multi-million-term ranges
+  and a separate 32-range order/prime matrix have exact GPU residue parity.
+- Matched order-48 throughput across six ranges per prime improves uniformly:
+
+  | prime | runtime terms/s | fixed terms/s | speedup |
+  |---:|---:|---:|---:|
+  | 2,147,483,647 | 2,916,619 | 3,292,240 | 1.1288x |
+  | 2,147,483,629 | 2,925,074 | 3,301,643 | 1.1287x |
+  | 2,147,483,587 | 2,951,531 | 3,323,903 | 1.1262x |
+  | 2,147,483,579 | 2,934,136 | 3,310,298 | 1.1282x |
+
+- Order policy: fixed specialization improves order 48 by `1.1301x` and
+  order 50 by `1.1228x`.  At orders 52--60 it is 0.6--3.9% slower, and order
+  64 is neutral.  The maintained binary therefore specializes only orders 48
+  and 50 and uses the existing runtime Montgomery kernel for orders 52--64.
+  This is an internal deterministic dispatch, not a user-visible tuning flag.
+- Launch retune: after specialization changes the register limit, 224 threads
+  per CTA is `1.0136x` faster than 256 at order 48 and `1.0131x` faster at
+  order 50 in alternating runs.  The default now selects 224 threads for
+  orders 48/50 and retains 256 for larger orders; an explicit diagnostic
+  override remains available.
+- Nsight explanation at order 48: specialization reduces registers per thread
+  from 48 to 40.  Register-limited residency rises from five to six CTAs per
+  SM, theoretical occupancy from 83.3% to 100%, and achieved occupancy from
+  75.7% to 92.3%.  Scheduler cycles with no eligible warp fall from 64.0% to
+  57.6%; profiled duration falls from 453.8 to 401.9 ms.  Neither kernel is
+  DRAM-bound.
+- Exact catalog weighting: the campaign contains 1,063,130,234,880 31-bit
+  sign terms, of which 960,654,999,552 (90.36%) are at orders 48 and 50.
+  Matched rates project 105.09 GPU-hours for the runtime control and 93.47
+  GPU-hours for the hybrid production binary, an exact workload-weighted
+  `1.1243x` speedup.  Relative to the earlier approximately 102-GPU-hour
+  estimate, the normalized estimate is about 90.7 GPU-hours; use 93.5 hours
+  as the more conservative current matched projection.
+- Production/provenance: the result algorithm becomes
+  `glynn-trace-hessenberg-residual-fixed-montgomery-cuda-v3`, and the reducer
+  rejects older or control results.  CUDA 12.8 builds all maintained kernels
+  for `sm_89` and `sm_120` without local-memory spills.  Nsight reports are
+  stored outside the repository under
+  `../rectangle-free-data-v2/profiles/verda-rtxpro6000-hafnian-fixed-montgomery-20260824/`.
+- Outcome: accept fixed-prime specialization for production orders 48 and 50.
+  Retain a compile-time runtime-Montgomery control target for regression and
+  profiling; expose no production fallback flag.

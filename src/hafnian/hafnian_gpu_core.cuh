@@ -11,6 +11,20 @@ struct HafnianMontgomery {
     uint32_t p=0,negative_inverse=0,one=0;
 };
 
+constexpr uint32_t hafnian_const_inverse_mod_2_32(uint32_t odd) {
+    uint32_t value=odd;
+    for(unsigned i=0;i<5;++i)value*=2U-odd*value;
+    return value;
+}
+
+template<uint32_t P>
+struct HafnianMontgomeryConstant {
+    static_assert(P&1);
+    static constexpr uint32_t p=P;
+    static constexpr uint32_t negative_inverse=0U-hafnian_const_inverse_mod_2_32(P);
+    static constexpr uint32_t one=uint32_t((UINT64_C(1)<<32)%P);
+};
+
 inline void hafnian_cuda_check(cudaError_t status,const char* operation) {
     if(status!=cudaSuccess)
         throw std::runtime_error(std::string(operation)+": "+cudaGetErrorString(status));
@@ -33,6 +47,28 @@ inline uint32_t hafnian_host_montgomery_mul(
 
 inline uint32_t hafnian_host_montgomery_power(
     uint32_t a,uint64_t exponent,const HafnianMontgomery& mod) {
+    uint32_t result=mod.one;
+    while(exponent) {
+        if(exponent&1)result=hafnian_host_montgomery_mul(result,a,mod);
+        a=hafnian_host_montgomery_mul(a,a,mod);
+        exponent>>=1;
+    }
+    return result;
+}
+
+template<uint32_t P>
+inline uint32_t hafnian_host_montgomery_mul(
+    uint32_t a,uint32_t b,HafnianMontgomeryConstant<P>) {
+    uint64_t product=uint64_t(a)*b;
+    uint32_t multiplier=uint32_t(product)*HafnianMontgomeryConstant<P>::negative_inverse;
+    uint64_t reduced=(product+uint64_t(multiplier)*P)>>32;
+    if(reduced>=P)reduced-=P;
+    return uint32_t(reduced);
+}
+
+template<uint32_t P>
+inline uint32_t hafnian_host_montgomery_power(
+    uint32_t a,uint64_t exponent,HafnianMontgomeryConstant<P> mod) {
     uint32_t result=mod.one;
     while(exponent) {
         if(exponent&1)result=hafnian_host_montgomery_mul(result,a,mod);
@@ -65,21 +101,43 @@ __device__ __forceinline__ uint32_t hafnian_montgomery_mul(
     return uint32_t(reduced);
 }
 
-__device__ inline uint32_t hafnian_montgomery_power(
-    uint32_t a,uint32_t exponent,HafnianMontgomery mod) {
+template<uint32_t P>
+__device__ __forceinline__ uint32_t hafnian_montgomery_mul(
+    uint32_t a,uint32_t b,HafnianMontgomeryConstant<P>) {
+    uint64_t product=uint64_t(a)*b;
+    uint32_t multiplier=uint32_t(product)*HafnianMontgomeryConstant<P>::negative_inverse;
+    uint64_t reduced=(product+uint64_t(multiplier)*P)>>32;
+    if(reduced>=P)reduced-=P;
+    return uint32_t(reduced);
+}
+
+__device__ __forceinline__ uint32_t hafnian_mul(
+    uint32_t a,uint32_t b,HafnianMontgomery mod) {
+    return hafnian_montgomery_mul(a,b,mod);
+}
+
+template<uint32_t P>
+__device__ __forceinline__ uint32_t hafnian_mul(
+    uint32_t a,uint32_t b,HafnianMontgomeryConstant<P> mod) {
+    return hafnian_montgomery_mul(a,b,mod);
+}
+
+template<class Mod>
+__device__ inline uint32_t hafnian_power(
+    uint32_t a,uint32_t exponent,Mod mod) {
     uint32_t result=mod.one;
     while(exponent) {
-        if(exponent&1)result=hafnian_montgomery_mul(result,a,mod);
-        a=hafnian_montgomery_mul(a,a,mod);
+        if(exponent&1)result=hafnian_mul(result,a,mod);
+        a=hafnian_mul(a,a,mod);
         exponent>>=1;
     }
     return result;
 }
 
-template<unsigned N>
+template<unsigned N,class Mod=HafnianMontgomery>
 __global__ void hafnian_terms_kernel(
     const uint8_t* __restrict__ adjacency,uint64_t begin,uint64_t end,
-    HafnianMontgomery mod,const uint32_t* __restrict__ inverse_small,
+    Mod mod,const uint32_t* __restrict__ inverse_small,
     uint32_t* __restrict__ block_sums) {
     static_assert(N%2==0&&N<=64);
     constexpr unsigned HALF=N/2;
@@ -132,11 +190,11 @@ __global__ void hafnian_terms_kernel(
                 __syncthreads();
             }
             if(threadIdx.x==0)
-                scalar[1]=hafnian_montgomery_power(
+                scalar[1]=hafnian_power(
                     matrix[(column+1)*MATRIX_STRIDE+column],mod.p-2,mod);
             __syncthreads();
             for(unsigned row=column+2+threadIdx.x;row<N;row+=blockDim.x)
-                factors[row]=hafnian_montgomery_mul(
+                factors[row]=hafnian_mul(
                     matrix[row*MATRIX_STRIDE+column],scalar[1],mod);
             __syncthreads();
             unsigned width=N-column;
@@ -145,14 +203,14 @@ __global__ void hafnian_terms_kernel(
                 unsigned row=column+2+item/width;
                 unsigned j=column+item%width;
                 matrix[row*MATRIX_STRIDE+j]=hafnian_sub_mod(
-                    matrix[row*MATRIX_STRIDE+j],hafnian_montgomery_mul(
+                    matrix[row*MATRIX_STRIDE+j],hafnian_mul(
                         factors[row],matrix[(column+1)*MATRIX_STRIDE+j],mod),mod.p);
             }
             __syncthreads();
             for(unsigned row=threadIdx.x;row<N;row+=blockDim.x) {
                 uint32_t sum=0;
                 for(unsigned eliminated=column+2;eliminated<N;++eliminated)
-                    sum=hafnian_add_mod(sum,hafnian_montgomery_mul(
+                    sum=hafnian_add_mod(sum,hafnian_mul(
                         factors[eliminated],matrix[row*MATRIX_STRIDE+eliminated],mod),mod.p);
                 matrix[row*MATRIX_STRIDE+column+1]=hafnian_add_mod(
                     matrix[row*MATRIX_STRIDE+column+1],sum,mod.p);
@@ -169,20 +227,20 @@ __global__ void hafnian_terms_kernel(
                 uint32_t product=mod.one;
                 for(unsigned distance=1;distance<size;++distance) {
                     unsigned subrow=size-distance;
-                    product=hafnian_montgomery_mul(
+                    product=hafnian_mul(
                         product,matrix[subrow*MATRIX_STRIDE+subrow-1],mod);
-                    char_factors[distance]=hafnian_montgomery_mul(
+                    char_factors[distance]=hafnian_mul(
                         product,matrix[(size-distance-1)*MATRIX_STRIDE+size-1],mod);
                 }
             }
             __syncthreads();
             for(unsigned k=threadIdx.x;k<=min(size,HALF);k+=blockDim.x) {
                 uint32_t value=k<=size-1?poly[(size-1)*POLY_STRIDE+k]:0;
-                if(k)value=hafnian_sub_mod(value,hafnian_montgomery_mul(
+                if(k)value=hafnian_sub_mod(value,hafnian_mul(
                     matrix[(size-1)*MATRIX_STRIDE+size-1],
                     poly[(size-1)*POLY_STRIDE+k-1],mod),mod.p);
                 for(unsigned distance=1;distance<size&&distance+1<=k;++distance)
-                    value=hafnian_sub_mod(value,hafnian_montgomery_mul(
+                    value=hafnian_sub_mod(value,hafnian_mul(
                         char_factors[distance],poly[(size-distance-1)*POLY_STRIDE+k-distance-1],mod),mod.p);
                 poly[size*POLY_STRIDE+k]=value;
             }
@@ -194,19 +252,19 @@ __global__ void hafnian_terms_kernel(
             uint32_t coefficients[HALF+1]{};
             coefficients[0]=mod.one;
             for(unsigned k=1;k<=HALF;++k) {
-                uint32_t value=hafnian_montgomery_mul(
+                uint32_t value=hafnian_mul(
                     uint32_t(uint64_t(k)*mod.one%mod.p),poly[N*POLY_STRIDE+k],mod);
                 for(unsigned j=1;j<k;++j)value=hafnian_add_mod(value,
-                    hafnian_montgomery_mul(poly[N*POLY_STRIDE+j],traces[k-j],mod),mod.p);
+                    hafnian_mul(poly[N*POLY_STRIDE+j],traces[k-j],mod),mod.p);
                 traces[k]=hafnian_neg_mod(value,mod.p);
             }
             for(unsigned degree=1;degree<=HALF;++degree) {
                 uint32_t sum=0;
                 for(unsigned k=1;k<=degree;++k)
-                    sum=hafnian_add_mod(sum,hafnian_montgomery_mul(
-                        hafnian_montgomery_mul(traces[k],inverse_small[2],mod),
+                    sum=hafnian_add_mod(sum,hafnian_mul(
+                        hafnian_mul(traces[k],inverse_small[2],mod),
                         coefficients[degree-k],mod),mod.p);
-                coefficients[degree]=hafnian_montgomery_mul(sum,inverse_small[degree],mod);
+                coefficients[degree]=hafnian_mul(sum,inverse_small[degree],mod);
             }
             unsigned negatives=(HALF-1)-__popcll(term);
             uint32_t contribution=negatives&1?
@@ -216,7 +274,7 @@ __global__ void hafnian_terms_kernel(
         __syncthreads();
     }
     if(threadIdx.x==0)
-        block_sums[blockIdx.x]=hafnian_montgomery_mul(local_sum,1,mod);
+        block_sums[blockIdx.x]=hafnian_mul(local_sum,1,mod);
 }
 
 template<unsigned N>
@@ -226,16 +284,16 @@ constexpr size_t hafnian_shared_bytes() {
     return (N*MATRIX_STRIDE+(N+1)*(HALF+1)+N+4)*sizeof(uint32_t);
 }
 
-template<unsigned N>
+template<unsigned N,class Mod=HafnianMontgomery>
 inline unsigned hafnian_recommended_blocks(
     unsigned threads,int multiprocessors,unsigned residency_waves=2) {
     constexpr size_t shared_bytes=hafnian_shared_bytes<N>();
-    hafnian_cuda_check(cudaFuncSetAttribute(hafnian_terms_kernel<N>,
+    hafnian_cuda_check(cudaFuncSetAttribute(hafnian_terms_kernel<N,Mod>,
         cudaFuncAttributeMaxDynamicSharedMemorySize,int(shared_bytes)),
         "set hafnian dynamic shared memory");
     int active_blocks=0;
     hafnian_cuda_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-        &active_blocks,hafnian_terms_kernel<N>,threads,shared_bytes),
+        &active_blocks,hafnian_terms_kernel<N,Mod>,threads,shared_bytes),
         "compute hafnian kernel occupancy");
     if(active_blocks<=0||multiprocessors<=0||!residency_waves)
         throw std::runtime_error("hafnian kernel has zero launch occupancy");

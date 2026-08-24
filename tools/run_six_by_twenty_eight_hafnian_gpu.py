@@ -100,13 +100,16 @@ def main() -> int:
     # 10--15-second recovery granularity for the rare N=64 queries.
     parser.add_argument("--chunk-terms", type=int, default=1 << 24)
     parser.add_argument("--blocks", type=int, default=0)
-    parser.add_argument("--threads", type=int, default=256)
+    parser.add_argument(
+        "--threads", type=int, default=0,
+        help="threads per CTA; 0 selects the measured order-specific default",
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     gpus = [item.strip() for item in args.gpus.split(",") if item.strip()]
     if not gpus or len(set(gpus)) != len(gpus):
         parser.error("--gpus must contain distinct comma-separated device IDs")
-    if args.chunk_terms <= 0 or not 1 <= args.threads <= 1024 or args.blocks < 0:
+    if args.chunk_terms <= 0 or not 0 <= args.threads <= 1024 or args.blocks < 0:
         parser.error("invalid kernel configuration")
     binary = args.binary.resolve()
     if not binary.is_file():

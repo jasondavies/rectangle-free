@@ -14,6 +14,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <vector>
 #include <unistd.h>
 
@@ -26,7 +27,11 @@ namespace {
 using Clock=std::chrono::steady_clock;
 using six_by_twenty_eight::Catalog;
 using six_by_twenty_eight::Query;
-constexpr const char* ALGORITHM="glynn-trace-hessenberg-residual-cuda-v2";
+#if defined(HAFNIAN_RUNTIME_MONTGOMERY_CONTROL)
+constexpr const char* ALGORITHM="glynn-trace-hessenberg-residual-runtime-montgomery-control-v1";
+#else
+constexpr const char* ALGORITHM="glynn-trace-hessenberg-residual-fixed-montgomery-cuda-v3";
+#endif
 constexpr const char* FORMAT="six-by-twenty-eight-hafnian-v1";
 
 bool is_prime_u32(uint32_t n) {
@@ -82,7 +87,8 @@ struct Options {
     // them once.  At the slow N=64 end this remains a roughly 10--15 second
     // interruption window on the measured RTX PRO 6000 worker.
     uint64_t chunk_terms=UINT64_C(1)<<24;
-    unsigned blocks=0,threads=256;
+    // Zero selects the measured order-specific production launch geometry.
+    unsigned blocks=0,threads=0;
     std::string batch;
     bool list=false,self_test=false,run=false;
 };
@@ -185,7 +191,7 @@ class DeviceWorkspace {
     std::vector<uint32_t> host_sums;
 };
 
-template<unsigned N>
+template<unsigned N,class ActiveMod>
 std::string run_query(const Query& query,const Catalog& catalog,const Task& task,
     const Options& options,DeviceWorkspace& workspace,
     const std::string& binary_digest) {
@@ -195,15 +201,19 @@ std::string run_query(const Query& query,const Catalog& catalog,const Task& task
     if(query.vertices!=N)throw std::runtime_error("query/kernel order mismatch");
     uint64_t end=task.end?task.end:TOTAL_TERMS;
     if(task.begin>=end||end>TOTAL_TERMS||!options.chunk_terms||
-            !options.threads||options.threads>1024)
+            options.threads>1024)
         throw std::runtime_error("invalid work range/configuration");
     if(!is_prime_u32(task.prime)||task.prime<=HALF||task.prime>INT32_MAX)
         throw std::runtime_error("prime outside supported range");
 
-    HafnianMontgomery mod;
-    mod.p=task.prime;
-    mod.negative_inverse=0U-hafnian_inverse_mod_2_32(task.prime);
-    mod.one=uint32_t((UINT64_C(1)<<32)%task.prime);
+    ActiveMod mod{};
+    if constexpr(std::is_same_v<ActiveMod,HafnianMontgomery>) {
+        mod.p=task.prime;
+        mod.negative_inverse=0U-hafnian_inverse_mod_2_32(task.prime);
+        mod.one=uint32_t((UINT64_C(1)<<32)%task.prime);
+    } else if(task.prime!=ActiveMod::p) {
+        throw std::runtime_error("prime does not match Montgomery specialization");
+    }
     if(hafnian_host_montgomery_mul(mod.one,1,mod)!=1)
         throw std::runtime_error("Montgomery setup failure");
     std::array<uint32_t,HALF+1> inverse_values{};
@@ -217,10 +227,11 @@ std::string run_query(const Query& query,const Catalog& catalog,const Task& task
         sizeof(inverse_values),cudaMemcpyHostToDevice),"copy inverses");
 
     constexpr size_t shared_bytes=hafnian_shared_bytes<N>();
+    unsigned threads=options.threads?options.threads:(N<=50?224U:256U);
     // Use complete residency waves.  The old fixed 4*SM grid leaves a severe
     // 3+1 tail for N=64, whereas two full waves remain balanced for every N.
-    unsigned recommended_blocks=hafnian_recommended_blocks<N>(
-        options.threads,workspace.multiprocessors);
+    unsigned recommended_blocks=hafnian_recommended_blocks<N,ActiveMod>(
+        threads,workspace.multiprocessors);
     unsigned blocks=options.blocks?options.blocks:recommended_blocks;
     workspace.ensure_blocks(blocks);
     uint32_t partial=0;
@@ -240,7 +251,7 @@ std::string run_query(const Query& query,const Catalog& catalog,const Task& task
             query.occupied,query.defect_count,query.excess,query.unmatched,
             query.defect_coefficient,query.matching_bound_power,N,
             N+1,binary_digest.c_str(),task.prime,task.begin,
-            covered_end,TOTAL_TERMS,partial,blocks,options.threads,
+            covered_end,TOTAL_TERMS,partial,blocks,threads,
             options.chunk_terms,elapsed);
         if(length<0||size_t(length)>=sizeof(buffer))
             throw std::runtime_error("result formatting failed");
@@ -253,8 +264,8 @@ std::string run_query(const Query& query,const Catalog& catalog,const Task& task
     std::string final_result;
     for(uint64_t begin=task.begin;begin<end;begin+=options.chunk_terms) {
         uint64_t chunk_end=std::min(end,begin+options.chunk_terms);
-        hafnian_terms_kernel<N><<<
-            blocks,options.threads,shared_bytes>>>(
+        hafnian_terms_kernel<N,ActiveMod><<<
+            blocks,threads,shared_bytes>>>(
             workspace.adjacency,begin,chunk_end,mod,workspace.inverses,
             workspace.sums);
         hafnian_cuda_check(cudaGetLastError(),"launch hafnian kernel");
@@ -278,20 +289,56 @@ std::string run_query(const Query& query,const Catalog& catalog,const Task& task
     return final_result;
 }
 
-std::string dispatch(const Query& query,const Catalog& catalog,const Task& task,
+template<class Mod>
+std::string dispatch_mod(const Query& query,const Catalog& catalog,const Task& task,
     const Options& options,DeviceWorkspace& workspace,
     const std::string& binary_digest) {
     switch(query.vertices) {
-        case 48:return run_query<48>(query,catalog,task,options,workspace,binary_digest);
-        case 50:return run_query<50>(query,catalog,task,options,workspace,binary_digest);
-        case 52:return run_query<52>(query,catalog,task,options,workspace,binary_digest);
-        case 54:return run_query<54>(query,catalog,task,options,workspace,binary_digest);
-        case 56:return run_query<56>(query,catalog,task,options,workspace,binary_digest);
-        case 58:return run_query<58>(query,catalog,task,options,workspace,binary_digest);
-        case 60:return run_query<60>(query,catalog,task,options,workspace,binary_digest);
-        case 64:return run_query<64>(query,catalog,task,options,workspace,binary_digest);
+        case 48:return run_query<48,Mod>(query,catalog,task,options,workspace,binary_digest);
+        case 50:return run_query<50,Mod>(query,catalog,task,options,workspace,binary_digest);
+        case 52:return run_query<52,Mod>(query,catalog,task,options,workspace,binary_digest);
+        case 54:return run_query<54,Mod>(query,catalog,task,options,workspace,binary_digest);
+        case 56:return run_query<56,Mod>(query,catalog,task,options,workspace,binary_digest);
+        case 58:return run_query<58,Mod>(query,catalog,task,options,workspace,binary_digest);
+        case 60:return run_query<60,Mod>(query,catalog,task,options,workspace,binary_digest);
+        case 64:return run_query<64,Mod>(query,catalog,task,options,workspace,binary_digest);
         default:throw std::runtime_error("unsupported residual graph order");
     }
+}
+
+template<class Mod>
+std::string dispatch_fixed_small(const Query& query,const Catalog& catalog,
+    const Task& task,const Options& options,DeviceWorkspace& workspace,
+    const std::string& binary_digest) {
+    switch(query.vertices) {
+        case 48:return run_query<48,Mod>(query,catalog,task,options,workspace,binary_digest);
+        case 50:return run_query<50,Mod>(query,catalog,task,options,workspace,binary_digest);
+        default:throw std::runtime_error("fixed-prime specialization is only used at orders 48 and 50");
+    }
+}
+
+std::string dispatch(const Query& query,const Catalog& catalog,const Task& task,
+    const Options& options,DeviceWorkspace& workspace,
+    const std::string& binary_digest) {
+#if defined(HAFNIAN_RUNTIME_MONTGOMERY_CONTROL)
+    return dispatch_mod<HafnianMontgomery>(
+        query,catalog,task,options,workspace,binary_digest);
+#else
+    if(query.vertices>50)
+        return dispatch_mod<HafnianMontgomery>(
+            query,catalog,task,options,workspace,binary_digest);
+    switch(task.prime) {
+        case 2147483647U:return dispatch_fixed_small<HafnianMontgomeryConstant<2147483647U>>(
+            query,catalog,task,options,workspace,binary_digest);
+        case 2147483629U:return dispatch_fixed_small<HafnianMontgomeryConstant<2147483629U>>(
+            query,catalog,task,options,workspace,binary_digest);
+        case 2147483587U:return dispatch_fixed_small<HafnianMontgomeryConstant<2147483587U>>(
+            query,catalog,task,options,workspace,binary_digest);
+        case 2147483579U:return dispatch_fixed_small<HafnianMontgomeryConstant<2147483579U>>(
+            query,catalog,task,options,workspace,binary_digest);
+        default:throw std::runtime_error("prime is outside the production CRT schedule");
+    }
+#endif
 }
 
 } // namespace
