@@ -14594,14 +14594,20 @@
   tiny dense 6x6 workspace.  Reduced lane participation costs more than the
   redundant cache-resident stores; retain the regular full-matrix build and
   symmetric-only Schur updates.
+- Preweight the six transformed update vectors by the diagonal Lanczos metric
+  once, reusing the otherwise dead source workspace.  Each Gram-moment term
+  then needs one Montgomery multiplication rather than first multiplying a
+  power vector by the metric.  This replaces roughly 24,000 per-chain metric
+  multiplications by 288 and saves a further 4--5% in matched warm runs without
+  increasing registers or shared memory.
 - Complete full-rank order-48 domains on one RTX PRO 6000 Blackwell:
 
-  | prime | former v3 s | resolvent v4 s | speedup |
+  | prime | former v3 s | preweighted resolvent v4 s | speedup |
   |---:|---:|---:|---:|
-  | 2,147,483,647 | 0.46247 | 0.41607 | 1.112x |
-  | 2,147,483,629 | 0.48644 | 0.43859 | 1.109x |
-  | 2,147,483,587 | 0.48602 | 0.43808 | 1.109x |
-  | 2,147,483,579 | 0.48528 | 0.43634 | 1.112x |
+  | 2,147,483,647 | 0.46247 | 0.39933 | 1.158x |
+  | 2,147,483,629 | 0.48644 | 0.41739 | 1.165x |
+  | 2,147,483,587 | 0.48602 | 0.41835 | 1.162x |
+  | 2,147,483,579 | 0.48528 | 0.41861 | 1.159x |
 
   All residues match.  Memcheck reports zero errors and racecheck reports zero
   hazards.  Rank-47 order-48 matrices are about 2% slower with the resolvent,
@@ -14613,7 +14619,7 @@
   becomes `glynn-gray-resolvent-fixed-field-cuda-v4`; `gray_chain=4` identifies
   the new path.
 - Outcome: accept the selective backend.  Full-rank order-48 work is about 71%
-  of weighted campaign terms, so the approximately 11% local gain projects to
-  roughly 7% end to end.  This is not a second algorithmic breakthrough, but it is a
-  verified saving on the dominant catalog sector and validates the resolvent
-  identity as a practical GPU primitive.
+  of weighted campaign terms, so the approximately 16% local gain projects to
+  roughly 10--11% end to end.  This is not a second algorithmic breakthrough,
+  but it is a verified saving on the dominant catalog sector and validates the
+  resolvent identity as a practical GPU primitive.

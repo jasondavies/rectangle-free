@@ -228,7 +228,12 @@ __global__ __launch_bounds__(THREADS,MIN_BLOCKS_PER_SM) void terms_kernel(
         for(unsigned index=lane;index<M*M*S;index+=32)q[index]=0;
         for(unsigned i=lane;i<M;i+=32)
             q[(size_t(i)*M+i)*S]=deltas[i];
-        for(unsigned index=lane;index<M*N;index+=32)power0[index]=future[index];
+        for(unsigned index=lane;index<M*N;index+=32) {
+            const unsigned row=index%N;
+            const uint32_t value=future[index];
+            power0[index]=value;
+            future[index]=hafnian_mul(metric[row],value,mod);
+        }
         __syncwarp();
         for(unsigned degree=0;degree<HALF;++degree) {
             constexpr unsigned DOT_GROUP=4,GROUPS=32/DOT_GROUP;
@@ -244,9 +249,8 @@ __global__ __launch_bounds__(THREADS,MIN_BLOCKS_PER_SM) void terms_kernel(
                 if(wanted<PAIRS)
                     for(unsigned coordinate=within;coordinate<N;coordinate+=DOT_GROUP)
                         value=hafnian_add_mod(value,hafnian_mul(
-                            future[size_t(pair_row)*N+coordinate],hafnian_mul(
-                            metric[coordinate],power0[size_t(pair_column)*N+coordinate],mod),
-                            mod),mod.p);
+                            future[size_t(pair_row)*N+coordinate],
+                            power0[size_t(pair_column)*N+coordinate],mod),mod.p);
                 for(unsigned offset=DOT_GROUP/2;offset;offset>>=1)
                     value=hafnian_add_mod(value,
                         __shfl_down_sync(0xffffffff,value,offset,DOT_GROUP),mod.p);
