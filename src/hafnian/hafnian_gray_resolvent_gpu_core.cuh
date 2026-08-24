@@ -103,10 +103,11 @@ __device__ __forceinline__ void invert_polynomial(
     const uint32_t* input,uint32_t* output,Mod mod) {
     constexpr unsigned DEGREE=N/2;
     const unsigned lane=threadIdx.x&31;
-    // Q(0)=I.  Every off-diagonal series has valuation one, so Schur
-    // products have valuation two and every pivot retains constant term one.
-    // Its inverse series therefore also has constant term one.
-    if(lane==0)output[0]=mod.one;
+    // The symmetric update metric has diagonal entries +/-1.  Off-diagonal
+    // series have valuation one, so Schur products cannot change a pivot's
+    // constant term; its inverse constant is the same +/-1.
+    const uint32_t inverse_constant=input[0];
+    if(lane==0)output[0]=inverse_constant;
     __syncwarp();
     for(unsigned degree=1;degree<=DEGREE;++degree) {
         uint32_t sum=0;
@@ -114,8 +115,8 @@ __device__ __forceinline__ void invert_polynomial(
             hafnian_mul(input[k],output[degree-k],mod),mod.p);
         for(unsigned offset=16;offset;offset>>=1)
             sum=hafnian_add_mod(sum,__shfl_down_sync(0xffffffff,sum,offset),mod.p);
-        if(lane==0)output[degree]=hafnian_neg_mod(
-            sum,mod.p);
+        if(lane==0)output[degree]=inverse_constant==mod.one?
+            hafnian_neg_mod(sum,mod.p):sum;
         __syncwarp();
     }
 }
@@ -171,9 +172,12 @@ __global__ __launch_bounds__(THREADS,MIN_BLOCKS_PER_SM) void terms_kernel(
                 future[(size_t(stage-1)*2+0)*N+row]=source[row];
                 future[(size_t(stage-1)*2+1)*N+row]=source[N+row];
             }
-            if(lane==0)deltas[stage-1]=(signs&(UINT64_C(1)<<(edge-1)))?
-                hafnian_add_mod(mod.one,mod.one,mod.p):
-                hafnian_neg_mod(hafnian_add_mod(mod.one,mod.one,mod.p),mod.p);
+            if(lane==0) {
+                const uint32_t sign=(signs&(UINT64_C(1)<<(edge-1)))?
+                    mod.one:hafnian_neg_mod(mod.one,mod.p);
+                deltas[2*(stage-1)+0]=sign;
+                deltas[2*(stage-1)+1]=hafnian_neg_mod(sign,mod.p);
+            }
         }
         constexpr size_t CELLS=size_t(N)*N;
         for(size_t cell=lane;cell<CELLS;cell+=32) {
@@ -202,7 +206,8 @@ __global__ __launch_bounds__(THREADS,MIN_BLOCKS_PER_SM) void terms_kernel(
                 basis,fixed_metric,inverse_metric,z0,z1,
                 vector0,vector1,vector2,vector3,N,mod);
             for(unsigned row=lane;row<N;row+=32) {
-                z0[row]=vector0[row];z1[row]=vector1[row];
+                z0[row]=hafnian_add_mod(vector0[row],vector1[row],mod.p);
+                z1[row]=hafnian_sub_mod(vector0[row],vector1[row],mod.p);
             }
             __syncwarp();
         }
@@ -214,13 +219,15 @@ __global__ __launch_bounds__(THREADS,MIN_BLOCKS_PER_SM) void terms_kernel(
         if(lane==0)local_sum=hafnian_add_mod(local_sum,contribution,mod.p);
         __syncwarp();
 
-        // Q(z)=I-z C U^T H (I-zT)^-1 U, truncated at degree N/2.
+        // In the +/- factor basis C is diagonal with entries +/-1.  Use
+        // det(I-z C G)=det(C) det(C-zG); the latter matrix is symmetric.
         uint32_t* q=basis;
         uint32_t* power0=dense;
         uint32_t* power1=power0+M*N;
         uint32_t* gram=power1+M*N;
         for(unsigned index=lane;index<M*M*S;index+=32)q[index]=0;
-        for(unsigned i=lane;i<M;i+=32)q[(size_t(i)*M+i)*S]=mod.one;
+        for(unsigned i=lane;i<M;i+=32)
+            q[(size_t(i)*M+i)*S]=deltas[i];
         for(unsigned index=lane;index<M*N;index+=32)power0[index]=future[index];
         __syncwarp();
         for(unsigned degree=0;degree<HALF;++degree) {
@@ -248,11 +255,9 @@ __global__ __launch_bounds__(THREADS,MIN_BLOCKS_PER_SM) void terms_kernel(
                         gram[size_t(pair_column)*M+pair_row]=value;
             }
             __syncwarp();
-            for(unsigned cell=lane;cell<M*M;cell+=32) {
-                const unsigned row=cell/M,column=cell%M;
-                q[size_t(cell)*S+degree+1]=hafnian_neg_mod(hafnian_mul(
-                    deltas[row/2],gram[size_t(row^1)*M+column],mod),mod.p);
-            }
+            for(unsigned cell=lane;cell<M*M;cell+=32)
+                q[size_t(cell)*S+degree+1]=hafnian_neg_mod(
+                    gram[cell],mod.p);
             for(unsigned index=lane;index<M*N;index+=32) {
                 const unsigned column=index/N,row=index%N;
                 uint32_t value=hafnian_mul(
@@ -276,15 +281,16 @@ __global__ __launch_bounds__(THREADS,MIN_BLOCKS_PER_SM) void terms_kernel(
             for(unsigned i=lane;i<S;i+=32)determinant[i]=third[i];
             __syncwarp();
             for(unsigned row=pivot+1;row<M;++row) {
-                uint32_t* target=q+(size_t(row)*M+pivot)*S;
-                multiply_polynomials<N,1,0>(target,inverse,third,mod);
-                for(unsigned i=lane;i<S;i+=32)target[i]=third[i];
+                const uint32_t* source=q+(size_t(row)*M+pivot)*S;
+                uint32_t* multiplier=q+(size_t(pivot)*M+row)*S;
+                multiply_polynomials<N,1,0>(source,inverse,third,mod);
+                for(unsigned i=lane;i<S;i+=32)multiplier[i]=third[i];
                 __syncwarp();
             }
             for(unsigned row=pivot+1;row<M;++row)
-                for(unsigned column=pivot+1;column<M;++column) {
-                    const uint32_t* multiplier=q+(size_t(row)*M+pivot)*S;
-                    const uint32_t* right=q+(size_t(pivot)*M+column)*S;
+                for(unsigned column=pivot+1;column<=row;++column) {
+                    const uint32_t* multiplier=q+(size_t(pivot)*M+row)*S;
+                    const uint32_t* right=q+(size_t(column)*M+pivot)*S;
                     uint32_t* target=q+(size_t(row)*M+column)*S;
                     multiply_polynomials<N,1,1>(multiplier,right,third,mod);
                     for(unsigned i=lane;i<S;i+=32)
@@ -294,6 +300,9 @@ __global__ __launch_bounds__(THREADS,MIN_BLOCKS_PER_SM) void terms_kernel(
             if(pivot&1) {
                 multiply_polynomials<N>(first,determinant,third,mod);
                 const unsigned stage=(pivot+1)/2;
+                if(stage&1)for(unsigned i=lane;i<S;i+=32)
+                    third[i]=hafnian_neg_mod(third[i],mod.p);
+                __syncwarp();
                 const uint64_t index=chain_begin+stage;
                 const uint64_t signs=index^(index>>1);
                 contribution=term_from_characteristic<N>(

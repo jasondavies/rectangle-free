@@ -14577,14 +14577,27 @@
   the valuation-two Schur products cannot change it.  Remove the six redundant
   Fermat inversions per chain and construct each inverse series from the known
   unit constant.  This saves a further 1--2% locally.
+- Diagonalize each rank-two block before forming the resolvent.  For update
+  sign `s=+/-1`,
+
+  ```text
+  2s(uv^T + vu^T)
+    = s(u+v)(u+v)^T - s(u-v)(u-v)^T.
+  ```
+
+  The update metric is therefore diagonal with entries `+/-1`.  Rewriting
+  `det(I-zDG)` as `det(D) det(D-zG)` makes the polynomial matrix symmetric;
+  symmetric LDL computes only one triangle and needs no general pivot
+  inversions.  In alternating complete-domain runs this is another 5% over
+  the unit-pivot LDU implementation.
 - Complete full-rank order-48 domains on one RTX PRO 6000 Blackwell:
 
   | prime | former v3 s | resolvent v4 s | speedup |
   |---:|---:|---:|---:|
-  | 2,147,483,647 | 0.46744 | 0.44989 | 1.039x |
-  | 2,147,483,629 | 0.48772 | 0.46569 | 1.047x |
-  | 2,147,483,587 | 0.48717 | 0.46111 | 1.057x |
-  | 2,147,483,579 | 0.48452 | 0.46001 | 1.053x |
+  | 2,147,483,647 | 0.46247 | 0.41607 | 1.112x |
+  | 2,147,483,629 | 0.48644 | 0.43859 | 1.109x |
+  | 2,147,483,587 | 0.48602 | 0.43808 | 1.109x |
+  | 2,147,483,579 | 0.48528 | 0.43634 | 1.112x |
 
   All residues match.  Memcheck reports zero errors and racecheck reports zero
   hazards.  Rank-47 order-48 matrices are about 2% slower with the resolvent,
@@ -14596,7 +14609,7 @@
   becomes `glynn-gray-resolvent-fixed-field-cuda-v4`; `gray_chain=4` identifies
   the new path.
 - Outcome: accept the selective backend.  Full-rank order-48 work is about 71%
-  of weighted campaign terms, so the 4--6% local gain projects to roughly
-  3--4% end to end.  This is not a second algorithmic breakthrough, but it is a
+  of weighted campaign terms, so the approximately 11% local gain projects to
+  roughly 7% end to end.  This is not a second algorithmic breakthrough, but it is a
   verified saving on the dominant catalog sector and validates the resolvent
   identity as a practical GPU primitive.

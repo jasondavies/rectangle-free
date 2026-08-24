@@ -68,7 +68,7 @@ full-rank order-48 work instead uses a four-term low-rank resolvent chain: one
 tridiagonalization plus a 6x6 truncated polynomial determinant evaluates all
 four terms.  Deficient, unaligned, larger-order, and pre-Blackwell work keeps
 the established Gray backend.  On one RTX PRO 6000, the exact workload
-currently projects to approximately 20--21.5 GPU-hours, excluding campaign
+currently projects to approximately 19.5--20.5 GPU-hours, excluding campaign
 interruptions and final independent validation.
 
 The independent finite-field Glynn/trace/Hessenberg fallback is shared with
