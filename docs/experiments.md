@@ -13926,21 +13926,43 @@
   | 6 | 308.29 | 307.50 | 1.0026x |
   | 8 | 308.48 | 305.12 | 1.0110x |
 
-  On complete order-48 domains, chain 8 is only `1.004--1.012x` faster across
-  the four primes.  A lower-rank (`r=46`) query gains `1.037x`, confirming that
-  the reduction is real but modest for the mostly full-rank workload.
-- Order-50 counterexample: chain 8 takes 333.84 ms per million terms versus
-  317.67 ms for production (`0.9516x`).  Shorter chains are worse.  Since
-  orders 48 and 50 dominate the campaign, this does not justify a second
-  production/restart path for an approximately one-percent best-case gain.
-- Profile: the shared-scratch version has 38 registers/thread but only eight
+  This was still only parity; it is retained to show why arithmetic-count
+  projections alone were misleading.
+- Winning residency change: place the disposable Lanczos basis beside the
+  already-global rebuild matrix.  Basis writes are strided, but its repeated
+  row-major reads are coalesced and overwhelmingly hit cache.  Chain 6 shared
+  storage falls from 14,156 to 4,940 bytes.  Residency rises from six to 17
+  CTAs/SM, and the complete million-term order-48 time falls from about 307.5
+  to 232.9 ms.  The extra global traffic is not a bandwidth bottleneck.
+- Complete-domain matched results:
+
+  | order | chain | prime | production s | Gray s | speedup |
+  |---:|---:|---:|---:|---:|---:|
+  | 48 | 6 | 2,147,483,647 | 2.3806 | 1.7822 | 1.3357x |
+  | 48 | 6 | 2,147,483,629 | 2.3752 | 1.7673 | 1.3440x |
+  | 48 | 6 | 2,147,483,587 | 2.3509 | 1.7597 | 1.3360x |
+  | 48 | 6 | 2,147,483,579 | 2.3698 | 1.7677 | 1.3406x |
+  | 50 | 4 | 2,147,483,647 | 5.0558 | 3.8170 | 1.3245x |
+  | 50 | 4 | 2,147,483,629 | 4.9756 | 3.8186 | 1.3030x |
+  | 50 | 4 | 2,147,483,587 | 4.9379 | 3.7718 | 1.3092x |
+  | 50 | 4 | 2,147,483,579 | 4.9631 | 3.8168 | 1.3003x |
+
+  Every listed run covers the entire sign domain and has exact residue parity
+  with zero breakdowns.
+- Profile: the original all-shared version has 38 registers/thread but only eight
   active warps/SM (16.7% occupancy), with 28.2% compute and negligible DRAM
-  throughput; it is latency-limited.  Globalizing only the rebuild matrix
-  raises residency to 12--14 warps/SM.  The remaining sequential Lanczos
-  recurrences and inversions prevent the CPU's approximately `2x` arithmetic
-  advantage from becoming a material GPU advantage.  The Nsight report is
-  retained outside the repository under
+  throughput; it is latency-limited.  The final global-basis chain-6 kernel
+  uses 37 registers, has 34 theoretical and 30.58 achieved active warps/SM
+  (63.7% achieved occupancy), reaches 47.7% SM throughput, and uses only 0.95%
+  of DRAM throughput.  The Nsight reports are retained outside the repository under
   `../rectangle-free-data-v2/profiles/verda-rtxpro6000-hafnian-gray-20260824/`.
+- Candidate campaign projection: orders 48 and 50 contain 90.36% of all
+  prime-image sign terms.  Applying the complete-domain measured timings to
+  those exact counts and leaving orders 52--64 on the current kernel reduces
+  the conservative projection from 87.29 to approximately 68.25 RTX PRO 6000
+  GPU-hours (`1.279x` overall), saving about 19.0 GPU-hours.  The rare
+  scalar-Lanczos-ineligible queries can retain the independent-term backend;
+  their effect on this estimate is negligible.
 - Exact FP16 MMA remains a possible separate arithmetic probe: centered
   residues below 2,048 are exactly representable, and reducing after 16
   products keeps the FP32 accumulator within its exact-integer range.  It
@@ -13948,9 +13970,9 @@
   while the present Gray recurrence exposes mostly dependent matrix-vector
   operations rather than large MMA tiles.  Do not infer a campaign gain from
   FP16 throughput alone; require a complete prime-image-weighted kernel gate.
-- Outcome: reject Gray-chain updates as a 6x28 production backend on RTX PRO
-  6000.  Retain the exact CUDA probe and the eager-factor-carry technique as
-  research artifacts.  Keep the maintained fixed-prime solver and its
-  conservative `87.3` GPU-hour campaign projection unchanged.  Do not pursue
-  INT8 MMA for this chain: the 31-bit version is already at parity, while the
-  measured small-prime CRT multiplier is `3.042x`.
+- Outcome: accept the global-basis Gray chain for production integration at
+  orders 48 and 50, with the independent fixed-prime kernel as the exact
+  fallback for an ineligible query or any runtime breakdown.  Keep orders
+  52--64 unchanged until separately measured.  Do not pursue INT8 MMA for
+  this chain: the exact 31-bit path wins without the measured `3.042x`
+  small-prime CRT multiplier.

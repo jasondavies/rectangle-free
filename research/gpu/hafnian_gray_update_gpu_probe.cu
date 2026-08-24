@@ -431,8 +431,7 @@ __global__ void gray_update_kernel(
     // This performs the same matrix-vector products as a lazy basis chain,
     // but lets every basis be discarded immediately and makes shared storage
     // independent of CHAIN at the dominant N^2 scale.
-    uint32_t* matrices=shared;                         // one disposable basis: N*N
-    uint32_t* metrics=matrices+N*N;                   // ping-pong: 2*N
+    uint32_t* metrics=shared;                         // ping-pong: 2*N
     uint32_t* inverse_metrics=metrics+2*N;            // ping-pong: 2*N
     uint32_t* diagonals=inverse_metrics+2*N;          // 2*N
     uint32_t* betas=diagonals+2*N;                    // 2*N
@@ -451,6 +450,7 @@ __global__ void gray_update_kernel(
 
     const uint64_t chain_stride=uint64_t(gridDim.x)*CHAIN;
     uint32_t* dense=dense_scratch+size_t(blockIdx.x)*N*N;
+    uint32_t* basis=dense_scratch+size_t(gridDim.x+blockIdx.x)*N*N;
     for(uint64_t chain_begin=begin+uint64_t(blockIdx.x)*CHAIN;
             chain_begin<end;chain_begin+=chain_stride) {
         const uint64_t signs0=chain_begin^(chain_begin>>1);
@@ -480,7 +480,7 @@ __global__ void gray_update_kernel(
             ok=generalized_lanczos(
                 dense,nullptr,nullptr,nullptr,nullptr,0,
                 fixed_metric,rank,splitmix64(chain_begin)^attempt,mod,
-                matrices,metrics,inverse_metrics,diagonals,betas,
+                basis,metrics,inverse_metrics,diagonals,betas,
                 previous,current,next,applied,warp_sums,scalar);
         if(!ok) {
             ++local_failures;
@@ -492,7 +492,7 @@ __global__ void gray_update_kernel(
         for(unsigned future_step=1;future_step<chain_end-chain_begin;++future_step) {
             uint32_t* first=future+(size_t(future_step-1)*2+0)*N;
             uint32_t* second=future+(size_t(future_step-1)*2+1)*N;
-            inverse_basis_apply_pair(matrices,fixed_metric,inverse_metrics,
+            inverse_basis_apply_pair(basis,fixed_metric,inverse_metrics,
                 first,second,temporary0,temporary1,rank,mod);
             if(threadIdx.x<rank) {
                 first[threadIdx.x]=temporary0[threadIdx.x];
@@ -521,7 +521,7 @@ __global__ void gray_update_kernel(
             for(unsigned attempt=0;attempt<4&&!ok;++attempt)
                 ok=generalized_lanczos(nullptr,diagonals+current_buffer*N,
                     betas+current_buffer*N,z0,z1,delta,old_metric,rank,
-                    splitmix64(index)^attempt,mod,matrices,
+                    splitmix64(index)^attempt,mod,basis,
                     metrics+next_buffer*N,inverse_metrics+next_buffer*N,
                     diagonals+next_buffer*N,betas+next_buffer*N,
                     previous,current,next,applied,warp_sums,scalar);
@@ -530,7 +530,7 @@ __global__ void gray_update_kernel(
                     future_step<chain_end-chain_begin;++future_step) {
                 uint32_t* first=future+(size_t(future_step-1)*2+0)*N;
                 uint32_t* second=future+(size_t(future_step-1)*2+1)*N;
-                inverse_basis_apply_pair(matrices,old_metric,
+                inverse_basis_apply_pair(basis,old_metric,
                     inverse_metrics+next_buffer*N,first,second,
                     temporary0,temporary1,rank,mod);
                 if(threadIdx.x<rank) {
@@ -557,7 +557,7 @@ __global__ void gray_update_kernel(
 template<unsigned N,unsigned CHAIN>
 constexpr size_t gray_shared_bytes() {
     constexpr unsigned HALF=N/2;
-    return (N*N+4*N+4*N+4*N+2*(CHAIN-1)*N+2*N+
+    return (4*N+4*N+4*N+2*(CHAIN-1)*N+2*N+
         3*(HALF+1)+4+4)*sizeof(uint32_t);
 }
 
@@ -591,7 +591,8 @@ void run_probe(const Query& query,const RankFactor& factor,uint64_t terms,
     hafnian_cuda_check(cudaMalloc(&device_failures,sizeof(uint32_t)),
         "allocate failure count");
     hafnian_cuda_check(cudaMalloc(&device_dense,
-        size_t(gray_blocks)*N*N*sizeof(uint32_t)),"allocate dense Gray scratch");
+        size_t(2)*gray_blocks*N*N*sizeof(uint32_t)),
+        "allocate dense/basis Gray scratch");
     std::vector<uint32_t> sums(maximum_blocks);
     cudaEvent_t started,finished;
     hafnian_cuda_check(cudaEventCreate(&started),"create start event");
