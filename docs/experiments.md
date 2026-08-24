@@ -13323,3 +13323,56 @@
   exact opt-in probe as the closed gate.  For near-term `8x8` performance,
   continue optimizing the existing quotient corpus; for `9x9`, require a new
   mathematical representation before provisioning GPUs.
+
+### Experiment 404: Offline row-gauge portfolio for the 8x8 join
+
+- Goal: revisit the row-gauge portfolio rejected in Experiments 322 and 345.
+  An offline corpus pass removes the old runtime selector cost, while the
+  token-plane quotient and current `K4 disjoint-union K2` prefix change the
+  relevant join objective.  There are 420 labelled embeddings of this
+  seven-pair prefix under `S_8`.
+- Implementation: add `offline_row_gauge_8x8_census`, an exact CPU simulator
+  of the current quotient layout and weight-class BMMA join.  For every gauge
+  it builds ordinary and complement distributions, retains one representative
+  of each token-plane orbit, evaluates both ordinary and plane-swapped right
+  orientations, groups by exact `(weight, orbit size)`, and counts physical
+  bucket screens, class pairs, `m16n8k128` tiles, and eight-warp 16-task-chunk
+  schedules.  It supports all-420 menu learning, explicit-menu validation,
+  and complete right-group sampling.  `pair_projection_8x8_census` now accepts
+  an arbitrary seven-pair mask so the distribution recurrence is shared.
+- Metric calibration: on 64 stride records from `s0000`, the exact tile count
+  correctly rejects both gauges that failed the direct GPU test in Experiment
+  345.  Relative to production mask `0x8002187`, mask `0x804600e` emits 23.27%
+  more tiles and mask `0x400428b` emits 7.66% more.  Their measured GPU
+  regressions were 17.09% and 8.96%.  The older fitted bucket-screen model had
+  incorrectly rewarded their much smaller number of cheap rejected pairs.
+  Aggregate BMMA tiles are therefore the primary offline objective.
+- Edge-level gate: learn on 32 stride records from each of `s0000` and `s0512`
+  and hold out 32 from `s1023`.  Fixed menus of 4, 8, and 16 gauges reduce
+  held-out tiles by 15.15%, 18.53%, and 24.76%; the per-edge all-420 oracle
+  reduces them by 36.55%.  This is the apparent opportunity, but it chooses a
+  potentially different physical layout for every edge.
+- Complete-group gate: sample complete right-prefix groups, because production
+  builds and reuses one right layout for all incident left edges.  An all-420
+  search over 32 uniformly sampled groups per shard gives only 4.66%, 6.79%,
+  and 8.07% held-out reductions for 4, 8, and 16 gauges.  Even the unrestricted
+  420-gauge group oracle saves only 18.24%.
+- Scaling validation: re-evaluate the learned 16-gauge menu on 128 uniformly
+  sampled complete groups per shard.  Held-out group-level reductions are
+  4.18%, 6.48%, and 9.08% for 4, 8, and 16 gauges.  Allowing per-edge choices
+  raises them only to 5.36%, 8.71%, and 11.58%, while requiring 1.156x, 1.281x,
+  and 1.344x as many `(right,gauge)` physical layouts.
+- Heavy-tail validation: on the four most frequently reused right groups from
+  each shard, group-level held-out savings are 4.08% for four gauges and 5.71%
+  even with the full 16-gauge menu.  Per-edge selection saves 11.25%, 13.45%,
+  and 15.25%, but explodes physical right layouts by 4x, 8x, and 13.25x.
+- Interpretation: preferences from individual joins largely cancel when all
+  edges sharing a right layout are assigned together.  Assigning gauges per
+  edge recovers part of the tile oracle but duplicates precisely the expensive
+  right construction that source-aware batching was designed to reuse.  The
+  remaining single-digit join-work reduction cannot repay extra left variants,
+  right construction, VRAM, underfilled batches, scheduling metadata, or the
+  offline scoring pass.
+- Outcome: reject offline row-gauge portfolios for production.  Keep the
+  census as a reproducible closed gate and retain the single globally tuned
+  production gauge.  No CUDA production path or result format changes.

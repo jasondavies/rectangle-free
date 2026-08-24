@@ -103,7 +103,8 @@ static uint64_t swap_suffix_planes(uint64_t suffix) {
 }
 
 static ProjectionDistribution build_distribution(uint32_t prefix,
-                                                 bool complement) {
+                                                 bool complement,
+                                                 uint32_t pair_mask) {
     struct Item {
         uint16_t prefix;
         uint32_t weight;
@@ -114,7 +115,6 @@ static ProjectionDistribution build_distribution(uint32_t prefix,
         build_full_weighted_distribution(prefix, complement);
     std::vector<Item> items;
     items.reserve((full.size() + 1) / 2);
-    const uint32_t pair_mask = production_mask(PREFIX_COORDINATES);
     uint64_t expanded_entries = 0;
     for (const FullWeightedEntry& entry : full) {
         uint64_t swapped = swap_token_planes_local(entry.mask);
@@ -178,8 +178,16 @@ static ProjectionDistribution build_distribution(uint32_t prefix,
 }
 
 static ProjectionPair build_pair_local(uint32_t prefix) {
-    return ProjectionPair{build_distribution(prefix, false),
-                          build_distribution(prefix, true)};
+    const uint32_t pair_mask = production_mask(PREFIX_COORDINATES);
+    return ProjectionPair{build_distribution(prefix, false, pair_mask),
+                          build_distribution(prefix, true, pair_mask)};
+}
+
+static ProjectionPair build_pair_local(uint32_t prefix, uint32_t pair_mask) {
+    if (__builtin_popcount(pair_mask) != PREFIX_COORDINATES)
+        throw std::runtime_error("projection pair mask has wrong width");
+    return ProjectionPair{build_distribution(prefix, false, pair_mask),
+                          build_distribution(prefix, true, pair_mask)};
 }
 
 static void add_stats(Stats& destination, const Stats& source) {

@@ -329,6 +329,11 @@ $(BUILD_DIR)/weight_class_bitset_8x8_census: research/probes/weight_class_bitset
 		research/probes/prefix_bucket_tt_rank_census.cpp research/probes/prefix_hierarchy_8x8_census.cpp
 	$(CXX) -O3 -std=c++17 -fopenmp -march=native -o $@ $<
 
+$(BUILD_DIR)/offline_row_gauge_8x8_census: research/probes/offline_row_gauge_8x8_census.cpp \
+		research/probes/pair_projection_8x8_census.cpp research/probes/prefix_bmma_cost_census.cpp \
+		research/probes/prefix_bucket_tt_rank_census.cpp research/probes/prefix_hierarchy_8x8_census.cpp
+	$(CXX) -O3 -std=c++17 -fopenmp -march=native -o $@ $<
+
 $(BUILD_DIR)/demanded_query_reuse_8x8_census: research/probes/demanded_query_reuse_8x8_census.cpp \
 		research/probes/prefix_bucket_tt_rank_census.cpp research/probes/prefix_hierarchy_8x8_census.cpp
 	$(CXX) -O3 -std=c++17 -fopenmp -march=native -o $@ $<
@@ -384,6 +389,7 @@ BUILD_TARGETS := 5xn_count4 partition_count4 partition_poly partition_poly_7 \
 	column_split_8x8_transform column_split_8x8_selector \
 	pair_projection_8x8_census behavioral_distribution_8x8_census \
 	demanded_query_reuse_8x8_census weight_class_bitset_8x8_census \
+	offline_row_gauge_8x8_census \
 	universal_state_symmetry_probe twocolour_3x4_probe twocolour_7x7_solve \
 	gpu_result_checkpoint_test
 
