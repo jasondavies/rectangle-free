@@ -185,6 +185,18 @@ $(BUILD_DIR)/token_plane_quotient_probe: research/probes/token_plane_quotient_pr
 $(BUILD_DIR)/six_by_thirty_matching_probe: research/probes/six_by_thirty_matching_probe.cpp
 	$(CXX) -O3 -march=native -std=c++17 $(OPENMP_CFLAGS) -o $@ $< $(OPENMP_LDFLAGS)
 
+$(BUILD_DIR)/six_by_twenty_eight_defect_census: research/probes/six_by_twenty_eight_defect_census.cpp \
+		src/hafnian/six_by_twenty_nine_catalog.hpp src/common/sha256.hpp
+	$(CXX) -O3 -march=native -std=c++17 $(OPENMP_CFLAGS) -o $@ $< \
+		$(OPENMP_LDFLAGS) -lnauty
+
+.PHONY: six-by-twenty-eight-census-test
+six-by-twenty-eight-census-test: six_by_twenty_eight_defect_census
+	./$(BUILD_DIR)/six_by_twenty_eight_defect_census --slack 1 --threads 2 --raw \
+		| grep -q 'raw_unions=83071 symmetry_orbits=29.*exact=OK'
+	./$(BUILD_DIR)/six_by_twenty_eight_defect_census --slack 2 --threads 2 --graph-isomorphism \
+		| grep -q 'symmetry_orbits=36398 graph_orbits=36398.*exact=OK'
+
 $(BUILD_DIR)/six_by_thirty_hafnian: src/hafnian/six_by_thirty_hafnian.cpp src/common/sha256.hpp
 	$(CXX) -O3 -march=native -std=c++17 $(OPENMP_CFLAGS) -o $@ $< $(OPENMP_LDFLAGS)
 
@@ -372,7 +384,7 @@ BUILD_TARGETS := 5xn_count4 partition_count4 partition_poly partition_poly_7 \
 	binary_orbit_augment_7x9 binary_orbit_augment_8x8 s8_prefix_module_probe \
 	symmetric_kernel_rank_probe twocolour_3x3_sampler twocolour_4x4_probe \
 	canonical_query_circuit_probe token_plane_quotient_probe \
-	six_by_thirty_matching_probe \
+	six_by_thirty_matching_probe six_by_twenty_eight_defect_census \
 	six_by_thirty_hafnian \
 	six_by_thirty_hafnian_gpu \
 	six_by_twenty_nine_hafnian_cpu \

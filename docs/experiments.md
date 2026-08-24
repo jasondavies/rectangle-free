@@ -13376,3 +13376,88 @@
 - Outcome: reject offline row-gauge portfolios for production.  Keep the
   census as a reproducible closed gate and retain the single globally tuned
   production gauge.  No CUDA production path or result format changes.
+
+### Experiment 405: Exact 6x28 defect-orbit and shared-minor gate
+
+- Goal: determine whether the successful 6x29 low-defect expansion can move
+  one more column from the saturated 6x30 endpoint, provided the 36,398
+  related residual matching queries share substantially more work than
+  independent hafnians.
+- Exact formulation: with slack four, a defect collection `D` has total
+  excess `e <= 4`, uses `2d+e` tokens, and leaves `r=4-e` tokens unmatched.
+  Its residual count is `m_(28-d)(H-D)` for
+  `H=K4 x KG(6,2)`.  The dummy-vertex formulation has even order
+  `64-2d-2e`; equivalently, after choosing the unmatched tokens, every term is
+  a perfect-matching minor of the same 60-vertex graph with exactly `2d+4`
+  deleted vertices.
+- Initial raw gate: the old generic hash enumerator is single-threaded and
+  exceeded 30 GiB before canonicalization.  A packed parallel rewrite exactly
+  counted 659,955,121 unordered defect configurations and 588,220,996 distinct
+  `(occupied,count)` unions, occupying 10.56 and 9.41 GB respectively.  It
+  was stopped before applying 720 row images to half a billion unions; that
+  computation graph is unnecessary.
+- Orbit-DP breakthrough: propagate total invariant coefficients directly on
+  occupied-set orbits under `S6 x S4`.  For one representative, the weighted
+  number of support transitions into each child orbit is identical for every
+  member of the parent orbit.  Multiplying that transition count by the
+  parent's orbit-total coefficient is therefore exact.  Generate ordered
+  defect sequences and divide the depth-`d` coefficients by `d!` at the end.
+  The complete levels contain 5, 103, 3,212, and 33,077 states and require
+  only 215,870 representative transitions.  Sixteen local threads finish the
+  exact orbit and graph-isomorphism census in 0.54 seconds.
+- Independent validation: at slack one, the same implementation reproduces
+  the complete 6x29 catalog: 84,421 unordered configurations, 83,071 raw unions,
+  29 `S6 x S4` orbits, all four known sector coefficient sums, and no further
+  graph-isomorphism merges.
+- Exact 6x28 sector census:
+
+  | excess | defects | augmented order | queries | coefficient sum | sign terms/prime |
+  |---:|---:|---:|---:|---:|---:|
+  | 0 | 0 | 64 | 1 | 1 | 2,147,483,648 |
+  | 1 | 1 | 60 | 2 | 840 | 1,073,741,824 |
+  | 2 | 1 | 58 | 1 | 1,440 | 268,435,456 |
+  | 2 | 2 | 56 | 25 | 303,660 | 3,355,443,200 |
+  | 3 | 2 | 54 | 36 | 993,600 | 2,415,919,104 |
+  | 3 | 3 | 52 | 664 | 62,422,320 | 22,280,142,848 |
+  | 4 | 1 | 54 | 2 | 480 | 134,217,728 |
+  | 4 | 2 | 52 | 42 | 800,640 | 1,409,286,144 |
+  | 4 | 3 | 50 | 2,548 | 291,375,360 | 42,748,346,368 |
+  | 4 | 4 | 48 | 33,077 | 8,126,516,160 | 277,469,986,816 |
+
+  Total: 36,398 queries and 353,303,003,136 sign terms per prime.  Exact nauty
+  canonicalization of every augmented residual graph leaves all 36,398
+  classes distinct, so arbitrary residual-graph isomorphism gives no second
+  quotient beyond `S6 x S4`.
+- CRT bound: for a sector `(e,d)` with coefficient sum `c`, bound its matching
+  count by the complete graph on `N=60-2d-e` residual vertices.  After the
+  factor `2^(28-d)` cancels the matching denominator, the contribution is at
+  most
+  `28! c N! / ((4-e)! (28-d)!)`.  Summing sectors gives the explicit 269-bit
+  bound
+  `551794091292261875770267722335444182236673150118373063746794731601920000000000000`.
+  Nine of the existing 31-bit primes therefore suffice, as for 6x29.
+- Shared matching-minor gate: add a modular deletion recurrence with one
+  symmetry-canonical memo shared across all roots.  A pivot token is either
+  one of the `r` unmatched tokens or is paired with one compatible neighbour.
+  Roots are processed from the smallest 48-vertex sector to maximize early
+  sharing.  In 120.06 seconds it creates 7,852,032 memo states, 31,175,151
+  branches, and 19,466,183 raw canonical-cache entries without completing the
+  first root.  Thus irregular CPU state sharing is already much slower than a
+  several-second GPU hafnian before any cross-query reuse occurs.
+- Generic derivative-data-structure check: applying [Li's high-order hafnian
+  data structure](https://arxiv.org/abs/2309.15422) through deletion order twelve would
+  require at least 1,477,362,046,652 even deletion subsets through size twelve
+  before its `2^30`-scale precomputation factor.  Its asymptotic multipoint
+  result does not provide a practical bounded-order minor oracle here.
+- Production estimate: extrapolating the measured RTX PRO 6000 rates from
+  orders 54--62 to orders 48--64 gives about 37.6 GPU-hours per prime, or
+  approximately 338 GPU-hours for nine primes.  Eight comparable GPUs project
+  to roughly 42 wall-clock hours before interruption and validation overhead;
+  78.5% of arithmetic is the 33,077 order-48 queries.
+- Outcome: accept the compact exact orbit census, but reject the shared CPU
+  recurrence, generic high-order derivative table, and graph-isomorphism
+  quotient as 6x28 accelerators.  A straightforward independent-hafnian GPU
+  campaign appears feasible but expensive.  Before building production
+  checkpoint/reduction machinery, benchmark representative order-48 and
+  order-64 queries on the intended GPU and obtain explicit approval for a
+  roughly 338-GPU-hour campaign.
