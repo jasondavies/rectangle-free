@@ -278,6 +278,7 @@ $(BUILD_DIR)/six_by_twenty_nine_hafnian_gpu: src/hafnian/six_by_twenty_nine_hafn
 $(BUILD_DIR)/six_by_twenty_eight_hafnian_gpu: src/hafnian/six_by_twenty_eight_hafnian_gpu.cu \
 		src/hafnian/six_by_twenty_eight_catalog.hpp src/hafnian/six_by_twenty_nine_catalog.hpp \
 		src/hafnian/hafnian_gpu_core.cuh src/hafnian/hafnian_gray_gpu_core.cuh \
+		src/hafnian/hafnian_gray_resolvent_gpu_core.cuh \
 		src/common/sha256.hpp
 	$(NVCC) $(NVCCFLAGS) -std=c++17 -o $@ $<
 
@@ -285,6 +286,7 @@ $(BUILD_DIR)/six_by_twenty_eight_runtime_montgomery_control: \
 		src/hafnian/six_by_twenty_eight_hafnian_gpu.cu \
 		src/hafnian/six_by_twenty_eight_catalog.hpp src/hafnian/six_by_twenty_nine_catalog.hpp \
 		src/hafnian/hafnian_gpu_core.cuh src/hafnian/hafnian_gray_gpu_core.cuh \
+		src/hafnian/hafnian_gray_resolvent_gpu_core.cuh \
 		src/common/sha256.hpp
 	$(NVCC) $(NVCCFLAGS) -std=c++17 -DHAFNIAN_RUNTIME_MONTGOMERY_CONTROL=1 -o $@ $<
 

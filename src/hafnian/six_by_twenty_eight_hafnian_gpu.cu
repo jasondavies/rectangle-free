@@ -20,6 +20,7 @@
 
 #include "hafnian_gpu_core.cuh"
 #include "hafnian_gray_gpu_core.cuh"
+#include "hafnian_gray_resolvent_gpu_core.cuh"
 #include "../common/sha256.hpp"
 #include "six_by_twenty_eight_catalog.hpp"
 
@@ -32,7 +33,7 @@ using six_by_twenty_eight::Query;
 constexpr const char* ALGORITHM="glynn-trace-hessenberg-residual-runtime-montgomery-control-v1";
 constexpr const char* FORMAT="six-by-twenty-eight-hafnian-v1";
 #else
-constexpr const char* ALGORITHM="glynn-gray-fraction-free-lanczos-fixed-field-cuda-v3";
+constexpr const char* ALGORITHM="glynn-gray-resolvent-fixed-field-cuda-v4";
 constexpr const char* FORMAT="six-by-twenty-eight-hafnian-v2";
 #endif
 
@@ -169,6 +170,9 @@ class DeviceWorkspace {
         hafnian_cuda_check(cudaDeviceGetAttribute(
             &multiprocessors,cudaDevAttrMultiProcessorCount,device),
             "multiprocessor count");
+        hafnian_cuda_check(cudaDeviceGetAttribute(
+            &compute_major,cudaDevAttrComputeCapabilityMajor,device),
+            "compute capability");
         hafnian_cuda_check(cudaMalloc(&adjacency,64*64),"allocate adjacency");
         hafnian_cuda_check(cudaMalloc(&inverses,33*sizeof(uint32_t)),"allocate inverses");
         hafnian_cuda_check(cudaMalloc(&gray_failures,sizeof(uint32_t)),
@@ -205,6 +209,7 @@ class DeviceWorkspace {
     uint32_t* gray_failures=nullptr;
     uint32_t* gray_scratch=nullptr;
     int multiprocessors=0;
+    int compute_major=0;
     unsigned block_capacity=0;
     size_t gray_word_capacity=0;
     std::vector<uint32_t> host_sums;
@@ -255,8 +260,9 @@ std::string run_query(const Query& query,const Catalog& catalog,const Task& task
         threads,workspace.multiprocessors);
     unsigned blocks=options.blocks?options.blocks:recommended_blocks;
 
-    bool gray_enabled=false;
+    bool gray_enabled=false,resolvent_enabled=false;
     unsigned gray_slots=0,gray_grid_blocks=0,gray_active_blocks=0;
+    unsigned selected_gray_chain=0;
     uint32_t gray_failures_total=0,gray_fallback_chunks=0,gray_chunks=0;
     hafnian_gray::RankFactor gray_factor;
     hafnian_gray::DeviceFactors gray_factors;
@@ -270,30 +276,51 @@ std::string run_query(const Query& query,const Catalog& catalog,const Task& task
         if(gray_factor.rank) {
             gray_factors=hafnian_gray::make_device_factors<N>(query,gray_factor,mod);
             int active=0;
-            if(gray_factor.rank==N)
+            if constexpr(N==48) {
+                resolvent_enabled=gray_factor.rank==N&&
+                    workspace.compute_major>=12&&
+                    task.begin%hafnian_resolvent::CHAIN==0&&
+                    end%hafnian_resolvent::CHAIN==0&&
+                    options.chunk_terms%hafnian_resolvent::CHAIN==0;
+            }
+            if(resolvent_enabled) {
+                if constexpr(N==48)
+                    hafnian_cuda_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                        &active,hafnian_resolvent::terms_kernel<N,ActiveMod>,
+                        hafnian_resolvent::THREADS,
+                        hafnian_resolvent::shared_bytes<N>()),
+                        "compute resolvent Gray kernel occupancy");
+                selected_gray_chain=hafnian_resolvent::CHAIN;
+            } else if(gray_factor.rank==N) {
                 hafnian_cuda_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
                     &active,hafnian_gray::terms_kernel<N,CHAIN,ActiveMod,true>,
                     hafnian_gray::THREADS,hafnian_gray::shared_bytes<N>()),
                     "compute full-rank Gray kernel occupancy");
-            else
+                selected_gray_chain=CHAIN;
+            } else {
                 hafnian_cuda_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
                     &active,hafnian_gray::terms_kernel<N,CHAIN,ActiveMod,false>,
                     hafnian_gray::THREADS,hafnian_gray::shared_bytes<N>()),
                     "compute generic Gray kernel occupancy");
+                selected_gray_chain=CHAIN;
+            }
             if(active<=0)throw std::runtime_error("Gray kernel has zero occupancy");
             gray_active_blocks=unsigned(active);
             uint64_t requested=options.blocks?options.blocks:
                 uint64_t(workspace.multiprocessors)*unsigned(active)*
                 hafnian_gray::WARPS_PER_BLOCK*24U;
             const uint64_t maximum_groups=(std::min<uint64_t>(
-                options.chunk_terms,end-task.begin)+CHAIN-1)/CHAIN;
+                options.chunk_terms,end-task.begin)+selected_gray_chain-1)/
+                selected_gray_chain;
             requested=std::min(requested,std::max<uint64_t>(2,maximum_groups));
             requested=std::max<uint64_t>(2,(requested+1)&~UINT64_C(1));
             if(requested>UINT32_MAX)
                 throw std::runtime_error("too many Gray chain slots");
             gray_slots=unsigned(requested);
             gray_grid_blocks=gray_slots/hafnian_gray::WARPS_PER_BLOCK;
-            workspace.ensure_gray_words(
+            if(resolvent_enabled)workspace.ensure_gray_words(
+                hafnian_resolvent::scratch_words<N>(gray_slots));
+            else workspace.ensure_gray_words(
                 hafnian_gray::scratch_words<N,CHAIN>(gray_slots));
             gray_enabled=true;
             threads=N<=50?224U:256U;
@@ -324,7 +351,7 @@ std::string run_query(const Query& query,const Catalog& catalog,const Task& task
             query.defect_coefficient,query.matching_bound_power,N,
             N+1,binary_digest.c_str(),task.prime,task.begin,
             covered_end,TOTAL_TERMS,partial,blocks,threads,
-            unsigned(gray_enabled),gray_enabled?GRAY_CHAIN:0U,
+            unsigned(gray_enabled),gray_enabled?selected_gray_chain:0U,
             gray_slots,
             gray_grid_blocks,gray_active_blocks,gray_chunks,
             gray_failures_total,gray_fallback_chunks,
@@ -349,7 +376,16 @@ std::string run_query(const Query& query,const Catalog& catalog,const Task& task
                 hafnian_cuda_check(cudaMemset(
                     workspace.gray_failures,0,sizeof(uint32_t)),
                     "clear Gray failure counter");
-                if(gray_factor.rank==N)
+                if(resolvent_enabled) {
+                    if constexpr(N==48)
+                        hafnian_resolvent::terms_kernel<N,ActiveMod><<<
+                            gray_grid_blocks,hafnian_resolvent::THREADS,
+                            hafnian_resolvent::shared_bytes<N>()>>>(
+                            gray_factors.edge_matrices,gray_factors.update_vectors,
+                            gray_factors.metric,begin,chunk_end,mod,
+                            workspace.inverses,workspace.gray_scratch,workspace.sums,
+                            workspace.gray_failures);
+                } else if(gray_factor.rank==N)
                     hafnian_gray::terms_kernel<N,CHAIN,ActiveMod,true><<<
                         gray_grid_blocks,hafnian_gray::THREADS,
                         hafnian_gray::shared_bytes<N>()>>>(

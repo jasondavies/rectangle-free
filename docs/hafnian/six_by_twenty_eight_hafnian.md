@@ -63,9 +63,13 @@ Orders 48--58 use exact Gray-code rank-two updates and a fraction-free
 generalized-Lanczos rebuild.  One batch inversion and warp product scans
 replace one inversion per basis column; a whole checkpoint falls back to the
 independent Gray-order Hessenberg kernel if any chain is non-cyclic.  Orders
-60 and 64 always use that independent kernel.  On one RTX PRO 6000, the exact
-workload currently projects to approximately 21--22 GPU-hours, excluding
-campaign interruptions and final independent validation.
+60 and 64 always use that independent kernel.  On measured Blackwell GPUs,
+full-rank order-48 work instead uses a four-term low-rank resolvent chain: one
+tridiagonalization plus a 6x6 truncated polynomial determinant evaluates all
+four terms.  Deficient, unaligned, larger-order, and pre-Blackwell work keeps
+the established Gray backend.  On one RTX PRO 6000, the exact workload
+currently projects to approximately 20.5--21.5 GPU-hours, excluding campaign
+interruptions and final independent validation.
 
 The independent finite-field Glynn/trace/Hessenberg fallback is shared with
 the 6x29 and 6x30 solvers.  The Gray-chain core and the geometry-specific

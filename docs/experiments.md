@@ -14551,3 +14551,48 @@
   polynomial dot products and convolutions.  Advance to CUDA only if those
   can be kept on chip or batched; do not materialize a large per-chain global
   polynomial matrix and infer a gain from the CPU ratio.
+
+### Experiment 428: Production CUDA resolvent chains
+
+- Goal: map experiment 427 to the complete GPU sign-term calculation and
+  retain it only if prime-image-weighted end-to-end time beats the accepted
+  fraction-free Gray kernel.
+- The first exact one-lane-per-moment implementation is decisively poor:
+  291.6 ms per million order-48 terms versus about 58.2 ms for production.
+  Source profiling attributes roughly 82% of the probe's own instructions to
+  the Gram moments.  Four lanes cooperatively evaluating each metric dot
+  reduce this to 73--77 ms; direct triangular-pair decoding lowers it to
+  68--70 ms.
+- Chain length four is the GPU optimum.  It uses a 6x6 polynomial correction;
+  length five is slowed by its 8x8 correction even though it amortizes the
+  initial tridiagonalization further.  Order 50 remains 4.2% slower than the
+  established seven-term Lanczos chain and is rejected.
+- The decisive low-level simplification is exact polynomial valuation.
+  Off-diagonal resolvent series start at degree one, so their Schur products
+  start at degree two.  Specialized convolutions omit the provably zero
+  terms.  This reduces the order-48 Montgomery kernel from 64 registers plus
+  a 16-byte stack to 56 registers with no stack, raising residency from 16 to
+  18 CTAs/SM.
+- Complete full-rank order-48 domains on one RTX PRO 6000 Blackwell:
+
+  | prime | former v3 s | resolvent v4 s | speedup |
+  |---:|---:|---:|---:|
+  | 2,147,483,647 | 0.46744 | 0.45868 | 1.019x |
+  | 2,147,483,629 | 0.48772 | 0.47156 | 1.034x |
+  | 2,147,483,587 | 0.48717 | 0.47182 | 1.033x |
+  | 2,147,483,579 | 0.48452 | 0.46722 | 1.037x |
+
+  All residues match.  Memcheck reports zero errors and racecheck reports zero
+  hazards.  Rank-47 order-48 matrices are about 2% slower with the resolvent,
+  so they retain the generic fraction-free chain.
+- Production policy: on measured compute capability 12.x hardware, select the
+  four-term resolvent only for full-rank order-48 matrices and four-aligned
+  ranges.  Deficient matrices, unaligned ranges, orders 50--58, and older GPU
+  architectures retain the established exact Gray backend.  Result provenance
+  becomes `glynn-gray-resolvent-fixed-field-cuda-v4`; `gray_chain=4` identifies
+  the new path.
+- Outcome: accept the selective backend.  Full-rank order-48 work is about 71%
+  of weighted campaign terms, so the 2--4% local gain projects to roughly 2%
+  end to end.  This is not a second algorithmic breakthrough, but it is a
+  verified saving on the dominant catalog sector and validates the resolvent
+  identity as a practical GPU primitive.
