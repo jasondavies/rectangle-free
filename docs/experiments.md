@@ -13572,3 +13572,72 @@
   exact order census gives about 102 RTX PRO 6000 GPU-hours, or 12.7 ideal
   hours on eight equal GPUs, before interruption, filesystem, and validation
   overhead.  This is a measured projection rather than a completed result.
+
+### Experiment 408: Production checkpoint-frequency correction
+
+- Goal: retain exact spot-interruption recovery without performing an atomic
+  result rewrite every fraction of a second on the dominant order-48 work.
+- Change: raise the maintained 6x28 worker and campaign-driver default from
+  `2^20` to `2^24` terms.  The command-line override remains available.
+- Exact campaign effect: the adaptive schedule has 109,197 query/prime jobs.
+  Under the order census, the old default performs 1,013,880 authenticated
+  publications; the new default performs 112,983, a `8.97x` reduction.  Every
+  order-48 and order-50 job now writes once.  The rare order-64 jobs retain 128
+  checkpoints, approximately 10--15 seconds apart at measured RTX PRO 6000
+  throughput.
+- Validation: the complete catalog, two independent CPU residual fixtures,
+  adaptive-CRT unit tests, and payload-authentication tests remain exact.
+- Outcome: accept and commit independently as `73b8d1b`.  This is primarily a
+  filesystem and campaign-reliability correction; do not subtract a guessed
+  percentage from the arithmetic-only 102-GPU-hour projection.
+
+### Experiment 409: Exact INT8 blocked-hafnian tensor-core gate
+
+- Goal: determine whether replacing 31-bit Montgomery trailing updates by
+  exact small-prime blocked updates can overcome the additional CRT images and
+  expose a useful tensor-core path for the hafnian solvers.
+- Probe: add `hafnian_int8_block_probe`, which evaluates
+  `C <- C - A B (mod p)` for orders 48 and 64 with block widths 8, 16, and 32.
+  The candidate uses exact
+  `mma.sync.m16n8k16.row.col.s32.u8.u8.s32`; controls use either the same
+  small prime with scalar arithmetic or the production 31-bit Montgomery
+  multiplication.  Every candidate output is compared with both the scalar
+  GPU output and an independent CPU `% p` calculation.  The Montgomery output
+  receives a separate independent CPU check.
+- Architecture gate: CUDA 12.8 compilation is clean and spill-free for both
+  `sm_89` and `sm_120`.  SASS contains native `IMMA.16816.U8.U8` on both Ada
+  and Blackwell, rather than the expanded instruction sequence observed for
+  Blackwell binary MMA.  Depending on order and block width, tensor kernels
+  use 29--40 registers and no barriers or spills.
+- Exact CRT census: descending primes from 251 require at most 14 images for
+  any query.  Weighting the required image count by each query's sign terms
+  gives `3,234,278,146,048` small-prime terms, versus
+  `1,063,130,234,880` production 31-bit-prime terms: an exact `3.042222x`
+  arithmetic multiplier, substantially below the initial rough fivefold
+  estimate.
+- Matched RTX PRO 6000 Blackwell results at 4,096 independent matrices and 30
+  timed iterations:
+  - width 8 is insufficient after CRT: adjusted speedups are `1.05x` at order
+    48 and `1.60x` at order 64, below the conservative integration gate;
+  - width 16 takes about `0.0173 ms` and `0.0263 ms`, giving raw
+    tensor/Montgomery speedups of `11.1x` and `13.1x`, or CRT-adjusted dense
+    update speedups of `3.64x` and `4.30x`;
+  - width 32 takes about `0.0186 ms` and `0.0267 ms`.  Three final repetitions
+    give raw speedups of `39.1x`--`39.4x` and `48.1x`, or CRT-adjusted dense
+    update speedups of `12.86x`--`12.96x` and `15.80x`--`15.82x`.
+  Primes 127 and 61 reproduce the width-16 exact result and essentially the
+  same timing as prime 251.
+- Qualification: this is a passed dense-update microkernel gate, not a full
+  hafnian speedup.  A production candidate must still implement exact blocked
+  similarity reduction with panel pivoting/permutations, generate packed
+  small-prime matrices, and include characteristic-polynomial/Newton work.
+  The result is strong enough to justify that implementation; it does not yet
+  alter the 102-GPU-hour campaign projection.
+- Cost and cleanup: the spot RTX PRO 6000 run used approximately `$0.32` of
+  balance.  The instance and detached OS volume were deleted and the final
+  burn rate is zero.  Exact logs, ptxas reports, and binary digests are stored
+  outside the repository under
+  `../rectangle-free-data-v2/profiles/verda-rtxpro6000-hafnian-int8-20260824/`.
+- Outcome: accept the INT8 blocked-update route as the next hafnian algorithm
+  integration experiment.  Keep the maintained 31-bit solver unchanged until
+  a complete sign-term kernel passes exact parity and end-to-end timing.
