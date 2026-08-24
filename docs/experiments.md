@@ -13670,3 +13670,62 @@
   complete sign-term throughput.  The next gate must time the sequential
   implicit-column work together with both batched dense updates and the
   characteristic-polynomial recurrence.
+
+### Experiment 411: Complete blocked-INT8 hafnian sign-term gate
+
+- Goal: turn the successful dense-update microbenchmark into one complete
+  exact sign-term implementation and decide the 30-GPU-hour production gate
+  from the complete adaptive-CRT workload rather than isolated matrix
+  multiplication.
+- Probe: add `hafnian_int8_sign_probe`.  It generates genuine 6x28 residual
+  sign matrices, performs the pivoted compact-panel Hessenberg reduction,
+  applies exact `IMMA.16816.U8.U8` trailing updates, recovers the
+  characteristic polynomial with La Budde's recurrence, performs the Newton
+  extraction, and applies the sign.  An independent CPU implementation checks
+  16 terms in every run.  Nonzero ranges at orders 48, 54, 60, and 64 and
+  primes 61 and 127 all reproduce the CPU residues exactly; prime 251 is used
+  for the throughput measurements.
+- Staged optimizations: removing incremental `W` maintenance and instead
+  forming `W=F T` once with tensor MMA raises order-48 throughput from about
+  4.24 to 5.09 million terms/s.  Moving the transient panel and polynomial
+  state to shared memory reaches about 5.14 million terms/s at order 48 and
+  2.77 million at order 64.
+- Fused candidate: use one persistent warp per sign term, retain the matrix,
+  panel state, and polynomial state in shared memory, use a 256-entry inverse
+  table, and write only the final residue.  Width 24 is the best measured
+  compromise.  At batch size 4,096 it reaches 6.507 million terms/s at order
+  48 and 2.668 million at order 64.  This is only about `1.27x` over the staged
+  order-48 kernel and is slightly slower than staged at order 64.
+- Contamination check: the initial fused diagnostic path also wrote matrices
+  and panel factors to global memory.  Making those stores debug-only improves
+  the clean production timing by only about 2% at order 48 and 1% at order 64.
+  Nsight Compute explains the small change: the clean fused kernel has
+  effectively zero DRAM throughput and 98.9%/99.8% L1/L2 hit rates, yet shared
+  memory limits theoretical occupancy to 25% and a scheduler has no eligible
+  warp on about 56% of cycles.  The bottleneck is the sequential panel and
+  polynomial dependency chain, not intermediate global traffic.
+- Exact complete-catalog census and matched fused rates:
+
+  | order | small-prime terms | terms/s | projected GPU-hours |
+  |---:|---:|---:|---:|
+  | 48 | 2,497,221,492,736 | 6,507,372 | 106.60 |
+  | 50 | 384,735,117,312 | 4,197,740 | 25.46 |
+  | 52 | 236,894,289,920 | 3,880,599 | 16.96 |
+  | 54 | 27,917,287,424 | 3,691,622 | 2.10 |
+  | 56 | 40,265,318,400 | 3,504,871 | 3.19 |
+  | 58 | 3,221,225,472 | 3,312,424 | 0.27 |
+  | 60 | 13,958,643,712 | 3,161,852 | 1.23 |
+  | 64 | 30,064,771,072 | 2,667,661 | 3.13 |
+
+  The exact sum is 3,234,278,146,048 prime-images and the weighted projection
+  is 158.93 RTX PRO 6000 GPU-hours.  Order 48 alone exceeds the complete
+  approximately 102-GPU-hour projection of the maintained 31-bit backend.
+- Architecture/build gate: CUDA 12.8 compiles the complete probe for both
+  `sm_89` and `sm_120` without local-memory spills.  Detailed staged and fused
+  Nsight reports are retained outside the repository under
+  `../rectangle-free-data-v2/profiles/verda-rtxpro6000-hafnian-int8-complete-20260824/`.
+- Outcome: reject the small-prime INT8 path as a 6x28 production backend.  The
+  tensor update itself is fast, but the `3.042x` CRT-image multiplier and the
+  sequential non-tensor work dominate the complete kernel.  Retain the exact
+  probe and its algebraic validation; keep the maintained 31-bit solver and
+  its approximately 102-GPU-hour projection unchanged.
