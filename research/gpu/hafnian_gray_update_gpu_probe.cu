@@ -32,6 +32,17 @@
 #ifndef HAFNIAN_GRAY_GLOBAL_FUTURE
 #define HAFNIAN_GRAY_GLOBAL_FUTURE 1
 #endif
+#ifndef HAFNIAN_GRAY_PARALLEL_POLY
+#define HAFNIAN_GRAY_PARALLEL_POLY 1
+#endif
+
+#ifndef HAFNIAN_GRAY_TRANSPOSE_DENSE
+#define HAFNIAN_GRAY_TRANSPOSE_DENSE 1
+#endif
+
+#ifndef HAFNIAN_GRAY_DIRECT_SQRT
+#define HAFNIAN_GRAY_DIRECT_SQRT 1
+#endif
 
 namespace {
 
@@ -265,7 +276,11 @@ __device__ void apply_dense(const uint32_t* matrix,const uint32_t* input,
         uint32_t sum=0;
         for(unsigned column=0;column<rank;++column)
             sum=hafnian_add_mod(sum,hafnian_mul(
+#if HAFNIAN_GRAY_TRANSPOSE_DENSE
+                matrix[size_t(column)*rank+threadIdx.x],input[column],mod),mod.p);
+#else
                 matrix[size_t(threadIdx.x)*rank+column],input[column],mod),mod.p);
+#endif
         output[threadIdx.x]=sum;
     }
     __syncthreads();
@@ -381,6 +396,7 @@ __device__ uint32_t term_from_tridiagonal(
     uint32_t* older=poly;
     uint32_t* previous=older+STRIDE;
     uint32_t* next=previous+STRIDE;
+#if !HAFNIAN_GRAY_PARALLEL_POLY
     if(threadIdx.x==0) {
         for(unsigned i=0;i<3*STRIDE;++i)poly[i]=0;
         previous[0]=mod.one;
@@ -416,6 +432,94 @@ __device__ uint32_t term_from_tridiagonal(
         const unsigned negatives=(HALF-1)-__popcll(signs);
         poly[0]=negatives&1?hafnian_neg_mod(coefficients[HALF],mod.p):coefficients[HALF];
     }
+#else
+    for(unsigned index=threadIdx.x;index<3*STRIDE;index+=blockDim.x)poly[index]=0;
+    if(threadIdx.x==0)previous[0]=mod.one;
+    __syncthreads();
+    for(unsigned size=1;size<=rank;++size) {
+        const unsigned at=size-1,maximum=min(size,HALF);
+        if(threadIdx.x<=maximum) {
+            const unsigned defect=threadIdx.x;
+            uint32_t value=defect<=size-1?previous[defect]:0;
+            if(defect)value=hafnian_sub_mod(value,hafnian_mul(
+                diagonal[at],previous[defect-1],mod),mod.p);
+            if(size>1&&defect>=2)value=hafnian_sub_mod(value,hafnian_mul(
+                beta[at],older[defect-2],mod),mod.p);
+            next[defect]=value;
+        }
+        __syncthreads();
+        uint32_t* temporary=older;older=previous;previous=next;next=temporary;
+    }
+    // The two non-characteristic buffers are now available for the final
+    // coefficient recurrence.
+    uint32_t* coefficients=older;
+    if(threadIdx.x<=HALF)coefficients[threadIdx.x]=0;
+#if !HAFNIAN_GRAY_DIRECT_SQRT
+    uint32_t* traces=next;
+    if(threadIdx.x<=HALF)traces[threadIdx.x]=0;
+#endif
+    if(threadIdx.x==0)coefficients[0]=mod.one;
+    __syncthreads();
+    if(threadIdx.x<32) {
+        const unsigned lane=threadIdx.x;
+#if HAFNIAN_GRAY_DIRECT_SQRT
+        // If P(z)=det(I-zK) and Q(z)=P(z)^(-1/2), then
+        //
+        //     2 P Q' + P' Q = 0.
+        //
+        // Equating z^(degree-1) gives Q directly from the characteristic
+        // coefficients, avoiding the separate trace/Newton convolution.
+        for(unsigned degree=1;degree<=HALF;++degree) {
+            uint32_t sum=0;
+            for(unsigned k=lane+1;k<=degree;k+=32) {
+                const uint32_t factor=uint32_t(
+                    uint64_t(2*degree-k)*mod.one%mod.p);
+                sum=hafnian_add_mod(sum,hafnian_mul(
+                    hafnian_mul(previous[k],coefficients[degree-k],mod),
+                    factor,mod),mod.p);
+            }
+            for(unsigned offset=16;offset;offset>>=1)
+                sum=hafnian_add_mod(sum,
+                    __shfl_down_sync(0xffffffff,sum,offset),mod.p);
+            if(lane==0)coefficients[degree]=hafnian_neg_mod(hafnian_mul(
+                hafnian_mul(sum,inverse_small[2],mod),
+                inverse_small[degree],mod),mod.p);
+            __syncwarp();
+        }
+#else
+        for(unsigned k=1;k<=HALF;++k) {
+            uint32_t value=lane==0?hafnian_mul(
+                uint32_t(uint64_t(k)*mod.one%mod.p),previous[k],mod):0;
+            for(unsigned j=lane?lane:32;j<k;j+=32)
+                value=hafnian_add_mod(value,
+                    hafnian_mul(previous[j],traces[k-j],mod),mod.p);
+            for(unsigned offset=16;offset;offset>>=1)
+                value=hafnian_add_mod(value,
+                    __shfl_down_sync(0xffffffff,value,offset),mod.p);
+            if(lane==0)traces[k]=hafnian_neg_mod(value,mod.p);
+            __syncwarp();
+        }
+        for(unsigned degree=1;degree<=HALF;++degree) {
+            uint32_t sum=0;
+            for(unsigned k=lane+1;k<=degree;k+=32)
+                sum=hafnian_add_mod(sum,hafnian_mul(
+                    hafnian_mul(traces[k],inverse_small[2],mod),
+                    coefficients[degree-k],mod),mod.p);
+            for(unsigned offset=16;offset;offset>>=1)
+                sum=hafnian_add_mod(sum,
+                    __shfl_down_sync(0xffffffff,sum,offset),mod.p);
+            if(lane==0)coefficients[degree]=hafnian_mul(
+                sum,inverse_small[degree],mod);
+            __syncwarp();
+        }
+#endif
+        if(lane==0) {
+            const unsigned negatives=(HALF-1)-__popcll(signs);
+            poly[0]=negatives&1?
+                hafnian_neg_mod(coefficients[HALF],mod.p):coefficients[HALF];
+        }
+    }
+#endif
     __syncthreads();
     return poly[0];
 }
@@ -481,7 +585,11 @@ __global__ void gray_update_kernel(
                 value=positive?hafnian_add_mod(value,addend,mod.p):
                     hafnian_sub_mod(value,addend,mod.p);
             }
+#if HAFNIAN_GRAY_TRANSPOSE_DENSE
+            dense[size_t(cell%rank)*rank+cell/rank]=value;
+#else
             dense[cell]=value;
+#endif
         }
         __syncthreads();
         bool ok=false;

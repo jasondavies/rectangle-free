@@ -14031,3 +14031,72 @@
   compile-time control only in the research probe.  The next research gate is
   pairing independent chains so that Montgomery's batch-inversion trick can
   replace two dependent field inversions by one.
+
+### Experiment 416: Parallel characteristic recurrence and direct square root
+
+- Goal: reduce the substantial serial tail left inside every exact Gray-chain
+  term after experiment 415.  The old device routine assigned the complete
+  tridiagonal characteristic recurrence and both Newton convolutions to one
+  thread while the other 63 CTA threads waited.
+- Parallel recurrence: compute each characteristic defect coefficient on a
+  separate CTA thread, and use warp reductions for the final triangular
+  convolution.  On a matched order-48, million-term sample, the Gray time
+  falls from approximately 214.5 ms to 126.8 ms (`1.69x`) while retaining the
+  independent-kernel residue and reporting zero breakdowns.  Chain length 6
+  becomes best for both orders 48 and 50.
+- Algebraic simplification: if
+
+  ```text
+  P(z) = det(I-zK),  Q(z) = P(z)^(-1/2),
+  ```
+
+  then `2 P Q' + P' Q = 0`, so
+
+  ```text
+  q[n] = -1/(2n) sum_{k=1..n} (2n-k) p[k] q[n-k].
+  ```
+
+  This computes the required hafnian coefficient directly from the
+  characteristic coefficients.  It removes the separate trace recurrence
+  and is exact over every odd production field.  Against the previous
+  trace-plus-Newton implementation it saves about 5.4% in the order-48 Gray
+  kernel and about 1% at order 50.  Applying the same identity to the
+  independent Hessenberg kernel saves approximately 4.9% and 3.7% at orders
+  48 and 50 respectively.
+- Complete-domain result on one RTX PRO 6000 Blackwell, chain 6, 144,384
+  blocks, with the direct recurrence enabled in both kernels:
+
+  | order | prime | independent s | Gray s | speedup |
+  |---:|---:|---:|---:|---:|
+  | 48 | 2,147,483,647 | 2.3463 | 0.9971 | 2.3532x |
+  | 48 | 2,147,483,629 | 2.2706 | 0.9978 | 2.2756x |
+  | 48 | 2,147,483,587 | 2.2482 | 0.9781 | 2.2986x |
+  | 50 | 2,147,483,647 | 4.8620 | 2.1339 | 2.2785x |
+  | 50 | 2,147,483,629 | 4.8823 | 2.1335 | 2.2884x |
+  | 50 | 2,147,483,587 | 4.8542 | 2.0929 | 2.3194x |
+
+  All complete domains reproduce the independent result; the fourth
+  production prime was also checked for both orders, with zero breakdowns.
+- Conservative campaign projection: applying the measured Gray rates only to
+  orders 48 and 50 and leaving every larger order at its old cost reduces
+  `87.29` to approximately `42.42` RTX PRO 6000 GPU-hours.  This is a
+  `2.058x` whole-campaign improvement and saves about 44.87 GPU-hours.  The
+  direct recurrence also accelerates the untouched fallback orders, so this
+  projection intentionally understates its complete benefit.
+- Memory/layout probe: storing the periodically rebuilt dense matrix
+  transposed makes its repeated matrix-vector loads coalesced.  The isolated
+  gain is only about 0.3--0.4%, consistent with the profile's negligible DRAM
+  traffic; retain it, but do not mistake the profiler's large theoretical
+  excess-sector count for a bandwidth bottleneck.
+- New profile: theoretical occupancy remains 100% and achieved occupancy is
+  about 68%, but 37.1% of warp cycles are still spent waiting at CTA barriers;
+  the average warp has only 18.8 active threads.  The next material gate is a
+  warp-per-chain formulation that gives each lane two vector coordinates and
+  packs two independent chains into one CTA.  This can remove inter-warp
+  barriers and make Montgomery batch inversion possible.  Plain batch
+  inversion without that organization has too small a ceiling to justify the
+  refactor.
+- Outcome: accept the parallel characteristic recurrence, direct square-root
+  recurrence, transposed rebuild matrix, chain length 6, and 32-wave grid.
+  CUDA 13.0 compiles the maintained 6x28 solver and research probe for both
+  `sm_89` and `sm_120`.

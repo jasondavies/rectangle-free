@@ -7,6 +7,10 @@
 #include <stdexcept>
 #include <string>
 
+#ifndef HAFNIAN_DIRECT_SQRT_RECURRENCE
+#define HAFNIAN_DIRECT_SQRT_RECURRENCE 1
+#endif
+
 struct HafnianMontgomery {
     uint32_t p=0,negative_inverse=0,one=0;
 };
@@ -280,9 +284,26 @@ __global__ void hafnian_terms_kernel(
         }
 
         if(threadIdx.x==0) {
-            uint32_t traces[HALF+1]{};
             uint32_t coefficients[HALF+1]{};
             coefficients[0]=mod.one;
+#if HAFNIAN_DIRECT_SQRT_RECURRENCE
+            // If P(z)=det(I-zK) and Q(z)=P(z)^(-1/2), then
+            // 2 P Q' + P' Q = 0.  This computes the required coefficient
+            // directly and avoids materialising the traces first.
+            for(unsigned degree=1;degree<=HALF;++degree) {
+                uint32_t sum=0;
+                for(unsigned k=1;k<=degree;++k) {
+                    const uint32_t factor=uint32_t(
+                        uint64_t(2*degree-k)*mod.one%mod.p);
+                    sum=hafnian_add_mod(sum,hafnian_mul(hafnian_mul(
+                        poly[N*POLY_STRIDE+k],coefficients[degree-k],mod),
+                        factor,mod),mod.p);
+                }
+                coefficients[degree]=hafnian_neg_mod(hafnian_mul(hafnian_mul(
+                    sum,inverse_small[2],mod),inverse_small[degree],mod),mod.p);
+            }
+#else
+            uint32_t traces[HALF+1]{};
             for(unsigned k=1;k<=HALF;++k) {
                 uint32_t value=hafnian_mul(
                     uint32_t(uint64_t(k)*mod.one%mod.p),poly[N*POLY_STRIDE+k],mod);
@@ -298,6 +319,7 @@ __global__ void hafnian_terms_kernel(
                         coefficients[degree-k],mod),mod.p);
                 coefficients[degree]=hafnian_mul(sum,inverse_small[degree],mod);
             }
+#endif
             unsigned negatives=(HALF-1)-__popcll(term);
             uint32_t contribution=negatives&1?
                 hafnian_neg_mod(coefficients[HALF],mod.p):coefficients[HALF];
