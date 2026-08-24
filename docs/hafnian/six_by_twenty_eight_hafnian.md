@@ -64,7 +64,7 @@ generalized-Lanczos rebuild.  One batch inversion and warp product scans
 replace one inversion per basis column; a whole checkpoint falls back to the
 independent Gray-order Hessenberg kernel if any chain is non-cyclic.  Orders
 60 and 64 always use that independent kernel.  On one RTX PRO 6000, the exact
-workload currently projects to approximately 25--26 GPU-hours, excluding
+workload currently projects to approximately 21--22 GPU-hours, excluding
 campaign interruptions and final independent validation.
 
 The independent finite-field Glynn/trace/Hessenberg fallback is shared with

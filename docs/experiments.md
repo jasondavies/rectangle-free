@@ -14416,10 +14416,63 @@
   elimination barriers.  Lane zero could begin the next column and overwrite
   the shared pivot ordinal while other lanes were still reading the previous
   value.  Add an explicit block barrier before that uniform `continue`.
+  Racecheck also exposed a Gray polynomial-initialization hazard: lane zero
+  assigned `previous[0]` before the lane responsible for that address had
+  necessarily completed the preceding zero-fill.  A warp barrier between
+  those phases removes the race without measurable runtime cost.
 - Three repeated million-term fixed-prime runs now return the same residue
   `1,034,330,483`, equal to the runtime-Montgomery control.  The full Gray
   path reports the expected 149,797 failed chains, recomputes the whole chunk,
   and returns that same residue deterministically.  CUDA racecheck falls from
-  27 reported hazards to zero.
+  27 errors plus two warnings to zero hazards.
 - Outcome: accept the barrier fix in the shared 6x28/6x29/6x30 independent
   hafnian core.  It is a correctness repair, not an optional optimization.
+
+### Experiment 425: Gray hot-loop algebra and scratch placement
+
+- Goal: profile the accepted fraction-free kernel and remove remaining
+  redundant modular arithmetic rather than introducing a new numeric backend.
+- Nsight Compute on an order-48 Montgomery range reports 70.7% SM throughput,
+  only 6.4% DRAM throughput, a 98.9% L2 hit rate, and 35.1% scheduler cycles
+  with no eligible warp.  The kernel is integer/dependency limited rather than
+  DRAM limited.  Its 64 registers permit 16 two-warp CTAs per SM; forcing 17
+  CTAs lowers it to 56 registers but adds a 24-byte stack frame and regresses
+  matched time by 0.9%.  Retain the 16-CTA launch bound.
+- Accepted exact simplifications:
+
+  1. Apply the operator before computing the Lanczos norm, then obtain
+     `<v,v>` and `<Av,v>` together with `dot_metric_pair`.  Sharing `M v`
+     changes four modular multiplies per row to three and removes a complete
+     metric traversal.  This is a `1.142x` matched order-48 gain.
+  2. The Gray rank-two coefficient is always `+2` or `-2`.  Replace two field
+     multiplications per apply by modular doubling and conditional negation,
+     gaining another 1.9% at order 48.
+  3. For every future-vector coordinate transform `B^T M z`, form `M z` once
+     in existing shared vector scratch.  This changes `3N^2` multiplies for
+     a pair to `2N^2+2N` and gains 4.9% at order 48, 5.8% at order 54.
+  4. During a rank-two rebuild, preweight the fixed low-rank vectors once in
+     `2N` extra shared words.  This changes all projection work from `3N^2`
+     to `2N^2+2N`, gaining another 2.6% at order 48 and 1.3% at order 54.
+
+- Rejected placements/fusions: putting the fixed weighted vectors in global
+  dense-matrix scratch regresses 5.7%; accumulating the norm/numerator inside
+  the operator-application functions is performance-neutral; retain the
+  smaller common dot-product implementation.
+- Complete order-48 results on one RTX PRO 6000 Blackwell:
+
+  | prime | experiment-421 s | final s | speedup |
+  |---:|---:|---:|---:|
+  | 2,147,483,647 | 0.6808 | 0.5302 | 1.284x |
+  | 2,147,483,629 | 0.7347 | 0.4989 | 1.473x |
+  | 2,147,483,587 | 0.7295 | 0.4994 | 1.461x |
+  | 2,147,483,579 | 0.7287 | 0.4995 | 1.459x |
+
+  A complete order-54 Montgomery domain falls from 7.0759 s to 5.0982 s
+  (`1.388x`).  All complete residues match the former production binary.  The
+  known non-cyclic order-52 range still triggers whole-chunk fallback and
+  returns the independently verified residue exactly.
+- The profiler-visible instruction count falls from 6.043 billion to 4.987
+  billion before the final fixed-vector preweighting, with the runtime falling
+  by the same 17.5%.  The revised workload-weighted projection is roughly
+  21--22 RTX PRO 6000 GPU-hours, pending a fresh campaign; this is about four
+  times faster than the 87.29-hour pre-Gray production baseline.

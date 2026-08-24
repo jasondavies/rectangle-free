@@ -214,6 +214,28 @@ __device__ void dot_metric_pair(const uint32_t* left0,const uint32_t* left1,
 }
 
 template<class Mod>
+__device__ void dot_pair(const uint32_t* left0,const uint32_t* left1,
+    const uint32_t* right,unsigned rank,Mod mod,
+    uint32_t& result0,uint32_t& result1) {
+    const unsigned lane=threadIdx.x&31;
+    uint32_t value0=0,value1=0;
+    for(unsigned row=lane;row<rank;row+=32) {
+        value0=hafnian_add_mod(value0,
+            hafnian_mul(left0[row],right[row],mod),mod.p);
+        value1=hafnian_add_mod(value1,
+            hafnian_mul(left1[row],right[row],mod),mod.p);
+    }
+    for(unsigned offset=16;offset;offset>>=1) {
+        value0=hafnian_add_mod(value0,
+            __shfl_down_sync(0xffffffff,value0,offset),mod.p);
+        value1=hafnian_add_mod(value1,
+            __shfl_down_sync(0xffffffff,value1,offset),mod.p);
+    }
+    result0=__shfl_sync(0xffffffff,value0,0);
+    result1=__shfl_sync(0xffffffff,value1,0);
+}
+
+template<class Mod>
 __device__ void apply_dense(const uint32_t* matrix,const uint32_t* input,
     uint32_t* output,unsigned rank,Mod mod) {
     const unsigned lane=threadIdx.x&31;
@@ -230,20 +252,27 @@ __device__ void apply_dense(const uint32_t* matrix,const uint32_t* input,
 template<class Mod>
 __device__ void apply_tridiagonal_update(
     const uint32_t* diagonal,const uint32_t* beta,const uint32_t* metric,
-    const uint32_t* z0,const uint32_t* z1,uint32_t delta,
+    const uint32_t* z0,const uint32_t* z1,
+    const uint32_t* weighted_z0,const uint32_t* weighted_z1,uint32_t delta,
     const uint32_t* input,uint32_t* output,unsigned rank,Mod mod) {
     uint32_t projection0=0,projection1=0;
-    dot_metric_pair(z0,z1,input,metric,rank,mod,projection0,projection1);
+    dot_pair(weighted_z0,weighted_z1,input,rank,mod,projection0,projection1);
+    uint32_t correction0=hafnian_add_mod(projection1,projection1,mod.p);
+    uint32_t correction1=hafnian_add_mod(projection0,projection0,mod.p);
+    if(delta!=hafnian_add_mod(mod.one,mod.one,mod.p)) {
+        correction0=hafnian_neg_mod(correction0,mod.p);
+        correction1=hafnian_neg_mod(correction1,mod.p);
+    }
     const unsigned lane=threadIdx.x&31;
     for(unsigned row=lane;row<rank;row+=32) {
         uint32_t value=hafnian_mul(diagonal[row],input[row],mod);
         if(row)value=hafnian_add_mod(value,input[row-1],mod.p);
         if(row+1<rank)value=hafnian_add_mod(
             value,hafnian_mul(beta[row+1],input[row+1],mod),mod.p);
-        value=hafnian_add_mod(value,hafnian_mul(
-            z0[row],hafnian_mul(delta,projection1,mod),mod),mod.p);
-        value=hafnian_add_mod(value,hafnian_mul(
-            z1[row],hafnian_mul(delta,projection0,mod),mod),mod.p);
+        value=hafnian_add_mod(value,
+            hafnian_mul(z0[row],correction0,mod),mod.p);
+        value=hafnian_add_mod(value,
+            hafnian_mul(z1[row],correction1,mod),mod.p);
         output[row]=value;
     }
     __syncwarp();
@@ -274,7 +303,8 @@ __device__ __forceinline__ uint32_t warp_inclusive_reverse_product(
 template<class Mod>
 __device__ bool generalized_lanczos(
     const uint32_t* dense,const uint32_t* old_diagonal,const uint32_t* old_beta,
-    const uint32_t* low0,const uint32_t* low1,uint32_t delta,
+    const uint32_t* low0,const uint32_t* low1,
+    uint32_t* weighted_low0,uint32_t* weighted_low1,uint32_t delta,
     const uint32_t* old_metric,unsigned rank,uint64_t seed,Mod mod,
     uint32_t* basis,uint32_t* new_metric,uint32_t* inverse_new_metric,
     uint32_t* new_diagonal,uint32_t* new_beta,
@@ -286,16 +316,25 @@ __device__ bool generalized_lanczos(
         previous[row]=0;
     }
     __syncwarp();
+    if(!dense) {
+        for(unsigned row=lane;row<rank;row+=32) {
+            weighted_low0[row]=hafnian_mul(old_metric[row],low0[row],mod);
+            weighted_low1[row]=hafnian_mul(old_metric[row],low1[row],mod);
+        }
+        __syncwarp();
+    }
     uint32_t previous_norm=0,previous_scale=0;
     for(unsigned column=0;column<rank;++column) {
         for(unsigned row=lane;row<rank;row+=32)
             basis[size_t(row)*rank+column]=current[row];
-        const uint32_t norm=dot_metric(current,current,old_metric,rank,mod);
-        if(!norm)return false;
         if(dense)apply_dense(dense,current,applied,rank,mod);
         else apply_tridiagonal_update(old_diagonal,old_beta,old_metric,
-            low0,low1,delta,current,applied,rank,mod);
-        const uint32_t numerator=dot_metric(current,applied,old_metric,rank,mod);
+            low0,low1,weighted_low0,weighted_low1,delta,
+            current,applied,rank,mod);
+        uint32_t norm=0,numerator=0;
+        dot_metric_pair(current,applied,current,old_metric,rank,mod,
+            norm,numerator);
+        if(!norm)return false;
         uint32_t scale=0,middle=0,norm_squared=0;
         if(lane==0) {
             new_metric[column]=norm;
@@ -460,15 +499,21 @@ template<class Mod>
 __device__ void inverse_basis_apply_pair(
     const uint32_t* basis,const uint32_t* old_metric,const uint32_t* inverse_new_metric,
     const uint32_t* input0,const uint32_t* input1,uint32_t* output0,uint32_t* output1,
-    unsigned rank,Mod mod) {
+    uint32_t* weighted0,uint32_t* weighted1,unsigned rank,Mod mod) {
     const unsigned lane=threadIdx.x&31;
+    for(unsigned source=lane;source<rank;source+=32) {
+        weighted0[source]=hafnian_mul(old_metric[source],input0[source],mod);
+        weighted1[source]=hafnian_mul(old_metric[source],input1[source],mod);
+    }
+    __syncwarp();
     for(unsigned target=lane;target<rank;target+=32) {
         uint32_t sum0=0,sum1=0;
         for(unsigned source=0;source<rank;++source) {
-            const uint32_t factor=hafnian_mul(
-                basis[size_t(source)*rank+target],old_metric[source],mod);
-            sum0=hafnian_add_mod(sum0,hafnian_mul(factor,input0[source],mod),mod.p);
-            sum1=hafnian_add_mod(sum1,hafnian_mul(factor,input1[source],mod),mod.p);
+            const uint32_t factor=basis[size_t(source)*rank+target];
+            sum0=hafnian_add_mod(sum0,
+                hafnian_mul(factor,weighted0[source],mod),mod.p);
+            sum1=hafnian_add_mod(sum1,
+                hafnian_mul(factor,weighted1[source],mod),mod.p);
         }
         output0[target]=hafnian_mul(sum0,inverse_new_metric[target],mod);
         output1[target]=hafnian_mul(sum1,inverse_new_metric[target],mod);
@@ -486,6 +531,7 @@ __device__ uint32_t term_from_tridiagonal(
     uint32_t* previous=older+STRIDE;
     uint32_t* next=previous+STRIDE;
     for(unsigned index=lane;index<3*STRIDE;index+=32)poly[index]=0;
+    __syncwarp();
     if(lane==0)previous[0]=mod.one;
     __syncwarp();
     for(unsigned size=1;size<=rank;++size) {
@@ -541,11 +587,13 @@ __global__ __launch_bounds__(THREADS,MIN_BLOCKS_PER_SM) void terms_kernel(
     const size_t slot=size_t(blockIdx.x)*WARPS_PER_BLOCK+warp;
     const size_t slots=size_t(gridDim.x)*WARPS_PER_BLOCK;
     extern __shared__ uint32_t shared[];
-    uint32_t* vectors=shared+warp*4*N;
+    uint32_t* vectors=shared+warp*6*N;
     uint32_t* previous=vectors;
     uint32_t* current=previous+N;
     uint32_t* next=current+N;
     uint32_t* applied=next+N;
+    uint32_t* weighted_low0=applied+N;
+    uint32_t* weighted_low1=weighted_low0+N;
     uint32_t* temporary0=previous;
     uint32_t* temporary1=current;
     uint32_t* poly=vectors;
@@ -587,8 +635,9 @@ __global__ __launch_bounds__(THREADS,MIN_BLOCKS_PER_SM) void terms_kernel(
         __syncwarp();
         bool ok=false;
         for(unsigned attempt=0;attempt<4&&!ok;++attempt)
-            ok=generalized_lanczos(dense,nullptr,nullptr,nullptr,nullptr,0,
-                fixed_metric,rank,splitmix64(chain_begin)^attempt,mod,basis,
+            ok=generalized_lanczos(dense,nullptr,nullptr,nullptr,nullptr,
+                nullptr,nullptr,0,fixed_metric,rank,
+                splitmix64(chain_begin)^attempt,mod,basis,
                 metrics,inverse_metrics,diagonals,betas,
                 previous,current,next,applied);
         if(!ok) {++local_failures;continue;}
@@ -596,7 +645,7 @@ __global__ __launch_bounds__(THREADS,MIN_BLOCKS_PER_SM) void terms_kernel(
             uint32_t* first=future+(size_t(future_step-1)*2+0)*N;
             uint32_t* second=future+(size_t(future_step-1)*2+1)*N;
             inverse_basis_apply_pair(basis,fixed_metric,inverse_metrics,
-                first,second,temporary0,temporary1,rank,mod);
+                first,second,temporary0,temporary1,next,applied,rank,mod);
             for(unsigned row=lane;row<rank;row+=32) {
                 first[row]=temporary0[row];second[row]=temporary1[row];
             }
@@ -622,7 +671,9 @@ __global__ __launch_bounds__(THREADS,MIN_BLOCKS_PER_SM) void terms_kernel(
             ok=false;
             for(unsigned attempt=0;attempt<4&&!ok;++attempt)
                 ok=generalized_lanczos(nullptr,diagonals+current_buffer*N,
-                    betas+current_buffer*N,z0,z1,delta,old_metric,rank,
+                    betas+current_buffer*N,z0,z1,
+                    weighted_low0,weighted_low1,delta,
+                    old_metric,rank,
                     splitmix64(index)^attempt,mod,basis,metrics+next_buffer*N,
                     inverse_metrics+next_buffer*N,diagonals+next_buffer*N,
                     betas+next_buffer*N,previous,current,next,applied);
@@ -633,7 +684,7 @@ __global__ __launch_bounds__(THREADS,MIN_BLOCKS_PER_SM) void terms_kernel(
                 uint32_t* second=future+(size_t(future_step-1)*2+1)*N;
                 inverse_basis_apply_pair(basis,old_metric,
                     inverse_metrics+next_buffer*N,first,second,
-                    temporary0,temporary1,rank,mod);
+                    temporary0,temporary1,next,applied,rank,mod);
                 for(unsigned row=lane;row<rank;row+=32) {
                     first[row]=temporary0[row];second[row]=temporary1[row];
                 }
@@ -655,7 +706,7 @@ __global__ __launch_bounds__(THREADS,MIN_BLOCKS_PER_SM) void terms_kernel(
 }
 
 template<unsigned N>
-constexpr size_t shared_bytes() {return size_t(WARPS_PER_BLOCK)*4*N*sizeof(uint32_t);}
+constexpr size_t shared_bytes() {return size_t(WARPS_PER_BLOCK)*6*N*sizeof(uint32_t);}
 
 template<unsigned N,unsigned CHAIN>
 constexpr size_t scratch_words(size_t slots) {
