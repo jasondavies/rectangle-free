@@ -145,6 +145,8 @@ $(BUILD_DIR)/hafnian_gray_update_probe: research/probes/hafnian_gray_update_prob
 hafnian-gray-update-test: $(BUILD_DIR)/hafnian_gray_update_probe
 	./$(BUILD_DIR)/hafnian_gray_update_probe --query 3321 --start 12345 \
 		--steps 16 --blocks 1,2,4,8 --deep-verify
+	./$(BUILD_DIR)/hafnian_gray_update_probe --query 3321 --start 12345 \
+		--steps 5 --prime 2147483629 --resolvent-gate
 
 $(BUILD_DIR)/clique_pivoter_probe: research/probes/clique_pivoter_probe.c
 	$(CC) $(CFLAGS_5XN) $(OPENMP_CFLAGS) -o $@ $< $(OPENMP_LDFLAGS)

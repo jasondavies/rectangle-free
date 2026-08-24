@@ -432,6 +432,99 @@ uint32_t term_from_coefficients(
     return negatives&1?mod.neg(coefficients[half]):coefficients[half];
 }
 
+using Polynomial=std::vector<uint32_t>;
+
+Polynomial polynomial_multiply_truncated(
+    const Polynomial& left,const Polynomial& right,unsigned degree,const Mod& mod) {
+    Polynomial result(degree+1);
+    for(unsigned i=0;i<=degree&&i<left.size();++i)
+        for(unsigned j=0;i+j<=degree&&j<right.size();++j)
+            result[i+j]=mod.add(result[i+j],mod.mul(left[i],right[j]));
+    return result;
+}
+
+Polynomial polynomial_inverse_series(
+    const Polynomial& input,unsigned degree,const Mod& mod) {
+    if(input.empty()||!input[0])throw std::runtime_error("singular power series");
+    Polynomial result(degree+1);
+    result[0]=mod.inverse(input[0]);
+    for(unsigned at=1;at<=degree;++at) {
+        uint32_t sum=0;
+        for(unsigned k=1;k<=at&&k<input.size();++k)
+            sum=mod.add(sum,mod.mul(input[k],result[at-k]));
+        result[at]=mod.neg(mod.mul(result[0],sum));
+    }
+    return result;
+}
+
+std::vector<Polynomial> leading_principal_determinants(
+    std::vector<Polynomial> matrix,unsigned order,unsigned degree,const Mod& mod) {
+    Polynomial determinant(degree+1);determinant[0]=1;
+    std::vector<Polynomial> result;
+    for(unsigned pivot=0;pivot<order;++pivot) {
+        Polynomial& diagonal=matrix[size_t(pivot)*order+pivot];
+        const Polynomial inverse=polynomial_inverse_series(diagonal,degree,mod);
+        determinant=polynomial_multiply_truncated(determinant,diagonal,degree,mod);
+        for(unsigned row=pivot+1;row<order;++row) {
+            const Polynomial multiplier=polynomial_multiply_truncated(
+                matrix[size_t(row)*order+pivot],inverse,degree,mod);
+            for(unsigned column=pivot+1;column<order;++column) {
+                const Polynomial product=polynomial_multiply_truncated(
+                    multiplier,matrix[size_t(pivot)*order+column],degree,mod);
+                Polynomial& target=matrix[size_t(row)*order+column];
+                for(unsigned k=0;k<=degree;++k)
+                    target[k]=mod.sub(target[k],product[k]);
+            }
+        }
+        if(pivot&1)result.push_back(determinant);
+    }
+    return result;
+}
+
+void apply_tridiagonal(
+    const Tridiagonal& matrix,const RankMatrix& input,RankMatrix& output,
+    const Mod& mod) {
+    const unsigned n=unsigned(matrix.diagonal.size());
+    for(unsigned column=0;column<input.columns;++column)
+        for(unsigned row=0;row<n;++row) {
+            uint32_t value=mod.mul(matrix.diagonal[row],input.at(row,column));
+            if(row)value=mod.add(value,input.at(row-1,column));
+            if(row+1<n)value=mod.add(
+                value,mod.mul(matrix.beta[row+1],input.at(row+1,column)));
+            output.at(row,column)=value;
+        }
+}
+
+std::vector<Polynomial> resolvent_correction_matrix(
+    const Tridiagonal& matrix,const std::vector<uint32_t>& metric,
+    const RankMatrix& factors,const std::vector<uint32_t>& deltas,
+    unsigned degree,const Mod& mod) {
+    const unsigned n=factors.rows,m=factors.columns;
+    if(m!=2*deltas.size())throw std::runtime_error("invalid resolvent factors");
+    std::vector<Polynomial> result(size_t(m)*m,Polynomial(degree+1));
+    for(unsigned i=0;i<m;++i)result[size_t(i)*m+i][0]=1;
+    RankMatrix power=factors,next(n,m);
+    std::vector<uint32_t> gram(size_t(m)*m);
+    for(unsigned k=0;k<degree;++k) {
+        for(unsigned row=0;row<m;++row)for(unsigned column=row;column<m;++column) {
+            uint32_t moment=0;
+            for(unsigned coordinate=0;coordinate<n;++coordinate)
+                moment=mod.add(moment,mod.mul(factors.at(coordinate,row),
+                    mod.mul(metric[coordinate],power.at(coordinate,column))));
+            gram[size_t(row)*m+column]=gram[size_t(column)*m+row]=moment;
+        }
+        for(unsigned row=0;row<m;++row)for(unsigned column=0;column<m;++column) {
+            const unsigned source=row^1;
+            result[size_t(row)*m+column][k+1]=mod.neg(mod.mul(
+                deltas[row/2],gram[size_t(source)*m+column]));
+        }
+        apply_tridiagonal(matrix,power,next,mod);
+        power.values.swap(next.values);
+    }
+    return result;
+}
+
+
 std::vector<uint32_t> polynomial_remainder(
     std::vector<uint32_t> dividend,const std::vector<uint32_t>& divisor,const Mod& mod) {
     while(!dividend.empty()&&!dividend.back())dividend.pop_back();
@@ -526,7 +619,7 @@ std::vector<unsigned> block_list(const std::string& text) {
 int main(int argc,char** argv) {
     try {
         unsigned query_id=0,steps=64;
-        bool deep_verify=false,catalog_census=false;
+        bool deep_verify=false,catalog_census=false,resolvent_gate=false;
         uint64_t start=0;
         uint32_t prime=2147483647U;
         uint64_t seed=UINT64_C(0x677261792d686166);
@@ -541,10 +634,11 @@ int main(int argc,char** argv) {
             else if(argument=="--blocks"&&i+1<argc)blocks=block_list(argv[++i]);
             else if(argument=="--deep-verify")deep_verify=true;
             else if(argument=="--catalog-census")catalog_census=true;
+            else if(argument=="--resolvent-gate")resolvent_gate=true;
             else throw std::runtime_error(
                 "usage: hafnian_gray_update_probe [--query Q] [--start N] [--steps N] "
                 "[--prime P] [--blocks 1,2,4,8] [--seed N] [--deep-verify] "
-                "[--catalog-census]");
+                "[--catalog-census] [--resolvent-gate]");
         }
         const Mod mod{prime};
         auto catalog=six_by_twenty_eight::build_catalog();
@@ -619,6 +713,79 @@ int main(int argc,char** argv) {
             "start=%" PRIu64 " steps=%u\n",
             query_id,n,factorization.rank,prime,start,steps);
         report_repeated_factor(query,start^(start>>1),mod);
+
+        if(resolvent_gate) {
+            const unsigned chain=std::min(steps,8U);
+            if(chain<2)throw std::runtime_error("resolvent gate needs at least two steps");
+            std::mt19937_64 random(seed);
+            const auto started=Clock::now();
+            const uint64_t signs0=start^(start>>1);
+            const Matrix reduced=build_reduced_matrix(factorization,signs0,mod);
+            auto rebuilt=generalized_lanczos(
+                factorization.rank,factorization.metric,
+                [&](const auto& input,auto& output){apply_dense(reduced,input,output,mod);},
+                mod,random);
+            RankMatrix factors(factorization.rank,2*(chain-1));
+            std::vector<uint32_t> deltas(chain-1);
+            for(unsigned stage=1;stage<chain;++stage) {
+                const uint64_t index=start+stage;
+                const uint64_t signs=index^(index>>1);
+                const unsigned edge=unsigned(__builtin_ctzll(index))+1;
+                std::array<uint32_t,16> kernel{};
+                RankMatrix fixed=make_reduced_update_factor(
+                    factorization,edge,mod,kernel,
+                    signs&(UINT64_C(1)<<(edge-1)));
+                RankMatrix transformed=inverse_basis_apply(
+                    rebuilt.basis,factorization.metric,
+                    rebuilt.inverse_metric,fixed,mod);
+                for(unsigned row=0;row<factorization.rank;++row)
+                    for(unsigned column=0;column<2;++column)
+                        factors.at(row,2*(stage-1)+column)=transformed.at(row,column);
+                deltas[stage-1]=kernel[1];
+            }
+            const auto prepared=Clock::now();
+            const auto correction=resolvent_correction_matrix(
+                rebuilt.tridiagonal,rebuilt.metric,factors,deltas,half,mod);
+            const auto moments_done=Clock::now();
+            const auto correction_determinants=leading_principal_determinants(
+                correction,2*(chain-1),half,mod);
+            const Polynomial base=tridiagonal_coefficients(
+                rebuilt.tridiagonal,half,mod);
+            std::vector<uint32_t> actual_terms(chain);
+            for(unsigned stage=0;stage<chain;++stage) {
+                Polynomial characteristic=base;
+                if(stage) {
+                    characteristic=polynomial_multiply_truncated(
+                        base,correction_determinants[stage-1],half,mod);
+                }
+                const uint64_t index=start+stage;
+                const uint64_t signs=index^(index>>1);
+                actual_terms[stage]=term_from_coefficients(
+                    characteristic,signs,half,mod);
+            }
+            const auto calculation_done=Clock::now();
+            for(unsigned stage=0;stage<chain;++stage) {
+                const uint64_t index=start+stage;
+                const uint64_t signs=index^(index>>1);
+                const uint32_t expected=term_from_coefficients(
+                    hessenberg_coefficients(
+                        build_signed_matrix(query,signs,mod),half,mod),
+                    signs,half,mod);
+                if(actual_terms[stage]!=expected)throw std::runtime_error(
+                    "resolvent mismatch at stage "+std::to_string(stage)+
+                    ": expected "+std::to_string(expected)+
+                    " actual "+std::to_string(actual_terms[stage]));
+            }
+            std::printf(
+                "GRAY_RESOLVENT_RESULT chain=%u exact=OK prepare_seconds=%.9f "
+                "moment_seconds=%.9f determinant_seconds=%.9f total_seconds=%.9f\n",
+                chain,
+                std::chrono::duration<double>(prepared-started).count(),
+                std::chrono::duration<double>(moments_done-prepared).count(),
+                std::chrono::duration<double>(calculation_done-moments_done).count(),
+                std::chrono::duration<double>(calculation_done-started).count());
+            return 0;
+        }
 
         for(unsigned block:blocks) {
             std::mt19937_64 random(seed^uint64_t(block)*UINT64_C(0x9e3779b97f4a7c15));

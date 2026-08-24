@@ -14513,3 +14513,41 @@
 - Outcome: accept the specialization.  Its campaign-wide gain is modest,
   roughly 2%, and keeps the projected 6x28 campaign near the low end of the
   existing 21--22 RTX PRO 6000 GPU-hour range.
+
+### Experiment 427: Low-rank resolvent chain gate
+
+- Goal: eliminate every generalized-Lanczos rebuild after the first term of a
+  Gray chain, rather than only reducing the constant inside those rebuilds.
+- Put all later rank-two changes into the first term's tridiagonal basis.  If
+  that basis has metric `H`, tridiagonal operator `T`, factor matrix `U`, and
+  block-diagonal signed update matrix `C`, the determinant lemma gives
+
+  ```text
+  det(I - z(T + U C U^T H))
+    = det(I - zT) det(I - z C U^T H (I - zT)^-1 U).
+  ```
+
+  Only coefficients through degree `N/2` are required.  The probe constructs
+  the small resolvent matrix as a truncated power series, computes all leading
+  even principal determinants with one fraction-free-equivalent power-series
+  LDU elimination, and feeds the resulting characteristic coefficients to the
+  exact hafnian recurrence.
+- Exactness: chain lengths 2--8 agree term by term with independent
+  Hessenberg recomputation.  A broader gate covers full- and deficient-rank
+  order-48 queries, representative larger-order queries, varied Gray starts,
+  and all four production primes without a mismatch.
+- Exploit metric self-adjointness when constructing the resolvent moments:
+  `U^T H T^k U` is symmetric.  Computing its upper triangle reduces the
+  moment stage by about 41%.  Sharing one LDU across every prefix avoids five
+  separate determinant calculations.
+- On the CPU probe, five-term chains are best.  A representative full-rank
+  order-48 chain takes about 0.61--0.62 ms, excluding the independent oracle;
+  the isolated dynamic calculation is about 12% cheaper per term than the
+  existing normalized CPU Gray update.
+  Longer chains lose because the resolvent dimension grows by two per update.
+- This is not yet a production speedup.  The accepted GPU kernel has a much
+  more optimized fraction-free Lanczos recurrence than the CPU control.  The
+  resolvent exposes fewer field operations but replaces them with many small
+  polynomial dot products and convolutions.  Advance to CUDA only if those
+  can be kept on chip or batched; do not materialize a large per-chain global
+  polynomial matrix and infer a gain from the CPU ratio.
