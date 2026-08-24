@@ -128,12 +128,58 @@ __device__ __forceinline__ uint32_t hafnian_montgomery_mul(
     return uint32_t(reduced);
 }
 
+// For p < 2^31, two products of reduced residues sum to less than p*2^32,
+// the input bound required by one Montgomery reduction.  Dot products can
+// therefore share the reduction exactly rather than reducing each product.
+__host__ __device__ __forceinline__ uint32_t hafnian_montgomery_sum2(
+    uint32_t a0,uint32_t b0,uint32_t a1,uint32_t b1,HafnianMontgomery mod) {
+    const uint64_t product=uint64_t(a0)*b0+uint64_t(a1)*b1;
+    const uint32_t multiplier=uint32_t(product)*mod.negative_inverse;
+    uint64_t reduced=(product+uint64_t(multiplier)*mod.p)>>32;
+    if(reduced>=mod.p)reduced-=mod.p;
+    return uint32_t(reduced);
+}
+
 template<uint32_t P>
 __device__ __forceinline__ uint32_t hafnian_montgomery_mul(
     uint32_t a,uint32_t b,HafnianMontgomeryConstant<P>) {
     uint64_t product=uint64_t(a)*b;
     uint32_t multiplier=uint32_t(product)*HafnianMontgomeryConstant<P>::negative_inverse;
     uint64_t reduced=(product+uint64_t(multiplier)*P)>>32;
+    if(reduced>=P)reduced-=P;
+    return uint32_t(reduced);
+}
+
+
+template<uint32_t P>
+__host__ __device__ __forceinline__ uint32_t hafnian_montgomery_sum2(
+    uint32_t a0,uint32_t b0,uint32_t a1,uint32_t b1,
+    HafnianMontgomeryConstant<P>) {
+    static_assert(P<(UINT32_C(1)<<31));
+    const uint64_t product=uint64_t(a0)*b0+uint64_t(a1)*b1;
+    const uint32_t multiplier=
+        uint32_t(product)*HafnianMontgomeryConstant<P>::negative_inverse;
+    uint64_t reduced=(product+uint64_t(multiplier)*P)>>32;
+    if(reduced>=P)reduced-=P;
+    return uint32_t(reduced);
+}
+
+
+template<uint32_t P>
+__host__ __device__ __forceinline__ uint32_t hafnian_montgomery_sum4(
+    uint32_t a0,uint32_t b0,uint32_t a1,uint32_t b1,
+    uint32_t a2,uint32_t b2,uint32_t a3,uint32_t b3,
+    HafnianMontgomeryConstant<P>) {
+    static_assert(P>(UINT32_C(1)<<30)&&P<(UINT32_C(1)<<31));
+    const uint64_t product=uint64_t(a0)*b0+uint64_t(a1)*b1+
+        uint64_t(a2)*b2+uint64_t(a3)*b3;
+    const uint32_t multiplier=
+        uint32_t(product)*HafnianMontgomeryConstant<P>::negative_inverse;
+    const uint64_t correction=uint64_t(multiplier)*P;
+    const uint64_t sum=product+correction;
+    uint64_t reduced=(sum>>32)+(uint64_t(sum<product)<<32);
+    if(reduced>=P)reduced-=P;
+    if(reduced>=P)reduced-=P;
     if(reduced>=P)reduced-=P;
     return uint32_t(reduced);
 }
@@ -153,6 +199,65 @@ __device__ __forceinline__ uint32_t hafnian_mul(
     uint32_t a,uint32_t b,HafnianMersenne31) {
     const uint64_t product=uint64_t(a)*b;
     uint64_t reduced=(product&HafnianMersenne31::p)+(product>>31);
+    if(reduced>=HafnianMersenne31::p)reduced-=HafnianMersenne31::p;
+    return uint32_t(reduced);
+}
+
+
+template<class Mod>
+__device__ __forceinline__ uint32_t hafnian_sum_products2(
+    uint32_t a0,uint32_t b0,uint32_t a1,uint32_t b1,Mod mod) {
+    return hafnian_add_mod(
+        hafnian_mul(a0,b0,mod),hafnian_mul(a1,b1,mod),mod.p);
+}
+
+__host__ __device__ __forceinline__ uint32_t hafnian_sum_products2(
+    uint32_t a0,uint32_t b0,uint32_t a1,uint32_t b1,HafnianMontgomery mod) {
+    return hafnian_montgomery_sum2(a0,b0,a1,b1,mod);
+}
+
+template<uint32_t P>
+__host__ __device__ __forceinline__ uint32_t hafnian_sum_products2(
+    uint32_t a0,uint32_t b0,uint32_t a1,uint32_t b1,
+    HafnianMontgomeryConstant<P> mod) {
+    return hafnian_montgomery_sum2(a0,b0,a1,b1,mod);
+}
+
+__host__ __device__ __forceinline__ uint32_t hafnian_sum_products2(
+    uint32_t a0,uint32_t b0,uint32_t a1,uint32_t b1,HafnianMersenne31) {
+    const uint64_t product=uint64_t(a0)*b0+uint64_t(a1)*b1;
+    uint64_t reduced=(product&HafnianMersenne31::p)+(product>>31);
+    reduced=(reduced&HafnianMersenne31::p)+(reduced>>31);
+    if(reduced>=HafnianMersenne31::p)reduced-=HafnianMersenne31::p;
+    return uint32_t(reduced);
+}
+
+
+template<class Mod>
+__device__ __forceinline__ uint32_t hafnian_sum_products4(
+    uint32_t a0,uint32_t b0,uint32_t a1,uint32_t b1,
+    uint32_t a2,uint32_t b2,uint32_t a3,uint32_t b3,Mod mod) {
+    return hafnian_add_mod(
+        hafnian_sum_products2(a0,b0,a1,b1,mod),
+        hafnian_sum_products2(a2,b2,a3,b3,mod),mod.p);
+}
+
+template<uint32_t P>
+__host__ __device__ __forceinline__ uint32_t hafnian_sum_products4(
+    uint32_t a0,uint32_t b0,uint32_t a1,uint32_t b1,
+    uint32_t a2,uint32_t b2,uint32_t a3,uint32_t b3,
+    HafnianMontgomeryConstant<P> mod) {
+    return hafnian_montgomery_sum4(
+        a0,b0,a1,b1,a2,b2,a3,b3,mod);
+}
+
+__host__ __device__ __forceinline__ uint32_t hafnian_sum_products4(
+    uint32_t a0,uint32_t b0,uint32_t a1,uint32_t b1,
+    uint32_t a2,uint32_t b2,uint32_t a3,uint32_t b3,HafnianMersenne31) {
+    const uint64_t product=uint64_t(a0)*b0+uint64_t(a1)*b1+
+        uint64_t(a2)*b2+uint64_t(a3)*b3;
+    uint64_t reduced=(product&HafnianMersenne31::p)+(product>>31);
+    reduced=(reduced&HafnianMersenne31::p)+(reduced>>31);
     if(reduced>=HafnianMersenne31::p)reduced-=HafnianMersenne31::p;
     return uint32_t(reduced);
 }

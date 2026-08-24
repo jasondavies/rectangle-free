@@ -86,12 +86,27 @@ __device__ __forceinline__ void multiply_polynomials(
     if(lane<S) {
         uint32_t value=0;
         if constexpr(LEFT_MIN+RIGHT_MIN==0) {
-            for(unsigned k=0;k<=lane;++k)value=hafnian_add_mod(value,
+            unsigned k=0;
+            for(;k+3<=lane;k+=4)value=hafnian_add_mod(value,
+                hafnian_sum_products4(left[k],right[lane-k],
+                    left[k+1],right[lane-k-1],left[k+2],right[lane-k-2],
+                    left[k+3],right[lane-k-3],mod),mod.p);
+            for(;k+1<=lane;k+=2)value=hafnian_add_mod(value,
+                hafnian_sum_products2(left[k],right[lane-k],
+                    left[k+1],right[lane-k-1],mod),mod.p);
+            if(k<=lane)value=hafnian_add_mod(value,
                 hafnian_mul(left[k],right[lane-k],mod),mod.p);
         } else if(lane>=LEFT_MIN+RIGHT_MIN) {
-            for(unsigned k=LEFT_MIN;k<=lane-RIGHT_MIN;++k)
-                value=hafnian_add_mod(value,
-                    hafnian_mul(left[k],right[lane-k],mod),mod.p);
+            unsigned k=LEFT_MIN;
+            for(;k+3<=lane-RIGHT_MIN;k+=4)
+                value=hafnian_add_mod(value,hafnian_sum_products4(
+                    left[k],right[lane-k],left[k+1],right[lane-k-1],
+                    left[k+2],right[lane-k-2],left[k+3],right[lane-k-3],mod),mod.p);
+            for(;k+1<=lane-RIGHT_MIN;k+=2)
+                value=hafnian_add_mod(value,hafnian_sum_products2(
+                    left[k],right[lane-k],left[k+1],right[lane-k-1],mod),mod.p);
+            if(k<=lane-RIGHT_MIN)value=hafnian_add_mod(value,
+                hafnian_mul(left[k],right[lane-k],mod),mod.p);
         }
         output[lane]=value;
     }

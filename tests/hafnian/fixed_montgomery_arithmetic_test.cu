@@ -32,9 +32,56 @@ uint64_t check_prime(uint64_t& state) {
             throw std::runtime_error("fixed Montgomery product mismatch");
         ++checked;
     };
+    auto check_sum=[&](uint32_t a,uint32_t b,uint32_t c,uint32_t d) {
+        const uint32_t encoded_a=uint32_t(uint64_t(a)*fixed.one%P);
+        const uint32_t encoded_b=uint32_t(uint64_t(b)*fixed.one%P);
+        const uint32_t encoded_c=uint32_t(uint64_t(c)*fixed.one%P);
+        const uint32_t encoded_d=uint32_t(uint64_t(d)*fixed.one%P);
+        const uint32_t fixed_sum=hafnian_sum_products2(
+            encoded_a,encoded_b,encoded_c,encoded_d,fixed);
+        const uint32_t runtime_sum=hafnian_sum_products2(
+            encoded_a,encoded_b,encoded_c,encoded_d,runtime);
+        const uint32_t decoded=hafnian_host_montgomery_mul(fixed_sum,1,fixed);
+        const uint32_t expected=uint32_t(
+            (uint64_t(a)*b+uint64_t(c)*d)%P);
+        if(fixed_sum!=runtime_sum||decoded!=expected)
+            throw std::runtime_error("fused Montgomery sum mismatch");
+        ++checked;
+    };
+    auto check_sum4=[&](uint32_t a,uint32_t b,uint32_t c,uint32_t d,
+            uint32_t e,uint32_t f,uint32_t g,uint32_t h) {
+        const uint32_t encoded_a=uint32_t(uint64_t(a)*fixed.one%P);
+        const uint32_t encoded_b=uint32_t(uint64_t(b)*fixed.one%P);
+        const uint32_t encoded_c=uint32_t(uint64_t(c)*fixed.one%P);
+        const uint32_t encoded_d=uint32_t(uint64_t(d)*fixed.one%P);
+        const uint32_t encoded_e=uint32_t(uint64_t(e)*fixed.one%P);
+        const uint32_t encoded_f=uint32_t(uint64_t(f)*fixed.one%P);
+        const uint32_t encoded_g=uint32_t(uint64_t(g)*fixed.one%P);
+        const uint32_t encoded_h=uint32_t(uint64_t(h)*fixed.one%P);
+        const uint32_t sum=hafnian_sum_products4(encoded_a,encoded_b,
+            encoded_c,encoded_d,encoded_e,encoded_f,encoded_g,encoded_h,fixed);
+        const uint32_t decoded=hafnian_host_montgomery_mul(sum,1,fixed);
+        const uint32_t expected=uint32_t((uint64_t(a)*b+uint64_t(c)*d+
+            uint64_t(e)*f+uint64_t(g)*h)%P);
+        if(decoded!=expected)
+            throw std::runtime_error("four-product Montgomery sum mismatch");
+        ++checked;
+    };
     for(uint32_t a:boundary)for(uint32_t b:boundary)check(a,b);
-    for(unsigned sample=0;sample<RANDOM_CASES;++sample)
+    for(uint32_t a:boundary)for(uint32_t b:boundary)
+        for(uint32_t c:boundary)for(uint32_t d:boundary) {
+            check_sum(a,b,c,d);
+            check_sum4(a,b,c,d,a,d,c,b);
+        }
+    for(unsigned sample=0;sample<RANDOM_CASES;++sample) {
         check(uint32_t(next_random(state)%P),uint32_t(next_random(state)%P));
+        check_sum(uint32_t(next_random(state)%P),uint32_t(next_random(state)%P),
+            uint32_t(next_random(state)%P),uint32_t(next_random(state)%P));
+        check_sum4(uint32_t(next_random(state)%P),uint32_t(next_random(state)%P),
+            uint32_t(next_random(state)%P),uint32_t(next_random(state)%P),
+            uint32_t(next_random(state)%P),uint32_t(next_random(state)%P),
+            uint32_t(next_random(state)%P),uint32_t(next_random(state)%P));
+    }
     for(uint32_t value:boundary) {
         if(!value)continue;
         uint32_t encoded=uint32_t(uint64_t(value)*fixed.one%P);
@@ -57,9 +104,37 @@ uint64_t check_mersenne(uint64_t& state) {
             throw std::runtime_error("Mersenne product mismatch");
         ++checked;
     };
+    auto check_sum=[&](uint32_t a,uint32_t b,uint32_t c,uint32_t d) {
+        const uint32_t sum=hafnian_sum_products2(a,b,c,d,mod);
+        const uint32_t expected=uint32_t(
+            (uint64_t(a)*b+uint64_t(c)*d)%P);
+        if(sum!=expected)throw std::runtime_error("fused Mersenne sum mismatch");
+        ++checked;
+    };
+    auto check_sum4=[&](uint32_t a,uint32_t b,uint32_t c,uint32_t d,
+            uint32_t e,uint32_t f,uint32_t g,uint32_t h) {
+        const uint32_t sum=hafnian_sum_products4(a,b,c,d,e,f,g,h,mod);
+        const uint32_t expected=uint32_t((uint64_t(a)*b+uint64_t(c)*d+
+            uint64_t(e)*f+uint64_t(g)*h)%P);
+        if(sum!=expected)
+            throw std::runtime_error("four-product Mersenne sum mismatch");
+        ++checked;
+    };
     for(uint32_t a:boundary)for(uint32_t b:boundary)check(a,b);
-    for(unsigned sample=0;sample<RANDOM_CASES;++sample)
+    for(uint32_t a:boundary)for(uint32_t b:boundary)
+        for(uint32_t c:boundary)for(uint32_t d:boundary) {
+            check_sum(a,b,c,d);
+            check_sum4(a,b,c,d,a,d,c,b);
+        }
+    for(unsigned sample=0;sample<RANDOM_CASES;++sample) {
         check(uint32_t(next_random(state)%P),uint32_t(next_random(state)%P));
+        check_sum(uint32_t(next_random(state)%P),uint32_t(next_random(state)%P),
+            uint32_t(next_random(state)%P),uint32_t(next_random(state)%P));
+        check_sum4(uint32_t(next_random(state)%P),uint32_t(next_random(state)%P),
+            uint32_t(next_random(state)%P),uint32_t(next_random(state)%P),
+            uint32_t(next_random(state)%P),uint32_t(next_random(state)%P),
+            uint32_t(next_random(state)%P),uint32_t(next_random(state)%P));
+    }
     for(uint32_t value:boundary) {
         if(!value)continue;
         const uint32_t inverse=hafnian_host_montgomery_power(value,P-2,mod);

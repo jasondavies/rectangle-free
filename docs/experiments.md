@@ -14623,3 +14623,52 @@
   roughly 10--11% end to end.  This is not a second algorithmic breakthrough,
   but it is a verified saving on the dominant catalog sector and validates the
   resolvent identity as a practical GPU primitive.
+
+### Experiment 429: Fused exact dot-product reductions
+
+- Goal: use a source-correlated Nsight Compute profile of the accepted
+  resolvent kernel to remove remaining redundant finite-field work.
+- The profiled order-48 kernel has 56 registers, no spills, 66.4% achieved
+  occupancy, 71.8% SM throughput, and only 11.7% DRAM throughput.  It is not a
+  DRAM-bandwidth problem.  Montgomery multiplication/reduction dominates the
+  instruction stream, while long-scoreboard latency is the largest stall
+  category.  The dense Lanczos matrix-vector product is the largest single
+  caller.
+- For every maintained prime `p < 2^31`, two reduced-residue products satisfy
+
+  ```text
+  a0*b0 + a1*b1 < p*2^32.
+  ```
+
+  One Montgomery reduction can therefore replace two reductions exactly.
+  Four products also fit strictly in 64 bits.  For four products, retain the
+  carry from `T + m*p`, restore it as one `2^32` term after the shift, and
+  subtract `p` at most three times.  The Mersenne backend uses two exact
+  31-bit folds.  Thirty million boundary and pseudorandom product sums across
+  all four primes and both runtime/fixed representations agree with ordinary
+  modular arithmetic.
+- Applying two- and four-product reductions only to the dense Lanczos
+  matrix-vector product saves 11--12% in the full-rank order-48 Montgomery
+  kernel.  Applying them to the small resolvent polynomial convolution saves
+  a further 2--3%.  Extending them to inverse-basis, Gram, and metric-dot loops
+  is neutral and was reverted; their shorter/divergent access patterns consume
+  the saved arithmetic.
+- Complete full-rank order-48 domains on one RTX PRO 6000 Blackwell:
+
+  | prime | preweighted v4 s | fused v4 s | additional speedup |
+  |---:|---:|---:|---:|
+  | 2,147,483,647 | 0.3948 | 0.3540 | 1.115x |
+  | 2,147,483,629 | 0.4174 | 0.3638 | 1.147x |
+  | 2,147,483,587 | 0.4183 | 0.3642 | 1.149x |
+  | 2,147,483,579 | 0.4186 | 0.3618 | 1.157x |
+
+  Every residue is unchanged.  A representative order-54 complete domain
+  falls from 4.69 s to 4.47 s (`1.049x`); measured order-50, 54, 56, and 58
+  samples improve by 4.8--5.6%.  A deliberately difficult order-52 sample,
+  whose non-cyclic chains fall back independently, improves by only 1.8%.
+  Memcheck and racecheck report no errors or hazards.
+- Outcome: accept fused reductions in the shared Gray core and resolver
+  polynomial product.  Weighting the approximately 12--15% dominant-sector
+  saving and approximately 5% larger-order saving lowers the current campaign
+  projection from 19--20 to roughly 17--18 RTX PRO 6000 GPU-hours.  Keep the
+  ordinary one-product reducer and the measured-neutral loop organizations.

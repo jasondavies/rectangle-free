@@ -241,9 +241,19 @@ __device__ void apply_dense(const uint32_t* matrix,const uint32_t* input,
     const unsigned lane=threadIdx.x&31;
     for(unsigned row=lane;row<rank;row+=32) {
         uint32_t sum=0;
-        for(unsigned column=0;column<rank;++column)
-            sum=hafnian_add_mod(sum,hafnian_mul(
-                matrix[size_t(column)*rank+row],input[column],mod),mod.p);
+        unsigned column=0;
+        for(;column+3<rank;column+=4)
+            sum=hafnian_add_mod(sum,hafnian_sum_products4(
+                matrix[size_t(column)*rank+row],input[column],
+                matrix[size_t(column+1)*rank+row],input[column+1],
+                matrix[size_t(column+2)*rank+row],input[column+2],
+                matrix[size_t(column+3)*rank+row],input[column+3],mod),mod.p);
+        for(;column+1<rank;column+=2)
+            sum=hafnian_add_mod(sum,hafnian_sum_products2(
+                matrix[size_t(column)*rank+row],input[column],
+                matrix[size_t(column+1)*rank+row],input[column+1],mod),mod.p);
+        if(column<rank)sum=hafnian_add_mod(sum,hafnian_mul(
+            matrix[size_t(column)*rank+row],input[column],mod),mod.p);
         output[row]=sum;
     }
     __syncwarp();
