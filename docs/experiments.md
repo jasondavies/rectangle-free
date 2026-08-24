@@ -14342,3 +14342,20 @@
 - Outcome: accept the heterogeneous exact field backend.  This recovers the
   useful portion of the old pseudo-Mersenne experiment without imposing its
   measured regressions on the other three primes.
+
+### Experiment 422: Per-query setup and overlap gate
+
+- Goal: determine whether the kernel-only projection omits material recurring
+  factorization/allocation cost across 109,197 query/prime jobs.
+- A persistent 100-task one-term batch takes 2.80 s wall time, but about 2.5 s
+  is the one-time 36,398-query catalog build.  On a realistic 50-job batch of
+  million-term order-48 ranges, the existing solver takes 7.19--7.20 s.
+- Prototypes that pre-factor task `N+1` on a CPU future and retain one packed
+  high-water device factor buffer take 7.11--7.12 s.  Alternating repetitions
+  overlap, and the apparent sub-1.2% difference is within process/setup noise;
+  tiny-task runs likewise show no stable improvement.
+- Outcome: reject and remove both changes.  Recurring setup is only a few
+  milliseconds per job, while the 2.5-second catalog build is paid once per
+  persistent worker.  Keep the sequential, locally owned factor object; a
+  more complex producer/arena pipeline would not materially change the
+  approximately 29-GPU-hour campaign.
