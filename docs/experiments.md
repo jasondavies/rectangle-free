@@ -13976,3 +13976,58 @@
   52--64 unchanged until separately measured.  Do not pursue INT8 MMA for
   this chain: the exact 31-bit path wins without the measured `3.042x`
   small-prime CRT multiplier.
+
+### Experiment 415: Fully global Gray carry state and long-grid scheduling
+
+- Goal: determine whether the remaining small shared-memory carry state and
+  the two-wave launch policy limit the winning Gray kernel from experiment
+  414.
+- Controlled representation: `HAFNIAN_GRAY_GLOBAL_FUTURE=0` retains all
+  future rank-two factors in shared memory; the default stores them in the
+  same per-CTA global scratch arena as the rebuild matrix and disposable
+  basis.  All hot recurrence vectors, metrics, tridiagonal coefficients, and
+  polynomial state remain shared.
+- Matched order-48 chain-6 A/B on one RTX PRO 6000 Blackwell:
+
+  | future storage | shared bytes | CTAs/SM | Gray ms / 2^20 | speedup vs production |
+  |---|---:|---:|---:|---:|
+  | shared control | 4,940 | 17 | 232.99 | 1.3234x |
+  | global | 3,020 | 24 | 227.12 | 1.3583x |
+
+  The candidate reaches the architectural 24-CTA/48-warp limit.  Its added
+  traffic is coalesced and cache-friendly; exact residues retain parity.
+- Chain census: with future storage no longer affecting residency, test every
+  length from 1 through 8.  Chain 7 is best for both orders 48 and 50.  On
+  million-term samples with the initial two-wave grid it reaches about
+  `1.38x` production throughput at both orders.
+- Scheduling census: two waves leave a measurable tail because finite-field
+  Lanczos attempts and chain work are heterogeneous.  Increasing the grid
+  continues to help until roughly 32 residency waves.  On complete domains,
+  144,384 blocks are within about 0.3% of much larger 216,576--288,768-block
+  grids while using substantially less scratch.  Select 32 waves as the
+  candidate production point on this 188-SM GPU; express the policy as
+  `32 * active_blocks * SMs`, not as a hardware-specific block constant.
+- Complete-domain result at the three primes used by essentially every
+  order-48/50 catalog query:
+
+  | order | prime | production s | Gray s | speedup |
+  |---:|---:|---:|---:|---:|
+  | 48 | 2,147,483,647 | 2.3729 | 1.6483 | 1.4396x |
+  | 48 | 2,147,483,629 | 2.3828 | 1.6359 | 1.4566x |
+  | 48 | 2,147,483,587 | 2.3510 | 1.6275 | 1.4445x |
+  | 50 | 2,147,483,647 | 4.9741 | 3.5399 | 1.4052x |
+  | 50 | 2,147,483,629 | 4.9862 | 3.5006 | 1.4244x |
+  | 50 | 2,147,483,587 | 4.9406 | 3.4983 | 1.4123x |
+
+  Every run covers the full sign domain, matches the independent production
+  residue, and reports zero breakdowns.
+- Revised candidate projection: applying these matched timings to the exact
+  order-48/50 prime-image counts, leaving larger orders unchanged, reduces
+  the conservative 87.29-GPU-hour projection to approximately 64.03 RTX PRO
+  6000 GPU-hours.  This is a `1.363x` whole-campaign improvement and saves
+  about 23.26 GPU-hours relative to the maintained production solver.
+- Outcome: accept global future-factor storage, chain length 7, and the
+  32-wave launch policy for production integration.  Retain the shared-future
+  compile-time control only in the research probe.  The next research gate is
+  pairing independent chains so that Montgomery's batch-inversion trick can
+  replace two dependent field inversions by one.

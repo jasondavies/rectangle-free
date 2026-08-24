@@ -29,6 +29,10 @@
 #include "../../src/hafnian/hafnian_gpu_core.cuh"
 #include "../../src/hafnian/six_by_twenty_eight_catalog.hpp"
 
+#ifndef HAFNIAN_GRAY_GLOBAL_FUTURE
+#define HAFNIAN_GRAY_GLOBAL_FUTURE 1
+#endif
+
 namespace {
 
 using six_by_twenty_eight::Query;
@@ -440,8 +444,9 @@ __global__ void gray_update_kernel(
     uint32_t* current=vectors+1*N;
     uint32_t* next=vectors+2*N;
     uint32_t* applied=vectors+3*N;
-    uint32_t* future=vectors+4*N;                     // 2*(CHAIN-1)*N
-    uint32_t* temporary0=future+2*(CHAIN-1)*N;
+    uint32_t* future_shared=vectors+4*N;
+    uint32_t* temporary0=future_shared+
+        (HAFNIAN_GRAY_GLOBAL_FUTURE?0:2*(CHAIN-1)*N);
     uint32_t* temporary1=temporary0+N;
     uint32_t* poly=temporary1+N;                      // 3*(HALF+1)
     uint32_t* warp_sums=poly+3*STRIDE;                // 4
@@ -451,6 +456,10 @@ __global__ void gray_update_kernel(
     const uint64_t chain_stride=uint64_t(gridDim.x)*CHAIN;
     uint32_t* dense=dense_scratch+size_t(blockIdx.x)*N*N;
     uint32_t* basis=dense_scratch+size_t(gridDim.x+blockIdx.x)*N*N;
+    uint32_t* future=HAFNIAN_GRAY_GLOBAL_FUTURE?
+        dense_scratch+size_t(2)*gridDim.x*N*N+
+            size_t(blockIdx.x)*2*(CHAIN-1)*N:
+        future_shared;
     for(uint64_t chain_begin=begin+uint64_t(blockIdx.x)*CHAIN;
             chain_begin<end;chain_begin+=chain_stride) {
         const uint64_t signs0=chain_begin^(chain_begin>>1);
@@ -557,7 +566,8 @@ __global__ void gray_update_kernel(
 template<unsigned N,unsigned CHAIN>
 constexpr size_t gray_shared_bytes() {
     constexpr unsigned HALF=N/2;
-    return (4*N+4*N+4*N+2*(CHAIN-1)*N+2*N+
+    return (4*N+4*N+4*N+
+        (HAFNIAN_GRAY_GLOBAL_FUTURE?0:2*(CHAIN-1)*N)+2*N+
         3*(HALF+1)+4+4)*sizeof(uint32_t);
 }
 
@@ -591,8 +601,10 @@ void run_probe(const Query& query,const RankFactor& factor,uint64_t terms,
     hafnian_cuda_check(cudaMalloc(&device_failures,sizeof(uint32_t)),
         "allocate failure count");
     hafnian_cuda_check(cudaMalloc(&device_dense,
-        size_t(2)*gray_blocks*N*N*sizeof(uint32_t)),
-        "allocate dense/basis Gray scratch");
+        (size_t(2)*gray_blocks*N*N+
+            (HAFNIAN_GRAY_GLOBAL_FUTURE?
+                size_t(gray_blocks)*2*(CHAIN-1)*N:0))*sizeof(uint32_t)),
+        "allocate dense/basis/future Gray scratch");
     std::vector<uint32_t> sums(maximum_blocks);
     cudaEvent_t started,finished;
     hafnian_cuda_check(cudaEventCreate(&started),"create start event");
@@ -637,11 +649,12 @@ void run_probe(const Query& query,const RankFactor& factor,uint64_t terms,
     const bool exact=!gray_failures&&gray_residue==baseline_residue;
     std::printf(
         "GRAY_UPDATE_GPU_RESULT vertices=%u rank=%u chain=%u terms=%" PRIu64
-        " prime=%u gray_blocks=%u active_blocks_per_sm=%d shared_bytes=%zu "
+        " prime=%u future_global=%d gray_blocks=%u active_blocks_per_sm=%d shared_bytes=%zu "
         "baseline_ms_best=%.6f baseline_ms_mean=%.6f gray_ms_best=%.6f "
         "gray_ms_mean=%.6f speedup_best=%.6f speedup_mean=%.6f "
         "baseline_residue=%u gray_residue=%u failures=%u exact=%s\n",
-        N,factor.rank,CHAIN,terms,mod.p,gray_blocks,active,dynamic_shared,
+        N,factor.rank,CHAIN,terms,mod.p,HAFNIAN_GRAY_GLOBAL_FUTURE,
+        gray_blocks,active,dynamic_shared,
         baseline[0],baseline[1],gray[0],gray[1],baseline[0]/gray[0],
         baseline[1]/gray[1],baseline_residue,gray_residue,gray_failures,
         exact?"OK":"FAIL");
@@ -656,10 +669,13 @@ void dispatch_chain(const Query& query,const RankFactor& factor,uint64_t terms,
     switch(chain) {
         case 1:return run_probe<N,1>(query,factor,terms,blocks,iterations,mod);
         case 2:return run_probe<N,2>(query,factor,terms,blocks,iterations,mod);
+        case 3:return run_probe<N,3>(query,factor,terms,blocks,iterations,mod);
         case 4:return run_probe<N,4>(query,factor,terms,blocks,iterations,mod);
+        case 5:return run_probe<N,5>(query,factor,terms,blocks,iterations,mod);
         case 6:return run_probe<N,6>(query,factor,terms,blocks,iterations,mod);
+        case 7:return run_probe<N,7>(query,factor,terms,blocks,iterations,mod);
         case 8:return run_probe<N,8>(query,factor,terms,blocks,iterations,mod);
-        default:throw std::runtime_error("chain must be 1, 2, 4, 6, or 8");
+        default:throw std::runtime_error("chain must be between 1 and 8");
     }
 }
 
@@ -703,7 +719,7 @@ int main(int argc,char** argv) {
             else if(argument=="--prime")prime=uint32_t(number(take()));
             else throw std::runtime_error(
                 "usage: hafnian_gray_update_gpu_probe [--query Q] [--terms 2^k] "
-                "[--chain 1|2|4|6|8] [--blocks N] [--iterations N] [--prime P]");
+                "[--chain 1..8] [--blocks N] [--iterations N] [--prime P]");
         }
         if(!terms||(terms&(terms-1))||!iterations)
             throw std::runtime_error("terms must be a nonzero power of two");
