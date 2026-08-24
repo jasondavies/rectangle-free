@@ -14476,3 +14476,40 @@
   by the same 17.5%.  The revised workload-weighted projection is roughly
   21--22 RTX PRO 6000 GPU-hours, pending a fresh campaign; this is about four
   times faster than the 87.29-hour pre-Gray production baseline.
+
+### Experiment 426: Gray-chain reuse and full-rank specialization
+
+- Goal: determine whether consecutive Gray terms retain useful dense state,
+  and whether the overwhelmingly full-rank low-order residuals admit a simpler
+  hot path.
+- Two exact cross-term reuse schemes were rejected.  Carrying the dense matrix
+  forward along each chain and applying the two changed columns in place is
+  1--2% slower than reconstructing it from the compact edge basis.  Building
+  one all-negative base matrix and adding the Gray-positive columns is 2.4%
+  slower.  The edge-basis reconstruction is sufficiently cache-resident that
+  the extra shared/global state and control outweigh fewer additions.
+- An exact rank census at `p=2^31-1` finds that full rank is the common case at
+  the dominant low orders:
+
+  | order | full-rank queries | all queries | share |
+  |---:|---:|---:|---:|
+  | 48 | 29,908 | 33,077 | 90.4% |
+  | 50 | 2,256 | 2,548 | 88.5% |
+  | 52 | 656 | 706 | 92.9% |
+  | 54 | 36 | 38 | 94.7% |
+
+  The order-56/58/60/64 matrices in this catalog are all deficient, so they
+  retain the generic path.  Rank is computed independently for every query
+  and prime; the dispatch therefore remains exact if a modular rank differs.
+- Specialize the Gray kernel at launch when the precomputed rank equals the
+  matrix order.  The compiler can then remove deficient-rank bounds and
+  related branches.  A matched million-term full-rank order-48 query falls
+  from 0.05967 s to 0.05817 s (`1.026x`).  A rank-47 order-48 query and a
+  rank-55 order-56 query are performance-neutral and return exactly the same
+  residues through the generic specialization.
+- Complete order-48 runs under all four production primes preserve their
+  former residues.  CUDA memcheck reports zero errors, and racecheck reports
+  zero hazards for both full-rank and deficient-rank paths.
+- Outcome: accept the specialization.  Its campaign-wide gain is modest,
+  roughly 2%, and keeps the projected 6x28 campaign near the low end of the
+  existing 21--22 RTX PRO 6000 GPU-hour range.

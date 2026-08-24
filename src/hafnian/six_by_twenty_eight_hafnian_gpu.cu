@@ -270,10 +270,16 @@ std::string run_query(const Query& query,const Catalog& catalog,const Task& task
         if(gray_factor.rank) {
             gray_factors=hafnian_gray::make_device_factors<N>(query,gray_factor,mod);
             int active=0;
-            hafnian_cuda_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-                &active,hafnian_gray::terms_kernel<N,CHAIN,ActiveMod>,
-                hafnian_gray::THREADS,hafnian_gray::shared_bytes<N>()),
-                "compute Gray kernel occupancy");
+            if(gray_factor.rank==N)
+                hafnian_cuda_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                    &active,hafnian_gray::terms_kernel<N,CHAIN,ActiveMod,true>,
+                    hafnian_gray::THREADS,hafnian_gray::shared_bytes<N>()),
+                    "compute full-rank Gray kernel occupancy");
+            else
+                hafnian_cuda_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                    &active,hafnian_gray::terms_kernel<N,CHAIN,ActiveMod,false>,
+                    hafnian_gray::THREADS,hafnian_gray::shared_bytes<N>()),
+                    "compute generic Gray kernel occupancy");
             if(active<=0)throw std::runtime_error("Gray kernel has zero occupancy");
             gray_active_blocks=unsigned(active);
             uint64_t requested=options.blocks?options.blocks:
@@ -343,13 +349,22 @@ std::string run_query(const Query& query,const Catalog& catalog,const Task& task
                 hafnian_cuda_check(cudaMemset(
                     workspace.gray_failures,0,sizeof(uint32_t)),
                     "clear Gray failure counter");
-                hafnian_gray::terms_kernel<N,CHAIN,ActiveMod><<<
-                    gray_grid_blocks,hafnian_gray::THREADS,
-                    hafnian_gray::shared_bytes<N>()>>>(
-                    gray_factors.edge_matrices,gray_factors.update_vectors,
-                    gray_factors.metric,gray_factor.rank,begin,chunk_end,mod,
-                    workspace.inverses,workspace.gray_scratch,workspace.sums,
-                    workspace.gray_failures);
+                if(gray_factor.rank==N)
+                    hafnian_gray::terms_kernel<N,CHAIN,ActiveMod,true><<<
+                        gray_grid_blocks,hafnian_gray::THREADS,
+                        hafnian_gray::shared_bytes<N>()>>>(
+                        gray_factors.edge_matrices,gray_factors.update_vectors,
+                        gray_factors.metric,gray_factor.rank,begin,chunk_end,mod,
+                        workspace.inverses,workspace.gray_scratch,workspace.sums,
+                        workspace.gray_failures);
+                else
+                    hafnian_gray::terms_kernel<N,CHAIN,ActiveMod,false><<<
+                        gray_grid_blocks,hafnian_gray::THREADS,
+                        hafnian_gray::shared_bytes<N>()>>>(
+                        gray_factors.edge_matrices,gray_factors.update_vectors,
+                        gray_factors.metric,gray_factor.rank,begin,chunk_end,mod,
+                        workspace.inverses,workspace.gray_scratch,workspace.sums,
+                        workspace.gray_failures);
                 hafnian_cuda_check(cudaGetLastError(),"launch Gray hafnian kernel");
                 uint32_t failures=0;
                 hafnian_cuda_check(cudaMemcpy(&failures,workspace.gray_failures,

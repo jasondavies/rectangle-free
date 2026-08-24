@@ -573,7 +573,7 @@ __device__ uint32_t term_from_tridiagonal(
     return __shfl_sync(0xffffffff,result,0);
 }
 
-template<unsigned N,unsigned CHAIN,class Mod>
+template<unsigned N,unsigned CHAIN,class Mod,bool FULL_RANK>
 __global__ __launch_bounds__(THREADS,MIN_BLOCKS_PER_SM) void terms_kernel(
     const uint32_t* __restrict__ edge_matrices,
     const uint32_t* __restrict__ update_vectors,
@@ -582,6 +582,7 @@ __global__ __launch_bounds__(THREADS,MIN_BLOCKS_PER_SM) void terms_kernel(
     uint32_t* __restrict__ scratch,uint32_t* __restrict__ chain_sums,
     uint32_t* __restrict__ failures) {
     static_assert(CHAIN>=1&&CHAIN<=8);
+    if constexpr(FULL_RANK)rank=N;
     constexpr unsigned HALF=N/2;
     const unsigned lane=threadIdx.x&31,warp=threadIdx.x>>5;
     const size_t slot=size_t(blockIdx.x)*WARPS_PER_BLOCK+warp;
@@ -626,7 +627,8 @@ __global__ __launch_bounds__(THREADS,MIN_BLOCKS_PER_SM) void terms_kernel(
             uint32_t value=0;
             for(unsigned edge=0;edge<HALF;++edge) {
                 const uint32_t addend=edge_matrices[size_t(edge)*cells+cell];
-                const bool positive=edge==0||(signs0&(UINT64_C(1)<<(edge-1)));
+                const bool positive=edge==0||
+                    (signs0&(UINT64_C(1)<<(edge-1)));
                 value=positive?hafnian_add_mod(value,addend,mod.p):
                     hafnian_sub_mod(value,addend,mod.p);
             }
