@@ -32,7 +32,7 @@ using six_by_twenty_eight::Query;
 constexpr const char* ALGORITHM="glynn-trace-hessenberg-residual-runtime-montgomery-control-v1";
 constexpr const char* FORMAT="six-by-twenty-eight-hafnian-v1";
 #else
-constexpr const char* ALGORITHM="glynn-gray-lanczos-residual-fixed-montgomery-cuda-v1";
+constexpr const char* ALGORITHM="glynn-gray-lanczos-residual-fixed-field-cuda-v2";
 constexpr const char* FORMAT="six-by-twenty-eight-hafnian-v2";
 #endif
 
@@ -438,12 +438,13 @@ std::string dispatch(const Query& query,const Catalog& catalog,const Task& task,
     return dispatch_mod<HafnianMontgomery>(
         query,catalog,task,options,workspace,binary_digest);
 #else
+    if(task.prime==HafnianMersenne31::p)
+        return dispatch_mod<HafnianMersenne31>(
+            query,catalog,task,options,workspace,binary_digest);
     if(query.vertices>58)
         return dispatch_mod<HafnianMontgomery>(
             query,catalog,task,options,workspace,binary_digest);
     switch(task.prime) {
-        case 2147483647U:return dispatch_fixed_small<HafnianMontgomeryConstant<2147483647U>>(
-            query,catalog,task,options,workspace,binary_digest);
         case 2147483629U:return dispatch_fixed_small<HafnianMontgomeryConstant<2147483629U>>(
             query,catalog,task,options,workspace,binary_digest);
         case 2147483587U:return dispatch_fixed_small<HafnianMontgomeryConstant<2147483587U>>(

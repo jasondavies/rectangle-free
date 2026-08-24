@@ -14204,8 +14204,9 @@
 - Every ordinary run reported zero breakdowns.  CUDA memcheck on a nonzero
   Gray range reported zero errors.  CUDA 13 compiled the integrated solver
   for both `sm_89` and `sm_120`; the CPU catalog/reducer suite also passes.
-- Results use format `six-by-twenty-eight-hafnian-v2` and algorithm identifier
-  `glynn-gray-lanczos-residual-fixed-montgomery-cuda-v1`.  Each checkpoint
+- Results initially used format `six-by-twenty-eight-hafnian-v2` and algorithm
+  identifier `glynn-gray-lanczos-residual-fixed-montgomery-cuda-v1`, superseded
+  by the arithmetic-neutral v2 identifier in experiment 421.  Each checkpoint
   records chain geometry, active occupancy, failure count, and fallback count,
   preventing accidental mixing with the former binary-order campaign.
 - Outcome: accept the Gray backend for production orders 48 and 50.  The
@@ -14297,3 +14298,47 @@
   stack frame.  Matched million-term time regresses from 0.09450 to 0.09665 s
   (`2.3%`).  Retain the spill-free 16-CTA launch bound; the 18/20-CTA points
   were already rejected in experiment 417.
+
+### Experiment 421: Heterogeneous Mersenne/Montgomery dispatch
+
+- Goal: revisit the earlier pseudo-Mersenne rejection at the one modulus where
+  folding is structurally ideal.  For `p=2^31-1`, ordinary residues multiply
+  exactly as
+
+  ```text
+  x = a*b
+  r = (x & p) + (x >> 31)
+  if r >= p: r -= p
+  ```
+
+  with one 64-bit product, one fold, and one correction.  The other three
+  primes remain on their accepted fixed Montgomery backends.
+- Exactness: a host gate checks 2,000,064 boundary/random products and boundary
+  inverses for the Mersenne backend, in addition to the existing 8,000,256
+  Montgomery products.  Complete order-48 GPU domains agree with Montgomery;
+  sampled order-60 and order-64 ranges also agree exactly.
+- Gray result at order 48 and `p=2^31-1`: alternating complete domains take
+  0.6804--0.6810 s with Mersenne arithmetic versus 0.7320--0.7393 s with the
+  new Montgomery addition chain, a `7.5--8.0%` gain.
+- Independent high-order result on 4,194,304 terms:
+
+  | order | Mersenne s | runtime Montgomery s | speedup |
+  |---:|---:|---:|---:|
+  | 60 | 1.9439 | 2.4797 | 1.276x |
+  | 64 | 2.9276 | 3.5453 | 1.211x |
+
+  The larger high-order gain combines cheaper multiplication with the
+  37-multiply fixed inverse chain; the former runtime backend used generic
+  exponentiation.
+- Production policy: dispatch `2^31-1` to `HafnianMersenne31` at every order,
+  use fixed Montgomery at Gray-enabled orders for the other primes, and keep
+  runtime Montgomery only for primes 2--4 at orders 60/64.  Rename result
+  provenance to `glynn-gray-lanczos-residual-fixed-field-cuda-v2`; the v2
+  format and Gray checkpoint ordering are unchanged.
+- Projection: weighting the Mersenne gain by its actual one-of-three or
+  one-of-four prime-image share saves roughly another 0.7--0.8 GPU-hours.  The
+  current conservative campaign target is approximately 28.8--29.0 RTX PRO
+  6000 GPU-hours, about `3.0x` below the 87.29-hour fixed-kernel baseline.
+- Outcome: accept the heterogeneous exact field backend.  This recovers the
+  useful portion of the old pseudo-Mersenne experiment without imposing its
+  measured regressions on the other three primes.

@@ -45,6 +45,30 @@ uint64_t check_prime(uint64_t& state) {
     return checked;
 }
 
+uint64_t check_mersenne(uint64_t& state) {
+    constexpr unsigned RANDOM_CASES=2000000;
+    constexpr uint32_t P=HafnianMersenne31::p;
+    HafnianMersenne31 mod;
+    std::array<uint32_t,8> boundary={0U,1U,2U,P/2,P/2+1,P-3,P-2,P-1};
+    uint64_t checked=0;
+    auto check=[&](uint32_t a,uint32_t b) {
+        const uint32_t product=hafnian_host_montgomery_mul(a,b,mod);
+        if(product!=uint32_t(uint64_t(a)*b%P))
+            throw std::runtime_error("Mersenne product mismatch");
+        ++checked;
+    };
+    for(uint32_t a:boundary)for(uint32_t b:boundary)check(a,b);
+    for(unsigned sample=0;sample<RANDOM_CASES;++sample)
+        check(uint32_t(next_random(state)%P),uint32_t(next_random(state)%P));
+    for(uint32_t value:boundary) {
+        if(!value)continue;
+        const uint32_t inverse=hafnian_host_montgomery_power(value,P-2,mod);
+        if(hafnian_host_montgomery_mul(value,inverse,mod)!=1)
+            throw std::runtime_error("Mersenne inverse mismatch");
+    }
+    return checked;
+}
+
 } // namespace
 
 int main() try {
@@ -53,7 +77,8 @@ int main() try {
     checked+=check_prime<2147483629U>(state);
     checked+=check_prime<2147483587U>(state);
     checked+=check_prime<2147483579U>(state);
-    std::printf("FIXED_MONTGOMERY_ARITHMETIC primes=4 products=%" PRIu64
+    checked+=check_mersenne(state);
+    std::printf("FIXED_MONTGOMERY_ARITHMETIC primes=4 mersenne=1 products=%" PRIu64
         " exact=OK\n",checked);
     return 0;
 } catch(const std::exception& error) {

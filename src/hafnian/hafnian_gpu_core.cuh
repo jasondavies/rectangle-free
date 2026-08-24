@@ -15,6 +15,11 @@ struct HafnianMontgomery {
     uint32_t p=0,negative_inverse=0,one=0;
 };
 
+struct HafnianMersenne31 {
+    static constexpr uint32_t p=2147483647U;
+    static constexpr uint32_t one=1;
+};
+
 constexpr uint32_t hafnian_const_inverse_mod_2_32(uint32_t odd) {
     uint32_t value=odd;
     for(unsigned i=0;i<5;++i)value*=2U-odd*value;
@@ -82,6 +87,24 @@ inline uint32_t hafnian_host_montgomery_power(
     return result;
 }
 
+inline uint32_t hafnian_host_montgomery_mul(
+    uint32_t a,uint32_t b,HafnianMersenne31) {
+    const uint64_t product=uint64_t(a)*b;
+    uint64_t reduced=(product&HafnianMersenne31::p)+(product>>31);
+    if(reduced>=HafnianMersenne31::p)reduced-=HafnianMersenne31::p;
+    return uint32_t(reduced);
+}
+
+inline uint32_t hafnian_host_montgomery_power(
+    uint32_t a,uint64_t exponent,HafnianMersenne31 mod) {
+    uint32_t result=1;
+    while(exponent) {
+        if(exponent&1)result=hafnian_host_montgomery_mul(result,a,mod);
+        a=hafnian_host_montgomery_mul(a,a,mod);exponent>>=1;
+    }
+    return result;
+}
+
 __device__ __forceinline__ uint32_t hafnian_add_mod(uint32_t a,uint32_t b,uint32_t p) {
     uint32_t value=a+b;
     if(value>=p||value<a)value-=p;
@@ -124,6 +147,42 @@ template<uint32_t P>
 __device__ __forceinline__ uint32_t hafnian_mul(
     uint32_t a,uint32_t b,HafnianMontgomeryConstant<P> mod) {
     return hafnian_montgomery_mul(a,b,mod);
+}
+
+__device__ __forceinline__ uint32_t hafnian_mul(
+    uint32_t a,uint32_t b,HafnianMersenne31) {
+    const uint64_t product=uint64_t(a)*b;
+    uint64_t reduced=(product&HafnianMersenne31::p)+(product>>31);
+    if(reduced>=HafnianMersenne31::p)reduced-=HafnianMersenne31::p;
+    return uint32_t(reduced);
+}
+
+__device__ inline uint32_t hafnian_power(
+    uint32_t a,uint32_t exponent,HafnianMersenne31 mod) {
+    if(exponent!=HafnianMersenne31::p-2) {
+        uint32_t result=1;
+        while(exponent) {
+            if(exponent&1)result=hafnian_mul(result,a,mod);
+            a=hafnian_mul(a,a,mod);exponent>>=1;
+        }
+        return result;
+    }
+    auto square_n=[&](uint32_t value,unsigned count) {
+#pragma unroll
+        for(unsigned i=0;i<count;++i)value=hafnian_mul(value,value,mod);
+        return value;
+    };
+    const uint32_t a4=square_n(a,2);
+    const uint32_t a5=hafnian_mul(a4,a,mod);
+    const uint32_t a10=hafnian_mul(a5,a5,mod);
+    const uint32_t a15=hafnian_mul(a5,a10,mod);
+    const uint32_t a120=square_n(a15,3);
+    const uint32_t a125=hafnian_mul(a5,a120,mod);
+    const uint32_t a250=hafnian_mul(a125,a125,mod);
+    const uint32_t a255=hafnian_mul(a5,a250,mod);
+    const uint32_t a65535=hafnian_mul(square_n(a255,8),a255,mod);
+    const uint32_t a16777215=hafnian_mul(square_n(a65535,8),a255,mod);
+    return hafnian_mul(square_n(a16777215,7),a125,mod);
 }
 
 // All device inversions use exponent P-2.  The four production exponents have
