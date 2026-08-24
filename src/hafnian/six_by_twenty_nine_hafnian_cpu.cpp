@@ -16,12 +16,21 @@
 #include <omp.h>
 #endif
 
+#ifdef SIX_BY_TWENTY_EIGHT
+#include "six_by_twenty_eight_catalog.hpp"
+#else
 #include "six_by_twenty_nine_catalog.hpp"
+#endif
 
 namespace {
 
 using Clock=std::chrono::steady_clock;
-constexpr unsigned MAX_N=62,MAX_HALF=31;
+constexpr unsigned MAX_N=64,MAX_HALF=32;
+#ifdef SIX_BY_TWENTY_EIGHT
+using DefectQuery=six_by_twenty_eight::Query;
+#else
+using DefectQuery=six_by_twenty_nine::Query;
+#endif
 
 struct Mod {
     uint32_t p;
@@ -116,7 +125,7 @@ std::array<uint32_t,MAX_HALF+1> power_traces(Matrix matrix,unsigned degree,const
 }
 
 uint32_t trace_term(
-    const six_by_twenty_nine::Query& query,uint64_t signs,const Mod& mod) {
+    const DefectQuery& query,uint64_t signs,const Mod& mod) {
     unsigned n=query.vertices,half=n/2;
     Matrix matrix;
     matrix.n=n;
@@ -168,7 +177,11 @@ int main(int argc,char** argv) {
             else throw std::runtime_error(
                 "usage: six_by_twenty_nine_hafnian_cpu --query Q --prime P --begin B --end E --threads N");
         }
+#ifdef SIX_BY_TWENTY_EIGHT
+        auto catalog=six_by_twenty_eight::build_catalog();
+#else
         auto catalog=six_by_twenty_nine::build_catalog();
+#endif
         if(query_id>=catalog.queries.size()||!threads)throw std::runtime_error("invalid query/configuration");
         const auto& query=catalog.queries[query_id];
         uint64_t total=UINT64_C(1)<<(query.vertices/2-1);
@@ -201,7 +214,11 @@ int main(int argc,char** argv) {
         for(uint64_t sum:sums)result=mod.add(result,uint32_t(sum%prime));
         double seconds=std::chrono::duration<double>(Clock::now()-started).count();
         std::printf(
+#ifdef SIX_BY_TWENTY_EIGHT
+            "HAFNIAN_6X28_CPU catalog=%s query=%u query_sha=%s vertices=%u prime=%u "
+#else
             "HAFNIAN_6X29_CPU catalog=%s query=%u query_sha=%s vertices=%u prime=%u "
+#endif
             "begin=%" PRIu64 " end=%" PRIu64 " residue=%u elapsed=%.9f exact=OK\n",
             catalog.digest.c_str(),query.id,query.digest.c_str(),query.vertices,prime,
             begin,end,result,seconds);

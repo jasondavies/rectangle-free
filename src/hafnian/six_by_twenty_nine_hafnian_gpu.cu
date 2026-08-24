@@ -131,7 +131,9 @@ std::string run_query(
     hafnian_cuda_check(cudaGetDevice(&device),"cudaGetDevice");
     hafnian_cuda_check(cudaDeviceGetAttribute(
         &multiprocessors,cudaDevAttrMultiProcessorCount,device),"multiprocessor count");
-    unsigned blocks=options.blocks?options.blocks:unsigned(multiprocessors)*4;
+    constexpr size_t shared_bytes=hafnian_shared_bytes<N>();
+    unsigned blocks=options.blocks?options.blocks:
+        hafnian_recommended_blocks<N>(options.threads,multiprocessors);
     uint8_t* device_adjacency=nullptr;
     uint32_t* device_inverses=nullptr;
     uint32_t* device_sums=nullptr;
@@ -144,9 +146,8 @@ std::string run_query(
         cudaMemcpyHostToDevice),"copy inverses");
     std::vector<uint32_t> host_sums(blocks);
 
-    constexpr size_t shared_bytes=hafnian_shared_bytes<N>();
-    hafnian_cuda_check(cudaFuncSetAttribute(hafnian_terms_kernel<N>,
-        cudaFuncAttributeMaxDynamicSharedMemorySize,int(shared_bytes)),"set dynamic shared memory");
+    if(options.blocks)
+        (void)hafnian_recommended_blocks<N>(options.threads,multiprocessors);
     uint32_t partial=0;
     auto started=Clock::now();
     std::string binary_digest=sha256_file(executable);

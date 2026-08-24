@@ -21,7 +21,7 @@ best across all geometries.
 | Token-state dynamic programming | `T_4(r,n)` for two through five rows | Process columns while recording which colour/row-pair tokens have already appeared. |
 | Partition and structure-graph search | Exact counts and full chromatic polynomials at moderate sizes | Canonicalise column partitions, build a conflict graph, then count its proper colourings or chromatic polynomial. |
 | GPU distribution contraction | Large single evaluations such as `T_4(7,9)` and `T_4(8,8)` | Split four colours into two bits, reduce the outer binary masks by symmetry, and contract cached half-grid token distributions with an exact weighted-disjointness join. |
-| Endpoint matching and hafnians | `T_4(6,30)` and the near-endpoint `T_4(6,29)` | At six rows, token saturation turns minimum columns into edges of a 60-vertex graph; count perfect matchings exactly over finite fields. |
+| Endpoint matching and hafnians | `T_4(6,30)` and near-endpoint 6-row grids | At six rows, token saturation turns minimum columns into edges of a 60-vertex graph; count perfect and low-defect matchings exactly over finite fields. |
 
 ### 1. Token-state dynamic programming
 
@@ -85,11 +85,13 @@ T_4(6,30) = 30! * 2^30 * hafnian(A).
 ```
 
 The implementation evaluates the hafnian modulo several primes on GPU and
-uses CRT for the exact integer. For 6x29, a defect expansion reduces the
-calculation to 29 related residual hafnians.
+uses CRT for the exact integer. Defect expansions reduce 6x29 to 29 residual
+hafnians and 6x28 to 36,398 symmetry-quotiented residual queries.
 
 See [six_by_thirty_hafnian.md](docs/hafnian/six_by_thirty_hafnian.md) and
 [six_by_twenty_nine_hafnian.md](docs/hafnian/six_by_twenty_nine_hafnian.md).
+The production 6x28 campaign is described in
+[six_by_twenty_eight_hafnian.md](docs/hafnian/six_by_twenty_eight_hafnian.md).
 
 ## Building
 
@@ -161,6 +163,7 @@ Exercise the exact hafnian implementations with:
 ```bash
 make six-by-thirty-hafnian-test
 make six-by-twenty-nine-hafnian-test
+make six-by-twenty-eight-hafnian-test
 ```
 
 The full GPU campaign commands, manifests, cache formats, checkpointing, and
@@ -213,8 +216,8 @@ Research probes are intentionally not part of `make gpu-production`.
 - `partition_poly_8` is bounded to eight rows and eight columns.
 - The maintained GPU production targets are specialised for 7x7, 7x9, and
   8x8 distribution-join campaigns.
-- The hafnian solvers are geometry-specific implementations for 6x30 and
-  6x29.
+- The hafnian solvers cover the 6x30 endpoint and its 6x29/6x28 low-defect
+  expansions; 6x28 is production-ready but not yet a recorded result.
 
 Exact recorded values are in [results.txt](results.txt); detailed performance
 logs and experiment provenance are in

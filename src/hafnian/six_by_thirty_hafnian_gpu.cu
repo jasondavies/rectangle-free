@@ -178,7 +178,8 @@ int main(int argc,char** argv){
         if(o.begin>=o.end||o.end>TOTAL_TERMS||!o.chunk_terms||!o.threads||o.threads>1024)throw std::runtime_error("invalid work range/configuration");
         int device=0,multiprocessors=0; cuda_check(cudaGetDevice(&device),"cudaGetDevice");
         cuda_check(cudaDeviceGetAttribute(&multiprocessors,cudaDevAttrMultiProcessorCount,device),"cudaDeviceGetAttribute");
-        if(!o.blocks)o.blocks=unsigned(multiprocessors)*4;
+        if(!o.blocks)o.blocks=hafnian_recommended_blocks<N>(o.threads,multiprocessors);
+        else (void)hafnian_recommended_blocks<N>(o.threads,multiprocessors);
         uint8_t* device_adjacency=nullptr; uint32_t* device_inverses=nullptr; uint32_t* device_sums=nullptr;
         cuda_check(cudaMalloc(&device_adjacency,graph.reordered.size()),"cudaMalloc adjacency");
         cuda_check(cudaMalloc(&device_inverses,sizeof(inverses)),"cudaMalloc inverses");
@@ -188,7 +189,6 @@ int main(int argc,char** argv){
         std::vector<uint32_t> host_sums(o.blocks);
         uint32_t partial=0; uint64_t completed=0;
         const size_t shared_bytes=hafnian_shared_bytes<N>();
-        cuda_check(cudaFuncSetAttribute(hafnian_terms_kernel<N>,cudaFuncAttributeMaxDynamicSharedMemorySize,int(shared_bytes)),"set dynamic shared memory");
         auto started=Clock::now();
         std::string binary_digest=sha256_file(argv[0]);
         auto publish=[&](uint64_t covered_end,double elapsed){

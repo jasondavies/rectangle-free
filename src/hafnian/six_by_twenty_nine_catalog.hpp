@@ -182,13 +182,13 @@ inline bool find_perfect_matching(
     return false;
 }
 
-inline void build_query_graph(const Geometry& geometry,Query& query) {
+inline void build_query_graph(const Geometry& geometry,Query& query,unsigned width=WIDTH) {
     std::vector<unsigned> originals;
     for(unsigned token=0;token<TOKENS;++token)
         if(!(query.occupied&(UINT64_C(1)<<token)))originals.push_back(token);
     unsigned original_count=unsigned(originals.size());
     query.vertices=uint8_t(original_count+query.unmatched);
-    if(query.vertices%2||query.vertices<54||query.vertices>62)
+    if(query.vertices%2||query.vertices<48||query.vertices>64)
         throw std::runtime_error("unexpected augmented graph order");
     unsigned n=query.vertices;
     std::vector<uint8_t> natural(size_t(n)*n);
@@ -224,7 +224,9 @@ inline void build_query_graph(const Geometry& geometry,Query& query) {
             throw std::runtime_error("reference matching reorder failed");
 
     Sha256 hash;
-    const std::string header="six-by-twenty-nine-residual-query-v1\n";
+    const std::string header=width==29
+        ? "six-by-twenty-nine-residual-query-v1\n"
+        : "six-by-twenty-eight-residual-query-v1\n";
     hash.update(header);
     uint8_t metadata[4]={query.defect_count,query.excess,query.unmatched,query.vertices};
     hash.update(metadata,sizeof(metadata));

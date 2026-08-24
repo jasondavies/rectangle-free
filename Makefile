@@ -217,8 +217,24 @@ $(BUILD_DIR)/six_by_twenty_nine_hafnian_cpu: src/hafnian/six_by_twenty_nine_hafn
 		src/hafnian/six_by_twenty_nine_catalog.hpp src/common/sha256.hpp
 	$(CXX) -O3 -march=native -std=c++17 $(OPENMP_CFLAGS) -o $@ $< $(OPENMP_LDFLAGS)
 
+$(BUILD_DIR)/six_by_twenty_eight_catalog_test: tests/hafnian/six_by_twenty_eight_catalog_test.cpp \
+		src/hafnian/six_by_twenty_eight_catalog.hpp \
+		src/hafnian/six_by_twenty_nine_catalog.hpp src/common/sha256.hpp
+	$(CXX) -O3 -march=native -std=c++17 -o $@ $<
+
+$(BUILD_DIR)/six_by_twenty_eight_hafnian_cpu: src/hafnian/six_by_twenty_nine_hafnian_cpu.cpp \
+		src/hafnian/six_by_twenty_eight_catalog.hpp \
+		src/hafnian/six_by_twenty_nine_catalog.hpp src/common/sha256.hpp
+	$(CXX) -O3 -march=native -std=c++17 $(OPENMP_CFLAGS) \
+		-DSIX_BY_TWENTY_EIGHT=1 -o $@ $< $(OPENMP_LDFLAGS)
+
 $(BUILD_DIR)/six_by_twenty_nine_hafnian_gpu: src/hafnian/six_by_twenty_nine_hafnian_gpu.cu \
 		src/hafnian/six_by_twenty_nine_catalog.hpp src/hafnian/hafnian_gpu_core.cuh src/common/sha256.hpp
+	$(NVCC) $(NVCCFLAGS) -std=c++17 -o $@ $<
+
+$(BUILD_DIR)/six_by_twenty_eight_hafnian_gpu: src/hafnian/six_by_twenty_eight_hafnian_gpu.cu \
+		src/hafnian/six_by_twenty_eight_catalog.hpp src/hafnian/six_by_twenty_nine_catalog.hpp \
+		src/hafnian/hafnian_gpu_core.cuh src/common/sha256.hpp
 	$(NVCC) $(NVCCFLAGS) -std=c++17 -o $@ $<
 
 .PHONY: six-by-twenty-nine-hafnian-test
@@ -226,6 +242,17 @@ six-by-twenty-nine-hafnian-test: six_by_twenty_nine_hafnian_cpu
 	./$(BUILD_DIR)/six_by_twenty_nine_hafnian_cpu --query 0 --prime 2147483647 --begin 0 --end 16 --threads 1 | \
 		grep -q 'residue=791700040.*exact=OK'
 	python3 -m unittest -v tests.hafnian.test_six_by_twenty_nine_hafnian
+
+.PHONY: six-by-twenty-eight-hafnian-test
+six-by-twenty-eight-hafnian-test: six_by_twenty_eight_catalog_test \
+		six_by_twenty_eight_hafnian_cpu
+	./$(BUILD_DIR)/six_by_twenty_eight_catalog_test | \
+		grep -q 'queries=36398.*prime_histogram_3=36395 prime_histogram_4=3.*exact=OK'
+	./$(BUILD_DIR)/six_by_twenty_eight_hafnian_cpu --query 0 --prime 2147483647 \
+		--begin 0 --end 16 --threads 1 | grep -q 'residue=2020296484.*exact=OK'
+	./$(BUILD_DIR)/six_by_twenty_eight_hafnian_cpu --query 3321 --prime 2147483647 \
+		--begin 0 --end 16 --threads 1 | grep -q 'residue=1061461801.*exact=OK'
+	python3 -m unittest -v tests.hafnian.test_six_by_twenty_eight_hafnian
 
 .PHONY: six-by-thirty-hafnian-test
 six-by-thirty-hafnian-test: six_by_thirty_hafnian
@@ -398,6 +425,9 @@ BUILD_TARGETS := 5xn_count4 partition_count4 partition_poly partition_poly_7 \
 	colour_plane_permanent_probe \
 	six_by_thirty_hafnian \
 	six_by_thirty_hafnian_gpu \
+	six_by_twenty_eight_catalog_test \
+	six_by_twenty_eight_hafnian_cpu \
+	six_by_twenty_eight_hafnian_gpu \
 	six_by_twenty_nine_hafnian_cpu \
 	six_by_twenty_nine_hafnian_gpu \
 	twocolour_gpu_64.bin twocolour_gpu_bench twocolour_7x7_solve_gpu \

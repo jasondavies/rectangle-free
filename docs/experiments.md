@@ -13517,3 +13517,58 @@
   to 301 GPU-hours.  Eight equal GPUs fall from about 42.3 to 37.6 ideal wall
   hours before interruptions and validation.  This is a guaranteed 11.1%
   saving, not the hoped-for order-of-magnitude algorithmic improvement.
+
+### Experiment 407: Factored CRT and conflict-free 6x28 production kernel
+
+- Goal: remove avoidable prime runs and validate the production orders 48--64
+  before committing to the complete 36,398-query campaign.
+- Exact common factor: every defect contribution contains `28! * 2^(28-d)`
+  with `d <= 4`.  Reconstruct
+  `Q=T_4(6,28)/(28! * 2^24)` and restore the common factor only after CRT.
+  Dividing the certified Experiment 406 bound upward by this factor gives the
+  113-bit bound
+  `7,030,983,209,987,543,242,183,335,298,990,080`.  Four existing 31-bit
+  primes have a 124-bit product, so four global primes suffice rather than
+  eight.
+- Per-query adaptive CRT: apply the same exact degree bound to each residual
+  matching count before the weighted sum.  The complete deterministic catalog
+  builds in 1.93 seconds and finds that 36,395 queries require three primes;
+  only query IDs 0--2 require four.  The campaign therefore contains
+  1,063,130,234,880 sign terms, or 3.009 complete-prime equivalents, rather
+  than eight.
+- Kernel correction: store the shared Hessenberg matrix with stride `N+1`.
+  Alias the non-overlapping elimination and characteristic-factor work arrays,
+  so padding does not increase shared-memory usage.  This removes the
+  power-of-two column-stride bank conflicts and adds the previously missing
+  order-64 specialization.
+- Scheduling correction: query actual CUDA occupancy and launch two complete
+  residency waves.  The old fixed `4 * SM` grid leaves an order-64 kernel with
+  a `3+1`-CTA tail; the measured RTX PRO 6000 grids are 1,880 blocks at order
+  48 and 1,128 blocks at order 64.  The maintained production path has no
+  unpadded fallback.
+- Exact validation on one spot RTX PRO 6000 Blackwell:
+  - padded and control kernels reproduce independent CPU 16-term residues at
+    orders 48 and 64;
+  - a complete order-48 query gives residue `2,129,779,463` in both kernels;
+  - at order 48, padding alone saves about 2.1%, while padding plus the
+    occupancy grid reduces 8,388,608-term time from about 3.056 to 2.782
+    seconds (`1.098x`);
+  - at order 64, padding alone reduces time from about 10.70 to 9.34 seconds,
+    and the full-wave grid reduces it further to about 6.63 seconds
+    (`1.61x` versus the old configuration);
+  - 256 threads beats 128 by about 1.4% at order 48 and 5.3% at order 64.
+- Production machinery: add a self-identifying 6x28 catalog, persistent
+  multi-query CUDA worker with high-water device buffers, exact adaptive CRT
+  reducer, heavy-first multi-GPU scheduling, and range checkpointing.
+- Shared-core rollout: matrix padding and occupancy-derived complete waves now
+  live in `hafnian_gpu_core.cuh` and are used by 6x28, 6x29, and 6x30.  On the
+  same RTX PRO 6000, the 6x29 order-54 sample improves from 1.920 to 1.785
+  seconds (`1.075x`) and its order-62 sample from 2.463 to 2.410 seconds
+  (`1.022x`).  The independent 6x29 and 6x30 GPU self-tests retain exact CPU
+  parity.  Geometry-specific catalogs and final reductions remain separate;
+  the finite-field arithmetic, matrix representation, and launch policy do
+  not.
+- Revised projection: weighting measured representative throughput by the
+  exact order census gives about 102 RTX PRO 6000 GPU-hours, or 12.7 ideal
+  hours on eight equal GPUs, before interruption, filesystem, and validation
+  overhead.  This is a measured projection rather than a completed result.

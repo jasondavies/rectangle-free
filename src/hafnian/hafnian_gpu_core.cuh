@@ -81,15 +81,19 @@ __global__ void hafnian_terms_kernel(
     const uint8_t* __restrict__ adjacency,uint64_t begin,uint64_t end,
     HafnianMontgomery mod,const uint32_t* __restrict__ inverse_small,
     uint32_t* __restrict__ block_sums) {
-    static_assert(N%2==0&&N<=62);
+    static_assert(N%2==0&&N<=64);
     constexpr unsigned HALF=N/2;
     constexpr unsigned POLY_STRIDE=HALF+1;
+    constexpr unsigned MATRIX_STRIDE=N+1;
     extern __shared__ uint32_t shared[];
     uint32_t* matrix=shared;
-    uint32_t* poly=matrix+N*N;
+    uint32_t* poly=matrix+N*MATRIX_STRIDE;
     uint32_t* factors=poly+(N+1)*POLY_STRIDE;
-    uint32_t* char_factors=factors+N;
-    uint32_t* scalar=char_factors+N;
+    // Hessenberg elimination and characteristic-polynomial construction do
+    // not overlap, so these two work arrays can share storage.  The saved N
+    // words exactly pay for the conflict-free N+1 matrix stride.
+    uint32_t* char_factors=factors;
+    uint32_t* scalar=factors+N;
     uint32_t local_sum=0;
 
     for(uint64_t term=begin+blockIdx.x;term<end;term+=gridDim.x) {
@@ -99,14 +103,15 @@ __global__ void hafnian_terms_kernel(
             unsigned edge=column%HALF;
             unsigned paired=column<HALF?column+HALF:column-HALF;
             bool positive=edge==0||(term&(UINT64_C(1)<<(edge-1)));
-            matrix[index]=adjacency[row*N+paired]?(positive?mod.one:mod.p-mod.one):0;
+            matrix[row*MATRIX_STRIDE+column]=
+                adjacency[row*N+paired]?(positive?mod.one:mod.p-mod.one):0;
         }
         __syncthreads();
 
         for(unsigned column=0;column+2<N;++column) {
             if(threadIdx.x==0) {
                 unsigned pivot=column+1;
-                while(pivot<N&&matrix[pivot*N+column]==0)++pivot;
+                while(pivot<N&&matrix[pivot*MATRIX_STRIDE+column]==0)++pivot;
                 scalar[0]=pivot;
             }
             __syncthreads();
@@ -114,39 +119,43 @@ __global__ void hafnian_terms_kernel(
             if(pivot==N)continue;
             if(pivot!=column+1) {
                 for(unsigned j=threadIdx.x;j<N;j+=blockDim.x) {
-                    uint32_t temporary=matrix[pivot*N+j];
-                    matrix[pivot*N+j]=matrix[(column+1)*N+j];
-                    matrix[(column+1)*N+j]=temporary;
+                    uint32_t temporary=matrix[pivot*MATRIX_STRIDE+j];
+                    matrix[pivot*MATRIX_STRIDE+j]=matrix[(column+1)*MATRIX_STRIDE+j];
+                    matrix[(column+1)*MATRIX_STRIDE+j]=temporary;
                 }
                 __syncthreads();
                 for(unsigned i=threadIdx.x;i<N;i+=blockDim.x) {
-                    uint32_t temporary=matrix[i*N+pivot];
-                    matrix[i*N+pivot]=matrix[i*N+column+1];
-                    matrix[i*N+column+1]=temporary;
+                    uint32_t temporary=matrix[i*MATRIX_STRIDE+pivot];
+                    matrix[i*MATRIX_STRIDE+pivot]=matrix[i*MATRIX_STRIDE+column+1];
+                    matrix[i*MATRIX_STRIDE+column+1]=temporary;
                 }
                 __syncthreads();
             }
             if(threadIdx.x==0)
-                scalar[1]=hafnian_montgomery_power(matrix[(column+1)*N+column],mod.p-2,mod);
+                scalar[1]=hafnian_montgomery_power(
+                    matrix[(column+1)*MATRIX_STRIDE+column],mod.p-2,mod);
             __syncthreads();
             for(unsigned row=column+2+threadIdx.x;row<N;row+=blockDim.x)
-                factors[row]=hafnian_montgomery_mul(matrix[row*N+column],scalar[1],mod);
+                factors[row]=hafnian_montgomery_mul(
+                    matrix[row*MATRIX_STRIDE+column],scalar[1],mod);
             __syncthreads();
             unsigned width=N-column;
             unsigned cells=(N-column-2)*width;
             for(unsigned item=threadIdx.x;item<cells;item+=blockDim.x) {
                 unsigned row=column+2+item/width;
                 unsigned j=column+item%width;
-                matrix[row*N+j]=hafnian_sub_mod(matrix[row*N+j],
-                    hafnian_montgomery_mul(factors[row],matrix[(column+1)*N+j],mod),mod.p);
+                matrix[row*MATRIX_STRIDE+j]=hafnian_sub_mod(
+                    matrix[row*MATRIX_STRIDE+j],hafnian_montgomery_mul(
+                        factors[row],matrix[(column+1)*MATRIX_STRIDE+j],mod),mod.p);
             }
             __syncthreads();
             for(unsigned row=threadIdx.x;row<N;row+=blockDim.x) {
                 uint32_t sum=0;
                 for(unsigned eliminated=column+2;eliminated<N;++eliminated)
                     sum=hafnian_add_mod(sum,hafnian_montgomery_mul(
-                        factors[eliminated],matrix[row*N+eliminated],mod),mod.p);
-                matrix[row*N+column+1]=hafnian_add_mod(matrix[row*N+column+1],sum,mod.p);
+                        factors[eliminated],matrix[row*MATRIX_STRIDE+eliminated],mod),mod.p);
+                matrix[row*MATRIX_STRIDE+column+1]=hafnian_add_mod(
+                    matrix[row*MATRIX_STRIDE+column+1],sum,mod.p);
             }
             __syncthreads();
         }
@@ -161,16 +170,17 @@ __global__ void hafnian_terms_kernel(
                 for(unsigned distance=1;distance<size;++distance) {
                     unsigned subrow=size-distance;
                     product=hafnian_montgomery_mul(
-                        product,matrix[subrow*N+subrow-1],mod);
+                        product,matrix[subrow*MATRIX_STRIDE+subrow-1],mod);
                     char_factors[distance]=hafnian_montgomery_mul(
-                        product,matrix[(size-distance-1)*N+size-1],mod);
+                        product,matrix[(size-distance-1)*MATRIX_STRIDE+size-1],mod);
                 }
             }
             __syncthreads();
             for(unsigned k=threadIdx.x;k<=min(size,HALF);k+=blockDim.x) {
                 uint32_t value=k<=size-1?poly[(size-1)*POLY_STRIDE+k]:0;
                 if(k)value=hafnian_sub_mod(value,hafnian_montgomery_mul(
-                    matrix[(size-1)*N+size-1],poly[(size-1)*POLY_STRIDE+k-1],mod),mod.p);
+                    matrix[(size-1)*MATRIX_STRIDE+size-1],
+                    poly[(size-1)*POLY_STRIDE+k-1],mod),mod.p);
                 for(unsigned distance=1;distance<size&&distance+1<=k;++distance)
                     value=hafnian_sub_mod(value,hafnian_montgomery_mul(
                         char_factors[distance],poly[(size-distance-1)*POLY_STRIDE+k-distance-1],mod),mod.p);
@@ -212,5 +222,22 @@ __global__ void hafnian_terms_kernel(
 template<unsigned N>
 constexpr size_t hafnian_shared_bytes() {
     constexpr unsigned HALF=N/2;
-    return (N*N+(N+1)*(HALF+1)+2*N+4)*sizeof(uint32_t);
+    constexpr unsigned MATRIX_STRIDE=N+1;
+    return (N*MATRIX_STRIDE+(N+1)*(HALF+1)+N+4)*sizeof(uint32_t);
+}
+
+template<unsigned N>
+inline unsigned hafnian_recommended_blocks(
+    unsigned threads,int multiprocessors,unsigned residency_waves=2) {
+    constexpr size_t shared_bytes=hafnian_shared_bytes<N>();
+    hafnian_cuda_check(cudaFuncSetAttribute(hafnian_terms_kernel<N>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize,int(shared_bytes)),
+        "set hafnian dynamic shared memory");
+    int active_blocks=0;
+    hafnian_cuda_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+        &active_blocks,hafnian_terms_kernel<N>,threads,shared_bytes),
+        "compute hafnian kernel occupancy");
+    if(active_blocks<=0||multiprocessors<=0||!residency_waves)
+        throw std::runtime_error("hafnian kernel has zero launch occupancy");
+    return unsigned(multiprocessors)*unsigned(active_blocks)*residency_waves;
 }
