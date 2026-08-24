@@ -14172,3 +14172,43 @@
   lengths 6/7, and the specialized inverse chain.  The next step is production
   integration with Gray-order checkpoint semantics and exact per-chunk
   fallback, rather than another unprofiled arithmetic rewrite.
+
+### Experiment 418: Production Gray-chain integration
+
+- Goal: promote the accepted order-48/50 Gray update from a research probe to
+  the maintained 6x28 solver without weakening exactness, resumability, or
+  result provenance.
+- The reusable production core is `hafnian_gray_gpu_core.cuh`.  It contains
+  the exact adjacency factorisation, the two-warp/CTA Gray kernel, and no
+  rejected carry or batch-inversion branches.  Orders 48 and 50 use chains 6
+  and 7 respectively.  Larger orders retain the independent Hessenberg
+  kernel.
+- Checkpoint ranges now index the Gray sequence: term index `i` represents
+  signs `i xor (i >> 1)`.  The independent kernel has an explicit Gray-order
+  specialization.  If any generalized-Lanczos chain reports a breakdown, the
+  complete checkpoint chunk is discarded and recomputed with that exact
+  independent specialization.  A compile-time forced-fallback test exercised
+  this branch on a nonzero-offset order-48 range and reproduced the control
+  residue exactly.
+- Production-format exact comparisons on one RTX PRO 6000 Blackwell:
+
+  | order | range | prime | Gray residue | control residue | Gray s | control s |
+  |---:|---:|---:|---:|---:|---:|---:|
+  | 48 | 65,536 | 2,147,483,647 | 681,784,060 | 681,784,060 | 0.00705 | 0.02389 |
+  | 50 | 131,072 | 2,147,483,629 | 302,974,741 | 302,974,741 | 0.01430 | 0.07019 |
+  | 48 | 8,388,608 | 2,147,483,647 | 2,129,779,463 | 2,129,779,463 | 0.76772 | 3.08724* |
+
+  `*` The listed control binary uses runtime Montgomery arithmetic.  The
+  matched fixed-prime production baseline from experiment 417 is 2.3066 s,
+  so the relevant complete-domain speedup is approximately `3.00x`.
+- Every ordinary run reported zero breakdowns.  CUDA memcheck on a nonzero
+  Gray range reported zero errors.  CUDA 13 compiled the integrated solver
+  for both `sm_89` and `sm_120`; the CPU catalog/reducer suite also passes.
+- Results use format `six-by-twenty-eight-hafnian-v2` and algorithm identifier
+  `glynn-gray-lanczos-residual-fixed-montgomery-cuda-v1`.  Each checkpoint
+  records chain geometry, active occupancy, failure count, and fallback count,
+  preventing accidental mixing with the former binary-order campaign.
+- Outcome: accept the Gray backend for production orders 48 and 50.  The
+  conservative campaign estimate remains approximately 34.92 RTX PRO 6000
+  GPU-hours (`2.50x` below the 87.29-GPU-hour baseline), because it still
+  assigns all orders above 50 their pre-optimization cost.

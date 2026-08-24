@@ -10,8 +10,8 @@ from collections import defaultdict
 from pathlib import Path
 
 
-FORMAT = "six-by-twenty-eight-hafnian-v1"
-ALGORITHM = "glynn-trace-hessenberg-residual-fixed-montgomery-cuda-v3"
+FORMAT = "six-by-twenty-eight-hafnian-v2"
+ALGORITHM = "glynn-gray-lanczos-residual-fixed-montgomery-cuda-v1"
 CATALOG_SHA256 = "feb6a22408c51627ab8b8cdf91da1d4707f64f324fae02dd6ef082c774e68b2d"
 QUERY_COUNT = 36_398
 PRIMES = (
@@ -39,7 +39,10 @@ def read_result(path: Path) -> dict[str, str]:
         "excess", "unmatched_tokens", "defect_coefficient",
         "matching_bound_power", "vertices", "matrix_stride",
         "solver_binary_sha256", "prime", "begin", "end", "total_terms",
-        "partial_glynn_sum", "status", "result_payload_sha256",
+        "partial_glynn_sum", "gray_enabled", "gray_chain", "gray_slots",
+        "gray_grid_blocks", "gray_active_blocks_per_sm", "gray_chunks",
+        "gray_failures", "gray_fallback_chunks", "status",
+        "result_payload_sha256",
     }
     if not required <= fields.keys():
         raise ValueError(f"{path}: missing fields {sorted(required-fields.keys())}")
@@ -97,12 +100,37 @@ def main() -> int:
         residue = int(fields["partial_glynn_sum"])
         vertices = int(fields["vertices"])
         stride = int(fields["matrix_stride"])
+        gray_enabled = int(fields["gray_enabled"])
+        gray_chain = int(fields["gray_chain"])
+        gray_slots = int(fields["gray_slots"])
+        gray_grid_blocks = int(fields["gray_grid_blocks"])
+        gray_active_blocks = int(fields["gray_active_blocks_per_sm"])
+        gray_chunks = int(fields["gray_chunks"])
+        gray_failures = int(fields["gray_failures"])
+        gray_fallback_chunks = int(fields["gray_fallback_chunks"])
         total_terms = int(fields["total_terms"])
         expected_terms = 1 << (vertices//2-1)
         if not 0 <= query < QUERY_COUNT or vertices not in range(48, 65, 2):
             raise ValueError(f"{path}: invalid query/order")
         if stride not in (vertices, vertices+1):
             raise ValueError(f"{path}: invalid matrix stride")
+        if gray_enabled not in (0, 1):
+            raise ValueError(f"{path}: invalid Gray mode")
+        expected_chain = {48: 6, 50: 7}.get(vertices, 0)
+        if gray_enabled:
+            if (gray_chain != expected_chain or gray_slots <= 0 or
+                    gray_active_blocks <= 0 or gray_chunks <= 0):
+                raise ValueError(f"{path}: invalid Gray chain geometry")
+            if gray_slots != 2*gray_grid_blocks:
+                raise ValueError(f"{path}: inconsistent Gray grid geometry")
+            if gray_fallback_chunks > gray_chunks:
+                raise ValueError(f"{path}: invalid Gray fallback count")
+        elif any((gray_chain, gray_slots, gray_grid_blocks,
+                  gray_active_blocks, gray_chunks, gray_failures,
+                  gray_fallback_chunks)):
+            raise ValueError(f"{path}: inactive Gray mode has nonzero state")
+        if gray_failures and not gray_fallback_chunks:
+            raise ValueError(f"{path}: Gray failures were not recomputed")
         if total_terms != expected_terms or not 0 <= begin < end <= total_terms:
             raise ValueError(f"{path}: invalid term range")
         if prime not in PRIMES or not 0 <= residue < prime:

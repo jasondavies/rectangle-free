@@ -30,6 +30,10 @@ def result_text() -> str:
         ("matrix_stride", 65), ("solver_binary_sha256", "b" * 64),
         ("prime", PRIMES[0]), ("begin", 0), ("end", 16),
         ("total_terms", 1 << 31), ("partial_glynn_sum", 123),
+        ("gray_enabled", 0), ("gray_chain", 0), ("gray_slots", 0),
+        ("gray_grid_blocks", 0), ("gray_active_blocks_per_sm", 0),
+        ("gray_chunks", 0), ("gray_failures", 0),
+        ("gray_fallback_chunks", 0),
         ("status", "complete"),
     ]
     payload = "".join(f"{key} {value}\n" for key, value in fields)

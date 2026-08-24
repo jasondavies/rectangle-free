@@ -210,7 +210,7 @@ __device__ inline uint32_t hafnian_power(
     return result;
 }
 
-template<unsigned N,class Mod=HafnianMontgomery>
+template<unsigned N,class Mod=HafnianMontgomery,bool GRAY_ORDER=false>
 __global__ void hafnian_terms_kernel(
     const uint8_t* __restrict__ adjacency,uint64_t begin,uint64_t end,
     Mod mod,const uint32_t* __restrict__ inverse_small,
@@ -231,12 +231,13 @@ __global__ void hafnian_terms_kernel(
     uint32_t local_sum=0;
 
     for(uint64_t term=begin+blockIdx.x;term<end;term+=gridDim.x) {
+        const uint64_t signs=GRAY_ORDER?term^(term>>1):term;
         for(unsigned index=threadIdx.x;index<N*N;index+=blockDim.x) {
             unsigned row=index/N;
             unsigned column=index%N;
             unsigned edge=column%HALF;
             unsigned paired=column<HALF?column+HALF:column-HALF;
-            bool positive=edge==0||(term&(UINT64_C(1)<<(edge-1)));
+            bool positive=edge==0||(signs&(UINT64_C(1)<<(edge-1)));
             matrix[row*MATRIX_STRIDE+column]=
                 adjacency[row*N+paired]?(positive?mod.one:mod.p-mod.one):0;
         }
@@ -360,7 +361,7 @@ __global__ void hafnian_terms_kernel(
                 coefficients[degree]=hafnian_mul(sum,inverse_small[degree],mod);
             }
 #endif
-            unsigned negatives=(HALF-1)-__popcll(term);
+            unsigned negatives=(HALF-1)-__popcll(signs);
             uint32_t contribution=negatives&1?
                 hafnian_neg_mod(coefficients[HALF],mod.p):coefficients[HALF];
             local_sum=hafnian_add_mod(local_sum,contribution,mod.p);

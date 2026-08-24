@@ -19,6 +19,7 @@
 #include <unistd.h>
 
 #include "hafnian_gpu_core.cuh"
+#include "hafnian_gray_gpu_core.cuh"
 #include "../common/sha256.hpp"
 #include "six_by_twenty_eight_catalog.hpp"
 
@@ -29,10 +30,11 @@ using six_by_twenty_eight::Catalog;
 using six_by_twenty_eight::Query;
 #if defined(HAFNIAN_RUNTIME_MONTGOMERY_CONTROL)
 constexpr const char* ALGORITHM="glynn-trace-hessenberg-residual-runtime-montgomery-control-v1";
-#else
-constexpr const char* ALGORITHM="glynn-trace-hessenberg-residual-fixed-montgomery-cuda-v3";
-#endif
 constexpr const char* FORMAT="six-by-twenty-eight-hafnian-v1";
+#else
+constexpr const char* ALGORITHM="glynn-gray-lanczos-residual-fixed-montgomery-cuda-v1";
+constexpr const char* FORMAT="six-by-twenty-eight-hafnian-v2";
+#endif
 
 bool is_prime_u32(uint32_t n) {
     if(n<2)return false;
@@ -167,9 +169,12 @@ class DeviceWorkspace {
             "multiprocessor count");
         hafnian_cuda_check(cudaMalloc(&adjacency,64*64),"allocate adjacency");
         hafnian_cuda_check(cudaMalloc(&inverses,33*sizeof(uint32_t)),"allocate inverses");
+        hafnian_cuda_check(cudaMalloc(&gray_failures,sizeof(uint32_t)),
+            "allocate Gray failure counter");
     }
     ~DeviceWorkspace() {
-        cudaFree(sums);cudaFree(inverses);cudaFree(adjacency);
+        cudaFree(gray_scratch);cudaFree(gray_failures);cudaFree(sums);
+        cudaFree(inverses);cudaFree(adjacency);
     }
     DeviceWorkspace(const DeviceWorkspace&)=delete;
     DeviceWorkspace& operator=(const DeviceWorkspace&)=delete;
@@ -183,11 +188,23 @@ class DeviceWorkspace {
         block_capacity=wanted;
     }
 
+    void ensure_gray_words(size_t wanted) {
+        if(wanted<=gray_word_capacity)return;
+        if(gray_scratch)
+            hafnian_cuda_check(cudaFree(gray_scratch),"free old Gray scratch");
+        hafnian_cuda_check(cudaMalloc(&gray_scratch,wanted*sizeof(uint32_t)),
+            "allocate Gray scratch");
+        gray_word_capacity=wanted;
+    }
+
     uint8_t* adjacency=nullptr;
     uint32_t* inverses=nullptr;
     uint32_t* sums=nullptr;
+    uint32_t* gray_failures=nullptr;
+    uint32_t* gray_scratch=nullptr;
     int multiprocessors=0;
     unsigned block_capacity=0;
+    size_t gray_word_capacity=0;
     std::vector<uint32_t> host_sums;
 };
 
@@ -226,14 +243,56 @@ std::string run_query(const Query& query,const Catalog& catalog,const Task& task
     hafnian_cuda_check(cudaMemcpy(workspace.inverses,inverse_values.data(),
         sizeof(inverse_values),cudaMemcpyHostToDevice),"copy inverses");
 
-    constexpr size_t shared_bytes=hafnian_shared_bytes<N>();
+    constexpr size_t independent_shared_bytes=hafnian_shared_bytes<N>();
     unsigned threads=options.threads?options.threads:(N<=50?224U:256U);
     // Use complete residency waves.  The old fixed 4*SM grid leaves a severe
     // 3+1 tail for N=64, whereas two full waves remain balanced for every N.
     unsigned recommended_blocks=hafnian_recommended_blocks<N,ActiveMod>(
         threads,workspace.multiprocessors);
     unsigned blocks=options.blocks?options.blocks:recommended_blocks;
-    workspace.ensure_blocks(blocks);
+
+    bool gray_enabled=false;
+    unsigned gray_slots=0,gray_grid_blocks=0,gray_active_blocks=0;
+    uint32_t gray_failures_total=0,gray_fallback_chunks=0,gray_chunks=0;
+    hafnian_gray::RankFactor gray_factor;
+    hafnian_gray::DeviceFactors gray_factors;
+#if !defined(HAFNIAN_RUNTIME_MONTGOMERY_CONTROL)
+    if constexpr(N==48||N==50) {
+        constexpr unsigned CHAIN=N==48?6:7;
+        if(options.threads&&options.threads!=hafnian_gray::THREADS)
+            throw std::runtime_error(
+                "orders 48 and 50 use a fixed 64-thread Gray kernel");
+        gray_factor=hafnian_gray::factor_adjacency(query,mod.p);
+        if(gray_factor.rank) {
+            gray_factors=hafnian_gray::make_device_factors<N>(query,gray_factor,mod);
+            int active=0;
+            hafnian_cuda_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                &active,hafnian_gray::terms_kernel<N,CHAIN,ActiveMod>,
+                hafnian_gray::THREADS,hafnian_gray::shared_bytes<N>()),
+                "compute Gray kernel occupancy");
+            if(active<=0)throw std::runtime_error("Gray kernel has zero occupancy");
+            gray_active_blocks=unsigned(active);
+            uint64_t requested=options.blocks?options.blocks:
+                uint64_t(workspace.multiprocessors)*unsigned(active)*
+                hafnian_gray::WARPS_PER_BLOCK*24U;
+            const uint64_t maximum_groups=(std::min<uint64_t>(
+                options.chunk_terms,end-task.begin)+CHAIN-1)/CHAIN;
+            requested=std::min(requested,std::max<uint64_t>(2,maximum_groups));
+            requested=std::max<uint64_t>(2,(requested+1)&~UINT64_C(1));
+            if(requested>UINT32_MAX)
+                throw std::runtime_error("too many Gray chain slots");
+            gray_slots=unsigned(requested);
+            gray_grid_blocks=gray_slots/hafnian_gray::WARPS_PER_BLOCK;
+            workspace.ensure_gray_words(
+                hafnian_gray::scratch_words<N,CHAIN>(gray_slots));
+            gray_enabled=true;
+            threads=N<=50?224U:256U;
+            blocks=hafnian_recommended_blocks<N,ActiveMod>(
+                threads,workspace.multiprocessors);
+        }
+    }
+#endif
+    workspace.ensure_blocks(std::max(blocks,gray_slots));
     uint32_t partial=0;
     auto started=Clock::now();
     auto publish=[&](uint64_t covered_end,double elapsed) {
@@ -246,12 +305,19 @@ std::string run_query(const Query& query,const Catalog& catalog,const Task& task
             "matching_bound_power %u\nvertices %u\nmatrix_stride %u\n"
             "solver_binary_sha256 %s\nprime %u\nbegin %" PRIu64 "\nend %" PRIu64 "\n"
             "total_terms %" PRIu64 "\npartial_glynn_sum %u\nblocks %u\nthreads %u\n"
-            "chunk_terms %" PRIu64 "\nelapsed_seconds %.9f\nstatus complete\n",
+            "gray_enabled %u\ngray_chain %u\ngray_slots %u\ngray_grid_blocks %u\n"
+            "gray_active_blocks_per_sm %u\ngray_chunks %u\ngray_failures %u\n"
+            "gray_fallback_chunks %u\nchunk_terms %" PRIu64
+            "\nelapsed_seconds %.9f\nstatus complete\n",
             FORMAT,ALGORITHM,catalog.digest.c_str(),query.id,query.digest.c_str(),
             query.occupied,query.defect_count,query.excess,query.unmatched,
             query.defect_coefficient,query.matching_bound_power,N,
             N+1,binary_digest.c_str(),task.prime,task.begin,
             covered_end,TOTAL_TERMS,partial,blocks,threads,
+            unsigned(gray_enabled),gray_enabled?(N==48?6U:(N==50?7U:0U)):0U,
+            gray_slots,
+            gray_grid_blocks,gray_active_blocks,gray_chunks,
+            gray_failures_total,gray_fallback_chunks,
             options.chunk_terms,elapsed);
         if(length<0||size_t(length)>=sizeof(buffer))
             throw std::runtime_error("result formatting failed");
@@ -264,15 +330,51 @@ std::string run_query(const Query& query,const Catalog& catalog,const Task& task
     std::string final_result;
     for(uint64_t begin=task.begin;begin<end;begin+=options.chunk_terms) {
         uint64_t chunk_end=std::min(end,begin+options.chunk_terms);
-        hafnian_terms_kernel<N,ActiveMod><<<
-            blocks,threads,shared_bytes>>>(
-            workspace.adjacency,begin,chunk_end,mod,workspace.inverses,
-            workspace.sums);
-        hafnian_cuda_check(cudaGetLastError(),"launch hafnian kernel");
+        unsigned sum_count=blocks;
+        bool fallback=!gray_enabled;
+#if !defined(HAFNIAN_RUNTIME_MONTGOMERY_CONTROL)
+        if constexpr(N==48||N==50) {
+            if(gray_enabled) {
+                constexpr unsigned CHAIN=N==48?6:7;
+                hafnian_cuda_check(cudaMemset(
+                    workspace.gray_failures,0,sizeof(uint32_t)),
+                    "clear Gray failure counter");
+                hafnian_gray::terms_kernel<N,CHAIN,ActiveMod><<<
+                    gray_grid_blocks,hafnian_gray::THREADS,
+                    hafnian_gray::shared_bytes<N>()>>>(
+                    gray_factors.edge_matrices,gray_factors.update_vectors,
+                    gray_factors.metric,gray_factor.rank,begin,chunk_end,mod,
+                    workspace.inverses,workspace.gray_scratch,workspace.sums,
+                    workspace.gray_failures);
+                hafnian_cuda_check(cudaGetLastError(),"launch Gray hafnian kernel");
+                uint32_t failures=0;
+                hafnian_cuda_check(cudaMemcpy(&failures,workspace.gray_failures,
+                    sizeof(uint32_t),cudaMemcpyDeviceToHost),
+                    "copy Gray failure counter");
+                ++gray_chunks;
+                gray_failures_total+=failures;
+                fallback=failures!=0;
+#if defined(HAFNIAN_FORCE_GRAY_FALLBACK)
+                fallback=true;
+#endif
+                if(fallback)++gray_fallback_chunks;
+                else sum_count=gray_slots;
+            }
+        }
+#endif
+        if(fallback) {
+            hafnian_terms_kernel<N,ActiveMod,true><<<
+                blocks,threads,independent_shared_bytes>>>(
+                workspace.adjacency,begin,chunk_end,mod,workspace.inverses,
+                workspace.sums);
+            hafnian_cuda_check(cudaGetLastError(),
+                "launch exact Gray-order fallback kernel");
+            sum_count=blocks;
+        }
         hafnian_cuda_check(cudaMemcpy(workspace.host_sums.data(),workspace.sums,
-            size_t(blocks)*sizeof(uint32_t),cudaMemcpyDeviceToHost),
+            size_t(sum_count)*sizeof(uint32_t),cudaMemcpyDeviceToHost),
             "copy block sums");
-        for(unsigned block=0;block<blocks;++block) {
+        for(unsigned block=0;block<sum_count;++block) {
             uint32_t value=workspace.host_sums[block];
             partial+=value;
             if(partial>=mod.p)partial-=mod.p;
@@ -281,8 +383,11 @@ std::string run_query(const Query& query,const Catalog& catalog,const Task& task
         final_result=publish(chunk_end,elapsed);
         std::printf(
             "HAFNIAN_6X28_PROGRESS query=%u vertices=%u stride=%u prime=%u "
-            "begin=%" PRIu64 " end=%" PRIu64 " elapsed=%.6f terms_per_second=%.3f\n",
+            "begin=%" PRIu64 " end=%" PRIu64
+            " gray=%u gray_failures=%u fallback_chunks=%u"
+            " elapsed=%.6f terms_per_second=%.3f\n",
             query.id,N,N+1,task.prime,task.begin,chunk_end,
+            unsigned(gray_enabled),gray_failures_total,gray_fallback_chunks,
             elapsed,double(chunk_end-task.begin)/elapsed);
         std::fflush(stdout);
     }
