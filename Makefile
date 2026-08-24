@@ -129,6 +129,16 @@ $(BUILD_DIR)/hafnian_blocked_hessenberg_probe: research/probes/hafnian_blocked_h
 hafnian-blocked-hessenberg-test: $(BUILD_DIR)/hafnian_blocked_hessenberg_probe
 	./$(BUILD_DIR)/hafnian_blocked_hessenberg_probe --samples 20
 
+$(BUILD_DIR)/hafnian_gray_update_probe: research/probes/hafnian_gray_update_probe.cpp \
+		src/hafnian/six_by_twenty_eight_catalog.hpp \
+		src/hafnian/six_by_twenty_nine_catalog.hpp src/common/sha256.hpp
+	$(CXX) -O3 -march=native -std=c++17 -o $@ $<
+
+.PHONY: hafnian-gray-update-test
+hafnian-gray-update-test: $(BUILD_DIR)/hafnian_gray_update_probe
+	./$(BUILD_DIR)/hafnian_gray_update_probe --query 3321 --start 12345 \
+		--steps 16 --blocks 1,2,4,8 --deep-verify
+
 $(BUILD_DIR)/clique_pivoter_probe: research/probes/clique_pivoter_probe.c
 	$(CC) $(CFLAGS_5XN) $(OPENMP_CFLAGS) -o $@ $< $(OPENMP_LDFLAGS)
 

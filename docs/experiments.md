@@ -13794,3 +13794,94 @@
 - Outcome: accept fixed-prime specialization for production orders 48 and 50.
   Retain a compile-time runtime-Montgomery control target for regression and
   profiling; expose no production fallback flag.
+
+### Experiment 413: Exact Gray-code low-rank hafnian gate
+
+- Goal: determine whether Gray ordering can replace one independent cubic
+  Hessenberg reduction per hafnian sign term by an exact quadratic dynamic
+  update.  Consecutive terms flip one paired sign and therefore change two
+  columns of the production matrix.
+- Important correction to the original proposal: the hafnian trace formula
+  needs the first `N/2` characteristic coefficients, not one coefficient or
+  one determinant evaluation.  A Sherman--Morrison update at a scalar spectral
+  point is insufficient.  The general dynamic-characteristic-polynomial result
+  of Frandsen and Sankowski gives randomized `O(k N^2 log N)` updates through a
+  lazy Frobenius-normal-form hierarchy, where `k` is the invariant-factor
+  count, but it is much more involved than a local Hessenberg bulge chase:
+  <https://www.brics.dk/RS/08/2/>.
+- Exact residual-specific reduction: factor the symmetric residual adjacency
+  matrix once over each production field as
+
+  ```text
+  A = X D X^T,
+  ```
+
+  with diagonal nonsingular `D`.  If `R_s` swaps each hafnian pair and applies
+  its repeated sign, Sylvester's determinant identity gives
+
+  ```text
+  det(lambda I_N - A R_s)
+      = lambda^(N-rank(A)) det(lambda I_r - D X^T R_s X).
+  ```
+
+  The omitted roots are zero, so the leading `N/2` coefficients used by the
+  trace formula are unchanged.  The reduced matrix is self-adjoint for the
+  fixed diagonal metric `D^-1`.  Flipping pair `e=(a,b)` changes it by the
+  exact rank-two term
+
+  ```text
+  Delta K = delta D (x_a^T x_b + x_b^T x_a),  delta in {+2,-2}.
+  ```
+
+- Prototype: add `hafnian_gray_update_probe`.  It uses generalized finite-field
+  Lanczos to reduce the metric-self-adjoint matrix to an asymmetric
+  tridiagonal form, retains a short lazy product of basis changes, and fully
+  rebuilds after a configurable Gray block.  A block of length `L` has average
+  arithmetic `O(r^3/L + L r^2)`, rather than claiming a complete `O(r^2)`
+  dynamic data structure.  It retains the current independent Hessenberg
+  evaluator as the exact per-term oracle.
+- Exactness:
+  - deep invariant checks verify the symmetric rank factorization, fixed-space
+    rank-two identity, transformed operator, Lanczos relation, and final term;
+  - 4,096 consecutive order-48 terms match full recomputation;
+  - representative order-48, 50, and 52 queries match for hundreds of terms
+    under all four production primes;
+  - no retry beyond the first random Lanczos vector occurred in accepted
+    samples.
+- CPU timing with ordinary 31-bit modular arithmetic: rebuild intervals 6--8
+  are best.  Representative complete-term speedups are approximately
+  `1.93--1.99x` at order 48, `2.07--2.11x` at order 50, and `2.1--2.2x` at
+  order 52.  These ratios compare two CPU implementations and are not yet a
+  CUDA projection; the production fixed-Montgomery GPU baseline has different
+  occupancy and arithmetic costs.
+- Complete catalog gate at `2^31-1`, weighted by the adaptive four-prime
+  schedule:
+
+  | order | queries | scalar-Lanczos accepted | prime-images | accepted prime-images |
+  |---:|---:|---:|---:|---:|
+  | 48 | 33,077 | 33,026 | 832,409,960,448 | 831,126,503,424 |
+  | 50 | 2,548 | 2,536 | 128,245,039,104 | 127,641,059,328 |
+  | 52 | 706 | 701 | 71,068,286,976 | 70,564,970,496 |
+  | 54 | 38 | 38 | 7,650,410,496 | 7,650,410,496 |
+  | 56 | 25 | 25 | 10,066,329,600 | 10,066,329,600 |
+  | 58 | 1 | 1 | 805,306,368 | 805,306,368 |
+  | 60 | 2 | 0 | 4,294,967,296 | 0 |
+  | 64 | 1 | 0 | 8,589,934,592 | 0 |
+
+  Total eligibility is `1,047,854,579,712 / 1,063,130,234,880 = 98.5631%`
+  of the exact 31-bit campaign work.  The non-cyclic cases remain exact under
+  the existing independent-term kernel; rare dynamic breakdowns can likewise
+  rebuild or fall back.
+- GPU implications: one CTA should own a short Gray chain.  A 31-bit
+  implementation needs roughly one dense `r x r` basis per lazy level; at
+  order 48, length 4 uses about 37 KiB before auxiliary state and length 7
+  about 64 KiB.  This may reduce residency enough that the CPU ratio does not
+  transfer.  INT8 remains a valid secondary backend: byte-valued bases make
+  the lazy state much smaller and basis-vector products can use packed dot
+  products or MMA, but it must overcome the measured `3.042x` small-prime CRT
+  multiplier.
+- Outcome: accept Gray-code rank updates as the strongest current 6x28
+  research candidate and advance to a matched GPU prototype.  Do not alter the
+  production solver or its conservative `87.3` GPU-hour estimate until the
+  complete 31-bit and optional INT8 chain kernels are timed against the current
+  fixed-Montgomery kernel.
