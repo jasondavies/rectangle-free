@@ -103,9 +103,10 @@ __device__ __forceinline__ void invert_polynomial(
     const uint32_t* input,uint32_t* output,Mod mod) {
     constexpr unsigned DEGREE=N/2;
     const unsigned lane=threadIdx.x&31;
-    uint32_t inverse_constant=lane==0?hafnian_power(input[0],mod.p-2,mod):0;
-    inverse_constant=__shfl_sync(0xffffffff,inverse_constant,0);
-    if(lane==0)output[0]=inverse_constant;
+    // Q(0)=I.  Every off-diagonal series has valuation one, so Schur
+    // products have valuation two and every pivot retains constant term one.
+    // Its inverse series therefore also has constant term one.
+    if(lane==0)output[0]=mod.one;
     __syncwarp();
     for(unsigned degree=1;degree<=DEGREE;++degree) {
         uint32_t sum=0;
@@ -114,7 +115,7 @@ __device__ __forceinline__ void invert_polynomial(
         for(unsigned offset=16;offset;offset>>=1)
             sum=hafnian_add_mod(sum,__shfl_down_sync(0xffffffff,sum,offset),mod.p);
         if(lane==0)output[degree]=hafnian_neg_mod(
-            hafnian_mul(inverse_constant,sum,mod),mod.p);
+            sum,mod.p);
         __syncwarp();
     }
 }

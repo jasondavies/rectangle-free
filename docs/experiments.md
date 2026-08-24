@@ -14573,14 +14573,18 @@
   terms.  This reduces the order-48 Montgomery kernel from 64 registers plus
   a 16-byte stack to 56 registers with no stack, raising residency from 16 to
   18 CTAs/SM.
+- Every power-series pivot also has constant coefficient one: `Q(0)=I`, and
+  the valuation-two Schur products cannot change it.  Remove the six redundant
+  Fermat inversions per chain and construct each inverse series from the known
+  unit constant.  This saves a further 1--2% locally.
 - Complete full-rank order-48 domains on one RTX PRO 6000 Blackwell:
 
   | prime | former v3 s | resolvent v4 s | speedup |
   |---:|---:|---:|---:|
-  | 2,147,483,647 | 0.46744 | 0.45868 | 1.019x |
-  | 2,147,483,629 | 0.48772 | 0.47156 | 1.034x |
-  | 2,147,483,587 | 0.48717 | 0.47182 | 1.033x |
-  | 2,147,483,579 | 0.48452 | 0.46722 | 1.037x |
+  | 2,147,483,647 | 0.46744 | 0.44989 | 1.039x |
+  | 2,147,483,629 | 0.48772 | 0.46569 | 1.047x |
+  | 2,147,483,587 | 0.48717 | 0.46111 | 1.057x |
+  | 2,147,483,579 | 0.48452 | 0.46001 | 1.053x |
 
   All residues match.  Memcheck reports zero errors and racecheck reports zero
   hazards.  Rank-47 order-48 matrices are about 2% slower with the resolvent,
@@ -14592,7 +14596,7 @@
   becomes `glynn-gray-resolvent-fixed-field-cuda-v4`; `gray_chain=4` identifies
   the new path.
 - Outcome: accept the selective backend.  Full-rank order-48 work is about 71%
-  of weighted campaign terms, so the 2--4% local gain projects to roughly 2%
-  end to end.  This is not a second algorithmic breakthrough, but it is a
+  of weighted campaign terms, so the 4--6% local gain projects to roughly
+  3--4% end to end.  This is not a second algorithmic breakthrough, but it is a
   verified saving on the dominant catalog sector and validates the resolvent
   identity as a practical GPU primitive.
