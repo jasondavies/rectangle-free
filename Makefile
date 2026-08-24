@@ -118,6 +118,13 @@ $(BUILD_DIR)/hafnian_int8_block_probe: research/gpu/hafnian_int8_block_probe.cu 
 		src/hafnian/six_by_twenty_nine_catalog.hpp src/common/sha256.hpp
 	$(NVCC) $(NVCCFLAGS) -std=c++17 -o $@ $<
 
+$(BUILD_DIR)/hafnian_blocked_hessenberg_probe: research/probes/hafnian_blocked_hessenberg_probe.cpp
+	$(CXX) -O3 -march=native -std=c++17 -o $@ $<
+
+.PHONY: hafnian-blocked-hessenberg-test
+hafnian-blocked-hessenberg-test: $(BUILD_DIR)/hafnian_blocked_hessenberg_probe
+	./$(BUILD_DIR)/hafnian_blocked_hessenberg_probe --samples 20
+
 $(BUILD_DIR)/clique_pivoter_probe: research/probes/clique_pivoter_probe.c
 	$(CC) $(CFLAGS_5XN) $(OPENMP_CFLAGS) -o $@ $< $(OPENMP_LDFLAGS)
 

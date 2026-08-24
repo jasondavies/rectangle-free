@@ -13641,3 +13641,32 @@
 - Outcome: accept the INT8 blocked-update route as the next hafnian algorithm
   integration experiment.  Keep the maintained 31-bit solver unchanged until
   a complete sign-term kernel passes exact parity and end-to-end timing.
+
+### Experiment 410: Exact compact blocked-Hessenberg algebra gate
+
+- Goal: prove that the sequential pivot dependency can be separated from a
+  tensor-friendly trailing update without changing the finite-field
+  Hessenberg reduction used by the hafnian sign terms.
+- Formulation: for the successful eliminations in one panel, collect the
+  factor vectors in `F` and their eliminated coordinates in `S`.  The product
+  of inverse Gauss transformations is
+  `R = I + F S^T`; consequently
+  `Q = R^-1 = I - F (I + S^T F)^-1 S^T`.
+  The small inverse is unit lower triangular and can be extended one row at a
+  time.  A panel is completed exactly by the two dense operations `A F` and
+  `W (S^T B)`, where `W = F (I + S^T F)^-1` and
+  `B = A + (A F) S^T`.
+- Pivot handling: a row-and-column pivot swap is applied to the panel base
+  matrix and to the rows of the accumulated `F` and `W`.  Earlier selector
+  coordinates lie before the new pivot and therefore remain fixed.  Columns
+  required to select the next pivot are evaluated implicitly from `Q A R`;
+  the complete trailing matrix is not updated between panel columns.
+- Exact CPU gate: compare the blocked result with the maintained scalar Gauss
+  similarity reduction for orders 48, 54, 60, and 64; primes 61, 127, and
+  251; panel widths 8, 16, 24, and 32; dense and sparse random matrices; and
+  explicit nonlocal pivot swaps.  All 960 matrix comparisons are identical.
+- Outcome: accept the compact panel algebra and row/column permutation rule.
+  This removes the main correctness uncertainty but says nothing yet about
+  complete sign-term throughput.  The next gate must time the sequential
+  implicit-column work together with both batched dense updates and the
+  characteristic-polynomial recurrence.
