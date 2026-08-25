@@ -33,7 +33,7 @@ using six_by_twenty_eight::Query;
 constexpr const char* ALGORITHM="glynn-trace-hessenberg-residual-runtime-montgomery-control-v1";
 constexpr const char* FORMAT="six-by-twenty-eight-hafnian-v1";
 #else
-constexpr const char* ALGORITHM="glynn-gray-resolvent-fixed-field-cuda-v5";
+constexpr const char* ALGORITHM="glynn-gray-resolvent-fixed-field-cuda-v6";
 constexpr const char* FORMAT="six-by-twenty-eight-hafnian-v2";
 #endif
 
@@ -276,7 +276,7 @@ std::string run_query(const Query& query,const Catalog& catalog,const Task& task
         if(gray_factor.rank) {
             gray_factors=hafnian_gray::make_device_factors<N>(query,gray_factor,mod);
             int active=0;
-            if constexpr(N==48) {
+            if constexpr(N==48||N==50) {
                 resolvent_enabled=gray_factor.rank==N&&
                     workspace.compute_major>=12&&
                     task.begin%hafnian_resolvent::CHAIN==0&&
@@ -284,7 +284,7 @@ std::string run_query(const Query& query,const Catalog& catalog,const Task& task
                     options.chunk_terms%hafnian_resolvent::CHAIN==0;
             }
             if(resolvent_enabled) {
-                if constexpr(N==48)
+                if constexpr(N==48||N==50)
                     hafnian_cuda_check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
                         &active,hafnian_resolvent::terms_kernel<N,ActiveMod>,
                         hafnian_resolvent::THREADS,
@@ -377,7 +377,7 @@ std::string run_query(const Query& query,const Catalog& catalog,const Task& task
                     workspace.gray_failures,0,sizeof(uint32_t)),
                     "clear Gray failure counter");
                 if(resolvent_enabled) {
-                    if constexpr(N==48)
+                    if constexpr(N==48||N==50)
                         hafnian_resolvent::terms_kernel<N,ActiveMod><<<
                             gray_grid_blocks,hafnian_resolvent::THREADS,
                             hafnian_resolvent::shared_bytes<N>()>>>(

@@ -14853,3 +14853,35 @@
   for `HafnianMersenne31`, and the established 18 CTAs for fixed and runtime
   Montgomery.  This keeps the Mersenne gain without regressing the other
   dominant campaign images and exposes no runtime flag.
+
+### Experiment 439: Order-50 hybrid resolver extension
+
+- Goal: revisit the full-rank order-50 sector after the order-48 resolver
+  acquired its exact rank-eight structured refresh.  The former four-term
+  order-50 resolver was 2.9% slower than the seven-term Gray kernel, but the
+  accepted eight-term hybrid removes three additional dense Lanczos builds.
+- Extend the existing resolver specialization from order 48 to orders 48 and
+  50.  Dispatch remains conditional on full modular rank, Blackwell, aligned
+  eight-term ranges, and aligned checkpoint chunks.  Rank-deficient queries
+  retain the generic seven-term Gray path and its independent-kernel fallback.
+- On query 773's complete 16,777,216-term domain at a fixed 2,205 MHz, eight
+  alternating prime-2 runs give median times of 0.89868 s for the production
+  seven-term kernel and 0.83518 s for the hybrid (`1.0760x`).  Six Mersenne
+  alternations give 0.88378 s and 0.84304 s (`1.0483x`).
+- All four production-prime residues agree exactly with the control and have
+  zero resolver failures: `278820956`, `55405368`, `456910632`, and
+  `111748258`.  Rank-48 order-50 query 776 remains on chain seven; both
+  binaries report the same `174744094` residue and the same 2,396,746
+  breakdowns followed by exact whole-chunk fallback.
+- The final `sm_120` resolver uses 48 registers, a 104-byte stack frame, and
+  no local-memory spills at order 50.  `sm_89` compilation succeeds, while
+  runtime dispatch intentionally keeps the resolver disabled before
+  Blackwell.  CUDA memcheck reports zero errors and racecheck reports zero
+  hazards on an order-50 resolver range.  GPU self-test, the CPU catalog and
+  residue fixtures, and reducer tests all pass.
+- Outcome: accept.  Order 50 accounts for about 12.1% of the current exact
+  prime-image census and 88.5% of its queries are full rank, so this removes
+  roughly 5--6% of that sector and under 1% of the whole projected campaign.
+  The projected total remains approximately 15 RTX PRO 6000 GPU-hours, now
+  near the lower end of the preceding 15--16-hour range.  Bump exact result
+  provenance to algorithm version 6.
