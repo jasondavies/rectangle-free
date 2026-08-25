@@ -21,6 +21,7 @@
 #include "hafnian_gpu_core.cuh"
 #include "hafnian_gray_gpu_core.cuh"
 #include "hafnian_gray_resolvent_gpu_core.cuh"
+
 #include "../common/sha256.hpp"
 #include "six_by_twenty_eight_catalog.hpp"
 
@@ -173,6 +174,9 @@ class DeviceWorkspace {
         hafnian_cuda_check(cudaDeviceGetAttribute(
             &compute_major,cudaDevAttrComputeCapabilityMajor,device),
             "compute capability");
+        hafnian_cuda_check(cudaDeviceGetAttribute(
+            &compute_minor,cudaDevAttrComputeCapabilityMinor,device),
+            "compute capability minor");
         hafnian_cuda_check(cudaMalloc(&adjacency,64*64),"allocate adjacency");
         hafnian_cuda_check(cudaMalloc(&inverses,33*sizeof(uint32_t)),"allocate inverses");
         hafnian_cuda_check(cudaMalloc(&gray_failures,sizeof(uint32_t)),
@@ -209,7 +213,7 @@ class DeviceWorkspace {
     uint32_t* gray_failures=nullptr;
     uint32_t* gray_scratch=nullptr;
     int multiprocessors=0;
-    int compute_major=0;
+    int compute_major=0,compute_minor=0;
     unsigned block_capacity=0;
     size_t gray_word_capacity=0;
     std::vector<uint32_t> host_sums;
@@ -278,7 +282,8 @@ std::string run_query(const Query& query,const Catalog& catalog,const Task& task
             int active=0;
             if constexpr(N==48||N==50||N==52) {
                 resolvent_enabled=gray_factor.rank==N&&
-                    workspace.compute_major>=12&&
+                    (workspace.compute_major>=12||
+                        (workspace.compute_major==8&&workspace.compute_minor==9))&&
                     task.begin%hafnian_resolvent::CHAIN==0&&
                     end%hafnian_resolvent::CHAIN==0&&
                     options.chunk_terms%hafnian_resolvent::CHAIN==0;

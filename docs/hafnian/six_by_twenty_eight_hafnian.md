@@ -63,14 +63,17 @@ Orders 48--58 use exact Gray-code rank-two updates and a fraction-free
 generalized-Lanczos rebuild.  One batch inversion and warp product scans
 replace one inversion per basis column; a whole checkpoint falls back to the
 independent Gray-order Hessenberg kernel if any chain is non-cyclic.  Orders
-60 and 64 always use that independent kernel.  On measured Blackwell GPUs,
-full-rank order-48 work instead uses a four-term low-rank resolvent chain: one
-tridiagonalization plus a 6x6 truncated polynomial determinant evaluates all
-four terms.  Deficient, unaligned, larger-order, and pre-Blackwell work keeps
-the established Gray backend.  Dense dot products share one exact modular
-reduction across two or four residue products.  On one RTX PRO 6000, the exact
-workload currently projects to approximately 16.5--17.5 GPU-hours, excluding campaign
-interruptions and final independent validation.
+60 and 64 always use that independent kernel.  On measured Ada 8.9 and
+Blackwell 12.x GPUs, full-rank order-48--52 work instead uses an eight-term
+hybrid resolvent chain: one tridiagonalization, two four-term truncated
+resolvent determinants, and one structured rank-eight refresh evaluate all
+eight terms.  Deficient, unaligned, larger-order, and other architectures keep
+the established Gray backend.  Ada uses a separately measured 14-CTA launch
+bound; Blackwell retains its order- and arithmetic-specific bounds.  Dense dot
+products share one exact modular reduction across two or four residue
+products.  On one RTX PRO 6000, the exact workload projects to approximately
+15 GPU-hours, excluding campaign interruptions and final independent
+validation.
 
 The independent finite-field Glynn/trace/Hessenberg fallback is shared with
 the 6x29 and 6x30 solvers.  The Gray-chain core and the geometry-specific

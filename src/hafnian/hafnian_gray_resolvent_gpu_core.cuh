@@ -14,7 +14,13 @@ constexpr unsigned WARPS_PER_BLOCK=2;
 constexpr unsigned THREADS=32*WARPS_PER_BLOCK;
 template<unsigned N,class Mod>
 constexpr unsigned min_blocks_per_sm() {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 890
+    // Ada has fewer resident warps than Blackwell and benefits from retaining
+    // 72 registers rather than forcing the resolver down to 48--56 registers.
+    return 14;
+#else
     return std::is_same_v<Mod,HafnianMersenne31> && N==48 ? 20 : 18;
+#endif
 }
 constexpr unsigned CHAIN=8;
 constexpr unsigned RESOLVENT_CHAIN=4;

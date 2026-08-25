@@ -14974,3 +14974,36 @@
   campaign saving.  Keep the simple integral bound and three-prime default.
   A future bound is interesting only if it proves a large part of the
   order-48 catalog below the two-prime product, not merely isolated queries.
+
+### Experiment 444: Ada resolver dispatch and occupancy gate
+
+- Goal: determine whether the exact eight-term hybrid resolver accepted on
+  Blackwell should also replace the fraction-free Gray chain on Ada, and tune
+  its launch geometry before an eight-L40S `6x28` campaign.
+- Hardware: one spot Verda node in `FIN-01` with eight L40S GPUs, native
+  `sm_89`, CUDA 13.0, and 142 SMs per GPU.  Control and candidate binaries use
+  the same algorithm-v7 source and complete query domains.
+- Full-rank order-48 query 3321 at prime `2,147,483,629` has median control
+  time `0.7039s`.  Merely enabling the Blackwell-tuned resolver lowers this to
+  `0.6499s` (`1.083x`).  A launch-bound sweep over 10, 12, 13, 14, 16, 18, and
+  20 CTAs/SM selects 14: it retains 72 registers with a 128-byte stack and
+  reaches median `0.5939s`, `1.185x` faster than the established Ada control.
+  The 13-CTA request compiles to the same 72-register kernel and admits 14
+  blocks; lower bounds lose occupancy, while higher bounds progressively
+  increase spill state.  At the Mersenne prime, 14 CTAs improves the former
+  20-CTA resolver from median `0.6584s` to `0.5473s` (`1.203x`).
+- Complete fixed-Montgomery gates also remain positive: order-50 query 773
+  falls from `1.6549s` under its seven-term control to `1.4546s` (`1.138x`),
+  and order-52 query 66 falls from `3.6512s` to `3.1553s` (`1.157x`).  Their
+  residues are exactly `55,405,368` and `2,065,054,974`, respectively, with
+  zero resolver failures.  Rank-deficient order-50 query 776 remains on the
+  seven-term path, reproduces residue `21,271,625` and the same 2,396,746
+  breakdowns/fallback as control, and is performance-neutral.
+- Production integration: enable the resolver only on measured Ada 8.9 and
+  Blackwell 12.x devices.  Select 14 CTAs/SM only in native `sm_89` device
+  code and retain all existing Blackwell bounds.  Extend the reducer's valid
+  provenance matrix to accept chain eight at orders 48--52 and require
+  eight-aligned result ranges.  The complete reducer unit suite passes.
+- Outcome: accept.  This is an exact architecture retune, not a new arithmetic
+  backend.  It materially reduces the dominant Ada sector while preserving
+  the independent Gray fallback for every ineligible or failed chain.
