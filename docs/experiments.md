@@ -14679,3 +14679,20 @@
   saving and approximately 5% larger-order saving lowers the current campaign
   projection from 19--20 to roughly 17--18 RTX PRO 6000 GPU-hours.  Keep the
   ordinary one-product reducer and the measured-neutral loop organizations.
+
+### Experiment 430: Post-fusion resolvent reuse gates
+
+- Goal: reopen two narrowly rejected resolvent configurations because fused
+  polynomial reduction changes their relative cost.
+- Order 50 is still better with the established seven-term fraction-free Gray
+  chain.  On a complete 16,777,216-term full-rank domain at a fixed 2,205 MHz,
+  six warm runs take 0.9875--0.9881 s with production and 1.0153--1.0171 s
+  with a four-term 6x6 resolvent.  The latter is exact but 2.9% slower, improved
+  from its pre-fusion 4.2% deficit.  Keep the order-48-only dispatch.
+- At order 48, a five-term chain amortizes one tridiagonalization across one
+  extra sign term but expands the polynomial correction from 6x6 to 8x8.  On
+  8,388,600 aligned terms, six fixed-clock alternations give approximately
+  0.3660 s for four terms and 0.3710 s for five.  The exact five-term path is
+  still 1.4% slower.  Keep chain length four.
+- Outcome: reject both extensions and remove their production changes.  The
+  accepted resolver niche remains full-rank order 48 on Blackwell.
