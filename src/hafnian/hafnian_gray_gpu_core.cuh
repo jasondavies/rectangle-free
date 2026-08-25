@@ -155,7 +155,10 @@ DeviceFactors make_device_factors(const Query& query,const RankFactor& factor,Mo
                 ordinary.mul(factor.at(e,i),factor.at(e+HALF,j)),
                 ordinary.mul(factor.at(e+HALF,i),factor.at(e,j)));
             value=ordinary.mul(factor.diagonal[i],value);
-            edge[(size_t(e)*rank+i)*rank+j]=encode(value,mod);
+            // Store the transpose consumed by the device operator.  This
+            // makes both edge reads and assembled dense-matrix writes
+            // contiguous across warp lanes.
+            edge[(size_t(e)*rank+j)*rank+i]=encode(value,mod);
         }
     }
     for(unsigned i=0;i<rank;++i)metric[i]=encode(factor.metric[i],mod);
@@ -750,7 +753,7 @@ __global__ __launch_bounds__(THREADS,MIN_BLOCKS_PER_SM) void terms_kernel(
                 value=positive?hafnian_add_mod(value,addend,mod.p):
                     hafnian_sub_mod(value,addend,mod.p);
             }
-            dense[size_t(cell%rank)*rank+cell/rank]=value;
+            dense[cell]=value;
         }
         __syncwarp();
         bool ok=false;

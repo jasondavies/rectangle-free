@@ -336,7 +336,7 @@ __global__ __launch_bounds__(THREADS,MIN_BLOCKS_PER_SM) void terms_kernel(
                 value=positive?hafnian_add_mod(value,addend,mod.p):
                     hafnian_sub_mod(value,addend,mod.p);
             }
-            dense[size_t(cell%N)*N+cell/N]=value;
+            dense[cell]=value;
         }
         __syncwarp();
         bool ok=false;

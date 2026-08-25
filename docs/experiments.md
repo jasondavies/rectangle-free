@@ -14786,3 +14786,28 @@
   repeated shared reads cost more than the local spills.
 - Outcome: reject shared projection staging and retain the single-pass
   eight-accumulator projection fusion.
+
+### Experiment 435: Post-hybrid L2 layout audit
+
+- A fresh Nsight Compute profile of the eight-term hybrid reports 67.8% SM
+  throughput, 78.5% L2 throughput, only 12.9% DRAM throughput, a 98.7% L2 hit
+  rate, and 1.578 billion excessive global sectors.  The optimized kernel has
+  shifted from primarily arithmetic-latency pressure to a mixed integer/L2
+  regime; its working set remains cache-resident.
+- The dense Gray matrix was assembled by reading every edge matrix in its
+  natural order and writing the sum transposed.  Move that transpose into the
+  one-time host factor packing and let both the standard and resolver kernels
+  write `dense[cell]`.  All 24 source reads and the destination store are now
+  coalesced.  Full order-48 and order-50 residues remain exact.
+- The complete order-48 prime-2 domain falls from about 0.3433 s to 0.3375 s
+  at fixed clocks (`1.017x`).  A follow-up profile lowers excessive sectors to
+  1.314 billion and L2 utilization to 74.2%.
+- The largest remaining individual excess is the row-major Lanczos-basis
+  write (about 528 million sectors).  Writing it coalesced and applying a
+  padded 16x16 shared-memory transpose preserves exactness, but the extra
+  matrix pass raises runtime to about 0.3460 s.  Reject that transpose: the
+  existing layout intentionally favors the much more frequent coalesced basis
+  reads.
+- Outcome: accept only host-side edge transposition and direct dense stores.
+  The cumulative projection is now approximately 15--16 RTX PRO 6000
+  GPU-hours.
