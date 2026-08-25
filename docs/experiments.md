@@ -14835,3 +14835,21 @@
 - Outcome: stop the gate and retain direct strided moment stores.  The profile
   ranks sectors, not wall-time opportunity; small cache-resident matrices can
   be cheaper to write redundantly than to transpose cooperatively.
+
+### Experiment 438: Post-hybrid occupancy sweep
+
+- The post-hybrid profile achieves 73.5% occupancy but has no eligible warp
+  on 40.7% of scheduler cycles.  Sweep launch bounds of 19, 20, and 24
+  two-warp CTAs per SM against the accepted 18-CTA kernel.
+- Bounds 19 and 20 compile to 48 registers and CUDA admits 20 active CTAs/SM;
+  bound 24 falls to 40 registers but spills too heavily.  A clean rebuild of
+  both shared headers is essential here: an initial sweep accidentally used a
+  stale rejected sign-mask include and was discarded before acceptance.
+- In the repeated clean fixed-clock comparison, 20 CTAs improves the Mersenne
+  prime from about 0.3280 s to 0.3221 s (`1.018x`).  The fixed Montgomery
+  prime instead rises slightly, from about 0.3374 s to 0.3385 s.  All four
+  complete prime residues and failure counts remain unchanged.
+- Outcome: specialize the launch bound by arithmetic backend: 20 CTAs only
+  for `HafnianMersenne31`, and the established 18 CTAs for fixed and runtime
+  Montgomery.  This keeps the Mersenne gain without regressing the other
+  dominant campaign images and exposes no runtime flag.
