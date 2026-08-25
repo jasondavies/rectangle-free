@@ -217,7 +217,7 @@ Research probes are intentionally not part of `make gpu-production`.
 - The maintained GPU production targets are specialised for 7x7, 7x9, and
   8x8 distribution-join campaigns.
 - The hafnian solvers cover the 6x30 endpoint and its 6x29/6x28 low-defect
-  expansions; 6x28 is production-ready but not yet a recorded result.
+  expansions; all three exact values are recorded in `results.txt`.
 
 Exact recorded values are in [results.txt](results.txt); detailed performance
 logs and experiment provenance are in
@@ -236,6 +236,7 @@ the time used by every GPU and is therefore distinct from elapsed wall time.
 | `T_4(7,9)` independent check | 128 shards; 8 L40S GPUs | 13.85 GPU-hours | About 2 hours |
 | `T_4(6,30)` | 8 RTX PRO 6000 GPUs | 0.79 GPU-hours | About 10 minutes |
 | `T_4(6,29)` | 8 RTX PRO 6000 GPUs; interrupted and resumed | 4.14 GPU-hours | About 39 minutes including setup |
+| `T_4(6,28)` | 8 L40S + 4 RTX PRO 6000 GPUs; interrupted and resumed | 23.43 GPU-hours | About 2 h 48 min including setup and recovery |
 
 The exact integers are collected in [results.txt](results.txt), while the
 algorithms, validation checks, and detailed timing breakdowns are recorded in
