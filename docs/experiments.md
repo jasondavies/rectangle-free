@@ -14873,15 +14873,40 @@
   `111748258`.  Rank-48 order-50 query 776 remains on chain seven; both
   binaries report the same `174744094` residue and the same 2,396,746
   breakdowns followed by exact whole-chunk fallback.
-- The final `sm_120` resolver uses 48 registers, a 104-byte stack frame, and
-  no local-memory spills at order 50.  `sm_89` compilation succeeds, while
-  runtime dispatch intentionally keeps the resolver disabled before
-  Blackwell.  CUDA memcheck reports zero errors and racecheck reports zero
-  hazards on an order-50 resolver range.  GPU self-test, the CPU catalog and
-  residue fixtures, and reducer tests all pass.
+- At order 50 the fixed-Montgomery `sm_120` resolver uses 55 registers and
+  spills one 8-byte value in each direction.  The 20-CTA Mersenne launch uses
+  48 registers and spills more heavily (84 store and 208 load bytes per
+  thread); the timings above already include that cost.  `sm_89` compilation
+  succeeds, while runtime dispatch intentionally keeps the resolver disabled
+  before Blackwell.  CUDA memcheck reports zero errors and racecheck reports
+  zero hazards on an order-50 resolver range.  GPU self-test, the CPU catalog
+  and residue fixtures, and reducer tests all pass.
 - Outcome: accept.  Order 50 accounts for about 12.1% of the current exact
   prime-image census and 88.5% of its queries are full rank, so this removes
   roughly 5--6% of that sector and under 1% of the whole projected campaign.
   The projected total remains approximately 15 RTX PRO 6000 GPU-hours, now
   near the lower end of the preceding 15--16-hour range.  Bump exact result
   provenance to algorithm version 6.
+
+### Experiment 440: Order-52 hybrid resolver extension
+
+- Goal: test the same eight-term hybrid at the next material campaign order.
+  Order 52 accounts for 71,068,286,976 of 1,063,130,234,880 current exact
+  prime-image terms (6.68%), and 92.9% of its catalog queries have full rank.
+- On full-rank query 66's complete 33,554,432-term domain at a fixed 2,205
+  MHz, six alternating prime-2 runs give median times of 1.90145 s for the
+  seven-term control and 1.76718 s for the hybrid (`1.0760x`).  Four Mersenne
+  alternations give 1.87610 s and 1.75408 s (`1.0696x`).
+- All four production-prime residues agree exactly with the control and have
+  zero failures: `1543979210`, `2065054974`, `436091873`, and `196949425`.
+  Rank-50 query 65 remains on chain seven and reproduces both its control
+  residue and failure count before exact fallback.
+- The order-52 fixed-Montgomery specialization uses 56 registers and spills
+  24 store/20 load bytes per thread.  The 20-CTA Mersenne specialization uses
+  48 registers and spills 148 store/228 load bytes.  Despite this, eliminating
+  three dense generalized-Lanczos constructions wins consistently.
+- Outcome: accept only the existing exact full-rank, Blackwell, and alignment
+  dispatch.  This removes about 6--7% of the full-rank order-52 sector and
+  roughly another 0.4% of projected campaign time.  The aggregate remains
+  approximately 15 RTX PRO 6000 GPU-hours.  Bump result provenance to
+  algorithm version 7.

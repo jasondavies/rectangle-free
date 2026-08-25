@@ -279,8 +279,8 @@ __global__ __launch_bounds__(THREADS,min_blocks_per_sm<Mod>()) void terms_kernel
     uint64_t begin,uint64_t end,Mod mod,const uint32_t* __restrict__ inverse_small,
     uint32_t* __restrict__ scratch,uint32_t* __restrict__ chain_sums,
     uint32_t* __restrict__ failures) {
-    static_assert(N==48||N==50,
-        "the measured resolver backend is specialized for orders 48 and 50");
+    static_assert(N==48||N==50||N==52,
+        "the measured resolver backend is specialized for orders 48, 50, and 52");
     constexpr unsigned HALF=N/2,S=HALF+1,M=UPDATE_COLUMNS;
     static_assert(M*M*S<=N*N);
     const unsigned lane=threadIdx.x&31,warp=threadIdx.x>>5;
