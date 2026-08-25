@@ -14820,3 +14820,18 @@
 - The inlined constant-size loop was already scheduled effectively; carrying
   the mask through the generalized operator increases live state.  Reject and
   retain the direct index/sign formulation.
+
+### Experiment 437: Tiled resolvent-moment layout
+
+- The next source-correlated L2 excess is the degree-by-degree store into 36
+  polynomials of stride 25 (about 195 million excessive sectors).  Prototype
+  a degree-major moment stream followed by a padded 8x8 shared-memory
+  transpose into the elimination layout.
+- The prototype does not preserve the first-eight-term residue in its current
+  mapping and, independently, already raises the full-domain time from about
+  0.339 s to 0.354 s.  Thirty extra warp synchronizations per resolver block
+  dominate the smaller transaction count; repairing exactness cannot recover
+  that overhead.
+- Outcome: stop the gate and retain direct strided moment stores.  The profile
+  ranks sectors, not wall-time opportunity; small cache-resident matrices can
+  be cheaper to write redundantly than to transpose cooperatively.
