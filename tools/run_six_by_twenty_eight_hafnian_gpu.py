@@ -228,6 +228,21 @@ def main() -> int:
         return 0
 
     result_index = scan_results(args.output)
+    if len(partition_weights) > 1:
+        for _, prime, query, _ in jobs:
+            cursor, _ = completed_prefix(result_index, prime, query.query)
+            if cursor != query.terms:
+                raise RuntimeError(
+                    f"prime {prime}, query {query.query}: "
+                    f"partition coverage {cursor}/{query.terms}"
+                )
+        print(
+            f"HAFNIAN_6X28_PARTITION_COMPLETE index={args.partition_index} "
+            f"jobs={len(jobs)} exact=OK",
+            flush=True,
+        )
+        return 0
+
     for query in catalog:
         for prime in PRIMES[:required_prime_count(query.bound_power)]:
             cursor, _ = completed_prefix(result_index, prime, query.query)
