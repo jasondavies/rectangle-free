@@ -15030,3 +15030,47 @@
 - Outcome: accept the weighted partition facility.  It is campaign-level
   scheduling only; solver arithmetic, result identities, and reducer semantics
   remain unchanged.
+
+### Experiment 446: Exact 6x27 defect-orbit feasibility census
+
+- Goal: extend the endpoint defect expansion from slack four (`6x28`) to
+  slack six (`6x27`) and obtain an exact production-work estimate before
+  building another residual-hafnian solver.
+- Generalize the maintained defect census from slack one and two to slack
+  three.  The residual matching has `27-d` ordinary edges and
+  `6-e` unmatched tokens for a defect collection with `d` supports and total
+  excess `e`.  Its dummy-augmented Glynn exponent is therefore
+  `29 + slack - d - e`.  The factorial and Friedland bounds now use the
+  target width `30-slack` rather than the former 6x28 constants.
+- Validation: the generalized adaptive-CRT calculation reproduces the exact
+  completed 6x28 workload of `1,063,130,234,880` sign terms, including the
+  complete per-order query and term census from all 109,198 production result
+  records.  Existing 6x29 raw-union and 6x28 orbit/graph-isomorphism
+  regressions also pass.
+- Exact slack-three orbit levels by defect count are `6`, `156`, `9,612`,
+  `579,995`, `9,812,545`, and `34,604,824` states.  The union over all sectors
+  contains `45,007,139` `S_6 x S_4` residual orbits after `302,875,636`
+  transitions.  Three independent runs agree; a 16-thread full census takes
+  about 5m45s--5m55s and peaks at 29.8 GB RSS on the local host.
+- One prime image contains `63,425,740,800,000` sign terms.  Certified
+  per-query stopping reduces the actual campaign to
+  `134,616,715,362,304` terms: 43,483,790 queries need two primes, 1,523,320
+  need three, and 29 need four.  This is 126.62 times the completed 6x28
+  adaptive workload and would create 91,537,656 prime-image results under the
+  current one-file-per-query scheme.
+- The adaptive work is unusually favourable in matrix order despite its
+  size: order 42 contributes 72,571,575,861,248 terms (53.91%), order 44
+  contributes 35,705,346,588,672 (26.52%), and order 46 contributes
+  19,455,228,772,352 (14.45%).  Together they account for 94.89%; only 3.38%
+  remains at order 48 and 1.73% above it.
+- A conservative projection from the measured 6x28 per-order throughput,
+  extrapolating orders 42--46 with cubic matrix cost, is roughly
+  1,700--1,900 useful GPU-hours before campaign overhead.  The lower orders
+  need an actual GPU benchmark, but even a favourable result leaves a
+  cluster-scale run and makes 91.5 million individual checkpoint files
+  unacceptable.
+- Outcome: reject immediate production, not the mathematics.  The next gate
+  is a persistent batched order-42/44/46 kernel plus bundled journals, followed
+  by an exact graph-isomorphism/reuse sample.  Continue only if those reduce
+  projected cost materially; do not generate a 45-million-query production
+  catalog in the current format.

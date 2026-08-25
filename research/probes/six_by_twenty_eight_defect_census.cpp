@@ -1,4 +1,5 @@
-// Exact packed defect-orbit and residual-hafnian workload gate for T_4(6,28).
+// Exact packed defect-orbit and residual-hafnian workload gate for
+// T_4(6,30-slack), currently covering 6x29 through 6x27.
 
 #include <nauty/nauty.h>
 
@@ -298,9 +299,31 @@ unsigned ceil_log2_factorial(unsigned degree) {
     return (value & (value - 1)) ? floor + 1 : floor;
 }
 
-BigUInt friedland_colouring_bound(const Geometry& geometry,
-                                  const std::vector<Record>& orbit,
-                                  unsigned slack) {
+struct FriedlandSummary {
+    BigUInt colouring_bound;
+    std::array<uint64_t, 5> queries_by_prime_count{};
+    std::array<U128, 5> sign_terms_by_prime_count{};
+    std::array<uint64_t, 67> queries_by_order{};
+    std::array<U128, 67> adaptive_sign_terms_by_order{};
+};
+
+unsigned required_matching_primes(unsigned bound_power) {
+    constexpr std::array<uint32_t, 4> primes{
+        2147483647U, 2147483629U, 2147483587U, 2147483579U};
+    if (bound_power >= 128)
+        throw std::overflow_error("matching bound exceeds four-prime CRT");
+    U128 modulus = 1;
+    const U128 bound = U128(1) << bound_power;
+    for (unsigned count = 1; count <= primes.size(); count++) {
+        modulus *= primes[count - 1];
+        if (modulus > bound) return count;
+    }
+    throw std::overflow_error("matching bound exceeds four-prime CRT");
+}
+
+FriedlandSummary friedland_summary(const Geometry& geometry,
+                                   const std::vector<Record>& orbit,
+                                   unsigned slack) {
     // lcm(2,4,...,36).  This makes the sum of the exponents
     // ceil(log2(d!))/(2d) exact as a rational number.
     constexpr uint64_t EXPONENT_DENOMINATOR = 24504480;
@@ -317,7 +340,8 @@ BigUInt friedland_colouring_bound(const Geometry& geometry,
         }
     }
 
-    BigUInt total;
+    const unsigned width = 30 - slack;
+    FriedlandSummary summary;
     const uint64_t full = (UINT64_C(1) << TOKENS) - 1;
     for (const Record& record : orbit) {
         auto [excess, count] = sector_of(record.key);
@@ -341,14 +365,29 @@ BigUInt friedland_colouring_bound(const Geometry& geometry,
             (exponent_numerator + EXPONENT_DENOMINATOR - 1) /
             EXPONENT_DENOMINATOR);
 
+        const uint64_t unmatched_choices = binomial(vertices, unmatched);
+        const unsigned bound_power = exponent +
+            (unmatched_choices <= 1 ? 0 :
+             64U - unsigned(__builtin_clzll(unmatched_choices - 1)));
+        const unsigned prime_count = required_matching_primes(bound_power);
+        const unsigned augmented_vertices = vertices + unmatched;
+        if (!augmented_vertices || (augmented_vertices & 1))
+            throw std::runtime_error("invalid augmented matching order");
+        const U128 sign_terms = U128(1) << (augmented_vertices / 2 - 1);
+        summary.queries_by_prime_count[prime_count]++;
+        summary.sign_terms_by_prime_count[prime_count] += sign_terms;
+        summary.queries_by_order[augmented_vertices]++;
+        summary.adaptive_sign_terms_by_order[augmented_vertices] +=
+            U128(prime_count) * sign_terms;
+
         BigUInt query(record.coefficient);
-        query.multiply(binomial(vertices, unmatched));
-        for (unsigned factor = 2; factor <= 28; factor++)
+        query.multiply(unmatched_choices);
+        for (unsigned factor = 2; factor <= width; factor++)
             query.multiply(factor);
         query.shift_left(matching_edges + exponent);
-        total.add(query);
+        summary.colouring_bound.add(query);
     }
-    return total;
+    return summary;
 }
 
 struct MatchingLimit : std::runtime_error {
@@ -588,8 +627,9 @@ int run_orbit_census(const Geometry& geometry,
                 Sector& sector = sectors[{excess, count}];
                 sector.symmetry_orbits++;
                 sector.coefficient += coefficient;
-                sector.symmetry_sign_terms +=
-                    U128(1) << (31 - count - excess);
+                const unsigned glynn_exponent =
+                    29 + options.slack - count - excess;
+                sector.symmetry_sign_terms += U128(1) << glynn_exponent;
             }
         }
     }
@@ -616,18 +656,21 @@ int run_orbit_census(const Geometry& geometry,
         unsigned unmatched = 2 * options.slack - excess;
         unsigned vertices = 60 - (2 * count + excess) + unmatched;
         if (!sector.graph_orbits) sector.graph_orbits = sector.symmetry_orbits;
-        U128 graph_terms = U128(sector.graph_orbits) <<
-                           (31 - count - excess);
+        const unsigned glynn_exponent =
+            29 + options.slack - count - excess;
+        U128 graph_terms =
+            U128(sector.graph_orbits) << glynn_exponent;
         total_orbits += sector.symmetry_orbits;
         total_graph_orbits += sector.graph_orbits;
         total_symmetry_terms += sector.symmetry_sign_terms;
         total_graph_terms += graph_terms;
         unsigned original_vertices = 60 - 2 * count - excess;
-        unsigned matching_edges = 28 - count;
+        const unsigned width = 30 - options.slack;
+        unsigned matching_edges = width - count;
         if (sector.coefficient > std::numeric_limits<uint64_t>::max())
             throw std::overflow_error("sector coefficient exceeds uint64_t");
         BigUInt sector_bound(uint64_t(sector.coefficient));
-        for (unsigned factor = matching_edges + 1; factor <= 28; factor++)
+        for (unsigned factor = matching_edges + 1; factor <= width; factor++)
             sector_bound.multiply(factor);
         for (unsigned factor = unmatched + 1; factor <= original_vertices;
              factor++)
@@ -647,8 +690,32 @@ int run_orbit_census(const Geometry& geometry,
               << " bits=" << bound_bits
               << " required_31bit_primes=" << (bound_bits + 30) / 31
               << " exact=OK\n";
-    const BigUInt friedland_bound =
-        friedland_colouring_bound(geometry, orbit, options.slack);
+    const FriedlandSummary friedland =
+        friedland_summary(geometry, orbit, options.slack);
+    U128 adaptive_sign_terms = 0;
+    for (unsigned primes = 1; primes < friedland.queries_by_prime_count.size();
+         primes++) {
+        adaptive_sign_terms +=
+            U128(primes) * friedland.sign_terms_by_prime_count[primes];
+        std::printf(
+            "DEFECT28_ADAPTIVE primes=%u queries=%" PRIu64
+            " sign_terms_per_prime=%s weighted_sign_terms=%s\n",
+            primes, friedland.queries_by_prime_count[primes],
+            decimal(friedland.sign_terms_by_prime_count[primes]).c_str(),
+            decimal(U128(primes) *
+                    friedland.sign_terms_by_prime_count[primes]).c_str());
+    }
+    std::printf("DEFECT28_ADAPTIVE_TOTAL sign_terms=%s exact=OK\n",
+                decimal(adaptive_sign_terms).c_str());
+    for (unsigned order = 0; order < friedland.queries_by_order.size(); order++) {
+        if (!friedland.queries_by_order[order]) continue;
+        std::printf(
+            "DEFECT28_ADAPTIVE_ORDER vertices=%u queries=%" PRIu64
+            " weighted_sign_terms=%s\n",
+            order, friedland.queries_by_order[order],
+            decimal(friedland.adaptive_sign_terms_by_order[order]).c_str());
+    }
+    const BigUInt& friedland_bound = friedland.colouring_bound;
     const unsigned friedland_bits = friedland_bound.bit_length();
     std::cout << "DEFECT28_FRIEDLAND_BOUND value="
               << friedland_bound.decimal() << " bits=" << friedland_bits
@@ -667,6 +734,14 @@ int run_orbit_census(const Geometry& geometry,
         throw std::runtime_error("6x29 orbit-DP census mismatch");
     if (options.slack == 2 && total_orbits != 36398)
         throw std::runtime_error("6x28 orbit-DP census mismatch");
+    if (options.slack == 3 && total_orbits != 45007139)
+        throw std::runtime_error("6x27 orbit-DP census mismatch");
+    if (options.slack == 2 &&
+        adaptive_sign_terms != U128(UINT64_C(1063130234880)))
+        throw std::runtime_error("6x28 adaptive workload mismatch");
+    if (options.slack == 3 &&
+        adaptive_sign_terms != U128(UINT64_C(134616715362304)))
+        throw std::runtime_error("6x27 adaptive workload mismatch");
     if (options.matching_max_states || options.matching_max_seconds ||
         options.matching_max_roots)
         SharedMatchingCounter(geometry, options).run(orbit, options.slack);
@@ -698,13 +773,14 @@ int main(int argc, char** argv) try {
         else
             throw std::runtime_error(
                 "usage: six_by_twenty_eight_defect_census "
-                "[--slack 1|2] [--threads N] [--max-configurations N] "
+                "[--slack 1|2|3] [--threads N] [--max-configurations N] "
                 "[--graph-isomorphism] [--raw] "
                 "[--matching-max-states N] [--matching-max-roots N] "
                 "[--matching-max-seconds S]");
     }
-    if (!options.threads || options.slack < 1 || options.slack > 2)
-        throw std::runtime_error("slack must be one or two and threads positive");
+    if (!options.threads || options.slack < 1 || options.slack > 3)
+        throw std::runtime_error(
+            "slack must be one, two, or three and threads positive");
     if (options.raw_census && options.slack != 1)
         throw std::runtime_error(
             "raw census is retained only for the bounded 6x29 regression");
@@ -801,7 +877,7 @@ int main(int argc, char** argv) try {
         sector.coefficient += record.coefficient;
         unsigned excess = sector_key.first;
         unsigned count = sector_key.second;
-        unsigned exponent = 31 - count - excess;
+        unsigned exponent = 29 + options.slack - count - excess;
         sector.symmetry_sign_terms += U128(1) << exponent;
     }
     std::printf("DEFECT28_SYMMETRY orbits=%zu bytes=%zu elapsed=%.6f\n",
@@ -833,8 +909,10 @@ int main(int argc, char** argv) try {
         if (!sector.graph_orbits) sector.graph_orbits = sector.symmetry_orbits;
         total_orbits += sector.symmetry_orbits;
         total_graph_orbits += sector.graph_orbits;
-        U128 graph_terms = U128(sector.graph_orbits) <<
-                           (31 - count - excess);
+        const unsigned glynn_exponent =
+            29 + options.slack - count - excess;
+        U128 graph_terms =
+            U128(sector.graph_orbits) << glynn_exponent;
         total_symmetry_terms += sector.symmetry_sign_terms;
         total_graph_terms += graph_terms;
         std::printf(
