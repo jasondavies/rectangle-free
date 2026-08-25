@@ -14696,3 +14696,31 @@
   still 1.4% slower.  Keep chain length four.
 - Outcome: reject both extensions and remove their production changes.  The
   accepted resolver niche remains full-rank order 48 on Blackwell.
+
+### Experiment 431: Fused Gray recurrences and transforms
+
+- Goal: extend experiment 429's exact four-product reduction only to long,
+  regular loops where the reduction saving exceeds added live-state cost.
+- Accept three shared Gray-core transformations:
+  1. In the fraction-free Lanczos update, combine
+     `middle*current + norm_squared*previous` before the subtraction.
+  2. In a rank-two tridiagonal apply, combine `diagonal*input` with the beta
+     term and combine the two low-rank corrections.
+  3. In each inverse-basis transform, accumulate four consecutive source
+     products per reduction, with a two-product and scalar tail.
+- The order-50 complete domain at fixed 2,205 MHz falls from 0.9877 s before
+  these transformations to 0.9400 s, an additional `1.051x`.  A 16,777,216
+  term order-54 range falls from about 1.116 s to 1.083 s (`1.030x`).  Every
+  partial residue and failure count agrees with the prior production binary.
+- Apply four-way reduction to the resolver's Gram moments as well.  Each lane
+  owns exactly twelve order-48 coordinates, so this becomes three regular
+  fused groups.  It preserves the 56-register, 8-byte-stack resource point
+  and saves a further 0.2--0.3% after warm-up.
+- A fused two-product tridiagonal characteristic recurrence is exact but about
+  0.3% slower after warm-up; revert it.  The short predicated recurrence does
+  not amortize its wider live expression.
+- Outcome: accept the four regular-loop transformations.  Their effect is
+  concentrated outside the dominant full-rank resolver sector, refining the
+  current campaign projection to approximately 16.5--17.5 RTX PRO 6000
+  GPU-hours.  Do not generalize fused reduction mechanically to short or
+  divergent loops.

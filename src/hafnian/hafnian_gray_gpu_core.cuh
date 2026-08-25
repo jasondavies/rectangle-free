@@ -275,14 +275,12 @@ __device__ void apply_tridiagonal_update(
     }
     const unsigned lane=threadIdx.x&31;
     for(unsigned row=lane;row<rank;row+=32) {
-        uint32_t value=hafnian_mul(diagonal[row],input[row],mod);
+        uint32_t value=row+1<rank?hafnian_sum_products2(
+            diagonal[row],input[row],beta[row+1],input[row+1],mod):
+            hafnian_mul(diagonal[row],input[row],mod);
         if(row)value=hafnian_add_mod(value,input[row-1],mod.p);
-        if(row+1<rank)value=hafnian_add_mod(
-            value,hafnian_mul(beta[row+1],input[row+1],mod),mod.p);
-        value=hafnian_add_mod(value,
-            hafnian_mul(z0[row],correction0,mod),mod.p);
-        value=hafnian_add_mod(value,
-            hafnian_mul(z1[row],correction1,mod),mod.p);
+        value=hafnian_add_mod(value,hafnian_sum_products2(
+            z0[row],correction0,z1[row],correction1,mod),mod.p);
         output[row]=value;
     }
     __syncwarp();
@@ -364,11 +362,11 @@ __device__ bool generalized_lanczos(
         norm_squared=__shfl_sync(0xffffffff,norm_squared,0);
         if(column+1<rank) {
             for(unsigned row=lane;row<rank;row+=32) {
-                uint32_t value=hafnian_sub_mod(
-                    hafnian_mul(scale,applied[row],mod),
+                uint32_t value=hafnian_mul(scale,applied[row],mod);
+                if(column)value=hafnian_sub_mod(value,hafnian_sum_products2(
+                    middle,current[row],norm_squared,previous[row],mod),mod.p);
+                else value=hafnian_sub_mod(value,
                     hafnian_mul(middle,current[row],mod),mod.p);
-                if(column)value=hafnian_sub_mod(value,
-                    hafnian_mul(norm_squared,previous[row],mod),mod.p);
                 next[row]=value;
             }
             __syncwarp();
@@ -518,12 +516,31 @@ __device__ void inverse_basis_apply_pair(
     __syncwarp();
     for(unsigned target=lane;target<rank;target+=32) {
         uint32_t sum0=0,sum1=0;
-        for(unsigned source=0;source<rank;++source) {
+        unsigned source=0;
+        for(;source+3<rank;source+=4) {
+            const uint32_t factor0=basis[size_t(source)*rank+target];
+            const uint32_t factor1=basis[size_t(source+1)*rank+target];
+            const uint32_t factor2=basis[size_t(source+2)*rank+target];
+            const uint32_t factor3=basis[size_t(source+3)*rank+target];
+            sum0=hafnian_add_mod(sum0,hafnian_sum_products4(
+                factor0,weighted0[source],factor1,weighted0[source+1],
+                factor2,weighted0[source+2],factor3,weighted0[source+3],mod),mod.p);
+            sum1=hafnian_add_mod(sum1,hafnian_sum_products4(
+                factor0,weighted1[source],factor1,weighted1[source+1],
+                factor2,weighted1[source+2],factor3,weighted1[source+3],mod),mod.p);
+        }
+        for(;source+1<rank;source+=2) {
+            const uint32_t factor0=basis[size_t(source)*rank+target];
+            const uint32_t factor1=basis[size_t(source+1)*rank+target];
+            sum0=hafnian_add_mod(sum0,hafnian_sum_products2(
+                factor0,weighted0[source],factor1,weighted0[source+1],mod),mod.p);
+            sum1=hafnian_add_mod(sum1,hafnian_sum_products2(
+                factor0,weighted1[source],factor1,weighted1[source+1],mod),mod.p);
+        }
+        if(source<rank) {
             const uint32_t factor=basis[size_t(source)*rank+target];
-            sum0=hafnian_add_mod(sum0,
-                hafnian_mul(factor,weighted0[source],mod),mod.p);
-            sum1=hafnian_add_mod(sum1,
-                hafnian_mul(factor,weighted1[source],mod),mod.p);
+            sum0=hafnian_add_mod(sum0,hafnian_mul(factor,weighted0[source],mod),mod.p);
+            sum1=hafnian_add_mod(sum1,hafnian_mul(factor,weighted1[source],mod),mod.p);
         }
         output0[target]=hafnian_mul(sum0,inverse_new_metric[target],mod);
         output1[target]=hafnian_mul(sum1,inverse_new_metric[target],mod);

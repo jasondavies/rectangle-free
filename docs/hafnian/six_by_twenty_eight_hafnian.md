@@ -69,7 +69,7 @@ tridiagonalization plus a 6x6 truncated polynomial determinant evaluates all
 four terms.  Deficient, unaligned, larger-order, and pre-Blackwell work keeps
 the established Gray backend.  Dense dot products share one exact modular
 reduction across two or four residue products.  On one RTX PRO 6000, the exact
-workload currently projects to approximately 17--18 GPU-hours, excluding campaign
+workload currently projects to approximately 16.5--17.5 GPU-hours, excluding campaign
 interruptions and final independent validation.
 
 The independent finite-field Glynn/trace/Hessenberg fallback is shared with

@@ -261,11 +261,23 @@ __global__ __launch_bounds__(THREADS,MIN_BLOCKS_PER_SM) void terms_kernel(
                     remainder-=M-pair_row++;
                 const unsigned pair_column=pair_row+remainder;
                 uint32_t value=0;
-                if(wanted<PAIRS)
-                    for(unsigned coordinate=within;coordinate<N;coordinate+=DOT_GROUP)
+                if(wanted<PAIRS) {
+                    unsigned coordinate=within;
+                    for(;coordinate+3*DOT_GROUP<N;coordinate+=4*DOT_GROUP)
+                        value=hafnian_add_mod(value,hafnian_sum_products4(
+                            future[size_t(pair_row)*N+coordinate],
+                            power0[size_t(pair_column)*N+coordinate],
+                            future[size_t(pair_row)*N+coordinate+DOT_GROUP],
+                            power0[size_t(pair_column)*N+coordinate+DOT_GROUP],
+                            future[size_t(pair_row)*N+coordinate+2*DOT_GROUP],
+                            power0[size_t(pair_column)*N+coordinate+2*DOT_GROUP],
+                            future[size_t(pair_row)*N+coordinate+3*DOT_GROUP],
+                            power0[size_t(pair_column)*N+coordinate+3*DOT_GROUP],mod),mod.p);
+                    for(;coordinate<N;coordinate+=DOT_GROUP)
                         value=hafnian_add_mod(value,hafnian_mul(
                             future[size_t(pair_row)*N+coordinate],
                             power0[size_t(pair_column)*N+coordinate],mod),mod.p);
+                }
                 for(unsigned offset=DOT_GROUP/2;offset;offset>>=1)
                     value=hafnian_add_mod(value,
                         __shfl_down_sync(0xffffffff,value,offset,DOT_GROUP),mod.p);
