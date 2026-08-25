@@ -14811,3 +14811,12 @@
 - Outcome: accept only host-side edge transposition and direct dense stores.
   The cumulative projection is now approximately 15--16 RTX PRO 6000
   GPU-hours.
+
+### Experiment 436: Hoisted rank-eight Gray signs
+
+- Hoist the four invariant Gray update signs out of the 48-step structured
+  Lanczos refresh and pass them as a four-bit mask.  The change is exact, but
+  fixed-clock prime-2 time rises from about 0.338 s to 0.342--0.343 s.
+- The inlined constant-size loop was already scheduled effectively; carrying
+  the mask through the generalized operator increases live state.  Reject and
+  retain the direct index/sign formulation.
