@@ -14771,3 +14771,18 @@
   at all other orders and architectures.  This lowers the current 6x28
   projection from approximately 16.5--17.5 to roughly 15.5--16.5 RTX PRO
   6000 GPU-hours.
+
+### Experiment 434: Shared staging for rank-eight projections
+
+- Goal: remove the accepted hybrid refresh's local projection spills.  The
+  fused eight-result dot product keeps all projections live; fixed Montgomery
+  kernels spill 8 bytes and the Mersenne specialization spills more.
+- Form the metric-weighted input once in spare shared memory, compute four
+  projection pairs sequentially, and stage the eight signed results in a
+  second shared vector before applying the correction.  This is exact and
+  preserves the first-eight-term residue.
+- At fixed 2,205 MHz, the complete order-48 prime-2 domain rises from about
+  0.3433 s to 0.3587 s, a 4.5% regression.  Extra warp synchronization and
+  repeated shared reads cost more than the local spills.
+- Outcome: reject shared projection staging and retain the single-pass
+  eight-accumulator projection fusion.
