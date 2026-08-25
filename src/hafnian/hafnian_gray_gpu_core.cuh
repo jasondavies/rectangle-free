@@ -200,10 +200,19 @@ __device__ void dot_metric_pair(const uint32_t* left0,const uint32_t* left1,
     uint32_t& result0,uint32_t& result1) {
     const unsigned lane=threadIdx.x&31;
     uint32_t value0=0,value1=0;
-    for(unsigned row=lane;row<rank;row+=32) {
-        const uint32_t weighted=hafnian_mul(metric[row],right[row],mod);
-        value0=hafnian_add_mod(value0,hafnian_mul(left0[row],weighted,mod),mod.p);
-        value1=hafnian_add_mod(value1,hafnian_mul(left1[row],weighted,mod),mod.p);
+    if(lane<rank) {
+        const uint32_t weighted0=hafnian_mul(metric[lane],right[lane],mod);
+        if(lane+32<rank) {
+            const uint32_t weighted1=
+                hafnian_mul(metric[lane+32],right[lane+32],mod);
+            value0=hafnian_sum_products2(
+                left0[lane],weighted0,left0[lane+32],weighted1,mod);
+            value1=hafnian_sum_products2(
+                left1[lane],weighted0,left1[lane+32],weighted1,mod);
+        } else {
+            value0=hafnian_mul(left0[lane],weighted0,mod);
+            value1=hafnian_mul(left1[lane],weighted0,mod);
+        }
     }
     for(unsigned offset=16;offset;offset>>=1) {
         value0=hafnian_add_mod(value0,__shfl_down_sync(0xffffffff,value0,offset),mod.p);
@@ -219,11 +228,16 @@ __device__ void dot_pair(const uint32_t* left0,const uint32_t* left1,
     uint32_t& result0,uint32_t& result1) {
     const unsigned lane=threadIdx.x&31;
     uint32_t value0=0,value1=0;
-    for(unsigned row=lane;row<rank;row+=32) {
-        value0=hafnian_add_mod(value0,
-            hafnian_mul(left0[row],right[row],mod),mod.p);
-        value1=hafnian_add_mod(value1,
-            hafnian_mul(left1[row],right[row],mod),mod.p);
+    if(lane<rank) {
+        if(lane+32<rank) {
+            value0=hafnian_sum_products2(left0[lane],right[lane],
+                left0[lane+32],right[lane+32],mod);
+            value1=hafnian_sum_products2(left1[lane],right[lane],
+                left1[lane+32],right[lane+32],mod);
+        } else {
+            value0=hafnian_mul(left0[lane],right[lane],mod);
+            value1=hafnian_mul(left1[lane],right[lane],mod);
+        }
     }
     for(unsigned offset=16;offset;offset>>=1) {
         value0=hafnian_add_mod(value0,

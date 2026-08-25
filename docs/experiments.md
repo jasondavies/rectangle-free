@@ -14724,3 +14724,17 @@
   current campaign projection to approximately 16.5--17.5 RTX PRO 6000
   GPU-hours.  Do not generalize fused reduction mechanically to short or
   divergent loops.
+
+### Experiment 432: Metric pairs and signed dense assembly
+
+- Pair the two rows owned by each lower warp lane in the Lanczos metric and
+  low-rank projection dot products.  This shares one reduction per result and
+  lowers the complete order-50 domain from about 0.9404 s to 0.9338 s at fixed
+  clocks (`1.0071x`).  The full-rank order-48 resolver is unchanged within
+  measurement noise.  Accept the shared-core change.
+- Reject reducing signed dense-matrix assembly only at the end.  Although the
+  positive and negative sums are each below `24p < 2^36`, two 64-bit
+  dependency chains and constant 64-bit remainder lower order-48 performance
+  from about 0.363 to 0.405 s, an 11% regression.  The existing per-edge
+  modular add/sub corrections are cheaper.  Remove the accumulator and its
+  reduction helpers.
