@@ -14948,3 +14948,29 @@
   fewer dense build per twelve terms.  This closes the straightforward
   longer-chain variants; another extension needs a different algebra, not
   another organization of the same three resolver blocks.
+
+### Experiment 443: Tighter CRT stopping-bound census
+
+- Goal: determine whether conservative per-degree rounding in the certified
+  Friedland perfect-matching bound forces a third 31-bit prime unnecessarily.
+  Removing one image would save one-third of arithmetic for every affected
+  query.
+- The catalog currently rounds `log2(d!)` upward before applying each
+  `1/(2d)` exponent.  Replace this only in the census with a rigorously
+  upward-rounded 1/1024-bit table: each entry `a_d` is certified by the exact
+  integer inequality `(d!)^1024 <= 2^(2*d*a_d)`, and vertex contributions are
+  summed before rounding.
+- Query 3321 demonstrates the issue.  Its stored bound is 62 bits, its tighter
+  Friedland exponent is at most 60.6211 bits, and its independently
+  reconstructed exact matching count has only 57 bits.  Two production primes
+  are therefore sufficient for this query.
+- Complete catalog census is nevertheless negative: only 25 of 36,398 queries
+  fall below the exact two-prime modulus, all at order 48.  They remove only
+  209,715,200 terms, about 0.020% of the 1,063,130,234,880-term current
+  prime-image workload.  The dominant order-48 bound distribution is centered
+  around 63.2--63.7 bits; even a shallow recursive Friedland refinement cannot
+  move those queries below 62 bits.
+- Outcome: reject a result-format/catalog migration for a seconds-scale
+  campaign saving.  Keep the simple integral bound and three-prime default.
+  A future bound is interesting only if it proves a large part of the
+  order-48 catalog below the two-prime product, not merely isolated queries.
