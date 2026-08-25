@@ -12,7 +12,7 @@ namespace hafnian_resolvent {
 
 constexpr unsigned WARPS_PER_BLOCK=2;
 constexpr unsigned THREADS=32*WARPS_PER_BLOCK;
-constexpr unsigned MIN_BLOCKS_PER_SM=16;
+constexpr unsigned MIN_BLOCKS_PER_SM=18;
 constexpr unsigned CHAIN=4;
 constexpr unsigned UPDATE_COLUMNS=2*(CHAIN-1);
 

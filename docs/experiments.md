@@ -14667,6 +14667,13 @@
   samples improve by 4.8--5.6%.  A deliberately difficult order-52 sample,
   whose non-cyclic chains fall back independently, improves by only 1.8%.
   Memcheck and racecheck report no errors or hazards.
+- The fused order-48 resolver initially rises from 56 to 64 registers and
+  lowers achieved occupancy from 66.4% to 60.2%.  Requiring 18 rather than 16
+  CTAs per SM restores 56 registers.  At a fixed 2,205 MHz GPU clock, eight
+  warm Montgomery alternations improve from 0.36786 s to 0.36514 s on average
+  (`1.0074x`); five Mersenne alternations improve by 0.2%.  Accept this narrow
+  launch retune.  The pre-fusion rejection does not transfer because fused
+  reduction changed both live ranges and arithmetic latency.
 - Outcome: accept fused reductions in the shared Gray core and resolver
   polynomial product.  Weighting the approximately 12--15% dominant-sector
   saving and approximately 5% larger-order saving lowers the current campaign
