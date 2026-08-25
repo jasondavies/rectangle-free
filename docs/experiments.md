@@ -14910,3 +14910,20 @@
   roughly another 0.4% of projected campaign time.  The aggregate remains
   approximately 15 RTX PRO 6000 GPU-hours.  Bump result provenance to
   algorithm version 7.
+
+### Experiment 441: Order-aware Mersenne resolver occupancy
+
+- Goal: revisit experiment 438's 20-CTA Mersenne launch bound now that the
+  resolver covers larger polynomials.  It wins at order 48, but forces much
+  heavier spills at orders 50 and 52.
+- Retain 20 CTAs/SM only at order 48 and use the fixed-Montgomery 18-CTA bound
+  at orders 50 and 52.  At order 50 this changes 48 registers and 84/208
+  spill-store/load bytes to 56 registers and 8/8 bytes.  At order 52 it changes
+  48 registers and 148/228 bytes to 56 registers and 40/132 bytes.
+- Warm fixed-clock complete-domain alternations are consistently positive:
+  order 50 falls from median 0.84266 s to 0.83749 s (`1.0062x`, eight pairs),
+  and order 52 falls from 1.75707 s to 1.74944 s (`1.0044x`, six pairs).  Every
+  residue agrees exactly.
+- Outcome: accept the order-aware bound.  The campaign impact is tiny, but it
+  removes avoidable local-memory traffic without adding a runtime control and
+  improves both affected sectors reproducibly.

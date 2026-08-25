@@ -12,9 +12,9 @@ namespace hafnian_resolvent {
 
 constexpr unsigned WARPS_PER_BLOCK=2;
 constexpr unsigned THREADS=32*WARPS_PER_BLOCK;
-template<class Mod>
+template<unsigned N,class Mod>
 constexpr unsigned min_blocks_per_sm() {
-    return std::is_same_v<Mod,HafnianMersenne31> ? 20 : 18;
+    return std::is_same_v<Mod,HafnianMersenne31> && N==48 ? 20 : 18;
 }
 constexpr unsigned CHAIN=8;
 constexpr unsigned RESOLVENT_CHAIN=4;
@@ -272,7 +272,7 @@ __device__ __forceinline__ void add_four_terms(
 }
 
 template<unsigned N,class Mod>
-__global__ __launch_bounds__(THREADS,min_blocks_per_sm<Mod>()) void terms_kernel(
+__global__ __launch_bounds__(THREADS,min_blocks_per_sm<N,Mod>()) void terms_kernel(
     const uint32_t* __restrict__ edge_matrices,
     const uint32_t* __restrict__ update_vectors,
     const uint32_t* __restrict__ fixed_metric,
