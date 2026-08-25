@@ -79,6 +79,17 @@ def required_prime_count(bound_power: int) -> int:
     raise ValueError(f"four primes do not cover matching bound 2^{bound_power}")
 
 
+def allowed_gray_chains(vertices: int) -> frozenset[int]:
+    """Return exact production chain lengths recorded at one matrix order."""
+    if vertices == 48:
+        return frozenset((6, 8))
+    if vertices in (50, 52):
+        return frozenset((7, 8))
+    if vertices in (54, 56, 58):
+        return frozenset((7,))
+    return frozenset()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("results", nargs="*", type=Path)
@@ -116,11 +127,13 @@ def main() -> int:
             raise ValueError(f"{path}: invalid matrix stride")
         if gray_enabled not in (0, 1):
             raise ValueError(f"{path}: invalid Gray mode")
-        expected_chain = 6 if vertices == 48 else (7 if vertices <= 58 else 0)
         if gray_enabled:
-            if (gray_chain != expected_chain or gray_slots <= 0 or
+            if (gray_chain not in allowed_gray_chains(vertices) or
+                    gray_slots <= 0 or
                     gray_active_blocks <= 0 or gray_chunks <= 0):
                 raise ValueError(f"{path}: invalid Gray chain geometry")
+            if gray_chain == 8 and (begin % 8 or end % 8):
+                raise ValueError(f"{path}: unaligned resolver chain range")
             if gray_slots != 2*gray_grid_blocks:
                 raise ValueError(f"{path}: inconsistent Gray grid geometry")
             if gray_fallback_chunks > gray_chunks:

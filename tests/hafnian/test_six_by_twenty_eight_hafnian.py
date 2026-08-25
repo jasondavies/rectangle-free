@@ -13,6 +13,7 @@ from tools.reduce_six_by_twenty_eight_hafnian import (
     ALGORITHM,
     PRIMES,
     QUOTIENT_BOUND,
+    allowed_gray_chains,
     crt,
     read_result,
     required_prime_count,
@@ -41,6 +42,13 @@ def result_text() -> str:
 
 
 class TwentyEightReductionTests(unittest.TestCase):
+    def test_production_gray_chain_matrix(self):
+        self.assertEqual(allowed_gray_chains(48), {6, 8})
+        self.assertEqual(allowed_gray_chains(50), {7, 8})
+        self.assertEqual(allowed_gray_chains(52), {7, 8})
+        self.assertEqual(allowed_gray_chains(54), {7})
+        self.assertEqual(allowed_gray_chains(60), set())
+
     def test_factored_bound_and_prime_counts(self):
         self.assertEqual(COMMON_FACTOR, math.factorial(28) * (1 << 24))
         self.assertEqual(QUOTIENT_BOUND.bit_length(), 113)
