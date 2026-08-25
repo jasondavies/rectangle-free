@@ -14738,3 +14738,36 @@
   from about 0.363 to 0.405 s, an 11% regression.  The existing per-edge
   modular add/sub corrections are cheaper.  Remove the accumulator and its
   reduction helpers.
+
+### Experiment 433: Hybrid resolvent chains with structured refreshes
+
+- Goal: amortize the dominant order-48 dense tridiagonalization beyond the
+  measured-optimal four-term resolver without enlarging its 6x6 polynomial
+  determinant.
+- A first eight-term prototype incorrectly applied only the fourth Gray
+  update before the second resolver block.  The first four-term block matched
+  independently, which isolated the error.  The exact bridge is the sum of
+  all four intervening rank-two changes: in the plus/minus factor basis it is
+  one signed rank-eight correction.
+- Add a generalized even-rank tridiagonal update.  Fuse its eight metric
+  projections so each coordinate's metric/input product is formed once, and
+  apply the invariant signs to the projections before the row loop rather
+  than multiplying by +/-1 for every output coordinate.  Preserve the eight
+  transformed factors in per-chain scratch because the first resolver block
+  overwrites its working factors.
+- The resulting chain evaluates eight terms with one dense generalized
+  Lanczos build, two unchanged four-term resolver contractions, and one exact
+  rank-eight generalized-Lanczos refresh.  On the complete 8,388,608-term
+  full-rank order-48 domain at a fixed 2,205 MHz, warm prime-2 runs fall from
+  about 0.3631 s to 0.3432 s (`1.058x`).  The first eight terms equal the sum
+  of independent 0--3 and 4--7 controls, with no Lanczos failures.
+- A twelve-term extension with two structured refreshes is exact, but its
+  duplicated instruction body runs at about 0.3965 s.  Moving the refresh to
+  a shared non-inlined device routine worsens this to about 0.4477 s.  Reject
+  both: instruction footprint and call overhead outweigh further dense-build
+  amortization.
+- Outcome: accept the eight-term hybrid only for the existing full-rank
+  order-48 Blackwell dispatch.  Retain the standard fraction-free Gray path
+  at all other orders and architectures.  This lowers the current 6x28
+  projection from approximately 16.5--17.5 to roughly 15.5--16.5 RTX PRO
+  6000 GPU-hours.

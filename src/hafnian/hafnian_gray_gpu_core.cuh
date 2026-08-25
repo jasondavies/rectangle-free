@@ -222,6 +222,40 @@ __device__ void dot_metric_pair(const uint32_t* left0,const uint32_t* left1,
     result1=__shfl_sync(0xffffffff,value1,0);
 }
 
+template<unsigned COUNT,class Mod>
+__device__ __forceinline__ void dot_metric_many(
+    const uint32_t* left,const uint32_t* right,const uint32_t* metric,
+    unsigned rank,Mod mod,uint32_t (&results)[COUNT]) {
+    const unsigned lane=threadIdx.x&31;
+    uint32_t values[COUNT]={};
+    if(lane<rank) {
+        const uint32_t weighted0=hafnian_mul(metric[lane],right[lane],mod);
+        if(lane+32<rank) {
+            const uint32_t weighted1=
+                hafnian_mul(metric[lane+32],right[lane+32],mod);
+            #pragma unroll
+            for(unsigned index=0;index<COUNT;++index)
+                values[index]=hafnian_sum_products2(
+                    left[size_t(index)*rank+lane],weighted0,
+                    left[size_t(index)*rank+lane+32],weighted1,mod);
+        } else {
+            #pragma unroll
+            for(unsigned index=0;index<COUNT;++index)
+                values[index]=hafnian_mul(
+                    left[size_t(index)*rank+lane],weighted0,mod);
+        }
+    }
+    for(unsigned offset=16;offset;offset>>=1) {
+        #pragma unroll
+        for(unsigned index=0;index<COUNT;++index)
+            values[index]=hafnian_add_mod(values[index],
+                __shfl_down_sync(0xffffffff,values[index],offset),mod.p);
+    }
+    #pragma unroll
+    for(unsigned index=0;index<COUNT;++index)
+        results[index]=__shfl_sync(0xffffffff,values[index],0);
+}
+
 template<class Mod>
 __device__ void dot_pair(const uint32_t* left0,const uint32_t* left1,
     const uint32_t* right,unsigned rank,Mod mod,
@@ -300,6 +334,46 @@ __device__ void apply_tridiagonal_update(
     __syncwarp();
 }
 
+template<unsigned LOW_RANK,class Mod>
+__device__ void apply_tridiagonal_update_many(
+    const uint32_t* diagonal,const uint32_t* beta,const uint32_t* metric,
+    const uint32_t* factors,uint32_t base_index,
+    const uint32_t* input,uint32_t* output,unsigned rank,Mod mod) {
+    static_assert((LOW_RANK&1)==0);
+    uint32_t projections[LOW_RANK];
+    dot_metric_many<LOW_RANK>(factors,input,metric,rank,mod,projections);
+
+    #pragma unroll
+    for(unsigned pair=0;pair<LOW_RANK/2;++pair) {
+        const uint64_t index=uint64_t(base_index)+pair+1;
+        const unsigned edge=unsigned(__ffsll(index));
+        const uint64_t signs=index^(index>>1);
+        const bool positive=signs&(UINT64_C(1)<<(edge-1));
+        if(!positive)projections[2*pair]=
+            hafnian_neg_mod(projections[2*pair],mod.p);
+        if(positive)projections[2*pair+1]=
+            hafnian_neg_mod(projections[2*pair+1],mod.p);
+    }
+
+    const unsigned lane=threadIdx.x&31;
+    for(unsigned row=lane;row<rank;row+=32) {
+        uint32_t value=row+1<rank?hafnian_sum_products2(
+            diagonal[row],input[row],beta[row+1],input[row+1],mod):
+            hafnian_mul(diagonal[row],input[row],mod);
+        if(row)value=hafnian_add_mod(value,input[row-1],mod.p);
+        #pragma unroll
+        for(unsigned factor=0;factor<LOW_RANK;factor+=2)
+            value=hafnian_add_mod(value,hafnian_sum_products2(
+                factors[size_t(factor)*rank+row],
+                projections[factor],
+                factors[size_t(factor+1)*rank+row],
+                projections[factor+1],
+                mod),mod.p);
+        output[row]=value;
+    }
+    __syncwarp();
+}
+
 template<class Mod>
 __device__ __forceinline__ uint32_t warp_inclusive_product(
     uint32_t value,Mod mod) {
@@ -322,7 +396,7 @@ __device__ __forceinline__ uint32_t warp_inclusive_reverse_product(
     return value;
 }
 
-template<class Mod>
+template<unsigned MULTI_RANK=0,class Mod>
 __device__ bool generalized_lanczos(
     const uint32_t* dense,const uint32_t* old_diagonal,const uint32_t* old_beta,
     const uint32_t* low0,const uint32_t* low1,
@@ -338,7 +412,7 @@ __device__ bool generalized_lanczos(
         previous[row]=0;
     }
     __syncwarp();
-    if(!dense) {
+    if(!dense&&!MULTI_RANK) {
         for(unsigned row=lane;row<rank;row+=32) {
             weighted_low0[row]=hafnian_mul(old_metric[row],low0[row],mod);
             weighted_low1[row]=hafnian_mul(old_metric[row],low1[row],mod);
@@ -350,6 +424,9 @@ __device__ bool generalized_lanczos(
         for(unsigned row=lane;row<rank;row+=32)
             basis[size_t(row)*rank+column]=current[row];
         if(dense)apply_dense(dense,current,applied,rank,mod);
+        else if constexpr(MULTI_RANK)
+            apply_tridiagonal_update_many<MULTI_RANK>(old_diagonal,old_beta,
+                old_metric,low0,delta,current,applied,rank,mod);
         else apply_tridiagonal_update(old_diagonal,old_beta,old_metric,
             low0,low1,weighted_low0,weighted_low1,delta,
             current,applied,rank,mod);

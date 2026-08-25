@@ -33,7 +33,7 @@ using six_by_twenty_eight::Query;
 constexpr const char* ALGORITHM="glynn-trace-hessenberg-residual-runtime-montgomery-control-v1";
 constexpr const char* FORMAT="six-by-twenty-eight-hafnian-v1";
 #else
-constexpr const char* ALGORITHM="glynn-gray-resolvent-fixed-field-cuda-v4";
+constexpr const char* ALGORITHM="glynn-gray-resolvent-fixed-field-cuda-v5";
 constexpr const char* FORMAT="six-by-twenty-eight-hafnian-v2";
 #endif
 
