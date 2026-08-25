@@ -14927,3 +14927,24 @@
 - Outcome: accept the order-aware bound.  The campaign impact is tiny, but it
   removes avoidable local-memory traffic without adding a runtime control and
   improves both affected sectors reproducibly.
+
+### Experiment 442: Reusable-body twelve-term resolver gate
+
+- Goal: revisit experiment 433's rejected twelve-term hybrid without
+  duplicating its large four-term polynomial resolver three times.  Make that
+  stage one non-inlined device routine, then evaluate three groups separated
+  by two exact signed rank-eight Lanczos refreshes.
+- The call-boundary prerequisite is tolerable but negative: an exact chain-8
+  order-48 run rises from about 0.3372 s to 0.3459 s.  It also changes the
+  caller to 96 spill-store and 140 spill-load bytes per thread.
+- The complete chain-12 implementation is exact on the common 8,388,600-term
+  aligned domain, reproducing residue `1689747721` with zero failures.  It is
+  dramatically better than the former duplicated chain-12 prototype, but
+  eight fixed-clock alternations still give median 0.35449 s versus 0.33723 s
+  for production chain 8: a 5.12% regression.
+- Outcome: reject and restore the fully inlined eight-term resolver.  Reusing
+  one instruction body solves most of the old instruction-footprint loss, but
+  device-call state, spills, and the second structured refresh outweigh one
+  fewer dense build per twelve terms.  This closes the straightforward
+  longer-chain variants; another extension needs a different algebra, not
+  another organization of the same three resolver blocks.
