@@ -15007,3 +15007,26 @@
 - Outcome: accept.  This is an exact architecture retune, not a new arithmetic
   backend.  It materially reduces the dominant Ada sector while preserving
   the independent Gray fallback for every ineligible or failed chain.
+
+### Experiment 445: Weighted heterogeneous campaign partition
+
+- Goal: add four available RTX PRO 6000 Blackwell GPUs to the running
+  eight-L40S `6x28` campaign without duplicating any exact sign-term range.
+- Add deterministic weighted campaign partitions to the persistent driver.
+  Remaining jobs are sorted by term count, greedily assigned by
+  `load / relative_capacity`, and only the requested partition is subsequently
+  balanced across its local GPUs.  The default single partition is unchanged.
+- The frozen common snapshot contains 2,928 authenticated result files.  The
+  measured complete order-48 rates are about 14.1 million terms/s on L40S and
+  24.2 million terms/s on RTX PRO 6000, so use relative group capacities 8:7.
+  The exact dry-run audit assigns 56,678 jobs / 514,070,675,456 terms to the
+  L40S node and 49,592 jobs / 449,805,549,568 terms to Blackwell.  All 106,270
+  remaining job identities are unique, their intersection is empty, and their
+  union contains exactly 963,876,225,024 terms.
+- Production: launch eight L40S workers and four RTX PRO 6000 workers from the
+  identical snapshot.  Each node retains atomic range checkpoints.  The local
+  finalizer merges both result streams, requires a complete exact reduction,
+  and deletes both VMs only after validation succeeds.
+- Outcome: accept the weighted partition facility.  It is campaign-level
+  scheduling only; solver arithmetic, result identities, and reducer semantics
+  remain unchanged.

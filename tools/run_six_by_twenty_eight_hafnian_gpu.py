@@ -107,11 +107,28 @@ def main() -> int:
         "--threads", type=int, default=0,
         help="fallback threads per CTA; Gray-enabled orders use 64; 0 autotunes",
     )
+    parser.add_argument(
+        "--partition-index", type=int, default=0,
+        help="weighted campaign partition to execute (default: 0)",
+    )
+    parser.add_argument(
+        "--partition-weights", default="1",
+        help="comma-separated relative capacities of disjoint campaign partitions",
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     gpus = [item.strip() for item in args.gpus.split(",") if item.strip()]
     if not gpus or len(set(gpus)) != len(gpus):
         parser.error("--gpus must contain distinct comma-separated device IDs")
+    try:
+        partition_weights = [
+            float(item) for item in args.partition_weights.split(",") if item
+        ]
+    except ValueError:
+        parser.error("--partition-weights must contain positive numbers")
+    if (not partition_weights or any(weight <= 0 for weight in partition_weights)
+            or not 0 <= args.partition_index < len(partition_weights)):
+        parser.error("invalid campaign partition configuration")
     if args.chunk_terms <= 0 or not 0 <= args.threads <= 1024 or args.blocks < 0:
         parser.error("invalid kernel configuration")
     binary = args.binary.resolve()
@@ -132,6 +149,26 @@ def main() -> int:
             if cursor < query.terms:
                 jobs.append((query.terms-cursor, prime, query, cursor))
     jobs.sort(key=lambda item: item[0], reverse=True)
+
+    partition_jobs: list[list[tuple[int, int, QueryInfo, int]]] = [
+        [] for _ in partition_weights
+    ]
+    partition_loads = [0] * len(partition_weights)
+    for job in jobs:
+        owner = min(
+            range(len(partition_weights)),
+            key=lambda index: partition_loads[index] / partition_weights[index],
+        )
+        partition_jobs[owner].append(job)
+        partition_loads[owner] += job[0]
+    jobs = partition_jobs[args.partition_index]
+    print(
+        f"HAFNIAN_6X28_PARTITION index={args.partition_index} "
+        f"count={len(partition_weights)} jobs={len(jobs)} "
+        f"load={partition_loads[args.partition_index]} "
+        f"all_loads={','.join(map(str, partition_loads))}",
+        flush=True,
+    )
 
     assignments: list[list[tuple[int, int, QueryInfo, int]]] = [[] for _ in gpus]
     loads = [0] * len(gpus)
