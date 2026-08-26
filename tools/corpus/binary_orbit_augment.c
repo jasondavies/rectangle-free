@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <time.h>
 
@@ -80,6 +81,11 @@ static const uint64_t g_expected_counts[MAX_COLUMNS + 1] = {
 #elif ORBIT_ROWS == 6 && ORBIT_MAX_COLUMNS == 9
 static const uint64_t g_expected_counts[MAX_COLUMNS + 1] = {
     1, 7, 50, 386, 3250, 28576, 251610, 2141733, 17256831, 130237768
+};
+#elif ORBIT_ROWS == 6 && ORBIT_MAX_COLUMNS == 10
+static const uint64_t g_expected_counts[MAX_COLUMNS + 1] = {
+    1, 7, 50, 386, 3250, 28576, 251610, 2141733, 17256831, 130237768,
+    917558397
 };
 #elif ORBIT_ROWS == 8 && ORBIT_MAX_COLUMNS == 8
 static const uint64_t g_expected_counts[MAX_COLUMNS + 1] = {
@@ -162,6 +168,60 @@ static void orbit_map_add(OrbitMap* map, uint64_t key, uint64_t weight) {
     }
     orbit_map_insert_raw(map, key, weight);
 }
+
+#if ORBIT_ROWS == 6 && ORBIT_MAX_COLUMNS == 10 && ORBIT_ROW_BITS == 10
+// The retained depth-ten table is allocated at its final capacity, so it can
+// be filled concurrently without rehashing.  A transient lock key publishes
+// the weight before the real key; readers encountering it retry the same slot.
+static int orbit_map_add_concurrent(OrbitMap* map, uint64_t key,
+                                    uint64_t weight) {
+    const uint64_t lock_key = UINT64_MAX - 1U;
+    size_t slot = (size_t)mix64(key) & (map->capacity - 1U);
+    for (;;) {
+        OrbitRecord* entry = &map->entries[slot];
+        uint64_t observed = __atomic_load_n(&entry->key, __ATOMIC_ACQUIRE);
+        if (observed == key) {
+            __atomic_fetch_add(&entry->weight, weight, __ATOMIC_RELAXED);
+            return 0;
+        }
+        if (observed == UINT64_MAX) {
+            uint64_t expected = UINT64_MAX;
+            if (__atomic_compare_exchange_n(
+                    &entry->key, &expected, lock_key, 0,
+                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                entry->weight = weight;
+                __atomic_store_n(&entry->key, key, __ATOMIC_RELEASE);
+                return 1;
+            }
+            continue;
+        }
+        if (observed == lock_key) continue;
+        slot = (slot + 1U) & (map->capacity - 1U);
+    }
+}
+
+static void validate_concurrent_orbit_map(void) {
+    OrbitMap map;
+    orbit_map_init(&map, 1024);
+    uint64_t inserted = 0;
+#pragma omp parallel for schedule(static) reduction(+:inserted)
+    for (int index = 0; index < 100000; index++) {
+        inserted += orbit_map_add_concurrent(
+            &map, (uint64_t)(index % 100), 1
+        );
+    }
+    map.count = (size_t)inserted;
+    uint64_t weight = 0;
+    for (size_t slot = 0; slot < map.capacity; slot++) {
+        if (map.entries[slot].key != UINT64_MAX) weight += map.entries[slot].weight;
+    }
+    if (map.count != 100 || weight != 100000) {
+        fprintf(stderr, "concurrent orbit-map self-test failed\n");
+        exit(1);
+    }
+    free(map.entries);
+}
+#endif
 
 static uint64_t pack_rows(const RowPattern rows[ROWS]) {
     uint64_t key = 0;
@@ -964,6 +1024,105 @@ static void run_build(int target_columns, const char* output_path) {
     free(current.entries);
 }
 
+static void run_augment(const char* parent_path, const char* output_path) {
+    int parent_columns = 0;
+    OrbitMap parents = read_orbit_file(parent_path, &parent_columns);
+    if (parent_columns >= MAX_COLUMNS) exit(2);
+    uint64_t candidates = 0;
+    double begin = seconds_now();
+    OrbitMap children = extend_map(
+        &parents, parent_columns, 0, parents.count, &candidates
+    );
+    free(parents.entries);
+    validate_map(&children, parent_columns + 1);
+    double augmentation_seconds = seconds_now() - begin;
+    write_orbit_file(output_path, parent_columns + 1, &children);
+    printf("augment columns=%d candidates=%llu unique=%zu "
+           "augmentation_seconds=%.3f total_seconds=%.3f output=%s OK\n",
+           parent_columns + 1, (unsigned long long)candidates, children.count,
+           augmentation_seconds, seconds_now() - begin, output_path);
+    free(children.entries);
+}
+
+#if ORBIT_ROWS == 6 && ORBIT_MAX_COLUMNS == 10 && ORBIT_ROW_BITS == 10
+static void run_augment_solve_6x10(const char* parent_path,
+                                   const char* output_path) {
+    validate_concurrent_orbit_map();
+    int parent_columns = 0;
+    OrbitMap parents = read_orbit_file(parent_path, &parent_columns);
+    if (parent_columns != 9) exit(2);
+    validate_map(&parents, parent_columns);
+    size_t capacity = 16;
+    while ((U128)capacity * 7U <= (U128)UINT64_C(502732239) * 10U)
+        capacity <<= 1;
+    OrbitMap children;
+    orbit_map_init(&children, capacity);
+    uint64_t raw_candidates = 0;
+    uint64_t retained_candidates = 0;
+    uint64_t unique_children = 0;
+    double begin = seconds_now();
+#pragma omp parallel for schedule(dynamic, 256) \
+    reduction(+:raw_candidates,retained_candidates,unique_children)
+    for (long long parent_slot = 0;
+         parent_slot < (long long)parents.capacity; parent_slot++) {
+        OrbitRecord parent = parents.entries[(size_t)parent_slot];
+        if (parent.key == UINT64_MAX) continue;
+        int parent_cells = __builtin_popcountll(parent.key);
+        RowPattern rows[ROWS];
+        unpack_rows(parent.key, rows);
+        for (unsigned assignment = 0; assignment < NEW_COLUMNS; assignment++) {
+            raw_candidates++;
+            if (parent_cells + __builtin_popcount(assignment) > 30) continue;
+            retained_candidates++;
+            RowPattern child_rows[ROWS];
+            for (int row = 0; row < ROWS; row++) {
+                child_rows[row] = rows[row] |
+                    (RowPattern)(((assignment >> row) & 1U) << 9);
+            }
+            unique_children += orbit_map_add_concurrent(
+                &children, canonical_key(child_rows, 10), parent.weight
+            );
+        }
+    }
+    children.count = (size_t)unique_children;
+    free(parents.entries);
+    U128 retained_weight = 0;
+    U128 covered_weight = 0;
+    uint64_t midpoint = 0;
+    for (size_t slot = 0; slot < children.capacity; slot++) {
+        OrbitRecord child = children.entries[slot];
+        if (child.key == UINT64_MAX) continue;
+        int cells = __builtin_popcountll(child.key);
+        if (cells > 30) exit(1);
+        retained_weight += child.weight;
+        covered_weight += (U128)child.weight * (cells < 30 ? 2U : 1U);
+        midpoint += cells == 30;
+    }
+    const int valid = raw_candidates == UINT64_C(8335217152) &&
+                      retained_candidates == UINT64_C(4569464882) &&
+                      children.count == UINT64_C(502732239) &&
+                      retained_weight == (U128)UINT64_C(635593043085854200) &&
+                      covered_weight == ((U128)1 << 60);
+    if (!valid) {
+        fprintf(stderr, "retained 6x10 augmentation validation failed\n");
+        exit(1);
+    }
+    double augmentation_seconds = seconds_now() - begin;
+    write_orbit_file(output_path, 10, &children);
+    printf("augment_solve_6x10 raw_candidates=%llu retained_candidates=%llu "
+           "unique=%zu midpoint=%llu retained_weight=",
+           (unsigned long long)raw_candidates,
+           (unsigned long long)retained_candidates, children.count,
+           (unsigned long long)midpoint);
+    print_u128(retained_weight);
+    printf(" covered_weight=");
+    print_u128(covered_weight);
+    printf(" augmentation_seconds=%.3f total_seconds=%.3f output=%s OK\n",
+           augmentation_seconds, seconds_now() - begin, output_path);
+    free(children.entries);
+}
+#endif
+
 #if ORBIT_ROWS == 8 && ORBIT_MAX_COLUMNS == 8 && ORBIT_ROW_BITS == 8
 static void run_build_canonical_parent(int target_columns, const char* output_path) {
     OrbitMap current;
@@ -1305,6 +1464,228 @@ static void write_orbit_header(FILE* file, int columns, uint64_t count) {
         fwrite(&columns_value, sizeof(columns_value), 1, file) != 1 ||
         fwrite(&count, sizeof(count), 1, file) != 1) exit(1);
 }
+
+#if ORBIT_ROWS == 6 && ORBIT_MAX_COLUMNS == 10 && ORBIT_ROW_BITS == 10
+static uint32_t solve_left_prefix_6x10(uint64_t key) {
+    RowPattern rows[6];
+    unpack_rows(key, rows);
+    uint32_t prefix = 0;
+    for (int row = 0; row < 6; row++) {
+        prefix = (prefix << 5) | (rows[row] & 31U);
+    }
+    return prefix;
+}
+
+static int solve_shard_6x10(uint64_t key, int shards) {
+    return (int)(mix64(solve_left_prefix_6x10(key)) % (uint64_t)shards);
+}
+
+static void run_solve_census_6x10(const char* parent_path) {
+    static const uint8_t binomial[7] = {1, 6, 15, 20, 15, 6, 1};
+    static const uint8_t binomial_prefix[7] = {1, 7, 22, 42, 57, 63, 64};
+    FILE* input = fopen(parent_path, "rb");
+    if (!input) exit(1);
+    char magic[8];
+    uint32_t columns = 0;
+    uint64_t count = 0;
+    if (fread(magic, sizeof(magic), 1, input) != 1 ||
+        memcmp(magic, ORBIT_MAGIC, 7) != 0 ||
+        fread(&columns, sizeof(columns), 1, input) != 1 ||
+        fread(&count, sizeof(count), 1, input) != 1 || columns != 9 ||
+        count != UINT64_C(130237768)) exit(1);
+    uint64_t retained_candidates = 0;
+    U128 retained_weight = 0;
+    U128 midpoint_weight = 0;
+    double begin = seconds_now();
+    for (uint64_t index = 0; index < count; index++) {
+        OrbitRecord parent;
+        if (fread(&parent, sizeof(parent), 1, input) != 1) exit(1);
+        int remaining = 30 - __builtin_popcountll(parent.key);
+        if (remaining < 0) continue;
+        unsigned maximum = remaining < 6 ? (unsigned)remaining : 6U;
+        retained_candidates += binomial_prefix[maximum];
+        retained_weight += (U128)parent.weight * binomial_prefix[maximum];
+        if (remaining <= 6)
+            midpoint_weight += (U128)parent.weight * binomial[remaining];
+    }
+    if (fgetc(input) != EOF || fclose(input) != 0) exit(1);
+    U128 covered_weight = retained_weight * 2U - midpoint_weight;
+    const int valid = covered_weight == ((U128)1 << 60);
+    printf("solve_census_6x10 parents=%llu raw_candidates=%llu "
+           "retained_candidates=%llu retained_weight=",
+           (unsigned long long)count,
+           (unsigned long long)(count * UINT64_C(64)),
+           (unsigned long long)retained_candidates);
+    print_u128(retained_weight);
+    printf(" midpoint_weight=");
+    print_u128(midpoint_weight);
+    printf(" covered_weight=");
+    print_u128(covered_weight);
+    printf(" seconds=%.3f %s\n", seconds_now() - begin,
+           valid ? "OK" : "FAIL");
+    if (!valid) exit(1);
+}
+
+static void raise_file_limit(int required) {
+    struct rlimit limit;
+    if (getrlimit(RLIMIT_NOFILE, &limit) != 0) exit(1);
+    rlim_t wanted = (rlim_t)required;
+    if (limit.rlim_cur >= wanted) return;
+    if (limit.rlim_max < wanted) {
+        fprintf(stderr, "open-file limit is too small for %d solve shards\n",
+                required - 1);
+        exit(1);
+    }
+    limit.rlim_cur = wanted;
+    if (setrlimit(RLIMIT_NOFILE, &limit) != 0) exit(1);
+}
+
+static void run_solve_partition_6x10(const char* input_path, int shards,
+                                     const char* output_prefix) {
+    if (shards < 1 || shards > 8192) exit(2);
+    raise_file_limit(shards + 16);
+    FILE* input = fopen(input_path, "rb");
+    if (!input) exit(1);
+    char magic[8];
+    uint32_t columns = 0;
+    uint64_t count = 0;
+    if (fread(magic, sizeof(magic), 1, input) != 1 ||
+        memcmp(magic, ORBIT_MAGIC, 7) != 0 ||
+        fread(&columns, sizeof(columns), 1, input) != 1 ||
+        fread(&count, sizeof(count), 1, input) != 1 || columns != 10 ||
+        !count) exit(1);
+    FILE** outputs = xcalloc((size_t)shards, sizeof(outputs[0]));
+    uint64_t* shard_records = xcalloc((size_t)shards, sizeof(shard_records[0]));
+    U128 labelled_weight = 0;
+    U128 retained_weight = 0;
+    U128 covered_weight = 0;
+    uint64_t retained = 0;
+    uint64_t midpoint = 0;
+    char path[4096];
+    for (int shard = 0; shard < shards; shard++) {
+        snprintf(path, sizeof(path), "%s.s%04d.orbits", output_prefix, shard);
+        outputs[shard] = fopen(path, "wb+");
+        if (!outputs[shard]) exit(1);
+        write_orbit_header(outputs[shard], 10, 0);
+    }
+    for (uint64_t index = 0; index < count; index++) {
+        OrbitRecord record;
+        if (fread(&record, sizeof(record), 1, input) != 1) exit(1);
+        labelled_weight += record.weight;
+        int cells = __builtin_popcountll(record.key);
+        if (cells > 30) continue;
+        int shard = solve_shard_6x10(record.key, shards);
+        if (fwrite(&record, sizeof(record), 1, outputs[shard]) != 1) exit(1);
+        shard_records[shard]++;
+        retained++;
+        retained_weight += record.weight;
+        covered_weight += (U128)record.weight * (cells < 30 ? 2U : 1U);
+        midpoint += cells == 30;
+    }
+    if (fgetc(input) != EOF || fclose(input) != 0) exit(1);
+    uint64_t minimum_records = UINT64_MAX;
+    uint64_t maximum_records = 0;
+    for (int shard = 0; shard < shards; shard++) {
+        if (fseeko(outputs[shard], 12, SEEK_SET) != 0 ||
+            fwrite(&shard_records[shard], sizeof(shard_records[shard]), 1,
+                   outputs[shard]) != 1 ||
+            fclose(outputs[shard]) != 0) exit(1);
+        if (shard_records[shard] < minimum_records)
+            minimum_records = shard_records[shard];
+        if (shard_records[shard] > maximum_records)
+            maximum_records = shard_records[shard];
+    }
+    const int full = retained == UINT64_C(502732239);
+    const int valid = !full || covered_weight == ((U128)1 << 60);
+    printf("solve_partition_6x10 input=%s records=%llu retained=%llu "
+           "midpoint=%llu shards=%d min_records=%llu max_records=%llu "
+           "labelled_weight=", input_path, (unsigned long long)count,
+           (unsigned long long)retained, (unsigned long long)midpoint, shards,
+           (unsigned long long)minimum_records,
+           (unsigned long long)maximum_records);
+    print_u128(labelled_weight);
+    printf(" retained_weight=");
+    print_u128(retained_weight);
+    printf(" covered_weight=");
+    print_u128(covered_weight);
+    printf(" prefix=%s full=%d %s\n", output_prefix, full,
+           valid ? "OK" : "FAIL");
+    free(shard_records);
+    free(outputs);
+    if (!valid) exit(1);
+}
+
+static void run_promote_half_seed_6x10(const char* input_path,
+                                       const char* output_path) {
+    FILE* input = fopen(input_path, "rb");
+    FILE* output = fopen(output_path, "wb");
+    if (!input || !output) exit(1);
+    char magic[8];
+    uint32_t columns = 0;
+    uint64_t count = 0;
+    if (fread(magic, sizeof(magic), 1, input) != 1 ||
+        memcmp(magic, ORBIT_MAGIC, 7) != 0 ||
+        fread(&columns, sizeof(columns), 1, input) != 1 ||
+        fread(&count, sizeof(count), 1, input) != 1 || columns != 5 ||
+        count != UINT64_C(28576)) exit(1);
+    write_orbit_header(output, 10, count);
+    OrbitRecord record;
+    U128 weight = 0;
+    for (uint64_t index = 0; index < count; index++) {
+        if (fread(&record, sizeof(record), 1, input) != 1 ||
+            fwrite(&record, sizeof(record), 1, output) != 1) exit(1);
+        weight += record.weight;
+    }
+    if (fgetc(input) != EOF || fclose(input) != 0 || fclose(output) != 0 ||
+        weight != ((U128)1 << 30)) exit(1);
+    printf("promote_half_seed_6x10 records=%llu input_weight=",
+           (unsigned long long)count);
+    print_u128(weight);
+    printf(" output=%s OK\n", output_path);
+}
+
+static void run_solve_check_6x10(int shards, int input_count,
+                                 char** input_paths) {
+    if (shards < 1 || shards != input_count) exit(2);
+    uint64_t records = 0;
+    U128 retained_weight = 0;
+    U128 covered_weight = 0;
+    for (int shard = 0; shard < shards; shard++) {
+        FILE* input = fopen(input_paths[shard], "rb");
+        if (!input) exit(1);
+        char magic[8];
+        uint32_t columns = 0;
+        uint64_t count = 0;
+        if (fread(magic, sizeof(magic), 1, input) != 1 ||
+            memcmp(magic, ORBIT_MAGIC, 7) != 0 ||
+            fread(&columns, sizeof(columns), 1, input) != 1 ||
+            fread(&count, sizeof(count), 1, input) != 1 || columns != 10)
+            exit(1);
+        records += count;
+        for (uint64_t index = 0; index < count; index++) {
+            OrbitRecord record;
+            if (fread(&record, sizeof(record), 1, input) != 1 ||
+                __builtin_popcountll(record.key) > 30 ||
+                solve_shard_6x10(record.key, shards) != shard) exit(1);
+            int cells = __builtin_popcountll(record.key);
+            retained_weight += record.weight;
+            covered_weight += (U128)record.weight * (cells < 30 ? 2U : 1U);
+        }
+        if (fgetc(input) != EOF || fclose(input) != 0) exit(1);
+    }
+    const int full = records == UINT64_C(502732239);
+    const int valid = !full || covered_weight == ((U128)1 << 60);
+    printf("solve_check_6x10 shards=%d records=%llu retained_weight=", shards,
+           (unsigned long long)records);
+    print_u128(retained_weight);
+    printf(" covered_weight=");
+    print_u128(covered_weight);
+    printf(" expected_covered_weight=");
+    print_u128((U128)1 << 60);
+    printf(" full=%d %s\n", full, valid ? "OK" : "FAIL");
+    if (!valid) exit(1);
+}
+#endif
 
 static void run_partition(const char* input_path, int bucket_count, const char* prefix) {
     if (bucket_count < 1 || bucket_count > 999) exit(2);
@@ -2714,6 +3095,7 @@ static void usage(const char* program) {
     fprintf(stderr,
             "Usage:\n"
             "  %s build COLUMNS [OUTPUT.orbits]\n"
+            "  %s augment PARENTS.orbits OUTPUT.orbits\n"
             "  %s extend PARENTS.orbits START END BUCKETS OUTPUT_PREFIX\n"
             "  %s reduce COLUMNS OUTPUT.orbits BUCKET_FILE...\n"
             "  %s combine OUTPUT.orbits INPUT.orbits...\n"
@@ -2721,11 +3103,21 @@ static void usage(const char* program) {
             "  %s partition INPUT.orbits BUCKETS OUTPUT_PREFIX\n"
             "  %s sample-extend PARENTS.orbits MOD ID OUTPUT.orbits\n"
             "  %s slice INPUT.orbits START END OUTPUT.orbits\n",
-            program, program, program, program, program, program, program, program);
+            program, program, program, program, program, program, program, program,
+            program);
 #if ORBIT_ROWS == ORBIT_MAX_COLUMNS && defined(SQUARE_TRANSPOSE_MAGIC)
     fprintf(stderr,
             "  %s square-transpose-filter INPUT.orbits OUTPUT.orbits\n",
             program);
+#endif
+#if ORBIT_ROWS == 6 && ORBIT_MAX_COLUMNS == 10 && ORBIT_ROW_BITS == 10
+    fprintf(stderr,
+            "  %s augment-solve PARENTS_6x9.orbits OUTPUT_6x10.orbits\n"
+            "  %s solve-census PARENTS_6x9.orbits\n"
+            "  %s solve-partition INPUT.orbits SHARDS OUTPUT_PREFIX\n"
+            "  %s solve-check SHARDS SHARD0.orbits ...\n"
+            "  %s promote-half-seed INPUT_6x5.orbits OUTPUT_6x10.orbits\n",
+            program, program, program, program, program);
 #endif
 #if ORBIT_ROWS == 7 && ORBIT_MAX_COLUMNS == 9 && ORBIT_ROW_BITS == 9
     fprintf(stderr,
@@ -2786,6 +3178,10 @@ int main(int argc, char** argv) {
         run_build(columns, argc == 4 ? argv[3] : NULL);
         return 0;
     }
+    if (argc == 4 && strcmp(argv[1], "augment") == 0) {
+        run_augment(argv[2], argv[3]);
+        return 0;
+    }
     if (argc == 7 && strcmp(argv[1], "extend") == 0) {
         size_t start = strtoull(argv[3], NULL, 10);
         size_t end = strtoull(argv[4], NULL, 10);
@@ -2821,6 +3217,28 @@ int main(int argc, char** argv) {
                   strtoull(argv[4], NULL, 10), argv[5]);
         return 0;
     }
+#if ORBIT_ROWS == 6 && ORBIT_MAX_COLUMNS == 10 && ORBIT_ROW_BITS == 10
+    if (argc == 4 && strcmp(argv[1], "augment-solve") == 0) {
+        run_augment_solve_6x10(argv[2], argv[3]);
+        return 0;
+    }
+    if (argc == 3 && strcmp(argv[1], "solve-census") == 0) {
+        run_solve_census_6x10(argv[2]);
+        return 0;
+    }
+    if (argc == 5 && strcmp(argv[1], "solve-partition") == 0) {
+        run_solve_partition_6x10(argv[2], atoi(argv[3]), argv[4]);
+        return 0;
+    }
+    if (argc >= 4 && strcmp(argv[1], "solve-check") == 0) {
+        run_solve_check_6x10(atoi(argv[2]), argc - 3, argv + 3);
+        return 0;
+    }
+    if (argc == 4 && strcmp(argv[1], "promote-half-seed") == 0) {
+        run_promote_half_seed_6x10(argv[2], argv[3]);
+        return 0;
+    }
+#endif
 #if ORBIT_ROWS == 7 && ORBIT_MAX_COLUMNS == 9 && ORBIT_ROW_BITS == 9
     if (argc == 5 && strcmp(argv[1], "sample-extend7x8") == 0) {
         run_sample_extend_7x8(argv[2], strtoull(argv[3], NULL, 10), argv[4]);

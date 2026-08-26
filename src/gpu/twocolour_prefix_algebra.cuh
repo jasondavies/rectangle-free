@@ -106,11 +106,17 @@ static __host__ __device__ int prefix_pair_rank(int pair) {
     if (pair == 11) rank = 6;
     if (pair == 8) rank = 7;
 #else
-    // The exact six-row sweep selects a triangle on rows 0,1,2.  It traverses
-    // fewer physical weight-class tiles than every other three-edge shape.
+    // The six-row ranking begins with the optimal triangle on rows 0,1,2,
+    // followed by one attached edge.  Three pairs win for 4+5 and four for
+    // the heavier 5+5 contraction.
     if (pair == 0) rank = 0;
     if (pair == 1) rank = 1;
     if (pair == 5) rank = 2;
+    if (pair == 2) rank = 3;
+    if (pair == 6) rank = 4;
+    if (pair == 3) rank = 5;
+    if (pair == 9) rank = 6;
+    if (pair == 7) rank = 7;
 #endif
     return rank;
 }

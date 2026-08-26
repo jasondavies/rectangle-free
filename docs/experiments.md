@@ -15126,3 +15126,37 @@
   scheduling and 128-thread Blackwell default.  The warm exact `6x9` solve is
   now under two minutes; use this maintained core as the starting point for a
   future `6x10` `5+5` specialization.
+
+### Experiment 448: Exact T_4(6,10) with the symmetric 5+5 GPU solver
+
+- Goal: extend the maintained six-row distribution-join method from the
+  asymmetric `4+5` calculation to an exact `5+5` calculation, generate the
+  previously missing outer corpus, and compute `T_4(6,10)`.
+- Corpus construction starts from the exact 130,237,768-record `6x9` orbit
+  table and augments one column in parallel.  Midpoint complement reduction
+  retains masks with at most 30 cells.  The exact gates are 8,335,217,152 raw
+  candidates, 4,569,464,882 retained candidates, 502,732,239 unique retained
+  orbits, retained labelled weight 635,593,043,085,854,200, and complement
+  coverage exactly `2^60`.  Sixteen local threads take 321.966s for the hash
+  augmentation and 408.423s including deterministic sorting/output, with
+  about 31.0 GiB peak RSS.
+- The equal-width solver shares one 28,576-source canonical `6x5` cache across
+  both sides.  Its token-plane quotient contains 117,778,840 representatives.
+  The production layout uses four prefix row pairs, 128-thread join CTAs,
+  natural-order scheduling, and the Blackwell NVFP4 join backend.
+- The original 1,024-way owner partition produced sub-million-record shards
+  and repeated too much setup.  An exact eight-way repartition contains
+  61,736,392--64,411,106 records per shard, passes the ownership/coverage
+  checker, and keeps the largest shard near 23 GiB of device memory.
+- The complete campaign ran all eight shards on one spot RTX PRO 6000.  All
+  128 sampled CPU joins passed.  It evaluated 6,411,602,261,631,579 logical
+  comparisons in 1,360.010 GPU-seconds (4.714 Tcomparisons/s) and used
+  1,453.900 summed solver-seconds end to end.  The reducer independently
+  verified every input SHA-256, result payload, solver/configuration/cache
+  digest, all 502,732,239 records, and exact `2^60` coefficient coverage.
+- Result:
+  `T_4(6,10) = 134801843107132031823174944563200`.
+- Outcome: accept the `6x10` specialization and add it to the maintained GPU
+  production set.  The full exact join requires only 0.378 GPU-hours on one
+  RTX PRO 6000; corpus construction, rather than the GPU contraction, is now
+  the larger one-time local-memory task.
