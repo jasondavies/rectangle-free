@@ -47,6 +47,17 @@ GEOMETRIES = {
         1 << 60,
         134_801_843_107_132_031_823_174_944_563_200,
     ),
+    "6x11": Geometry(
+        "6x11",
+        "T_4(6,11)",
+        "RECT6X11_PREFIX_RESULT",
+        b"R6W1101\0",
+        11,
+        3_294_410_345,
+        40_503_202_364_427_236_102,
+        1 << 66,
+        76_380_896_192_602_995_200_411_451_026_841_600,
+    ),
     "7x9": Geometry(
         "7x9",
         "T_4(7,9)",
@@ -384,6 +395,14 @@ def atomic_write_json(path: Path, value: Any) -> None:
         raise
 
 
+def accessible_file(path: Path) -> bool:
+    """Treat inaccessible remote manifest paths as absent on this host."""
+    try:
+        return path.is_file()
+    except OSError:
+        return False
+
+
 def aggregate_campaign(
     geometry: Geometry,
     manifest: Path,
@@ -446,7 +465,7 @@ def aggregate_campaign(
             raise ValidationError(f"mixed corpus provenance for {item.path}")
 
     should_check_coverage = full or verify_inputs or corpus_root is not None or all(
-        Path(item.path).is_file() for item in items
+        accessible_file(Path(item.path)) for item in items
     )
     coverage: dict[str, Any] | None = None
     resolved: dict[str, Path] = {}

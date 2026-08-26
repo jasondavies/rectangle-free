@@ -5,15 +5,18 @@ from pathlib import Path
 import struct
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from tools.aggregate_gpu_v3 import (
     GEOMETRIES,
     Geometry,
     ValidationError,
     WorkItem,
+    accessible_file,
     aggregate_campaign,
     exact_coverage,
     read_manifest,
+    read_orbit_header,
 )
 
 
@@ -138,6 +141,19 @@ class AggregateGpuV3Test(unittest.TestCase):
         write_result(self.results / "a.result", items[0], 2)
         report = aggregate_campaign(GEOMETRIES["8x8"], manifest, self.results)
         self.assertEqual(report["missing_items"], ["b"])
+
+    def test_inaccessible_remote_corpus_is_treated_as_unavailable(self) -> None:
+        with patch(
+            "tools.aggregate_gpu_v3.Path.is_file",
+            side_effect=PermissionError("remote root is inaccessible"),
+        ):
+            self.assertFalse(accessible_file(self.corpus))
+
+    def test_wide_6x11_orbit_magic_is_eight_bytes(self) -> None:
+        corpus = self.root / "wide.orbits"
+        corpus.write_bytes(struct.pack("<8sIQ", b"R6W1101\0", 11, 0))
+        header = read_orbit_header(corpus, GEOMETRIES["6x11"])
+        self.assertEqual(header.records, 0)
 
     def test_checksum_corruption_is_rejected(self) -> None:
         items, manifest = self.two_ranges()

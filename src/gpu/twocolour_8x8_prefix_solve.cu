@@ -26,6 +26,10 @@
 
 #include "gpu_result_checkpoint.hpp"
 
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
+
 static constexpr uint64_t PREFIX_DEFAULT_DEVICE_RESERVE_BYTES = UINT64_C(2) << 30;
 #ifndef TWCOLOUR_ESTIMATED_RIGHT_BYTES_PER_ENTRY
 #define TWCOLOUR_ESTIMATED_RIGHT_BYTES_PER_ENTRY 28
@@ -213,6 +217,13 @@ int main(int argc, char** argv) {
 #if LEFT_COLUMNS != RIGHT_COLUMNS
     right_factory_storage.entries.clear();
     right_factory_storage.entries.shrink_to_fit();
+#endif
+#if defined(__GLIBC__)
+    // Large asymmetric canonical factories can leave tens of GiB in glibc's
+    // arenas after their entries have been uploaded.  Return those unused
+    // pages before constructing per-work-item host layouts so several GPU
+    // workers can safely share one host.
+    malloc_trim(0);
 #endif
     std::printf(
         "PREFIX_SHARED_CACHE seed=%s paths=%zu left_canonical_sources=%zu "
@@ -522,8 +533,13 @@ int main(int argc, char** argv) {
                 checked++;
             }
             covered_weight += U128(edge.factor) * edge.weight;
-            contribution += U128(edge.factor) * edge.weight * U128(selected) *
-                            complement;
+            U128 term = U128(edge.factor) * edge.weight * U128(selected) *
+                        complement;
+            if (~U128(0) - contribution < term) {
+                throw std::overflow_error(
+                    "per-work-item contribution exceeds unsigned 128-bit");
+            }
+            contribution += term;
             edge_index++;
         }
         free_weight_class_layout(right_class_layout);

@@ -9,8 +9,8 @@
 
 #include "gpu_cuda_utils.cuh"
 
-#if (GRID_ROWS != 6 && GRID_ROWS != 7 && GRID_ROWS != 8) || LEFT_COLUMNS + RIGHT_COLUMNS != GRID_COLUMNS || LEFT_COLUMNS > 5 || RIGHT_COLUMNS > 5
-#error "the prefix core requires six through eight rows and halves at most five columns"
+#if (GRID_ROWS != 6 && GRID_ROWS != 7 && GRID_ROWS != 8) || LEFT_COLUMNS + RIGHT_COLUMNS != GRID_COLUMNS || LEFT_COLUMNS > 6 || RIGHT_COLUMNS > 6
+#error "the prefix core requires six through eight rows and halves at most six columns"
 #endif
 #ifndef TWCOLOUR_PREFIX_PAIR_COUNT
 #define TWCOLOUR_PREFIX_PAIR_COUNT (GRID_ROWS == 8 ? 7 : 5)

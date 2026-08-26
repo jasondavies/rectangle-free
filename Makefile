@@ -30,6 +30,7 @@ NVCCFLAGS ?= -O3 -arch=sm_89 -std=c++17
 gpu-production: twocolour_7x7_solve_gpu twocolour_7x9_solve_gpu \
 		twocolour_7x9_four_owner_gpu twocolour_7x9_cache_build \
 		twocolour_6x9_prefix_gpu twocolour_6x10_prefix_gpu \
+		twocolour_6x11_prefix_gpu \
 		twocolour_8x8_solve_gpu
 
 .PHONY: gpu-code-dump
@@ -190,6 +191,16 @@ $(BUILD_DIR)/binary_orbit_augment_6x10: tools/corpus/binary_orbit_augment.c
 		-DORBIT_ROWS=6 -DORBIT_MAX_COLUMNS=10 \
 		-DORBIT_ROW_BITS=10 -DORBIT_MAGIC='"R6ORB01"' \
 		-o $@ $< $(OPENMP_LDFLAGS)
+
+$(BUILD_DIR)/six_row_distribution_census: \
+		research/probes/six_row_distribution_census.cpp \
+		src/gpu/twocolour_gpu_common.cuh
+	$(CXX) -O3 -march=native -std=c++17 $(OPENMP_CFLAGS) \
+		-Isrc/gpu -o $@ $< $(OPENMP_LDFLAGS)
+
+$(BUILD_DIR)/binary_orbit_augment_6x11: \
+		tools/corpus/binary_orbit_augment_6x11.c
+	$(CC) $(CFLAGS_5XN) $(OPENMP_CFLAGS) -o $@ $< $(OPENMP_LDFLAGS)
 
 $(BUILD_DIR)/binary_orbit_augment_7x8: tools/corpus/binary_orbit_augment.c
 	$(CC) $(CFLAGS_5XN) -DORBIT_ROWS=7 -DORBIT_MAX_COLUMNS=8 \
@@ -358,6 +369,14 @@ $(BUILD_DIR)/twocolour_6x10_prefix_gpu: src/gpu/twocolour_6x10_prefix_solve.cu \
 		src/gpu/gpu_result_checkpoint.hpp src/common/sha256.hpp
 	$(NVCC) $(NVCCFLAGS) -Xcompiler=-fopenmp -o $@ $<
 
+$(BUILD_DIR)/twocolour_6x11_prefix_gpu: src/gpu/twocolour_6x11_prefix_solve.cu \
+		src/gpu/twocolour_8x8_prefix_solve.cu \
+		src/gpu/twocolour_weight_class_join.cuh src/gpu/twocolour_canonical_device.cuh \
+		src/gpu/gpu_cuda_utils.cuh src/gpu/twocolour_prefix_algebra.cuh \
+		src/gpu/twocolour_gpu_common.cuh src/gpu/gpu_memory_policy.hpp \
+		src/gpu/gpu_result_checkpoint.hpp src/common/sha256.hpp
+	$(NVCC) $(NVCCFLAGS) -Xcompiler=-fopenmp -o $@ $<
+
 $(BUILD_DIR)/twocolour_7x8_gpu: src/gpu/twocolour_7x7_gpu.cu src/gpu/twocolour_7x7_engine.cuh \
 		src/gpu/twocolour_gpu_common.cuh
 	$(NVCC) -O3 -std=c++17 -arch=sm_89 -Xcompiler=-fopenmp \
@@ -494,6 +513,7 @@ BUILD_TARGETS := 5xn_count4 partition_count4 partition_poly partition_poly_7 \
 	twobit_full_orbit_probe twocolour_prefix_distribution_probe \
 	binary_orbit_burnside_probe twocolour_7x5_canonical_census \
 	binary_orbit_augment binary_orbit_augment_6x9 binary_orbit_augment_6x10 \
+	binary_orbit_augment_6x11 six_row_distribution_census \
 	binary_orbit_augment_7x8 \
 	binary_orbit_augment_7x9 binary_orbit_augment_8x8 s8_prefix_module_probe \
 	symmetric_kernel_rank_probe twocolour_3x3_sampler twocolour_4x4_probe \
@@ -509,7 +529,7 @@ BUILD_TARGETS := 5xn_count4 partition_count4 partition_poly partition_poly_7 \
 	six_by_twenty_nine_hafnian_gpu \
 	twocolour_gpu_64.bin twocolour_gpu_bench twocolour_7x7_solve_gpu \
 	twocolour_7x7_prefix_gpu twocolour_6x9_gpu twocolour_6x9_prefix_gpu \
-	twocolour_6x10_prefix_gpu \
+	twocolour_6x10_prefix_gpu twocolour_6x11_prefix_gpu \
 	twocolour_7x8_gpu \
 	twocolour_7x8_prefix_gpu twocolour_7x9_prefix_gpu \
 	twocolour_7x9_solve_gpu twocolour_7x9_four_owner_gpu \

@@ -15160,3 +15160,50 @@
   production set.  The full exact join requires only 0.378 GPU-hours on one
   RTX PRO 6000; corpus construction, rather than the GPU contraction, is now
   the larger one-time local-memory task.
+
+### Experiment 449: Asymmetric 5+6 GPU solver and exact 6x11 campaign
+
+- Goal: extend the six-row distribution-join solver to `6x11` with a resident
+  `6x5` left half and a `6x6` right half, while retaining the exact token-plane
+  quotient and Blackwell NVFP4 join.
+- The 66-bit outer mask uses a new compact 16-byte `R6W1101` record: 64 low
+  key bits plus two high key bits packed below the exact 62-bit orbit weight.
+  Reconstructing the missing complements of the retained `6x10` parents gives
+  917,558,397 parents, 58,723,737,408 raw extensions, 32,058,782,252
+  midpoint-surviving extensions and 3,294,410,345 unique retained orbits.
+  Their retained labelled weight is 40,503,202,364,427,236,102; the
+  550,078,210 midpoint orbits have weight 7,219,428,434,016,265,740, restoring
+  coverage exactly `2^66`.
+- On a 120-vCPU Verda worker, the exact 6x10 regeneration took 58.820s for
+  augmentation and 160.650s including validation/output.  The 6x11 hash
+  augmentation took 418.851s and the final 64-way owner scan/write 71.773s,
+  using 71.4 GiB peak RSS.  The resulting corpus occupies about 49 GiB; owner
+  shards contain 46,388,077--58,562,478 records.
+- The complete canonical `6x6` token-plane-quotient cache contains 251,610
+  distributions, 3,469,067,567 support representatives and 290,716 fixed
+  representatives.  A distribution has at most 225,799 representatives, 30
+  orbit-aware weight classes and weight 720.  The cache fits a 96 GiB RTX PRO
+  6000 together with the left layout and a full right batch.
+- The largest-shard pilot (`s0043`, 58,562,478 records) passed eight exact CPU
+  join checks.  It evaluated 2,738,170,376,835,155 logical comparisons in
+  393.923 GPU-seconds (6.951 Tcomparisons/s) and 482.871s end to end.
+- Building the huge host factory temporarily reached about 174 GiB RSS, while
+  glibc retained roughly 97 GiB after the vectors were released.  An explicit
+  post-upload `malloc_trim(0)` reduced steady RSS to 3.8 GiB without changing
+  the exact pilot contribution or hot-path runtime, making staggered four-GPU
+  execution safe on the 353 GiB host.
+- The four-GPU production campaign completed all 64 shards in about 1 h 52
+  min.  It evaluated 162,349,573,544,511,007 logical comparisons in
+  23,802.987 GPU-seconds (6.612 GPU-hours, 6.821 Tcomparisons/s) and used
+  26,486.610 summed solver-seconds.  The all-in spot worker cost was about
+  $10, including corpus generation, cache census, pilot runs and validation.
+- Independent validation rescanned all 49 GiB of corpus data and recovered
+  3,294,410,345 records, the exact retained and midpoint weights, and total
+  coefficient coverage `2^66`.  The campaign reducer verified all 64 input
+  SHA-256 digests, result payloads, the single solver/configuration/cache
+  provenance tuple, and 260 exact CPU join samples.
+- Result:
+  `T_4(6,11) = 76380896192602995200411451026841600`.
+- Outcome: accept the asymmetric `5+6` specialization and wide 66-bit corpus
+  ABI as maintained production code.  The measured 6.612 GPU-hours is within
+  the pre-campaign 6--9 GPU-hour estimate.

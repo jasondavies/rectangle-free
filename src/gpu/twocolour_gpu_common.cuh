@@ -1,4 +1,9 @@
+#ifdef __CUDACC__
 #include <cuda_runtime.h>
+#else
+#define __host__
+#define __device__
+#endif
 
 #include <algorithm>
 #include <array>
@@ -46,10 +51,18 @@ static_assert(THREADS >= 64 && THREADS <= 256 && THREADS % 32 == 0,
               "production CUDA blocks require two through eight warps");
 
 
+#ifdef TWCOLOUR_WIDE_ORBIT_RECORD
+struct OrbitRecord {
+    uint64_t low;
+    // Low two bits are key bits 64--65; upper bits are the exact weight.
+    uint64_t meta;
+};
+#else
 struct OrbitRecord {
     uint64_t key;
     uint64_t weight;
 };
+#endif
 
 struct alignas(16) Entry {
     uint64_t mask;
@@ -326,7 +339,7 @@ static CanonicalForm canonical_prefix(PrefixKey prefix, int columns) {
         prefix >>= columns;
     }
 
-    std::array<uint8_t, 5> permutation{};
+    std::array<uint8_t, 6> permutation{};
     for (int column = 0; column < columns; column++) {
         permutation[size_t(column)] = uint8_t(column);
     }
@@ -524,6 +537,7 @@ static CanonicalFactory build_canonical_factory(std::vector<PrefixKey> raw_keys,
     return factory;
 }
 
+#ifndef TWCOLOUR_WIDE_ORBIT_RECORD
 static PrefixKey left_prefix(uint64_t key) {
     PrefixKey result = 0;
     for (int row = 0; row < ROWS; row++) {
@@ -547,6 +561,59 @@ static PrefixKey right_prefix(uint64_t key) {
 
 static int cell_count(uint64_t key) {
     return __builtin_popcountll(key);
+}
+#endif
+
+static PrefixKey orbit_left_prefix(const OrbitRecord& record) {
+#ifdef TWCOLOUR_WIDE_ORBIT_RECORD
+    U128 key = (U128(record.meta & 3U) << 64) | record.low;
+    PrefixKey result = 0;
+    const U128 row_mask = (U128(1) << ROW_BITS) - 1U;
+    for (int row = 0; row < ROWS; row++) {
+        unsigned shift = ROW_BITS * (ROWS - 1U - row);
+        PrefixKey pattern = PrefixKey((key >> shift) & row_mask);
+        result = (result << LEFT_COLUMNS) |
+                 (pattern & ((PrefixKey(1) << LEFT_COLUMNS) - 1U));
+    }
+    return result;
+#else
+    return left_prefix(record.key);
+#endif
+}
+
+static PrefixKey orbit_right_prefix(const OrbitRecord& record) {
+#ifdef TWCOLOUR_WIDE_ORBIT_RECORD
+    U128 key = (U128(record.meta & 3U) << 64) | record.low;
+    PrefixKey result = 0;
+    const U128 row_mask = (U128(1) << ROW_BITS) - 1U;
+    for (int row = 0; row < ROWS; row++) {
+        unsigned shift = ROW_BITS * (ROWS - 1U - row);
+        PrefixKey pattern = PrefixKey((key >> shift) & row_mask);
+        result = (result << RIGHT_COLUMNS) |
+                 ((pattern >> LEFT_COLUMNS) &
+                  ((PrefixKey(1) << RIGHT_COLUMNS) - 1U));
+    }
+    return result;
+#else
+    return right_prefix(record.key);
+#endif
+}
+
+static uint64_t orbit_weight(const OrbitRecord& record) {
+#ifdef TWCOLOUR_WIDE_ORBIT_RECORD
+    return record.meta >> 2;
+#else
+    return record.weight;
+#endif
+}
+
+static int orbit_cell_count(const OrbitRecord& record) {
+#ifdef TWCOLOUR_WIDE_ORBIT_RECORD
+    return __builtin_popcountll(record.low) +
+           __builtin_popcountll(record.meta & 3U);
+#else
+    return cell_count(record.key);
+#endif
 }
 
 static std::vector<Edge> read_edges(const std::string& path, uint64_t start,
@@ -580,14 +647,17 @@ static std::vector<Edge> read_edges(const std::string& path, uint64_t start,
         OrbitRecord record;
         input.read(reinterpret_cast<char*>(&record), sizeof(record));
         if (!input) throw std::runtime_error("truncated orbit file");
-        PrefixKey left = left_prefix(record.key);
+        PrefixKey left = orbit_left_prefix(record);
         if (filter_mod && mix64(left) % filter_mod != filter_id) continue;
         records++;
-        labelled_weight += record.weight;
-        int cells = cell_count(record.key);
+        const uint64_t weight = orbit_weight(record);
+        if (!weight) throw std::runtime_error("zero orbit weight");
+        labelled_weight += weight;
+        int cells = orbit_cell_count(record);
         if (cells * 2 <= CELLS) {
             uint8_t factor = cells * 2 < CELLS ? 2 : 1;
-            edges.push_back(Edge{left, right_prefix(record.key), record.weight, factor});
+            edges.push_back(
+                Edge{left, orbit_right_prefix(record), weight, factor});
         }
     }
     std::sort(edges.begin(), edges.end(), [](const Edge& a, const Edge& b) {

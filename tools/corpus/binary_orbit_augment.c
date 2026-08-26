@@ -1526,6 +1526,76 @@ static void run_solve_census_6x10(const char* parent_path) {
     if (!valid) exit(1);
 }
 
+// Count the exact midpoint-reduced 6x11 extension without materialising its
+// 66-bit child keys. Every retained child has at most 33 cells, hence some
+// column has at most three cells; deleting that column leaves a parent in the
+// retained 6x10 table consumed here.
+static void run_next_solve_census_6x11(const char* parent_path) {
+    static const uint8_t binomial[7] = {1, 6, 15, 20, 15, 6, 1};
+    static const uint8_t binomial_prefix[7] = {1, 7, 22, 42, 57, 63, 64};
+    FILE* input = fopen(parent_path, "rb");
+    if (!input) exit(1);
+    char magic[8];
+    uint32_t columns = 0;
+    uint64_t count = 0;
+    if (fread(magic, sizeof(magic), 1, input) != 1 ||
+        memcmp(magic, ORBIT_MAGIC, 7) != 0 ||
+        fread(&columns, sizeof(columns), 1, input) != 1 ||
+        fread(&count, sizeof(count), 1, input) != 1 || columns != 10 ||
+        count != UINT64_C(502732239)) exit(1);
+    uint64_t reconstructed_parents = 0;
+    uint64_t retained_candidates = 0;
+    U128 retained_weight = 0;
+    U128 midpoint_weight = 0;
+    double begin = seconds_now();
+    for (uint64_t index = 0; index < count; index++) {
+        OrbitRecord parent;
+        if (fread(&parent, sizeof(parent), 1, input) != 1) exit(1);
+        int cells = __builtin_popcountll(parent.key);
+        int remaining = 33 - cells;
+        if (remaining < 0) continue;
+        reconstructed_parents++;
+        unsigned maximum = remaining < 6 ? (unsigned)remaining : 6U;
+        retained_candidates += binomial_prefix[maximum];
+        retained_weight += (U128)parent.weight * binomial_prefix[maximum];
+        if (remaining <= 6)
+            midpoint_weight += (U128)parent.weight * binomial[remaining];
+        // The retained 6x10 corpus stores one orientation below the midpoint.
+        // Its complement is a distinct row/column orbit and must also be
+        // extended to recover the exact 6x11 augmentation weights.
+        if (cells < 30) {
+            reconstructed_parents++;
+            remaining = cells - 27;  // 33 - (60 - cells)
+            if (remaining >= 0) {
+                maximum = remaining < 6 ? (unsigned)remaining : 6U;
+                retained_candidates += binomial_prefix[maximum];
+                retained_weight +=
+                    (U128)parent.weight * binomial_prefix[maximum];
+                midpoint_weight +=
+                    (U128)parent.weight * binomial[remaining];
+            }
+        }
+    }
+    if (fgetc(input) != EOF || fclose(input) != 0) exit(1);
+    U128 covered_weight = retained_weight * 2U - midpoint_weight;
+    const int valid = covered_weight == ((U128)1 << 66);
+    const int parents_valid =
+        reconstructed_parents == UINT64_C(917558397);
+    printf("next_solve_census_6x11 parents=%llu raw_candidates=%llu "
+           "retained_candidates=%llu retained_weight=",
+           (unsigned long long)reconstructed_parents,
+           (unsigned long long)(reconstructed_parents * UINT64_C(64)),
+           (unsigned long long)retained_candidates);
+    print_u128(retained_weight);
+    printf(" midpoint_weight=");
+    print_u128(midpoint_weight);
+    printf(" covered_weight=");
+    print_u128(covered_weight);
+    printf(" seconds=%.3f %s\n", seconds_now() - begin,
+           valid && parents_valid ? "OK" : "FAIL");
+    if (!valid || !parents_valid) exit(1);
+}
+
 static void raise_file_limit(int required) {
     struct rlimit limit;
     if (getrlimit(RLIMIT_NOFILE, &limit) != 0) exit(1);
@@ -3114,10 +3184,11 @@ static void usage(const char* program) {
     fprintf(stderr,
             "  %s augment-solve PARENTS_6x9.orbits OUTPUT_6x10.orbits\n"
             "  %s solve-census PARENTS_6x9.orbits\n"
+            "  %s next-solve-census RETAINED_6x10.orbits\n"
             "  %s solve-partition INPUT.orbits SHARDS OUTPUT_PREFIX\n"
             "  %s solve-check SHARDS SHARD0.orbits ...\n"
             "  %s promote-half-seed INPUT_6x5.orbits OUTPUT_6x10.orbits\n",
-            program, program, program, program, program);
+            program, program, program, program, program, program);
 #endif
 #if ORBIT_ROWS == 7 && ORBIT_MAX_COLUMNS == 9 && ORBIT_ROW_BITS == 9
     fprintf(stderr,
@@ -3224,6 +3295,10 @@ int main(int argc, char** argv) {
     }
     if (argc == 3 && strcmp(argv[1], "solve-census") == 0) {
         run_solve_census_6x10(argv[2]);
+        return 0;
+    }
+    if (argc == 3 && strcmp(argv[1], "next-solve-census") == 0) {
+        run_next_solve_census_6x11(argv[2]);
         return 0;
     }
     if (argc == 5 && strcmp(argv[1], "solve-partition") == 0) {
