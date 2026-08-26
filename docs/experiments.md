@@ -15074,3 +15074,55 @@
   by an exact graph-isomorphism/reuse sample.  Continue only if those reduce
   projected cost materially; do not generate a 45-million-query production
   catalog in the current format.
+
+### Experiment 447: Modern six-row prefix/NVFP4 production solver
+
+- Goal: replace the historical full-mask scalar `6x9` path with the maintained
+  token-plane-quotient, direct weight-class layout and architecture-native
+  tensor join, then retune the geometry on one spot RTX PRO 6000 Blackwell.
+- Implementation: generalize the shared prefix algebra and production driver
+  to six rows and an asymmetric `4+5` split.  The solver retains independent
+  canonical caches for the 1,223 four-column and 28,576 five-column sources,
+  makes token-plane quotienting intrinsic, uses 32-bit suffix storage, and
+  writes the same self-identifying v3 checkpoints as `8x8`.  The complete
+  quotient caches contain 1,985,531 and 117,778,840 representatives.
+- Exact layout interning was measured before adoption.  All 73,874 labelled
+  left layouts and all 1,627,245 labelled right layouts have distinct linked
+  selected/complement canonical signatures in the full workload.  It offers
+  no construction reuse here and was removed from the clean production path.
+- Prefix sweep on the exact first-million-record regression: one, two, three,
+  and four physical row-pair prefixes give NVFP4 join times of 2.292s, 0.648s,
+  0.468s, and 0.520s respectively with the initial shapes.  Among all five
+  three-edge graph types, the triangle is best at 0.451s; the star, path,
+  matching and wedge-plus-disjoint alternatives take 0.468s, 0.806s, 1.074s,
+  and 0.659s.  Adopt the three-pair triangle, leaving a 24-bit suffix.
+- Backend and screening gates: NVFP4 beats both emulated B1 BMMA and scalar
+  grouped AND on Blackwell.  Warp-parallel screening of 32 right buckets is
+  exact but regresses the million-record join from 0.458s to 0.897s, so the
+  compact Cartesian bucket loop remains.  A latent out-of-bounds read for
+  prefix domains smaller than one warp was found and fixed during the sweep.
+- CPU scheduling: 71,696,841 outer edges create 143,393,682 join descriptors.
+  Removing the unnecessary heavy-first sort, result-slot vector and result
+  permutation reduces the full run from 153.391s to 125.384s.  It also lowers
+  GPU time from 116.980s to 108.857s because natural order has no worse tail
+  with tens of millions of independent blocks.
+- Launch sweep: 128-thread join CTAs are 5--6% faster than 256 threads on the
+  million-record corpus, while 64 threads regress.  Task chunks from 4 through
+  16 are effectively tied; retain 16.  The accepted kernel uses 48 registers
+  per thread.  Increasing the right-layout batch cap from six batches to five
+  changes complete time by less than 0.03s, so retain the conservative memory
+  estimate and the exact 32-bit destination-offset cap.
+- Final exact regression: all 130,237,768 weighted outer orbits, exactly
+  71,696,841 evaluated edges, labelled and complement-covered weights both
+  `2^54`, and 16 independent CPU joins pass.  The result is again
+  `T_4(6,9) = 197810562116614403484457574400`.
+- Final RTX PRO 6000 timing: 6.241s load, 2.078s canonical factories, 0.880s
+  canonical upload, 0.668s summed right-layout construction, 93.400s GPU join,
+  0.245s validation, and 110.083s complete wall time.  Peak device use is
+  about 18 GiB.  Against the historical one-L40S 900.109s solve, this is an
+  `8.18x` end-to-end improvement, while the join itself falls from 594.185s to
+  93.400s despite the less favourable Blackwell B1 implementation.
+- Outcome: accept the modern six-row solver, triangle prefix, natural-order
+  scheduling and 128-thread Blackwell default.  The warm exact `6x9` solve is
+  now under two minutes; use this maintained core as the starting point for a
+  future `6x10` `5+5` specialization.

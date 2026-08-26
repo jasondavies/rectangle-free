@@ -508,6 +508,51 @@ weight_class_selected_join_dual(
 #endif
 }
 
+static __device__ __forceinline__ unsigned long long
+weight_class_bucket_pair_join(
+    const PrefixSuffix* __restrict__ left_suffixes,
+    const PrefixSuffix* __restrict__ right_suffixes,
+    const WeightClassMeta* __restrict__ left_classes,
+    const WeightClassMeta* __restrict__ right_classes,
+    PrefixBucket left_bucket, PrefixBucket right_bucket,
+    bool forward_prefix, bool swapped_prefix, unsigned lane) {
+    unsigned long long sum = 0;
+    for (uint32_t a = 0; a < left_bucket.count; a++) {
+        WeightClassMeta left_class =
+            left_classes[left_bucket.entry_offset + a];
+        PrefixBucket left_entries_bucket{
+            left_class.entry_offset, left_class.count, 0, 0};
+        for (uint32_t b = 0; b < right_bucket.count; b++) {
+            WeightClassMeta right_class =
+                right_classes[right_bucket.entry_offset + b];
+            PrefixBucket right_entries_bucket{
+                right_class.entry_offset, right_class.count, 0, 0};
+            unsigned long long compatible = 0;
+            if (forward_prefix && swapped_prefix &&
+                right_class.orbit_size == 2) {
+                compatible = weight_class_selected_join_dual(
+                    left_suffixes, left_entries_bucket,
+                    right_suffixes, right_entries_bucket, lane);
+            } else {
+                if (forward_prefix) {
+                    compatible += weight_class_selected_join(
+                        left_suffixes, left_entries_bucket,
+                        right_suffixes, right_entries_bucket, lane);
+                }
+                if (right_class.orbit_size == 2 && swapped_prefix) {
+                    compatible += weight_class_selected_join(
+                        left_suffixes, left_entries_bucket,
+                        right_suffixes, right_entries_bucket, lane, true);
+                }
+            }
+            sum += compatible * uint64_t(left_class.orbit_size) *
+                   uint64_t(left_class.weight) *
+                   uint64_t(right_class.weight);
+        }
+    }
+    return sum;
+}
+
 __global__ void weight_class_prefix_joins(
     const PrefixSuffix* __restrict__ left_suffixes,
     const PrefixSuffix* __restrict__ right_suffixes,
@@ -518,7 +563,8 @@ __global__ void weight_class_prefix_joins(
     const PrefixJoinDesc* __restrict__ joins,
     unsigned long long* __restrict__ results
     ) {
-    __shared__ unsigned long long warp_partial[8];
+    constexpr unsigned warps_per_block = THREADS / 32;
+    __shared__ unsigned long long warp_partial[warps_per_block];
     __shared__ uint32_t next_task;
     const PrefixJoinDesc join = joins[blockIdx.x];
     const unsigned lane = threadIdx.x & 31U;
@@ -547,43 +593,11 @@ __global__ void weight_class_prefix_joins(
             const bool swapped_prefix =
                 !(left_bucket.prefix &
                   swap_prefix_token_planes(right_bucket.prefix));
-            if (forward_prefix || swapped_prefix) {
-                for (uint32_t a = 0; a < left_bucket.count; a++) {
-                    WeightClassMeta left_class =
-                        left_classes[left_bucket.entry_offset + a];
-                    PrefixBucket left_entries_bucket{
-                        left_class.entry_offset, left_class.count, 0, 0};
-                    for (uint32_t b = 0; b < right_bucket.count; b++) {
-                        WeightClassMeta right_class =
-                            right_classes[right_bucket.entry_offset + b];
-                        PrefixBucket right_entries_bucket{
-                            right_class.entry_offset, right_class.count, 0, 0};
-                        unsigned long long compatible = 0;
-                        if (forward_prefix && swapped_prefix &&
-                            right_class.orbit_size == 2) {
-                            compatible += weight_class_selected_join_dual(
-                                left_suffixes, left_entries_bucket,
-                                right_suffixes, right_entries_bucket, lane);
-                        } else {
-                            if (forward_prefix) {
-                                compatible += weight_class_selected_join(
-                                    left_suffixes, left_entries_bucket,
-                                    right_suffixes, right_entries_bucket, lane);
-                            }
-                            if (right_class.orbit_size == 2 &&
-                                swapped_prefix) {
-                                compatible += weight_class_selected_join(
-                                    left_suffixes, left_entries_bucket,
-                                    right_suffixes, right_entries_bucket, lane,
-                                    true);
-                            }
-                        }
-                        sum += compatible * uint64_t(left_class.orbit_size) *
-                               uint64_t(left_class.weight) *
-                               uint64_t(right_class.weight);
-                    }
-                }
-            }
+            if (forward_prefix || swapped_prefix)
+                sum += weight_class_bucket_pair_join(
+                    left_suffixes, right_suffixes, left_classes,
+                    right_classes, left_bucket, right_bucket,
+                    forward_prefix, swapped_prefix, lane);
             if (++ri == join.right_bucket_count) {
                 ri = 0;
                 li++;
@@ -600,7 +614,7 @@ __global__ void weight_class_prefix_joins(
     if (!lane) warp_partial[warp] = sum;
     __syncthreads();
     if (threadIdx.x < 32) {
-        sum = lane < 8 ? warp_partial[lane] : 0;
+        sum = lane < warps_per_block ? warp_partial[lane] : 0;
 #pragma unroll
         for (int offset = 16; offset; offset >>= 1) {
             sum += __shfl_down_sync(UINT32_MAX, sum, offset);
@@ -762,7 +776,8 @@ __global__ void build_direct_prefix_metadata(
     uint32_t bucket_ordinal = 0;
     for (uint32_t base = 0; base < PREFIX_BUCKET_COUNT; base += 32) {
         uint32_t prefix = base + lane;
-        uint32_t count = dense_bucket_map[dense_base + prefix];
+        uint32_t count = prefix < PREFIX_BUCKET_COUNT
+            ? dense_bucket_map[dense_base + prefix] : 0;
         unsigned occupied = __ballot_sync(UINT32_MAX, count != 0);
         uint32_t inclusive = count;
 #pragma unroll
@@ -885,7 +900,8 @@ __global__ void build_direct_weight_classes(
     WeightClassMeta* __restrict__ classes) {
     unsigned warp = threadIdx.x >> 5;
     unsigned lane = threadIdx.x & 31U;
-    size_t bucket_index = size_t(blockIdx.x) * 8 + warp;
+    constexpr unsigned warps_per_block = THREADS / 32;
+    size_t bucket_index = size_t(blockIdx.x) * warps_per_block + warp;
     if (bucket_index >= bucket_count) return;
     PrefixBucket physical = buckets[bucket_index];
     DirectBucketAux aux = bucket_aux[bucket_index];
@@ -1121,7 +1137,9 @@ build_direct_weight_class_layout_from_descriptions(
     result.maximum_classes = maximum_classes;
     result.suffixes.reserve(result.entry_count);
     result.classes.reserve(std::max<size_t>(1, result.class_count));
-    unsigned bucket_blocks = unsigned((result.bucket_count + 7) / 8);
+    constexpr unsigned warps_per_block = THREADS / 32;
+    unsigned bucket_blocks = unsigned(
+        (result.bucket_count + warps_per_block - 1) / warps_per_block);
     build_direct_weight_classes<<<bucket_blocks, THREADS>>>(
         result.buckets.get(), bucket_aux, result.bucket_count, candidates,
         class_weights, class_orbit_sizes, class_offsets, result.classes.get());

@@ -29,7 +29,7 @@ NVCCFLAGS ?= -O3 -arch=sm_89 -std=c++17
 .PHONY: gpu-production
 gpu-production: twocolour_7x7_solve_gpu twocolour_7x9_solve_gpu \
 		twocolour_7x9_four_owner_gpu twocolour_7x9_cache_build \
-		twocolour_8x8_solve_gpu
+		twocolour_6x9_prefix_gpu twocolour_8x8_solve_gpu
 
 .PHONY: gpu-code-dump
 gpu-code-dump:
@@ -335,6 +335,14 @@ $(BUILD_DIR)/twocolour_6x9_gpu: src/gpu/twocolour_7x7_gpu.cu src/gpu/twocolour_7
 		-DGRID_ROWS=6 -DGRID_COLUMNS=9 -DLEFT_COLUMNS=4 -DRIGHT_COLUMNS=5 \
 		-DORBIT_ROW_BITS=10 -DORBIT_MAGIC='"R6ORB01"' -o $@ $<
 
+$(BUILD_DIR)/twocolour_6x9_prefix_gpu: src/gpu/twocolour_6x9_prefix_solve.cu \
+		src/gpu/twocolour_8x8_prefix_solve.cu \
+		src/gpu/twocolour_weight_class_join.cuh src/gpu/twocolour_canonical_device.cuh \
+		src/gpu/gpu_cuda_utils.cuh src/gpu/twocolour_prefix_algebra.cuh \
+		src/gpu/twocolour_gpu_common.cuh src/gpu/gpu_memory_policy.hpp \
+		src/gpu/gpu_result_checkpoint.hpp src/common/sha256.hpp
+	$(NVCC) $(NVCCFLAGS) -Xcompiler=-fopenmp -o $@ $<
+
 $(BUILD_DIR)/twocolour_7x8_gpu: src/gpu/twocolour_7x7_gpu.cu src/gpu/twocolour_7x7_engine.cuh \
 		src/gpu/twocolour_gpu_common.cuh
 	$(NVCC) -O3 -std=c++17 -arch=sm_89 -Xcompiler=-fopenmp \
@@ -484,7 +492,8 @@ BUILD_TARGETS := 5xn_count4 partition_count4 partition_poly partition_poly_7 \
 	six_by_twenty_nine_hafnian_cpu \
 	six_by_twenty_nine_hafnian_gpu \
 	twocolour_gpu_64.bin twocolour_gpu_bench twocolour_7x7_solve_gpu \
-	twocolour_7x7_prefix_gpu twocolour_6x9_gpu twocolour_7x8_gpu \
+	twocolour_7x7_prefix_gpu twocolour_6x9_gpu twocolour_6x9_prefix_gpu \
+	twocolour_7x8_gpu \
 	twocolour_7x8_prefix_gpu twocolour_7x9_prefix_gpu \
 	twocolour_7x9_solve_gpu twocolour_7x9_four_owner_gpu \
 	twocolour_7x9_cache_build \

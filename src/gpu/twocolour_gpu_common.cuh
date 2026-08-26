@@ -30,14 +30,20 @@ using PrefixKey = uint64_t;
 #error "GPU geometry and orbit format must be defined by the entry point"
 #endif
 
+#ifndef TWCOLOUR_THREADS
+#define TWCOLOUR_THREADS 256
+#endif
+
 enum {
     ROWS = GRID_ROWS,
     COLUMNS = GRID_COLUMNS,
     PAIRS = ROWS * (ROWS - 1) / 2,
     ROW_BITS = ORBIT_ROW_BITS,
     CELLS = ROWS * COLUMNS,
-    THREADS = 256
+    THREADS = TWCOLOUR_THREADS
 };
+static_assert(THREADS >= 64 && THREADS <= 256 && THREADS % 32 == 0,
+              "production CUDA blocks require two through eight warps");
 
 
 struct OrbitRecord {

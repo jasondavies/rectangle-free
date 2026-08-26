@@ -1,9 +1,23 @@
+#ifndef GRID_ROWS
 #define GRID_ROWS 8
 #define GRID_COLUMNS 8
 #define LEFT_COLUMNS 4
 #define RIGHT_COLUMNS 4
 #define ORBIT_ROW_BITS 8
 #define ORBIT_MAGIC "R8SQT01"
+#define TWCOLOUR_GEOMETRY "8x8"
+#define TWCOLOUR_RESULT_MAGIC "RECT8X8_PREFIX_RESULT"
+#define TWCOLOUR_TRANSPOSE_QUOTIENT 1
+#endif
+#ifndef TWCOLOUR_GEOMETRY
+#error "the production prefix solver requires a geometry name"
+#endif
+#ifndef TWCOLOUR_RESULT_MAGIC
+#error "the production prefix solver requires a result-format magic"
+#endif
+#ifndef TWCOLOUR_TRANSPOSE_QUOTIENT
+#define TWCOLOUR_TRANSPOSE_QUOTIENT 0
+#endif
 #include "twocolour_prefix_algebra.cuh"
 #include "gpu_memory_policy.hpp"
 
@@ -13,7 +27,11 @@
 #include "gpu_result_checkpoint.hpp"
 
 static constexpr uint64_t PREFIX_DEFAULT_DEVICE_RESERVE_BYTES = UINT64_C(2) << 30;
-static constexpr uint64_t PREFIX_ESTIMATED_RIGHT_BYTES_PER_ENTRY = 28;
+#ifndef TWCOLOUR_ESTIMATED_RIGHT_BYTES_PER_ENTRY
+#define TWCOLOUR_ESTIMATED_RIGHT_BYTES_PER_ENTRY 28
+#endif
+static constexpr uint64_t PREFIX_ESTIMATED_RIGHT_BYTES_PER_ENTRY =
+    TWCOLOUR_ESTIMATED_RIGHT_BYTES_PER_ENTRY;
 
 namespace fs = std::filesystem;
 
@@ -74,23 +92,26 @@ static std::vector<std::array<CanonicalRef, 2>> resolve_canonical_refs(
 #include "twocolour_weight_class_join.cuh"
 #include "twocolour_canonical_device.cuh"
 
-static gpu_checkpoint::RunProvenance prefix_8x8_run_provenance(
+static gpu_checkpoint::RunProvenance prefix_run_provenance(
     const std::string& executable, const std::string& canonical_seed) {
     std::ostringstream configuration;
-    configuration << "geometry=8x8;left_columns=" << LEFT_COLUMNS
+    configuration << "geometry=" << TWCOLOUR_GEOMETRY
+                  << ";left_columns=" << LEFT_COLUMNS
                   << ";right_columns=" << RIGHT_COLUMNS
                   << ";prefix_pairs=" << PREFIX_PAIR_COUNT
                   << ";task_chunk=" << PREFIX_TASK_CHUNK
                   << ";threads=" << THREADS
                   << ";orbit_magic=" << ORBIT_MAGIC
-                  << ";transpose_quotient=1;token_plane_quotient=1"
+                  << ";transpose_quotient=" << TWCOLOUR_TRANSPOSE_QUOTIENT
+                  << ";token_plane_quotient=1"
                   << ";join=" << WEIGHT_CLASS_JOIN_FINGERPRINT;
     return gpu_checkpoint::run_provenance(
-        "RECT8X8_PREFIX_RESULT", "8x8", executable, configuration.str(),
+        TWCOLOUR_RESULT_MAGIC, TWCOLOUR_GEOMETRY, executable,
+        configuration.str(),
         canonical_seed);
 }
 
-static bool validated_8x8_result_exists(
+static bool validated_prefix_result_exists(
     const fs::path& directory, const gpu_checkpoint::WorkItem& item,
     const gpu_checkpoint::WorkProvenance& provenance) {
     static const std::vector<std::string> required = {
@@ -127,13 +148,13 @@ int main(int argc, char** argv) {
         PREFIX_DEFAULT_DEVICE_RESERVE_BYTES);
 
     gpu_checkpoint::RunProvenance run_provenance =
-        prefix_8x8_run_provenance("/proc/self/exe", seed_path);
+        prefix_run_provenance("/proc/self/exe", seed_path);
     std::vector<std::pair<gpu_checkpoint::WorkItem,
                           gpu_checkpoint::WorkProvenance>> pending;
     for (const gpu_checkpoint::WorkItem& item : items) {
         gpu_checkpoint::WorkProvenance provenance =
             gpu_checkpoint::work_provenance(run_provenance, item);
-        if (validated_8x8_result_exists(results_directory, item, provenance)) {
+        if (validated_prefix_result_exists(results_directory, item, provenance)) {
             std::printf("SKIP id=%s result=%s\n", item.id.c_str(),
                         gpu_checkpoint::result_path(results_directory, item)
                             .c_str());
@@ -150,8 +171,8 @@ int main(int argc, char** argv) {
     validate_row_map_algebra();
 
     // Build and upload the canonical source cache once, then retain it while
-    // solving every pending manifest item. Shard zero is the known universal
-    // 8x4 source seed, but it need not itself appear in this worker's manifest.
+    // solving every pending manifest item. Equal-width geometries share one
+    // cache; asymmetric splits retain independent left and right caches.
     double session_start = seconds_now();
     U128 seed_labelled_weight = 0;
     uint64_t seed_records = 0;
@@ -162,25 +183,46 @@ int main(int argc, char** argv) {
     double seed_load_seconds = seconds_now() - seed_load_start;
     std::vector<PrefixKey> seed_keys = unique_lefts(seed_edges);
     std::vector<PrefixKey> seed_rights = unique_rights(seed_edges);
+#if LEFT_COLUMNS == RIGHT_COLUMNS
     seed_keys.insert(seed_keys.end(), seed_rights.begin(), seed_rights.end());
+#endif
     double factory_start = seconds_now();
-    CanonicalFactory factory =
+    CanonicalFactory left_factory =
         build_canonical_factory(std::move(seed_keys), LEFT_COLUMNS);
+    CanonicalFactory right_factory_storage;
+    const CanonicalFactory* right_factory = &left_factory;
+#if LEFT_COLUMNS != RIGHT_COLUMNS
+    right_factory_storage =
+        build_canonical_factory(std::move(seed_rights), RIGHT_COLUMNS);
+    right_factory = &right_factory_storage;
+#endif
     double cache_factory_seconds = seconds_now() - factory_start;
     double canonical_upload_start = seconds_now();
-    ProductionCanonicalDevice canonical = upload_production_canonical(factory);
+    ProductionCanonicalDevice left_canonical =
+        upload_production_canonical(left_factory);
+    ProductionCanonicalDevice right_canonical_storage;
+    const ProductionCanonicalDevice* right_canonical = &left_canonical;
+#if LEFT_COLUMNS != RIGHT_COLUMNS
+    right_canonical_storage =
+        upload_production_canonical(right_factory_storage);
+    right_canonical = &right_canonical_storage;
+#endif
     double cache_upload_seconds = seconds_now() - canonical_upload_start;
-    factory.entries.clear();
-    factory.entries.shrink_to_fit();
+    left_factory.entries.clear();
+    left_factory.entries.shrink_to_fit();
+#if LEFT_COLUMNS != RIGHT_COLUMNS
+    right_factory_storage.entries.clear();
+    right_factory_storage.entries.shrink_to_fit();
+#endif
     std::printf(
-        "PREFIX_SHARED_CACHE seed=%s paths=%zu canonical_sources=%zu "
-        "canonical_entries=%zu seed_load_seconds=%.6f "
+        "PREFIX_SHARED_CACHE seed=%s paths=%zu left_canonical_sources=%zu "
+        "right_canonical_sources=%zu left_canonical_entries=%zu "
+        "right_canonical_entries=%zu seed_load_seconds=%.6f "
         "factory_seconds=%.6f upload_seconds=%.6f token_plane_quotient=%d\n",
-        seed_path.c_str(), pending.size(), factory.canonical_keys.size(),
-        canonical.entry_count, seed_load_seconds, cache_factory_seconds,
-        cache_upload_seconds,
-        1
-        );
+        seed_path.c_str(), pending.size(), left_factory.canonical_keys.size(),
+        right_factory->canonical_keys.size(), left_canonical.entry_count,
+        right_canonical->entry_count, seed_load_seconds,
+        cache_factory_seconds, cache_upload_seconds, 1);
 
     size_t solved_items = 0;
     for (const auto& pending_item : pending) {
@@ -188,7 +230,7 @@ int main(int argc, char** argv) {
     const gpu_checkpoint::WorkProvenance& provenance = pending_item.second;
     gpu_checkpoint::WorkClaim claim(
         gpu_checkpoint::result_path(results_directory, item));
-    if (validated_8x8_result_exists(results_directory, item, provenance)) {
+    if (validated_prefix_result_exists(results_directory, item, provenance)) {
         std::printf("SKIP_AFTER_CLAIM id=%s\n", item.id.c_str());
         continue;
     }
@@ -225,26 +267,25 @@ int main(int argc, char** argv) {
     std::vector<PrefixKey> right_keys = unique_rights(edges);
     std::vector<uint32_t> edge_left_ids =
         resolve_edge_left_ids(edges, left_keys);
-    std::printf("INPUT path=%s records=%llu kernels=%zu unique_left=%zu "
-                "unique_right=%zu prefix_pairs=%d prefix_bits=%d "
-                "load_seconds=%.6f\n",
-                path.c_str(), (unsigned long long)records, edges.size(), left_keys.size(),
-                right_keys.size(), PREFIX_PAIR_COUNT, 2 * PREFIX_PAIR_COUNT,
-                load_seconds);
-
     double factory_seconds = first_solve ? cache_factory_seconds : 0;
     double canonical_resolve_start = seconds_now();
     std::vector<std::array<CanonicalRef, 2>> right_references =
-        resolve_canonical_refs(right_keys, factory);
+        resolve_canonical_refs(right_keys, *right_factory);
     std::vector<std::array<CanonicalRef, 2>> left_references =
-        resolve_canonical_refs(left_keys, factory);
+        resolve_canonical_refs(left_keys, left_factory);
     double canonical_resolve_seconds = seconds_now() - canonical_resolve_start;
+    std::printf("INPUT path=%s records=%llu kernels=%zu unique_left=%zu "
+                "unique_right=%zu prefix_pairs=%d prefix_bits=%d "
+                "load_seconds=%.6f\n",
+                path.c_str(), (unsigned long long)records, edges.size(),
+                left_keys.size(), right_keys.size(), PREFIX_PAIR_COUNT,
+                2 * PREFIX_PAIR_COUNT, load_seconds);
     double canonical_upload_seconds = first_solve
         ? cache_upload_seconds : 0;
     DeviceWeightClassLayout left_class_layout;
     DirectWeightClassWorkspace direct_workspace;
     left_class_layout = build_direct_weight_class_layout_from_refs(
-        left_references, factory, canonical, direct_workspace);
+        left_references, left_factory, left_canonical, direct_workspace);
     double left_layout_seconds = left_class_layout.build_seconds;
     // The persistent right-batch workspace should start at the first recurring
     // batch's true high-water mark rather than retaining one-off left scratch.
@@ -264,13 +305,13 @@ int main(int argc, char** argv) {
         "weight_table_seconds=%.6f\n",
         left_keys.size(), left_class_layout.entry_count,
         left_class_layout.bucket_count,
-        canonical.entry_count, free_bytes, factory_seconds,
+        left_canonical.entry_count, free_bytes, factory_seconds,
         canonical_upload_seconds, left_layout_seconds,
         left_class_layout.class_count, left_class_layout.maximum_classes,
         left_class_layout.candidate_slots, left_class_layout.fixed_candidate_slots,
-        canonical.class_weight_count,
-        canonical.maximum_distribution_weights,
-        canonical.weight_table_seconds);
+        left_canonical.class_weight_count,
+        left_canonical.maximum_distribution_weights,
+        left_canonical.weight_table_seconds);
 
     // The fixed reserve covers builder scratch, joins, results, and allocator
     // variation around the direct grouped layout.
@@ -280,6 +321,10 @@ int main(int argc, char** argv) {
         ? uint64_t(free_bytes - device_reserve_bytes) /
               estimated_right_bytes_per_entry
         : 1;
+    // DirectWeightBuildDesc stores destination offsets in uint32_t.  A single
+    // layout may contain exactly 2^32 entries but cannot address beyond it.
+    right_entry_budget = std::min<uint64_t>(
+        right_entry_budget, uint64_t(UINT32_MAX) + 1);
     std::vector<std::pair<size_t, size_t>> batch_ranges;
     std::vector<std::pair<size_t, size_t>> batch_right_ranges;
     size_t right_cursor = 0;
@@ -299,8 +344,9 @@ int main(int argc, char** argv) {
             }
             const auto& references = right_references[right_cursor];
             uint64_t group_entries =
-                factory.descriptors[references[0].distribution].count +
-                uint64_t(factory.descriptors[references[1].distribution].count);
+                right_factory->descriptors[references[0].distribution].count +
+                uint64_t(right_factory->descriptors[
+                    references[1].distribution].count);
             bool exceeds_kernels = end != begin &&
                 group_end - begin > batch_edges;
             bool exceeds_entries = end != begin &&
@@ -358,7 +404,8 @@ int main(int argc, char** argv) {
             right_references.begin() + right_begin,
             right_references.begin() + right_end);
         right_class_layout = build_direct_weight_class_layout_from_refs(
-            group_references, factory, canonical, direct_workspace);
+            group_references, *right_factory, *right_canonical,
+            direct_workspace);
         right_layout_seconds += right_class_layout.build_seconds;
         right_classes += right_class_layout.class_count;
         right_candidate_slots += right_class_layout.candidate_slots;
@@ -375,9 +422,13 @@ int main(int argc, char** argv) {
             std::max(maximum_right_buckets, batch_right_buckets);
 
         std::vector<PrefixJoinDesc> joins;
+#ifndef TWCOLOUR_PRESERVE_JOIN_ORDER
         std::vector<uint64_t> join_work;
+#endif
         joins.reserve((end - begin) * 2);
+#ifndef TWCOLOUR_PRESERVE_JOIN_ORDER
         join_work.reserve((end - begin) * 2);
+#endif
         size_t edge_index = begin;
         for (size_t group = 0; group < group_keys.size(); group++) {
             const PrefixPair& right = right_class_layout.pairs[group];
@@ -397,14 +448,18 @@ int main(int argc, char** argv) {
                         lhs.bucket_offset, rhs.bucket_offset,
                         lhs.bucket_count, rhs.bucket_count});
                     uint64_t work = uint64_t(lhs.entry_count) * rhs.entry_count;
+#ifndef TWCOLOUR_PRESERVE_JOIN_ORDER
                     join_work.push_back(work);
+#endif
                     comparisons += work;
                 }
                 edge_index++;
             }
         }
+#ifndef TWCOLOUR_PRESERVE_JOIN_ORDER
         std::vector<uint32_t> result_slots =
             schedule_prefix_heavy_first(joins, join_work);
+#endif
         device_joins.reserve(joins.size());
         device_results.reserve(joins.size());
         CUDA_CHECK(cudaMemcpy(device_joins.get(), joins.data(),
@@ -426,10 +481,15 @@ int main(int argc, char** argv) {
                               scheduled_results.size() *
                                   sizeof(unsigned long long),
                               cudaMemcpyDeviceToHost));
-        std::vector<unsigned long long> results(joins.size());
+        std::vector<unsigned long long> results;
+#ifdef TWCOLOUR_PRESERVE_JOIN_ORDER
+        results = std::move(scheduled_results);
+#else
+        results.resize(joins.size());
         for (size_t scheduled = 0; scheduled < joins.size(); scheduled++) {
             results[result_slots[scheduled]] = scheduled_results[scheduled];
         }
+#endif
 
         edge_index = begin;
         size_t result_index = 0;
@@ -480,6 +540,24 @@ int main(int argc, char** argv) {
     }
 
     double total_seconds = seconds_now() - total_start;
+#if GRID_ROWS == 6 && GRID_COLUMNS == 9
+    if (!filter_mod && start_record == 0 && end_record == 0 &&
+        records == UINT64_C(130237768)) {
+        const bool valid =
+            labelled_weight == (U128(1) << CELLS) &&
+            edges.size() == UINT64_C(71696841) &&
+            covered_weight == (U128(1) << CELLS) &&
+            u128_string(contribution) ==
+                "197810562116614403484457574400";
+        std::printf(
+            "FULL_CHECK expected_records=130237768 "
+            "expected_kernels=71696841 expected_weight=%s "
+            "expected_contribution=197810562116614403484457574400 %s\n",
+            u128_string(U128(1) << CELLS).c_str(),
+            valid ? "OK" : "FAIL");
+        if (!valid) return 1;
+    }
+#endif
     std::printf(
         "RESULT path=%s records=%llu labelled_weight=%s kernels=%zu "
         "covered_weight=%s right_groups=%llu verified=%llu comparisons=%s "
@@ -509,7 +587,7 @@ int main(int argc, char** argv) {
         minimum_free_bytes);
     std::ostringstream result_payload;
     result_payload
-        << "transpose_quotient 1\n"
+        << "transpose_quotient " << TWCOLOUR_TRANSPOSE_QUOTIENT << "\n"
         << "records " << records << "\n"
         << "labelled_weight " << u128_string(labelled_weight) << "\n"
         << "kernels " << edges.size() << "\n"
@@ -527,8 +605,12 @@ int main(int argc, char** argv) {
         << "direct_comparisons " << u128_string(comparisons) << "\n"
         << "contribution " << u128_string(contribution) << "\n"
         << "minimum_free_bytes " << minimum_free_bytes << "\n"
-        << "canonical_sources " << factory.canonical_keys.size() << "\n"
-        << "canonical_entries " << canonical.entry_count << "\n"
+        << "left_canonical_sources " << left_factory.canonical_keys.size()
+        << "\n"
+        << "right_canonical_sources " << right_factory->canonical_keys.size()
+        << "\n"
+        << "left_canonical_entries " << left_canonical.entry_count << "\n"
+        << "right_canonical_entries " << right_canonical->entry_count << "\n"
         << "right_classes " << right_classes << "\n"
         << "maximum_right_classes " << maximum_right_classes << "\n"
         << "right_candidate_slots " << right_candidate_slots << "\n"

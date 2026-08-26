@@ -9,13 +9,22 @@
 
 #include "gpu_cuda_utils.cuh"
 
-#if (GRID_ROWS != 7 && GRID_ROWS != 8) || LEFT_COLUMNS + RIGHT_COLUMNS != GRID_COLUMNS || LEFT_COLUMNS > 5 || RIGHT_COLUMNS > 5
-#error "the prefix core requires seven or eight rows and halves at most five columns"
+#if (GRID_ROWS != 6 && GRID_ROWS != 7 && GRID_ROWS != 8) || LEFT_COLUMNS + RIGHT_COLUMNS != GRID_COLUMNS || LEFT_COLUMNS > 5 || RIGHT_COLUMNS > 5
+#error "the prefix core requires six through eight rows and halves at most five columns"
 #endif
-constexpr int PREFIX_PAIR_COUNT = GRID_ROWS == 7 ? 5 : 7;
-constexpr uint32_t PREFIX_TASK_CHUNK = 16;
+#ifndef TWCOLOUR_PREFIX_PAIR_COUNT
+#define TWCOLOUR_PREFIX_PAIR_COUNT (GRID_ROWS == 8 ? 7 : 5)
+#endif
+constexpr int PREFIX_PAIR_COUNT = TWCOLOUR_PREFIX_PAIR_COUNT;
+static_assert(PREFIX_PAIR_COUNT > 0 && PREFIX_PAIR_COUNT < PAIRS,
+              "the physical prefix must leave a nonempty suffix");
+#ifndef TWCOLOUR_PREFIX_TASK_CHUNK
+#define TWCOLOUR_PREFIX_TASK_CHUNK 16
+#endif
+constexpr uint32_t PREFIX_TASK_CHUNK = TWCOLOUR_PREFIX_TASK_CHUNK;
+static_assert(PREFIX_TASK_CHUNK > 0, "the dynamic task chunk must advance");
 
-#if GRID_ROWS == 7
+#if GRID_ROWS <= 7
 using PrefixSuffix = uint32_t;
 #else
 using PrefixSuffix = uint64_t;
@@ -85,7 +94,7 @@ static __host__ __device__ int prefix_pair_rank(int pair) {
     if (pair == 12) rank = 25;
     if (pair == 17) rank = 26;
     if (pair == 21) rank = 27;
-#else
+#elif GRID_ROWS == 7
     if (pair == 0) rank = 0;
     if (pair == 1) rank = 1;
     if (pair == 2) rank = 2;
@@ -96,6 +105,12 @@ static __host__ __device__ int prefix_pair_rank(int pair) {
     if (pair == 3) rank = 5;
     if (pair == 11) rank = 6;
     if (pair == 8) rank = 7;
+#else
+    // The exact six-row sweep selects a triangle on rows 0,1,2.  It traverses
+    // fewer physical weight-class tiles than every other three-edge shape.
+    if (pair == 0) rank = 0;
+    if (pair == 1) rank = 1;
+    if (pair == 5) rank = 2;
 #endif
     return rank;
 }
