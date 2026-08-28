@@ -224,6 +224,7 @@ static long double ld(U128 value) { return static_cast<long double>(value); }
 
 }  // namespace
 
+#ifndef SIX_BY_TWELVE_PROJECTION_CENSUS_NO_MAIN
 int main(int argc, char** argv) {
     if (argc < 2 || argc > 5) {
         std::fprintf(stderr, "Usage: %s SAMPLE [RECORDS=32] [PAIR_MASK=0x67] [HEAVY=512]\n", argv[0]);
@@ -304,3 +305,4 @@ int main(int argc, char** argv) {
                   << " tile_coverage=" << double(ld(stats.sos_tiles[i]) / ld(stats.tiles)) << '\n';
     std::cout << "SIX_BY_TWELVE_PROJECTION exact=STRUCTURAL_OK\n";
 }
+#endif

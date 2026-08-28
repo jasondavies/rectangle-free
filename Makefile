@@ -220,6 +220,20 @@ $(BUILD_DIR)/six_by_twelve_projection_census: \
 	$(CXX) -O3 -march=native -std=c++17 $(OPENMP_CFLAGS) -Isrc/gpu \
 		-o $@ $< $(OPENMP_LDFLAGS)
 
+$(BUILD_DIR)/six_by_twelve_tile_portfolio_census: \
+		research/probes/six_by_twelve_tile_portfolio_census.cpp \
+		research/probes/six_by_twelve_projection_census.cpp \
+		src/gpu/twocolour_gpu_common.cuh
+	$(CXX) -O3 -march=native -std=c++17 $(OPENMP_CFLAGS) -Isrc/gpu \
+		-o $@ $< $(OPENMP_LDFLAGS)
+
+$(BUILD_DIR)/six_by_twelve_tile_portfolio_materialize: \
+		research/probes/six_by_twelve_tile_portfolio_materialize.cpp \
+		research/probes/six_by_twelve_projection_census.cpp \
+		src/gpu/twocolour_gpu_common.cuh
+	$(CXX) -O3 -march=native -std=c++17 $(OPENMP_CFLAGS) -Isrc/gpu \
+		-o $@ $< $(OPENMP_LDFLAGS)
+
 $(BUILD_DIR)/six_by_twelve_adaptive_split: \
 		research/probes/six_by_twelve_adaptive_split.cpp \
 		src/gpu/twocolour_gpu_common.cuh
@@ -552,6 +566,8 @@ BUILD_TARGETS := 5xn_count4 partition_count4 partition_poly partition_poly_7 \
 	binary_orbit_augment_6x11 six_row_distribution_census \
 	six_by_twelve_sample six_by_twelve_split_cost \
 	six_by_twelve_column_split_census six_by_twelve_projection_census \
+	six_by_twelve_tile_portfolio_census \
+	six_by_twelve_tile_portfolio_materialize \
 	six_by_twelve_adaptive_split \
 	binary_orbit_augment_7x8 \
 	binary_orbit_augment_7x9 binary_orbit_augment_8x8 s8_prefix_module_probe \

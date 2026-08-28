@@ -15285,3 +15285,42 @@
 - Outcome: reject independent selected/complement cuts at the 10% integration
   gate.  Keep the production representation coupled and investigate a larger
   tile-aware same-cut portfolio instead.
+
+### Experiment 452: Tile-aware same-cut portfolios for 6x12
+
+- Goal: replace the support-product cut proxy with the exact padded tensor-tile
+  count executed by the production weight-class join, then test whether menus
+  larger than four cuts reduce real GPU time enough to justify their extra
+  source layouts.
+- The census evaluates all 462 unordered `6+6` column cuts.  For each selected
+  and complement join it constructs the exact token-plane-quotient
+  distributions, applies the production five-pair `0x067` prefix, groups exact
+  weight/orbit classes, and counts the actual padded `m16n8` tiles in both the
+  ordinary and plane-swapped orientations.  A 256-record stratified sample
+  greedily selects the menu
+  `03f,0cf,077,11f,07d,60f,05f,18f,0e7,51d,61d,273,09f,1c7,07b,25d`.
+  Relative to its four-cut prefix, the eight- and sixteen-cut prefixes reduce
+  exact tile work by 11.18% and 20.76% on that independent sample.
+- Exact materialization over all 15,665 performance-seed records predicts
+  6,706,010,305 tiles for p4, 6,173,435,608 for p8, and 5,632,360,472 for p16.
+  Thus p8 and p16 reduce predicted work by 7.94% and 16.01% relative to p4.
+  Each chosen cut is materialized as an ordinary exact `6x12` orbit record;
+  the smaller selected-plus-complement support half is made resident.
+- A regular RTX PRO 6000 was unavailable, so the uncontaminated A/B ran twice
+  in forward/reverse order on one spot RTX A6000 using native B1 BMMA.  Mean
+  join times are 42.765s (p4), 40.146s (p8), and 37.431s (p16); p8 is 6.12%
+  faster and p16 is 12.47% faster than p4.  Mean complete times are 62.127s,
+  59.152s, and 55.602s, improvements of 4.79% and 10.50%.  Reverse-order
+  repeats agree within 0.3%.
+- The reported logical comparisons fall from 87,456,311,965,056 at p4 to
+  80,122,624,770,240 at p8 and 72,934,146,036,096 at p16, reductions of 8.39%
+  and 16.61%.  This close agreement with the exact tile prediction validates
+  the offline model.  All variants produce the same exact contribution
+  `12293599970325868427008`; a separate p16 run passes 16 independent CPU
+  join checks.
+- Outcome: accept the sixteen-cut tile-aware offline selector.  It clears the
+  5% end-to-end gate with a 10.5% measured saving and needs no solver/checkpoint
+  ABI change.  The p16 corpus also uses fewer canonical entries and fewer
+  resident/streamed layout entries than p4 on this workload.  Confirm the
+  absolute timing on Blackwell when capacity is available, but no architectural
+  reason suggests reversing the accepted ordering.
