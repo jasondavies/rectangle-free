@@ -215,7 +215,7 @@ Research probes are intentionally not part of `make gpu-production`.
 - `partition_poly_7` is bounded to seven rows and seven columns.
 - `partition_poly_8` is bounded to eight rows and eight columns.
 - The maintained GPU production targets are specialised for 6x9, 6x10,
-  6x11, 7x7, 7x9, and 8x8 distribution-join campaigns.
+  6x11, prospective 6x12, 7x7, 7x9, and 8x8 distribution-join campaigns.
 - The hafnian solvers cover the 6x30 endpoint and its 6x29/6x28 low-defect
   expansions; all three exact values are recorded in `results.txt`.
 

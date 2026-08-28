@@ -85,10 +85,10 @@ static void write_records(const fs::path& path,
 
 int main(int argc, char** argv) {
     try {
-        if (argc < 3 || argc > 5) {
+        if (argc < 3 || argc > 6) {
             std::fprintf(stderr,
                          "Usage: %s INPUT OUTPUT_DIR [REPEAT=64] "
-                         "[PAIR_MASK=0x67]\n", argv[0]);
+                         "[PAIR_MASK=0x67] [COST_MATRIX]\n", argv[0]);
             return 2;
         }
         const unsigned repeat =
@@ -125,6 +125,8 @@ int main(int argc, char** argv) {
             record_menus[item].resize(records.size());
         }
         std::array<U128, PORTFOLIO_SIZES.size()> tile_totals{};
+        std::vector<uint64_t> cut_costs;
+        if (argc == 6) cut_costs.resize(records.size() * TILE_MENU.size());
         std::array<std::array<uint64_t, TILE_MENU.size()>,
                    PORTFOLIO_SIZES.size()> selections{};
         const double start = seconds_now();
@@ -150,6 +152,9 @@ int main(int argc, char** argv) {
                 const uint64_t tiles =
                     layout_tiles(first_selected, second_selected) +
                     layout_tiles(first_complement, second_complement);
+                if (!cut_costs.empty())
+                    cut_costs[size_t(record) * TILE_MENU.size() + menu] =
+                        tiles;
                 if (tiles < best_tiles) {
                     best_tiles = tiles;
                     best_menu = menu;
@@ -173,6 +178,23 @@ int main(int argc, char** argv) {
             }
         }
         fs::create_directories(argv[2]);
+        if (!cut_costs.empty()) {
+            std::ofstream costs(argv[5], std::ios::binary);
+            const char magic[8] = {'R','6','T','I','L','E','1','\0'};
+            const uint32_t menu_size = TILE_MENU.size();
+            const uint64_t record_count = records.size();
+            costs.write(magic, sizeof(magic));
+            costs.write(reinterpret_cast<const char*>(&menu_size),
+                        sizeof(menu_size));
+            costs.write(reinterpret_cast<const char*>(&record_count),
+                        sizeof(record_count));
+            costs.write(reinterpret_cast<const char*>(TILE_MENU.data()),
+                        sizeof(TILE_MENU));
+            costs.write(reinterpret_cast<const char*>(cut_costs.data()),
+                        std::streamsize(cut_costs.size() * sizeof(uint64_t)));
+            if (!costs)
+                throw std::runtime_error("failed writing tile-cost matrix");
+        }
         for (size_t item = 0; item < PORTFOLIO_SIZES.size(); ++item) {
             for (size_t record = 0; record < records.size(); ++record) {
                 tile_totals[item] += record_tiles[item][record];

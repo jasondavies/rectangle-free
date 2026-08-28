@@ -179,6 +179,26 @@ desired checker concurrency. `tools/aggregate_8x8_results.py` remains solely for
 historical pre-transpose provider-result inventory. Run `make gpu-campaign-test`
 for the non-CUDA campaign regression suite.
 
+The prospective 6x12 corpus uses the fixed sixteen-cut portfolio selected in
+Experiment 452. Do not run the exact tile materializer over its projected
+20.23 billion records. Build the complete read-only half-support table once,
+then rewrite an existing corpus in place with bounded lookup work:
+
+```bash
+make six_by_twelve_cut_select
+./build/six_by_twelve_cut_select build-table \
+    CANONICAL_6x6.orbits support-table.bin
+./build/six_by_twelve_cut_select select-in-place \
+    support-table.bin CORPUS_6x12.orbits 16
+```
+
+The table is 0.893 GiB and may be shared read-only by all generator workers.
+The selector has constant auxiliary memory, preserves every orbit weight, and
+only permutes columns before choosing which six-column half is resident. Use
+the non-destructive `select TABLE INPUT OUTPUT 16` form when enough storage is
+available. A generator can equivalently apply the same lookup immediately
+before it serializes each final record, avoiding the post-pass.
+
 `make gpu-code-dump` regenerates `build/code-dump.txt` from the current maintained
 surface for external review; the generated file is intentionally untracked.
 

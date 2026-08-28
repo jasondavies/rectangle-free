@@ -1,0 +1,544 @@
+#define GRID_ROWS 6
+#define GRID_COLUMNS 12
+#define LEFT_COLUMNS 6
+#define RIGHT_COLUMNS 6
+#define ORBIT_ROW_BITS 12
+#define ORBIT_MAGIC "R6W1201"
+#define TWCOLOUR_WIDE_ORBIT_RECORD 1
+
+#include "../../src/gpu/twocolour_gpu_common.cuh"
+
+#include <fcntl.h>
+#include <filesystem>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
+namespace {
+
+using U128 = unsigned __int128;
+
+constexpr uint64_t RAW_MULTISET_COUNT = 119877472;
+constexpr uint64_t EXPECTED_CANONICAL_COUNT = 251610;
+constexpr uint64_t EXPECTED_SUPPORT_COUNT = 3469067567ULL;
+constexpr uint16_t ALL_COLUMNS = (1U << COLUMNS) - 1U;
+constexpr std::array<uint16_t, 16> TILE_MENU = {
+    0x03f, 0x0cf, 0x077, 0x11f, 0x07d, 0x60f, 0x05f, 0x18f,
+    0x0e7, 0x51d, 0x61d, 0x273, 0x09f, 0x1c7, 0x07b, 0x25d};
+
+struct TableHeader {
+    char magic[8];
+    uint32_t version;
+    uint32_t rows;
+    uint64_t entries;
+};
+static_assert(sizeof(TableHeader) == 24);
+
+struct CorpusMapping {
+    int descriptor = -1;
+    size_t bytes = 0;
+    const uint8_t* mapping = nullptr;
+    uint64_t records = 0;
+};
+
+struct MutableMapping {
+    int descriptor = -1;
+    size_t bytes = 0;
+    uint8_t* mapping = nullptr;
+};
+
+struct alignas(64) ThreadSelections {
+    std::array<uint64_t, 16> counts{};
+};
+
+static uint64_t choose[70][7];
+
+static void initialise_choose() {
+    choose[0][0] = 1;
+    for (unsigned n = 1; n < 70; ++n) {
+        choose[n][0] = 1;
+        for (unsigned k = 1; k <= 6; ++k)
+            choose[n][k] = choose[n - 1][k - 1] + choose[n - 1][k];
+    }
+    if (choose[69][6] != RAW_MULTISET_COUNT)
+        throw std::logic_error("bad multiset census");
+}
+
+static uint32_t multiset_rank(std::array<uint8_t, 6> values) {
+    std::sort(values.begin(), values.end());
+    uint64_t rank = 0;
+    for (unsigned index = 0; index < values.size(); ++index)
+        rank += choose[unsigned(values[index]) + index][index + 1];
+    if (rank >= RAW_MULTISET_COUNT)
+        throw std::logic_error("multiset rank overflow");
+    return uint32_t(rank);
+}
+
+static std::array<uint8_t, 6> column_vectors(PrefixKey key) {
+    std::array<uint8_t, ROWS> row_patterns{};
+    for (int row = ROWS - 1; row >= 0; --row) {
+        row_patterns[size_t(row)] = uint8_t(key & 63U);
+        key >>= 6;
+    }
+    std::array<uint8_t, 6> result{};
+    for (unsigned column = 0; column < 6; ++column)
+        for (unsigned row = 0; row < ROWS; ++row)
+            result[column] |= uint8_t((row_patterns[row] >> column) & 1U)
+                              << row;
+    return result;
+}
+
+static std::array<uint8_t, COLUMNS> full_column_vectors(U128 key) {
+    std::array<uint8_t, COLUMNS> result{};
+    for (unsigned row = 0; row < ROWS; ++row) {
+        const unsigned shift = COLUMNS * (ROWS - 1U - row);
+        const uint16_t pattern = uint16_t(key >> shift) & ALL_COLUMNS;
+        for (unsigned column = 0; column < COLUMNS; ++column)
+            result[column] |= uint8_t((pattern >> column) & 1U) << row;
+    }
+    return result;
+}
+
+static uint32_t half_multiset_rank(
+        const std::array<uint8_t, COLUMNS>& columns, uint16_t selected) {
+    std::array<uint8_t, 6> values{};
+    unsigned output = 0;
+    for (unsigned column = 0; column < COLUMNS; ++column)
+        if (selected & (1U << column)) values[output++] = columns[column];
+    return multiset_rank(values);
+}
+
+static PrefixKey packed_half(U128 key, uint16_t columns) {
+    PrefixKey result = 0;
+    for (unsigned row = 0; row < ROWS; ++row) {
+        const unsigned shift = COLUMNS * (ROWS - 1U - row);
+        const uint16_t pattern = uint16_t(key >> shift) & ALL_COLUMNS;
+        uint8_t half = 0;
+        unsigned output = 0;
+        for (unsigned column = 0; column < COLUMNS; ++column) {
+            if (!(columns & (1U << column))) continue;
+            half |= uint8_t((pattern >> column) & 1U) << output++;
+        }
+        result = (result << 6) | half;
+    }
+    return result;
+}
+
+static U128 concatenate(PrefixKey resident, PrefixKey streamed) {
+    U128 result = 0;
+    for (unsigned row = 0; row < ROWS; ++row) {
+        const unsigned shift = 6 * (ROWS - 1U - row);
+        const PrefixKey left = (resident >> shift) & 63U;
+        const PrefixKey right = (streamed >> shift) & 63U;
+        result = (result << 12) | (U128(right) << 6) | left;
+    }
+    return result;
+}
+
+static CorpusMapping map_corpus(const char* path) {
+    CorpusMapping result;
+    result.descriptor = open(path, O_RDONLY);
+    if (result.descriptor < 0)
+        throw std::runtime_error(std::string("cannot open ") + path);
+    struct stat status{};
+    if (fstat(result.descriptor, &status) || status.st_size < 20)
+        throw std::runtime_error("invalid corpus size");
+    result.bytes = size_t(status.st_size);
+    result.mapping = static_cast<const uint8_t*>(mmap(
+        nullptr, result.bytes, PROT_READ, MAP_PRIVATE, result.descriptor, 0));
+    if (result.mapping == MAP_FAILED) throw std::runtime_error("mmap failed");
+    uint32_t columns = 0;
+    std::memcpy(&columns, result.mapping + 8, 4);
+    std::memcpy(&result.records, result.mapping + 12, 8);
+    if (std::memcmp(result.mapping, ORBIT_MAGIC, 7) || columns != COLUMNS ||
+        result.bytes != 20 + result.records * sizeof(OrbitRecord))
+        throw std::runtime_error("invalid 6x12 corpus header");
+    return result;
+}
+
+static void unmap_corpus(CorpusMapping& value) {
+    if (value.mapping && munmap(const_cast<uint8_t*>(value.mapping),
+                                value.bytes))
+        throw std::runtime_error("corpus munmap failed");
+    if (value.descriptor >= 0 && close(value.descriptor))
+        throw std::runtime_error("corpus close failed");
+    value = CorpusMapping{};
+}
+
+static MutableMapping create_output(const char* path, size_t bytes) {
+    MutableMapping result;
+    result.descriptor = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    if (result.descriptor < 0 || ftruncate(result.descriptor, off_t(bytes)))
+        throw std::runtime_error(std::string("cannot create ") + path);
+    result.bytes = bytes;
+    result.mapping = static_cast<uint8_t*>(mmap(
+        nullptr, bytes, PROT_READ | PROT_WRITE, MAP_SHARED,
+        result.descriptor, 0));
+    if (result.mapping == MAP_FAILED)
+        throw std::runtime_error("output mmap failed");
+    return result;
+}
+
+static MutableMapping map_mutable_corpus(const char* path,
+                                         uint64_t& records) {
+    MutableMapping result;
+    result.descriptor = open(path, O_RDWR);
+    struct stat status{};
+    if (result.descriptor < 0 || fstat(result.descriptor, &status) ||
+        status.st_size < 20)
+        throw std::runtime_error(std::string("cannot open ") + path);
+    result.bytes = size_t(status.st_size);
+    result.mapping = static_cast<uint8_t*>(mmap(
+        nullptr, result.bytes, PROT_READ | PROT_WRITE, MAP_SHARED,
+        result.descriptor, 0));
+    if (result.mapping == MAP_FAILED)
+        throw std::runtime_error("corpus mmap failed");
+    uint32_t columns = 0;
+    std::memcpy(&columns, result.mapping + 8, 4);
+    std::memcpy(&records, result.mapping + 12, 8);
+    if (std::memcmp(result.mapping, ORBIT_MAGIC, 7) || columns != COLUMNS ||
+        result.bytes != 20 + records * sizeof(OrbitRecord))
+        throw std::runtime_error("invalid 6x12 corpus header");
+    return result;
+}
+
+static void finish_output(MutableMapping& value) {
+    if (msync(value.mapping, value.bytes, MS_SYNC) ||
+        munmap(value.mapping, value.bytes) || close(value.descriptor))
+        throw std::runtime_error("output flush failed");
+    value = MutableMapping{};
+}
+
+static std::vector<PrefixKey> read_canonical_keys(const char* path) {
+    std::ifstream input(path, std::ios::binary);
+    char magic[8];
+    uint32_t columns = 0;
+    uint64_t count = 0;
+    input.read(magic, 8);
+    input.read(reinterpret_cast<char*>(&columns), 4);
+    input.read(reinterpret_cast<char*>(&count), 8);
+    if (!input || std::memcmp(magic, "R6ORB01", 7) || columns != 6 ||
+        count != EXPECTED_CANONICAL_COUNT)
+        throw std::runtime_error("invalid canonical 6x6 corpus");
+    std::vector<PrefixKey> result(count);
+    for (uint64_t index = 0; index < count; ++index) {
+        uint64_t key = 0, weight = 0;
+        input.read(reinterpret_cast<char*>(&key), 8);
+        input.read(reinterpret_cast<char*>(&weight), 8);
+        PrefixKey packed = 0;
+        for (unsigned row = 0; row < ROWS; ++row) {
+            const unsigned shift = 10 * (ROWS - 1U - row);
+            packed = (packed << 6) | ((key >> shift) & 63U);
+        }
+        // The augmentation corpus retains its ten-bit row stride and its own
+        // equivalent canonical convention.  Normalize into the distribution
+        // factory's compact six-bit-row convention before lookup.
+        result[index] = canonical_prefix(packed, 6).key;
+    }
+    if (!input) throw std::runtime_error("truncated canonical corpus");
+    std::sort(result.begin(), result.end());
+    if (std::adjacent_find(result.begin(), result.end()) != result.end())
+        throw std::runtime_error("duplicate canonical key");
+    return result;
+}
+
+static void build_table(const char* canonical_path, const char* table_path) {
+    initialise_tables();
+    const std::vector<PrefixKey> keys = read_canonical_keys(canonical_path);
+    std::vector<uint32_t> supports(keys.size());
+    const double support_start = seconds_now();
+#pragma omp parallel for schedule(dynamic, 1)
+    for (long long index = 0; index < (long long)keys.size(); ++index) {
+        Distribution distribution = quotient_token_planes(
+            build_distribution(keys[size_t(index)], 6, false));
+        if (distribution.entries.size() > UINT32_MAX)
+            std::terminate();
+        supports[size_t(index)] = uint32_t(distribution.entries.size());
+    }
+    uint64_t support_total = 0;
+    for (uint32_t count : supports) support_total += count;
+    if (support_total != EXPECTED_SUPPORT_COUNT)
+        throw std::runtime_error("canonical support census mismatch");
+    std::vector<uint32_t> complement_supports(keys.size());
+    const PrefixKey full = (PrefixKey(1) << 36) - 1U;
+#pragma omp parallel for schedule(static)
+    for (long long index = 0; index < (long long)keys.size(); ++index) {
+        const PrefixKey complement = canonical_prefix(
+            keys[size_t(index)] ^ full, 6).key;
+        const auto found = std::lower_bound(keys.begin(), keys.end(), complement);
+        if (found == keys.end() || *found != complement) std::terminate();
+        complement_supports[size_t(index)] =
+            supports[size_t(found - keys.begin())];
+    }
+
+    const size_t bytes = sizeof(TableHeader) +
+                         RAW_MULTISET_COUNT * sizeof(uint64_t);
+    MutableMapping output = create_output(table_path, bytes);
+    const TableHeader header{{'R','6','S','U','P','T','1','\0'}, 1, ROWS,
+                             RAW_MULTISET_COUNT};
+    std::memcpy(output.mapping, &header, sizeof(header));
+    uint64_t* table = reinterpret_cast<uint64_t*>(
+        output.mapping + sizeof(TableHeader));
+    std::memset(table, 0, RAW_MULTISET_COUNT * sizeof(uint64_t));
+    std::array<std::array<uint8_t, 64>, 720> row_images{};
+    std::array<uint8_t, 6> permutation{0, 1, 2, 3, 4, 5};
+    size_t permutation_count = 0;
+    do {
+        for (unsigned value = 0; value < 64; ++value)
+            for (unsigned destination = 0; destination < 6; ++destination)
+                row_images[permutation_count][value] |=
+                    uint8_t((value >> permutation[destination]) & 1U)
+                    << destination;
+        ++permutation_count;
+    } while (std::next_permutation(permutation.begin(), permutation.end()));
+    if (permutation_count != 720) throw std::logic_error("bad S6 census");
+    const double expansion_start = seconds_now();
+#pragma omp parallel for schedule(dynamic, 8)
+    for (long long index = 0; index < (long long)keys.size(); ++index) {
+        const auto columns = column_vectors(keys[size_t(index)]);
+        const uint64_t packed = uint64_t(supports[size_t(index)]) |
+            (uint64_t(complement_supports[size_t(index)]) << 32);
+        for (const auto& images : row_images) {
+            std::array<uint8_t, 6> transformed{};
+            for (unsigned column = 0; column < 6; ++column)
+                transformed[column] = images[columns[column]];
+            const uint32_t rank = multiset_rank(transformed);
+            uint64_t expected = 0;
+            if (!__atomic_compare_exchange_n(
+                    table + rank, &expected, packed, false,
+                    __ATOMIC_RELAXED, __ATOMIC_RELAXED) && expected != packed)
+                std::terminate();
+        }
+    }
+    uint64_t missing = 0;
+#pragma omp parallel for schedule(static) reduction(+:missing)
+    for (long long index = 0; index < (long long)RAW_MULTISET_COUNT; ++index)
+        missing += table[size_t(index)] == 0;
+    if (missing) throw std::runtime_error("support table is incomplete");
+    finish_output(output);
+    std::printf("SIX_BY_TWELVE_SUPPORT_TABLE canonical=%zu entries=%llu "
+                "bytes=%zu support_total=%llu support_seconds=%.6f "
+                "expansion_seconds=%.6f output=%s exact=OK\n",
+                keys.size(), (unsigned long long)RAW_MULTISET_COUNT, bytes,
+                (unsigned long long)support_total,
+                expansion_start - support_start,
+                seconds_now() - expansion_start, table_path);
+}
+
+struct ReadOnlyTable {
+    int descriptor = -1;
+    size_t bytes = 0;
+    const uint8_t* mapping = nullptr;
+    const uint64_t* entries = nullptr;
+};
+
+static ReadOnlyTable map_table(const char* path) {
+    ReadOnlyTable result;
+    result.descriptor = open(path, O_RDONLY);
+    struct stat status{};
+    if (result.descriptor < 0 || fstat(result.descriptor, &status))
+        throw std::runtime_error("cannot open support table");
+    result.bytes = size_t(status.st_size);
+    if (result.bytes != sizeof(TableHeader) +
+                        RAW_MULTISET_COUNT * sizeof(uint64_t))
+        throw std::runtime_error("bad support table size");
+    result.mapping = static_cast<const uint8_t*>(mmap(
+        nullptr, result.bytes, PROT_READ, MAP_SHARED, result.descriptor, 0));
+    if (result.mapping == MAP_FAILED)
+        throw std::runtime_error("support table mmap failed");
+    const auto* header = reinterpret_cast<const TableHeader*>(result.mapping);
+    if (std::memcmp(header->magic, "R6SUPT1", 7) || header->version != 1 ||
+        header->rows != ROWS || header->entries != RAW_MULTISET_COUNT)
+        throw std::runtime_error("bad support table header");
+    result.entries = reinterpret_cast<const uint64_t*>(
+        result.mapping + sizeof(TableHeader));
+    return result;
+}
+
+static void unmap_table(ReadOnlyTable& value) {
+    if (munmap(const_cast<uint8_t*>(value.mapping), value.bytes) ||
+        close(value.descriptor))
+        throw std::runtime_error("support table close failed");
+    value = ReadOnlyTable{};
+}
+
+static std::array<uint64_t, TILE_MENU.size()> select_records(
+        const uint64_t* table, const uint8_t* input, uint8_t* output,
+        uint64_t records, unsigned menu_size) {
+    for (unsigned menu = 0; menu < menu_size; ++menu)
+        if (__builtin_popcount(TILE_MENU[menu]) != 6)
+            throw std::logic_error("cut is not 6+6");
+    unsigned thread_count = 1;
+#ifdef _OPENMP
+    thread_count = unsigned(omp_get_max_threads());
+#endif
+    std::vector<ThreadSelections> thread_selections(thread_count);
+#pragma omp parallel for schedule(static)
+    for (long long index = 0; index < (long long)records; ++index) {
+        unsigned thread = 0;
+#ifdef _OPENMP
+        thread = unsigned(omp_get_thread_num());
+#endif
+        OrbitRecord record{};
+        std::memcpy(&record, input + size_t(index) * sizeof(record),
+                    sizeof(record));
+        const uint64_t weight = record.meta >> WIDE_ORBIT_KEY_BITS;
+        const U128 key =
+            (U128(record.meta & WIDE_ORBIT_KEY_MASK) << 64) | record.low;
+        const auto columns = full_column_vectors(key);
+        uint64_t best_cost = UINT64_MAX;
+        uint16_t best_cut = 0;
+        bool best_swap = false;
+        unsigned best_menu = 0;
+        for (unsigned menu = 0; menu < menu_size; ++menu) {
+            const uint16_t cut = TILE_MENU[menu];
+            const uint64_t left_counts =
+                table[half_multiset_rank(columns, cut)];
+            const uint64_t right_counts =
+                table[half_multiset_rank(columns, ALL_COLUMNS ^ cut)];
+            const uint64_t left_selected = uint32_t(left_counts);
+            const uint64_t right_selected = uint32_t(right_counts);
+            const uint64_t left_complement = left_counts >> 32;
+            const uint64_t right_complement = right_counts >> 32;
+            const uint64_t cost = left_selected * right_selected +
+                                  left_complement * right_complement;
+            if (cost < best_cost) {
+                best_cost = cost;
+                best_menu = menu;
+                best_cut = cut;
+                best_swap = left_selected + left_complement >
+                            right_selected + right_complement;
+            }
+        }
+        PrefixKey best_left = packed_half(key, best_cut);
+        PrefixKey best_right = packed_half(key, ALL_COLUMNS ^ best_cut);
+        if (best_swap) std::swap(best_left, best_right);
+        const U128 transformed = concatenate(best_left, best_right);
+        OrbitRecord result = record;
+        result.low = uint64_t(transformed);
+        result.meta = (weight << WIDE_ORBIT_KEY_BITS) |
+                      uint64_t(transformed >> 64);
+        std::memcpy(output + size_t(index) * sizeof(result), &result,
+                    sizeof(result));
+        thread_selections[thread].counts[best_menu]++;
+    }
+    std::array<uint64_t, TILE_MENU.size()> result{};
+    for (const ThreadSelections& item : thread_selections)
+        for (unsigned menu = 0; menu < menu_size; ++menu)
+            result[menu] += item.counts[menu];
+    return result;
+}
+
+static void print_selection_result(
+        uint64_t records, unsigned menu_size, double compute_seconds,
+        double flush_seconds,
+        const std::array<uint64_t, TILE_MENU.size()>& selection_counts,
+        const char* output_path, bool in_place) {
+    std::printf("SIX_BY_TWELVE_CUT_SELECT records=%llu menu=%u "
+                "compute_seconds=%.6f flush_seconds=%.6f "
+                "records_per_second=%.3f selections=",
+                (unsigned long long)records, menu_size, compute_seconds,
+                flush_seconds, records / compute_seconds);
+    for (unsigned menu = 0; menu < menu_size; ++menu)
+        std::printf("%s0x%03x:%llu", menu ? "," : "", TILE_MENU[menu],
+                    (unsigned long long)selection_counts[menu]);
+    std::printf(" output=%s in_place=%u exact=OK\n", output_path,
+                unsigned(in_place));
+}
+
+static void select_corpus(const char* table_path, const char* input_path,
+                          const char* output_path, unsigned menu_size) {
+    if (!menu_size || menu_size > TILE_MENU.size())
+        throw std::runtime_error("menu size must be in 1..16");
+    ReadOnlyTable table = map_table(table_path);
+    CorpusMapping input = map_corpus(input_path);
+    const std::string temporary_path =
+        std::string(output_path) + ".tmp." + std::to_string(getpid());
+    MutableMapping output = create_output(temporary_path.c_str(), input.bytes);
+    // Publish the valid corpus header only after every record is complete.
+    // An interrupted non-destructive rewrite is therefore rejected rather
+    // than mistaken for a complete solve corpus.
+    std::memset(output.mapping, 0, 20);
+    const double start = seconds_now();
+    const auto selection_counts = select_records(
+        table.entries, input.mapping + 20, output.mapping + 20,
+        input.records, menu_size);
+    std::memcpy(output.mapping, input.mapping, 20);
+    const double compute_seconds = seconds_now() - start;
+    const double flush_start = seconds_now();
+    finish_output(output);
+    if (rename(temporary_path.c_str(), output_path))
+        throw std::runtime_error("cannot publish selected corpus");
+    const double flush_seconds = seconds_now() - flush_start;
+    const uint64_t records = input.records;
+    unmap_corpus(input);
+    unmap_table(table);
+    print_selection_result(records, menu_size, compute_seconds,
+                           flush_seconds, selection_counts, output_path,
+                           false);
+}
+
+static void select_corpus_in_place(const char* table_path,
+                                   const char* corpus_path,
+                                   unsigned menu_size) {
+    if (!menu_size || menu_size > TILE_MENU.size())
+        throw std::runtime_error("menu size must be in 1..16");
+    ReadOnlyTable table = map_table(table_path);
+    uint64_t records = 0;
+    MutableMapping corpus = map_mutable_corpus(corpus_path, records);
+    const double start = seconds_now();
+    const auto selection_counts = select_records(
+        table.entries, corpus.mapping + 20, corpus.mapping + 20, records,
+        menu_size);
+    const double compute_seconds = seconds_now() - start;
+    const double flush_start = seconds_now();
+    finish_output(corpus);
+    const double flush_seconds = seconds_now() - flush_start;
+    unmap_table(table);
+    print_selection_result(records, menu_size, compute_seconds, flush_seconds,
+                           selection_counts, corpus_path, true);
+}
+
+static void usage(const char* program) {
+    std::fprintf(stderr,
+                 "Usage:\n"
+                 "  %s build-table CANONICAL_6x6.orbits TABLE.bin\n"
+                 "  %s select TABLE.bin INPUT.orbits OUTPUT.orbits "
+                 "[MENU_SIZE=16]\n"
+                 "  %s select-in-place TABLE.bin CORPUS.orbits "
+                 "[MENU_SIZE=16]\n",
+                 program, program, program);
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    try {
+        initialise_choose();
+        if (argc == 4 && !std::strcmp(argv[1], "build-table")) {
+            build_table(argv[2], argv[3]);
+            return 0;
+        }
+        if ((argc == 5 || argc == 6) && !std::strcmp(argv[1], "select")) {
+            select_corpus(argv[2], argv[3], argv[4],
+                          argc == 6 ? std::strtoul(argv[5], nullptr, 10) : 16);
+            return 0;
+        }
+        if ((argc == 4 || argc == 5) &&
+            !std::strcmp(argv[1], "select-in-place")) {
+            select_corpus_in_place(
+                argv[2], argv[3],
+                argc == 5 ? std::strtoul(argv[4], nullptr, 10) : 16);
+            return 0;
+        }
+        usage(argv[0]);
+        return 2;
+    } catch (const std::exception& error) {
+        std::fprintf(stderr, "error: %s\n", error.what());
+        return 1;
+    }
+}

@@ -15318,9 +15318,50 @@
   the offline model.  All variants produce the same exact contribution
   `12293599970325868427008`; a separate p16 run passes 16 independent CPU
   join checks.
-- Outcome: accept the sixteen-cut tile-aware offline selector.  It clears the
-  5% end-to-end gate with a 10.5% measured saving and needs no solver/checkpoint
-  ABI change.  The p16 corpus also uses fewer canonical entries and fewer
-  resident/streamed layout entries than p4 on this workload.  Confirm the
-  absolute timing on Blackwell when capacity is available, but no architectural
-  reason suggests reversing the accepted ordering.
+- Outcome: accept the sixteen-cut menu and the exact tile selector as the
+  performance oracle.  It clears the 5% end-to-end gate with a 10.5% measured
+  saving and needs no solver/checkpoint ABI change.  The p16 corpus also uses
+  fewer canonical entries and fewer resident/streamed layout entries than p4
+  on this workload.  Exact materialization remains too expensive to run once
+  per record over the complete corpus; Experiment 453 supplies the scalable
+  production selector.
+
+### Experiment 453: Cached streaming p16 cut selection for 6x12
+
+- Goal: make the accepted sixteen-cut portfolio usable while generating or
+  rewriting the projected 20,230,535,486-record (301.46-GiB) production corpus,
+  without constructing four sparse distributions for every candidate cut.
+- A six-column binary half is invariant under column order.  There are only
+  `C(64+6-1,6) = 119,877,472` row-labelled multisets of six 6-bit columns.
+  `six_by_twelve_cut_select build-table` constructs each of the 251,610
+  canonical `6x6` quotient distributions once, checks the exact
+  3,469,067,567-entry support census, and expands its selected/complement
+  support sizes through all 720 row permutations.  The resulting read-only
+  table has one pair of 32-bit counts per multiset: 959,019,800 bytes
+  (914.59 MiB, 0.893 GiB).  It built in 45.3 seconds on the local 16-thread
+  machine and has SHA-256
+  `22c3c0ac3b60404b453bbafc150aae1d5057f67c8938f98200b08d06146f881a`.
+- Selection extracts the twelve 6-bit column vectors once, evaluates the p16
+  menu with 32 bounded table lookups, makes the lower-support half resident,
+  and writes the chosen column permutation as an ordinary `R6W1201` record.
+  Orbit weights are copied unchanged.  The implementation has constant
+  working memory beyond the shared table and memory mappings; the explicit
+  `select-in-place` mode avoids allocating a second 301.46-GiB corpus.
+- The cached output is byte-for-byte identical to the earlier support-based
+  p16 materializer on all 15,665 seed records.  Its exact fixed-layout census
+  is 536,650,201,555 comparisons and 6,145,648,989 padded tiles.  This is 8.36%
+  fewer tiles than exact-tile p4, although 9.11% more than the expensive exact
+  p16 oracle: the scalable support proxy retains about half of p16's available
+  tile saving.
+- Measured selection rates are 5.14 million records/s on a 119,287-record
+  diverse sample and 6.16 million records/s on its eightfold repeat.  The
+  complete corpus therefore projects to 0.91--1.09 hours on this local
+  16-thread machine, plus final storage flush, rather than years of repeated
+  distribution construction.  Generation may perform the same table lookup
+  before serializing each final record; the in-place CLI is the storage-cheap
+  fallback for an already materialized corpus.
+- Outcome: accept the complete multiset support table and p16 support-product
+  selector for production corpus preparation.  Cut choice affects performance
+  only: every selected 6+6 column permutation is an exact representation of
+  the same outer orbit, so neither the proxy nor a corrupted cost ordering can
+  alter the mathematical answer.
