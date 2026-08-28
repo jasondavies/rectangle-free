@@ -703,7 +703,7 @@ static __device__ __forceinline__ uint64_t transform_pair_mask_shared(
 }
 
 __global__ void histogram_direct_weight_prefixes(
-    const uint64_t* __restrict__ canonical_masks,
+    const CanonicalDeviceMask* __restrict__ canonical_masks,
     const DirectWeightBuildDesc* __restrict__ descriptions,
     uint32_t* __restrict__ dense_counts) {
     const DirectWeightBuildDesc description = descriptions[blockIdx.x];
@@ -808,7 +808,7 @@ __global__ void build_direct_prefix_metadata(
 }
 
 __global__ void histogram_direct_weight_classes(
-    const uint64_t* __restrict__ canonical_masks,
+    const CanonicalDeviceMask* __restrict__ canonical_masks,
     const uint8_t* __restrict__ canonical_weight_ordinals,
     const DirectWeightBuildDesc* __restrict__ descriptions,
     const uint32_t* __restrict__ dense_bucket_map,
@@ -937,7 +937,7 @@ __global__ void build_direct_weight_classes(
 }
 
 __global__ void scatter_direct_weight_classes(
-    const uint64_t* __restrict__ canonical_masks,
+    const CanonicalDeviceMask* __restrict__ canonical_masks,
     const uint8_t* __restrict__ canonical_weight_ordinals,
     const DirectWeightBuildDesc* __restrict__ descriptions,
     const uint32_t* __restrict__ dense_bucket_map,

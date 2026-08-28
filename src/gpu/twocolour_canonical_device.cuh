@@ -10,7 +10,7 @@ struct CanonicalWeightSpan {
 };
 
 struct ProductionCanonicalDevice {
-    DeviceBuffer<uint64_t> masks;
+    DeviceBuffer<CanonicalDeviceMask> masks;
     DeviceBuffer<uint8_t> weight_ordinals;
     DeviceBuffer<uint32_t> class_weights;
     DeviceBuffer<uint8_t> class_orbit_sizes;
@@ -21,12 +21,13 @@ struct ProductionCanonicalDevice {
     size_t entry_count = 0;
 };
 
-static DeviceBuffer<uint64_t> upload_production_masks(
+static DeviceBuffer<CanonicalDeviceMask> upload_production_masks(
     const std::vector<Entry>& entries) {
-    std::vector<uint64_t> masks(entries.size());
+    std::vector<CanonicalDeviceMask> masks(entries.size());
 #pragma omp parallel for schedule(static)
     for (long long index = 0; index < (long long)entries.size(); index++) {
-        masks[size_t(index)] = entries[size_t(index)].mask;
+        masks[size_t(index)] =
+            CanonicalDeviceMask(entries[size_t(index)].mask);
     }
     return upload_buffer(masks);
 }

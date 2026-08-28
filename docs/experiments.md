@@ -15207,3 +15207,50 @@
 - Outcome: accept the asymmetric `5+6` specialization and wide 66-bit corpus
   ABI as maintained production code.  The measured 6.612 GPU-hours is within
   the pre-campaign 6--9 GPU-hour estimate.
+
+### Experiment 450: 6x12 split, prefix, cache-width and hybrid-join gates
+
+- Goal: reduce the projected cost of a future exact `6x12` campaign before
+  generating its roughly 20.2-billion-record outer corpus.  Add an exact
+  `6+6` solver/provenance ABI and benchmark the five highest-priority ideas on
+  one spot RTX PRO 6000.
+- The deterministic performance corpus contains 15,665 exact canonical
+  `6x12` records repeated 64 times, for 1,002,560 joins.  Every accepted and
+  rejected GPU variant produced the same contribution,
+  `12293599970325868427008`; the final adaptive run also passed 16 stratified
+  exact CPU join checks.
+- Prefix count: on a larger 954,296-record sample, four and five row-pair
+  prefixes take 22.208s and 21.406s in the join.  Including both layout builds,
+  five pairs are 1.71% faster.  Three, six and seven pairs are worse.  An
+  exhaustive GPU sweep of all 15 unlabeled five-edge graphs selects the
+  existing `K4`-minus-one-edge topology (`0x067`) at 20.723s; the runner-up is
+  21.237s and the worst is 27.912s.  Adopt five pairs and bind the measured
+  topology explicitly in the `6x12` entry point.
+- Cache width: six rows use only 30 token bits, so canonical device masks now
+  use `uint32_t`.  On the reduced seed this saves 2.17 GiB and reduces upload
+  from 2.722s to 2.037s without changing the join (20.729s versus 20.723s).
+  The complete 3,469,067,567-entry `6x6` cache saves 13,876,270,268 bytes, or
+  12.92 GiB.  A 720-by-32768 S6 permutation lookup was rejected: random table
+  traffic worsens layout construction and doubles this workload's join time.
+- Column partitions: a fixed alternative cut gives no gain on the 256-record
+  exact census.  Per-record selection from the greedy cuts `0x03f`, `0x09f`,
+  `0x0e7`, and `0x06f` reduces the support-product proxy by 30.42% on the
+  complete 15,665-record performance seed.  Materializing those choices as
+  exact column permutations reduces GPU join time from 20.723s to 16.531s
+  (`20.2%`) and complete time from 28.867s to 24.769s (`14.2%`).  It increases
+  resident-left support from 478.9M to 672.6M entries, which remains practical
+  on the 96 GiB production target.  Accept the four-cut offline preprocessor.
+- Pair-specific projection: on 64 stratified records, terminal all-compatible
+  or all-incompatible tests cover only 2.65% of BMMA tiles.  Projection merges
+  about 23.2% of entries in the 512 heaviest class pairs, but only 4.35% of
+  tiles pass even an optimistic SOS gate requiring an 8x operation advantage;
+  0.089% pass a 32x gate and none pass 128x.  Reject an adaptive SOS backend.
+- Asymmetric split: the exact 2,048-record workload census gives support-product
+  costs `216423472482` for `6+6` and `387525821308` for `5+7`; `5+7` is 79.1%
+  worse.  Its workload-biased `6x7` mean support is 93,218 representatives,
+  and a complete `6x7` cache has 2,141,733 canonical masks.  Reject `5+7` on
+  both join cost and cache size.
+- Outcome: the credible projected reduction is approximately 14% end to end,
+  not an order of magnitude.  Retain symmetric `6+6`, the five-pair `0x067`
+  prefix, 32-bit canonical masks and the four-cut offline selector; do not add
+  the S6 table, SOS dispatcher, or `5+7` cache.

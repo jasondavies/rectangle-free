@@ -103,6 +103,8 @@ static gpu_checkpoint::RunProvenance prefix_run_provenance(
                   << ";left_columns=" << LEFT_COLUMNS
                   << ";right_columns=" << RIGHT_COLUMNS
                   << ";prefix_pairs=" << PREFIX_PAIR_COUNT
+                  << ";prefix_pair_mask=0x" << std::hex
+                  << production_prefix_pair_mask() << std::dec
                   << ";task_chunk=" << PREFIX_TASK_CHUNK
                   << ";threads=" << THREADS
                   << ";orbit_magic=" << ORBIT_MAGIC

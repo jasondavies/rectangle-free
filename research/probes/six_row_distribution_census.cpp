@@ -12,11 +12,14 @@
 #include <mutex>
 
 int main(int argc, char** argv) {
-    if (argc < 2 || argc > 4) {
-        std::fprintf(stderr, "Usage: %s CANONICAL_6x6.orbits [START END]\n",
+    if (argc < 2 || argc > 5) {
+        std::fprintf(stderr, "Usage: %s CANONICAL.orbits [COLUMNS=6] "
+                             "[START END]\n",
                      argv[0]);
         return 2;
     }
+    int distribution_columns = argc >= 3 ? std::atoi(argv[2]) : 6;
+    if (distribution_columns < 1 || distribution_columns > 7) return 2;
     std::ifstream input(argv[1], std::ios::binary);
     char magic[8];
     uint32_t columns = 0;
@@ -24,12 +27,16 @@ int main(int argc, char** argv) {
     input.read(magic, sizeof(magic));
     input.read(reinterpret_cast<char*>(&columns), sizeof(columns));
     input.read(reinterpret_cast<char*>(&count), sizeof(count));
-    if (!input || std::memcmp(magic, ORBIT_MAGIC, 7) || columns != 6 ||
-        count != UINT64_C(251610)) {
+    const uint64_t expected = distribution_columns == 6
+        ? UINT64_C(251610) : distribution_columns == 7
+        ? UINT64_C(2141733) : 0;
+    if (!input || std::memcmp(magic, ORBIT_MAGIC, 7) ||
+        columns != uint32_t(distribution_columns) ||
+        (expected && count != expected)) {
         throw std::runtime_error("invalid canonical 6x6 corpus");
     }
-    uint64_t start = argc >= 3 ? std::strtoull(argv[2], nullptr, 10) : 0;
-    uint64_t end = argc >= 4 ? std::strtoull(argv[3], nullptr, 10) : count;
+    uint64_t start = argc >= 4 ? std::strtoull(argv[3], nullptr, 10) : 0;
+    uint64_t end = argc >= 5 ? std::strtoull(argv[4], nullptr, 10) : count;
     if (start > end || end > count) throw std::runtime_error("invalid range");
     std::vector<PrefixKey> keys(end - start);
     input.seekg(std::streamoff(20 + start * sizeof(OrbitRecord)));
@@ -47,7 +54,9 @@ int main(int argc, char** argv) {
             stored >>= 10;
         }
         for (int row = 0; row < ROWS; row++)
-            compact = (compact << 6) | (rows[size_t(row)] & 63U);
+            compact = (compact << distribution_columns) |
+                      (rows[size_t(row)] &
+                       ((PrefixKey(1) << distribution_columns) - 1U));
         key = compact;
     }
 
@@ -66,7 +75,8 @@ int main(int argc, char** argv) {
     for (long long index = 0; index < (long long)keys.size(); index++) {
         try {
             Distribution distribution = quotient_token_planes(
-                build_distribution(keys[size_t(index)], 6, false));
+                build_distribution(keys[size_t(index)], distribution_columns,
+                                   false));
             entries += distribution.entries.size();
             std::vector<std::pair<uint32_t, uint8_t>> classes;
             for (const Entry& entry : distribution.entries) {
@@ -105,11 +115,13 @@ int main(int argc, char** argv) {
     }
     if (failed.load(std::memory_order_relaxed)) return 1;
     std::printf(
-        "SIX_ROW_DISTRIBUTION_CENSUS start=%llu end=%llu distributions=%zu "
+        "SIX_ROW_DISTRIBUTION_CENSUS columns=%d start=%llu end=%llu "
+        "distributions=%zu "
         "quotient_entries=%llu fixed_entries=%llu maximum_entries=%llu "
         "maximum_entry_key=%llu class_values=%llu maximum_classes=%u "
         "maximum_weight=%llu seconds=%.6f\n",
-        (unsigned long long)start, (unsigned long long)end, keys.size(),
+        distribution_columns, (unsigned long long)start,
+        (unsigned long long)end, keys.size(),
         (unsigned long long)entries, (unsigned long long)fixed_entries,
         (unsigned long long)maximum_entries,
         (unsigned long long)maximum_entry_key,

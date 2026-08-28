@@ -52,9 +52,16 @@ static_assert(THREADS >= 64 && THREADS <= 256 && THREADS % 32 == 0,
 
 
 #ifdef TWCOLOUR_WIDE_ORBIT_RECORD
+static_assert(CELLS > 64 && CELLS < 128,
+              "wide orbit records require a 65--127 bit grid key");
+static constexpr unsigned WIDE_ORBIT_KEY_BITS = CELLS - 64;
+static constexpr uint64_t WIDE_ORBIT_KEY_MASK =
+    (UINT64_C(1) << WIDE_ORBIT_KEY_BITS) - 1U;
 struct OrbitRecord {
     uint64_t low;
-    // Low two bits are key bits 64--65; upper bits are the exact weight.
+    // Low WIDE_ORBIT_KEY_BITS bits are key bits above bit 63; the remaining
+    // high bits store the exact orbit weight.  This covers both the 66-bit
+    // 6x11 corpus and the 72-bit 6x12 corpus without geometry-specific code.
     uint64_t meta;
 };
 #else
@@ -566,7 +573,7 @@ static int cell_count(uint64_t key) {
 
 static PrefixKey orbit_left_prefix(const OrbitRecord& record) {
 #ifdef TWCOLOUR_WIDE_ORBIT_RECORD
-    U128 key = (U128(record.meta & 3U) << 64) | record.low;
+    U128 key = (U128(record.meta & WIDE_ORBIT_KEY_MASK) << 64) | record.low;
     PrefixKey result = 0;
     const U128 row_mask = (U128(1) << ROW_BITS) - 1U;
     for (int row = 0; row < ROWS; row++) {
@@ -583,7 +590,7 @@ static PrefixKey orbit_left_prefix(const OrbitRecord& record) {
 
 static PrefixKey orbit_right_prefix(const OrbitRecord& record) {
 #ifdef TWCOLOUR_WIDE_ORBIT_RECORD
-    U128 key = (U128(record.meta & 3U) << 64) | record.low;
+    U128 key = (U128(record.meta & WIDE_ORBIT_KEY_MASK) << 64) | record.low;
     PrefixKey result = 0;
     const U128 row_mask = (U128(1) << ROW_BITS) - 1U;
     for (int row = 0; row < ROWS; row++) {
@@ -601,7 +608,7 @@ static PrefixKey orbit_right_prefix(const OrbitRecord& record) {
 
 static uint64_t orbit_weight(const OrbitRecord& record) {
 #ifdef TWCOLOUR_WIDE_ORBIT_RECORD
-    return record.meta >> 2;
+    return record.meta >> WIDE_ORBIT_KEY_BITS;
 #else
     return record.weight;
 #endif
@@ -610,7 +617,7 @@ static uint64_t orbit_weight(const OrbitRecord& record) {
 static int orbit_cell_count(const OrbitRecord& record) {
 #ifdef TWCOLOUR_WIDE_ORBIT_RECORD
     return __builtin_popcountll(record.low) +
-           __builtin_popcountll(record.meta & 3U);
+           __builtin_popcountll(record.meta & WIDE_ORBIT_KEY_MASK);
 #else
     return cell_count(record.key);
 #endif

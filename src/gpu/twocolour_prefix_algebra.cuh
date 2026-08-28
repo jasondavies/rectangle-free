@@ -30,6 +30,17 @@ using PrefixSuffix = uint32_t;
 using PrefixSuffix = uint64_t;
 #endif
 
+// Six rows have only 2*C(6,2)=30 token coordinates.  Keeping their universal
+// canonical cache in 64-bit words wastes nearly thirteen GiB for the complete
+// 6x6 cache and doubles the mask traffic in every direct-builder pass.
+#if GRID_ROWS == 6
+using CanonicalDeviceMask = uint32_t;
+static_assert(2 * PAIRS <= 32,
+              "six-row canonical masks must fit their device word");
+#else
+using CanonicalDeviceMask = uint64_t;
+#endif
+
 struct PrefixBucket {
     uint32_t entry_offset;
     uint32_t count;
@@ -122,7 +133,21 @@ static __host__ __device__ int prefix_pair_rank(int pair) {
 }
 
 static __host__ __device__ bool prefix_pair_selected(int pair) {
+#ifdef TWCOLOUR_PREFIX_PAIR_MASK
+    static_assert(__builtin_popcount(unsigned(TWCOLOUR_PREFIX_PAIR_MASK)) ==
+                      PREFIX_PAIR_COUNT,
+                  "explicit prefix mask must match prefix-pair count");
+    return (unsigned(TWCOLOUR_PREFIX_PAIR_MASK) >> pair) & 1U;
+#else
     return prefix_pair_rank(pair) < PREFIX_PAIR_COUNT;
+#endif
+}
+
+static unsigned production_prefix_pair_mask() {
+    unsigned result = 0;
+    for (int pair = 0; pair < PAIRS; ++pair)
+        if (prefix_pair_selected(pair)) result |= 1U << pair;
+    return result;
 }
 
 static __host__ __device__ void split_pair_mask(uint64_t mask, uint16_t& prefix,
