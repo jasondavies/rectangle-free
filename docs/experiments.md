@@ -15254,3 +15254,34 @@
   not an order of magnitude.  Retain symmetric `6+6`, the five-pair `0x067`
   prefix, 32-bit canonical masks and the four-cut offline selector; do not add
   the S6 table, SOS dispatcher, or `5+7` cache.
+
+### Experiment 451: Independent selected/complement cut gate for 6x12
+
+- Goal: test the exact freedom to use cut `P` for `C(G)` and a different cut
+  `Q` for `C(G^c)`.  Extend the all-462-cut census to retain the two component
+  costs separately, greedily construct shared cut menus through size 16, and
+  measure the component-specific resident and streamed layout sets.
+- On 256 stratified records, independent choices improve the corresponding
+  same-cut portfolios by only 0.72%, 1.63%, and 1.42% at menu sizes 4, 8, and
+  16.  The unrestricted independent oracle improves the same-cut oracle by
+  about 4.3%.
+- The larger 2,048-record census reaches 211,878 of the 251,610 canonical
+  `6x6` half masks.  Independent choices improve same-cut menus by 1.15% at
+  four cuts, 1.45% at eight cuts, and 2.04% at sixteen cuts.  The same-cut and
+  independent oracle ratios are 0.337304 and 0.322331, so even perfect
+  per-component choices have only a 4.44% relative ceiling on this proxy.
+- Component-specific orientation keeps resident layouts small: at sixteen
+  cuts the sample has 2,041 selected and 1,997 complement resident layouts,
+  containing 4,160,984 total support representatives.  Memory is therefore
+  not the rejection reason; the arithmetic saving is simply too small to
+  justify a second cut ID, separate component layouts, and a more complex
+  solver/checkpoint ABI.
+- A useful control result is that enlarging the ordinary same-cut menu remains
+  more promising.  On the 2,048-record census its eight- and sixteen-cut
+  proxies improve by 15.0% and 26.6% relative to the four-cut proxy.  This is
+  a separate portfolio-size opportunity, not evidence for independent cuts,
+  and still requires a GPU A/B because support products overstate tensor-tile
+  savings.
+- Outcome: reject independent selected/complement cuts at the 10% integration
+  gate.  Keep the production representation coupled and investigate a larger
+  tile-aware same-cut portfolio instead.

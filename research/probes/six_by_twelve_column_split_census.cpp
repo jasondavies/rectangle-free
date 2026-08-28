@@ -119,7 +119,9 @@ int main(int argc, char** argv) {
     for (size_t item = 0; item < canonical_keys.size(); ++item)
         index.emplace(canonical_keys[item], uint32_t(item));
 
-    std::vector<std::vector<uint64_t>> costs(
+    std::vector<std::vector<uint64_t>> selected_costs(
+        cuts.size(), std::vector<uint64_t>(records.size()));
+    std::vector<std::vector<uint64_t>> complement_costs(
         cuts.size(), std::vector<uint64_t>(records.size()));
     std::vector<std::vector<PrefixKey>> execution_left(
         cuts.size(), std::vector<PrefixKey>(records.size()));
@@ -129,8 +131,9 @@ int main(int argc, char** argv) {
             const size_t offset = (record * cuts.size() + size_t(cut)) * 2;
             const Counts& first = counts[index.at(canonical_halves[offset])];
             const Counts& second = counts[index.at(canonical_halves[offset + 1])];
-            costs[size_t(cut)][record] =
-                uint64_t(first.selected) * second.selected +
+            selected_costs[size_t(cut)][record] =
+                uint64_t(first.selected) * second.selected;
+            complement_costs[size_t(cut)][record] =
                 uint64_t(first.complement) * second.complement;
             execution_left[size_t(cut)][record] =
                 uint64_t(first.selected) + first.complement <=
@@ -139,7 +142,11 @@ int main(int argc, char** argv) {
         }
     }
     auto total_for = [&](size_t cut) {
-        return std::accumulate(costs[cut].begin(), costs[cut].end(), U128(0));
+        U128 result = 0;
+        for (size_t record = 0; record < records.size(); ++record)
+            result += selected_costs[cut][record] +
+                      complement_costs[cut][record];
+        return result;
     };
     const auto baseline_iterator =
         std::find(cuts.begin(), cuts.end(), uint16_t(0x03f));
@@ -149,35 +156,148 @@ int main(int argc, char** argv) {
     for (size_t cut = 1; cut < cuts.size(); ++cut)
         if (total_for(cut) < total_for(best_fixed)) best_fixed = cut;
     std::vector<uint64_t> oracle(records.size(), UINT64_MAX);
+    std::vector<uint64_t> selected_oracle(records.size(), UINT64_MAX);
+    std::vector<uint64_t> complement_oracle(records.size(), UINT64_MAX);
     std::vector<size_t> oracle_cut(records.size());
-    for (size_t cut = 0; cut < cuts.size(); ++cut)
-        for (size_t record = 0; record < records.size(); ++record)
-            if (costs[cut][record] < oracle[record]) {
-                oracle[record] = costs[cut][record];
+    for (size_t cut = 0; cut < cuts.size(); ++cut) {
+        for (size_t record = 0; record < records.size(); ++record) {
+            const uint64_t combined = selected_costs[cut][record] +
+                                      complement_costs[cut][record];
+            if (combined < oracle[record]) {
+                oracle[record] = combined;
                 oracle_cut[record] = cut;
             }
+            selected_oracle[record] =
+                std::min(selected_oracle[record], selected_costs[cut][record]);
+            complement_oracle[record] = std::min(
+                complement_oracle[record], complement_costs[cut][record]);
+        }
+    }
     const U128 oracle_cost =
         std::accumulate(oracle.begin(), oracle.end(), U128(0));
+    U128 independent_oracle_cost = 0;
+    for (size_t record = 0; record < records.size(); ++record)
+        independent_oracle_cost += selected_oracle[record] +
+                                   complement_oracle[record];
 
-    std::vector<uint64_t> portfolio(records.size(), UINT64_MAX);
-    std::vector<size_t> selected;
-    for (unsigned round = 0; round < 4; ++round) {
+    std::vector<uint64_t> same_portfolio(records.size(), UINT64_MAX);
+    std::vector<size_t> same_cuts;
+    for (unsigned round = 0; round < 16; ++round) {
         size_t choice = 0;
         U128 choice_cost = U128(-1);
         for (size_t cut = 0; cut < cuts.size(); ++cut) {
             U128 candidate = 0;
-            for (size_t record = 0; record < records.size(); ++record)
-                candidate += std::min(portfolio[record], costs[cut][record]);
+            for (size_t record = 0; record < records.size(); ++record) {
+                const uint64_t combined = selected_costs[cut][record] +
+                                          complement_costs[cut][record];
+                candidate += std::min(same_portfolio[record], combined);
+            }
             if (candidate < choice_cost) choice_cost = candidate, choice = cut;
         }
-        selected.push_back(choice);
-        for (size_t record = 0; record < records.size(); ++record)
-            portfolio[record] =
-                std::min(portfolio[record], costs[choice][record]);
+        same_cuts.push_back(choice);
+        for (size_t record = 0; record < records.size(); ++record) {
+            const uint64_t combined = selected_costs[choice][record] +
+                                      complement_costs[choice][record];
+            same_portfolio[record] =
+                std::min(same_portfolio[record], combined);
+        }
         std::printf("COLUMN_SPLIT_6X12_PORTFOLIO size=%u added=0x%03x "
                     "ratio=%.12f\n", round + 1, cuts[choice],
                     double(choice_cost) / double(baseline_cost));
     }
+
+    // One shared menu is allowed, but selected and complement contractions
+    // independently choose their cheapest cut from that menu.
+    std::vector<uint64_t> selected_portfolio(records.size(), UINT64_MAX);
+    std::vector<uint64_t> complement_portfolio(records.size(), UINT64_MAX);
+    std::vector<size_t> independent_cuts;
+    for (unsigned round = 0; round < 16; ++round) {
+        size_t choice = 0;
+        U128 choice_cost = U128(-1);
+        for (size_t cut = 0; cut < cuts.size(); ++cut) {
+            U128 candidate = 0;
+            for (size_t record = 0; record < records.size(); ++record) {
+                candidate += std::min(selected_portfolio[record],
+                                      selected_costs[cut][record]);
+                candidate += std::min(complement_portfolio[record],
+                                      complement_costs[cut][record]);
+            }
+            if (candidate < choice_cost) choice_cost = candidate, choice = cut;
+        }
+        independent_cuts.push_back(choice);
+        for (size_t record = 0; record < records.size(); ++record) {
+            selected_portfolio[record] = std::min(
+                selected_portfolio[record], selected_costs[choice][record]);
+            complement_portfolio[record] = std::min(
+                complement_portfolio[record], complement_costs[choice][record]);
+        }
+        std::printf(
+            "COLUMN_SPLIT_6X12_INDEPENDENT_PORTFOLIO size=%u added=0x%03x "
+            "ratio=%.12f\n", round + 1, cuts[choice],
+            double(choice_cost) / double(baseline_cost));
+    }
+
+    auto component_layout_stats = [&](size_t menu_size) {
+        std::unordered_map<PrefixKey, uint32_t> selected_left;
+        std::unordered_map<PrefixKey, uint32_t> selected_right;
+        std::unordered_map<PrefixKey, uint32_t> complement_left;
+        std::unordered_map<PrefixKey, uint32_t> complement_right;
+        for (size_t record = 0; record < records.size(); ++record) {
+            size_t selected_cut = independent_cuts[0];
+            size_t complement_cut = independent_cuts[0];
+            for (size_t item = 1; item < menu_size; ++item) {
+                const size_t cut = independent_cuts[item];
+                if (selected_costs[cut][record] <
+                    selected_costs[selected_cut][record])
+                    selected_cut = cut;
+                if (complement_costs[cut][record] <
+                    complement_costs[complement_cut][record])
+                    complement_cut = cut;
+            }
+            auto add_component = [&](size_t cut, bool complement,
+                                     auto& left, auto& right) {
+                const size_t offset = (record * cuts.size() + cut) * 2;
+                const Counts& first = counts[index.at(canonical_halves[offset])];
+                const Counts& second =
+                    counts[index.at(canonical_halves[offset + 1])];
+                const uint32_t first_entries =
+                    complement ? first.complement : first.selected;
+                const uint32_t second_entries =
+                    complement ? second.complement : second.selected;
+                if (first_entries <= second_entries) {
+                    left.emplace(raw_halves[offset], first_entries);
+                    right.emplace(raw_halves[offset + 1], second_entries);
+                } else {
+                    left.emplace(raw_halves[offset + 1], second_entries);
+                    right.emplace(raw_halves[offset], first_entries);
+                }
+            };
+            add_component(selected_cut, false, selected_left, selected_right);
+            add_component(complement_cut, true, complement_left,
+                          complement_right);
+        }
+        auto entries = [](const auto& layouts) {
+            U128 result = 0;
+            for (const auto& item : layouts) result += item.second;
+            return result;
+        };
+        const U128 left_entries = entries(selected_left) +
+                                  entries(complement_left);
+        const U128 right_entries = entries(selected_right) +
+                                   entries(complement_right);
+        std::printf(
+            "COLUMN_SPLIT_6X12_INDEPENDENT_LAYOUT size=%zu "
+            "selected_left=%zu complement_left=%zu selected_right=%zu "
+            "complement_right=%zu left_entries=%s right_entries=%s\n",
+            menu_size, selected_left.size(), complement_left.size(),
+            selected_right.size(), complement_right.size(),
+            u128_string(left_entries).c_str(),
+            u128_string(right_entries).c_str());
+    };
+    component_layout_stats(1);
+    component_layout_stats(4);
+    component_layout_stats(8);
+    component_layout_stats(16);
     std::unordered_set<PrefixKey> fixed_left;
     std::unordered_set<PrefixKey> oracle_left;
     for (size_t record = 0; record < records.size(); ++record) {
@@ -187,11 +307,14 @@ int main(int argc, char** argv) {
     std::printf(
         "COLUMN_SPLIT_6X12 samples=%zu cuts=%zu canonical_halves=%zu "
         "baseline=0x%03x best_fixed=0x%03x best_fixed_ratio=%.12f "
-        "oracle_ratio=%.12f fixed_left=%zu oracle_left=%zu "
+        "oracle_ratio=%.12f independent_oracle_ratio=%.12f "
+        "fixed_left=%zu oracle_left=%zu "
         "canonical_seconds=%.6f distribution_seconds=%.6f OK\n",
         records.size(), cuts.size(), canonical_keys.size(), cuts[baseline],
         cuts[best_fixed], double(total_for(best_fixed)) / double(baseline_cost),
-        double(oracle_cost) / double(baseline_cost), fixed_left.size(),
-        oracle_left.size(), canonical_seconds, distribution_seconds);
+        double(oracle_cost) / double(baseline_cost),
+        double(independent_oracle_cost) / double(baseline_cost),
+        fixed_left.size(), oracle_left.size(), canonical_seconds,
+        distribution_seconds);
     return 0;
 }
