@@ -439,6 +439,29 @@ static uint64_t left_prefix(U128 key) {
     return result;
 }
 
+static uint64_t right_prefix(U128 key) {
+    uint64_t result = 0;
+    for (unsigned row = 0; row < ROWS; ++row) {
+        const unsigned shift = COLUMNS * (ROWS - 1U - row);
+        result = (result << 6) | (uint64_t(key >> (shift + 6)) & 63U);
+    }
+    return result;
+}
+
+// Solve owners use a right-major key so ordinary numeric ordering is exactly
+// the solver's recurring (right,left) traversal.  Generator fragments retain
+// the interleaved grid representation needed by the canonical-parent path.
+static U128 right_major_key(U128 interleaved) {
+    return (U128(right_prefix(interleaved)) << 36) |
+           left_prefix(interleaved);
+}
+
+static U128 interleaved_key(U128 right_major) {
+    const uint64_t half_mask = (UINT64_C(1) << 36) - 1U;
+    return concatenate(uint64_t(right_major) & half_mask,
+                       uint64_t(right_major >> 36));
+}
+
 static OutputRecord output_record(U128 key, uint64_t weight) {
     if (weight >= (UINT64_C(1) << (64 - OUTPUT_KEY_BITS)))
         throw std::overflow_error("6x12 orbit weight overflow");
@@ -459,8 +482,8 @@ static void raise_file_limit(unsigned required) {
         throw std::runtime_error("setrlimit failed");
 }
 
-static void write_header(FILE* file, uint64_t records) {
-    const char magic[8] = "R6W1201";
+static void write_header(FILE* file, uint64_t records,
+                         const char (&magic)[8]) {
     const uint32_t columns = COLUMNS;
     if (std::fwrite(magic, sizeof(magic), 1, file) != 1 ||
         std::fwrite(&columns, sizeof(columns), 1, file) != 1 ||
@@ -486,7 +509,7 @@ public:
             if (!files_[shard])
                 throw std::runtime_error("cannot create output shard");
             std::setvbuf(files_[shard], nullptr, _IOFBF, 1U << 20);
-            write_header(files_[shard], 0);
+            write_header(files_[shard], 0, "R6W1201");
 #ifdef _OPENMP
             omp_init_lock(&locks_[shard]);
 #endif
@@ -517,7 +540,7 @@ public:
         for (unsigned shard = 0; shard < shards_; ++shard) {
             if (fseeko(files_[shard], 0, SEEK_SET))
                 throw std::runtime_error("output seek failed");
-            write_header(files_[shard], counts_[shard]);
+            write_header(files_[shard], counts_[shard], "R6W1201");
             if (std::fclose(files_[shard]))
                 throw std::runtime_error("output close failed");
             files_[shard] = nullptr;
@@ -1096,6 +1119,7 @@ static void run_self_test(unsigned maximum_columns) {
 struct CheckedRecord {
     OutputRecord record;
     unsigned owner;
+    bool right_major;
 };
 
 static void run_check_range(const char* table_path,
@@ -1114,14 +1138,17 @@ static void run_check_range(const char* table_path,
         std::memcpy(magic, file.data, 8);
         std::memcpy(&columns, file.data + 8, 4);
         std::memcpy(&count, file.data + 12, 8);
-        if (std::memcmp(magic, "R6W1201", 8) || columns != COLUMNS ||
+        const bool right_major = !std::memcmp(magic, "R6W1202", 8);
+        if ((!right_major && std::memcmp(magic, "R6W1201", 8)) ||
+            columns != COLUMNS ||
             file.bytes != 20 + count * sizeof(OutputRecord))
             throw std::runtime_error("invalid output shard");
         const uint8_t* input = file.data + 20;
         records.reserve(records.size() + size_t(count));
         for (uint64_t index = 0; index < count; ++index)
             records.push_back(CheckedRecord{
-                load_unaligned_record<OutputRecord>(input, index), owner});
+                load_unaligned_record<OutputRecord>(input, index), owner,
+                right_major});
         unmap_file(file);
     }
     std::vector<U128> keys(records.size());
@@ -1133,9 +1160,11 @@ static void run_check_range(const char* table_path,
     for (long long index = 0; index < (long long)records.size(); ++index) {
         const CheckedRecord& item = records[size_t(index)];
         const uint64_t weight = item.record.meta >> OUTPUT_KEY_BITS;
-        const U128 key =
+        const U128 stored_key =
             (U128(item.record.meta & OUTPUT_KEY_MASK) << 64) |
             item.record.low;
+        const U128 key = item.right_major ? interleaved_key(stored_key)
+                                          : stored_key;
         const unsigned cells = unsigned(__builtin_popcountll(item.record.low)) +
             unsigned(__builtin_popcountll(item.record.meta & OUTPUT_KEY_MASK));
         const CanonicalResult canonical =
@@ -1220,6 +1249,16 @@ static void run_reduce_owner(unsigned shards, unsigned owner,
     }
     if (bad_owner.load(std::memory_order_relaxed))
         throw std::runtime_error("bad fragment record");
+
+    // Convert once before the only global sort.  This representation is a
+    // bijection, so duplicate detection and all coefficient checks remain
+    // exact while every later GPU solve can consume the stored order.
+#pragma omp parallel for schedule(static)
+    for (long long index = 0; index < (long long)records.size(); ++index) {
+        OutputRecord& record = records[size_t(index)];
+        const uint64_t weight = record.meta >> OUTPUT_KEY_BITS;
+        record = output_record(right_major_key(record_key(record)), weight);
+    }
     std::sort(records.begin(), records.end(), [](const OutputRecord& a,
                                                   const OutputRecord& b) {
         return record_key(a) < record_key(b);
@@ -1243,7 +1282,7 @@ static void run_reduce_owner(unsigned shards, unsigned owner,
     const std::string temporary = std::string(output_path) + ".tmp";
     FILE* output = std::fopen(temporary.c_str(), "wb");
     if (!output) throw std::runtime_error("cannot create reduced owner");
-    write_header(output, records.size());
+    write_header(output, records.size(), "R6W1202");
     if (std::fwrite(records.data(), sizeof(OutputRecord), records.size(),
                     output) != records.size() ||
         std::fclose(output) || rename(temporary.c_str(), output_path))
@@ -1286,14 +1325,23 @@ static void run_check_full(const char* table_path,
         std::memcpy(magic, file.data, 8);
         std::memcpy(&columns, file.data + 8, 4);
         std::memcpy(&count, file.data + 12, 8);
-        if (std::memcmp(magic, "R6W1201", 8) || columns != COLUMNS ||
+        const bool right_major = !std::memcmp(magic, "R6W1202", 8);
+        if ((!right_major && std::memcmp(magic, "R6W1201", 8)) ||
+            columns != COLUMNS ||
             file.bytes != 20 + count * sizeof(OutputRecord))
             throw std::runtime_error("invalid solve shard");
         const uint8_t* source = file.data + 20;
+        U128 previous_stored_key = 0;
         for (uint64_t index = 0; index < count; ++index) {
             const OutputRecord record = load_unaligned_record<OutputRecord>(
                 source, index);
-            const U128 key = record_key(record);
+            const U128 stored_key = record_key(record);
+            if (right_major && index && stored_key <= previous_stored_key)
+                throw std::runtime_error(
+                    "right-major solve shard is not strictly sorted");
+            previous_stored_key = stored_key;
+            const U128 key = right_major ? interleaved_key(stored_key)
+                                         : stored_key;
             const uint64_t weight = record.meta >> OUTPUT_KEY_BITS;
             const unsigned cells = unsigned(__builtin_popcountll(record.low)) +
                 unsigned(__builtin_popcountll(record.meta & OUTPUT_KEY_MASK));

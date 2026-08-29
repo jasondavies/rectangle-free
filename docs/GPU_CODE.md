@@ -210,6 +210,9 @@ OMP_NUM_THREADS=16 ./build/binary_orbit_augment_6x12 generate-range \
 
 # Reduce owners independently; several owners may run concurrently. The
 # deleting form removes fragments only after publishing the checked output.
+# Reduction converts interleaved R6W1201 fragments into right-major R6W1202
+# solve shards sorted by (right half,left half); the GPU solver consumes that
+# order directly and does not repeat the sort.
 ./build/binary_orbit_augment_6x12 reduce-owner-delete \
     256 OWNER solve/sNNNN.orbits fragments/g*.sNNNN.orbits
 

@@ -15414,3 +15414,26 @@
   production 6x12 corpus path.  Isomorph-free generation is the better local
   strategy; the large conventional RAM estimate applied only to the discarded
   global child hash table.
+
+### Experiment 455: Solve-ready right-major 6x12 corpus
+
+- Goal: remove the recurring comparison sort from every future `6x12` solve.
+  A 256-way production owner averages about 79.0 million records, while the
+  reducer already performs one exact global sort to reject duplicates across
+  the 64 independent generator ranges.
+- Format: retain the compact 16-byte record and exact weight field, but emit
+  `R6W1202` owners with the 72-bit key represented as `(right_36,left_36)`.
+  Numeric key order is therefore exactly the solver's `(right,left)` traversal.
+  Generator fragments remain interleaved `R6W1201`; reduction applies the
+  bijective layout conversion before sorting and writes only `R6W1202`.
+- Solver integration: extract both halves with shifts and masks, reserve the
+  complete retained span rather than half of it, verify stored order linearly,
+  and omit `std::sort`.  Range and ownership filtering preserve the order.
+- Exact gate: three independently generated owner-0 fragments reduce to
+  3,296,879 strictly ordered `R6W1202` records.  The independent range checker
+  reconstructs the interleaved grids and validates canonicality, automorphism
+  weights, p16 cuts, ownership, uniqueness, and the exact retained/midpoint
+  sums.  The existing `R6W1201` fragment path remains unchanged.
+- Outcome: accept the right-major solve ABI.  This moves an unavoidable sort
+  into the existing one-time reduction and prevents all 256 campaign work
+  items from sorting their approximately 1.18-GiB inputs again.

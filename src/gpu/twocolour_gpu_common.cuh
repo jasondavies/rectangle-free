@@ -574,6 +574,12 @@ static int cell_count(uint64_t key) {
 static PrefixKey orbit_left_prefix(const OrbitRecord& record) {
 #ifdef TWCOLOUR_WIDE_ORBIT_RECORD
     U128 key = (U128(record.meta & WIDE_ORBIT_KEY_MASK) << 64) | record.low;
+#ifdef TWCOLOUR_RIGHT_MAJOR_ORBIT_RECORD
+    constexpr unsigned half_bits = ROWS * LEFT_COLUMNS;
+    static_assert(LEFT_COLUMNS == RIGHT_COLUMNS,
+                  "right-major records require equal-width halves");
+    return PrefixKey(key & ((U128(1) << half_bits) - 1U));
+#else
     PrefixKey result = 0;
     const U128 row_mask = (U128(1) << ROW_BITS) - 1U;
     for (int row = 0; row < ROWS; row++) {
@@ -583,6 +589,7 @@ static PrefixKey orbit_left_prefix(const OrbitRecord& record) {
                  (pattern & ((PrefixKey(1) << LEFT_COLUMNS) - 1U));
     }
     return result;
+#endif
 #else
     return left_prefix(record.key);
 #endif
@@ -591,6 +598,12 @@ static PrefixKey orbit_left_prefix(const OrbitRecord& record) {
 static PrefixKey orbit_right_prefix(const OrbitRecord& record) {
 #ifdef TWCOLOUR_WIDE_ORBIT_RECORD
     U128 key = (U128(record.meta & WIDE_ORBIT_KEY_MASK) << 64) | record.low;
+#ifdef TWCOLOUR_RIGHT_MAJOR_ORBIT_RECORD
+    constexpr unsigned half_bits = ROWS * LEFT_COLUMNS;
+    static_assert(LEFT_COLUMNS == RIGHT_COLUMNS,
+                  "right-major records require equal-width halves");
+    return PrefixKey(key >> half_bits);
+#else
     PrefixKey result = 0;
     const U128 row_mask = (U128(1) << ROW_BITS) - 1U;
     for (int row = 0; row < ROWS; row++) {
@@ -601,6 +614,7 @@ static PrefixKey orbit_right_prefix(const OrbitRecord& record) {
                   ((PrefixKey(1) << RIGHT_COLUMNS) - 1U));
     }
     return result;
+#endif
 #else
     return right_prefix(record.key);
 #endif
@@ -635,7 +649,7 @@ static std::vector<Edge> read_edges(const std::string& path, uint64_t start,
     input.read(magic, 8);
     input.read(reinterpret_cast<char*>(&columns), sizeof(columns));
     input.read(reinterpret_cast<char*>(&count), sizeof(count));
-    if (!input || std::memcmp(magic, ORBIT_MAGIC, 7) || columns != COLUMNS) {
+    if (!input || std::memcmp(magic, ORBIT_MAGIC, 8) || columns != COLUMNS) {
         throw std::runtime_error("invalid orbit file");
     }
     if (!end) end = count;
@@ -649,7 +663,11 @@ static std::vector<Edge> read_edges(const std::string& path, uint64_t start,
     std::vector<Edge> edges;
     const uint64_t span = read_end - read_start;
     const uint64_t filtered_span = filter_mod ? span / filter_mod : span;
+#ifdef TWCOLOUR_RETAINED_ORBIT_CORPUS
+    edges.reserve(size_t(filtered_span + 1));
+#else
     edges.reserve(size_t(filtered_span / 2 + 1));
+#endif
     for (uint64_t index = read_start; index < read_end; index++) {
         OrbitRecord record;
         input.read(reinterpret_cast<char*>(&record), sizeof(record));
@@ -667,10 +685,20 @@ static std::vector<Edge> read_edges(const std::string& path, uint64_t start,
                 Edge{left, orbit_right_prefix(record), weight, factor});
         }
     }
+#ifndef TWCOLOUR_RIGHT_MAJOR_ORBIT_RECORD
     std::sort(edges.begin(), edges.end(), [](const Edge& a, const Edge& b) {
         if (a.right != b.right) return a.right < b.right;
         return a.left < b.left;
     });
+#else
+    if (!std::is_sorted(edges.begin(), edges.end(),
+                        [](const Edge& a, const Edge& b) {
+                            return a.right != b.right ? a.right < b.right
+                                                      : a.left < b.left;
+                        })) {
+        throw std::runtime_error("right-major orbit file is not sorted");
+    }
+#endif
     return edges;
 }
 
