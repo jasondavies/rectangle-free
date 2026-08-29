@@ -243,7 +243,8 @@ $(BUILD_DIR)/six_by_twelve_fixed_cost: \
 
 $(BUILD_DIR)/six_by_twelve_cut_select: \
 		tools/corpus/six_by_twelve_cut_select.cpp \
-		src/gpu/twocolour_gpu_common.cuh
+		src/gpu/twocolour_gpu_common.cuh \
+		src/gpu/six_by_six_cache_artifact.hpp
 	$(CXX) -O3 -march=native -std=c++17 $(OPENMP_CFLAGS) -Isrc/gpu \
 		-o $@ $< $(OPENMP_LDFLAGS)
 
@@ -440,6 +441,7 @@ $(BUILD_DIR)/twocolour_6x11_prefix_gpu: src/gpu/twocolour_6x11_prefix_solve.cu \
 $(BUILD_DIR)/twocolour_6x12_prefix_gpu: src/gpu/twocolour_6x12_prefix_solve.cu \
 		src/gpu/twocolour_8x8_prefix_solve.cu \
 		src/gpu/twocolour_weight_class_join.cuh src/gpu/twocolour_canonical_device.cuh \
+		src/gpu/six_by_six_cache_artifact.hpp src/gpu/six_by_six_cache_mapped.hpp \
 		src/gpu/gpu_cuda_utils.cuh src/gpu/twocolour_prefix_algebra.cuh \
 		src/gpu/twocolour_gpu_common.cuh src/gpu/gpu_memory_policy.hpp \
 		src/gpu/gpu_result_checkpoint.hpp src/common/sha256.hpp

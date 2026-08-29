@@ -21,6 +21,11 @@
 #include "twocolour_prefix_algebra.cuh"
 #include "gpu_memory_policy.hpp"
 
+#ifdef TWCOLOUR_SIX_BY_SIX_CACHE_ARTIFACT
+#include "six_by_six_cache_mapped.hpp"
+static const MappedSixBySixCache* active_six_by_six_cache = nullptr;
+#endif
+
 #include <filesystem>
 #include <sstream>
 
@@ -62,6 +67,15 @@ static std::vector<uint32_t> schedule_prefix_heavy_first(
 static std::vector<std::array<CanonicalRef, 2>> resolve_canonical_refs(
     const std::vector<PrefixKey>& keys, const CanonicalFactory& factory) {
     std::vector<std::array<CanonicalRef, 2>> result(keys.size());
+#ifdef TWCOLOUR_SIX_BY_SIX_CACHE_ARTIFACT
+    if (active_six_by_six_cache) {
+#pragma omp parallel for schedule(static)
+        for (long long index = 0; index < (long long)keys.size(); ++index)
+            result[size_t(index)] = active_six_by_six_cache->resolve(
+                keys[size_t(index)]);
+        return result;
+    }
+#endif
     std::vector<size_t> unresolved;
     unresolved.reserve(keys.size());
     size_t raw_index = 0;
@@ -132,7 +146,11 @@ int main(int argc, char** argv) {
     if (argc < 4 || argc > 6) {
         std::fprintf(
             stderr,
+#ifdef TWCOLOUR_SIX_BY_SIX_CACHE_ARTIFACT
+            "Usage: %s CANONICAL_CACHE.bin WORK.tsv RESULTS_DIR "
+#else
             "Usage: %s CANONICAL_SEED.orbits WORK.tsv RESULTS_DIR "
+#endif
             "[BATCH_EDGES=auto] [VERIFY_JOINS=4]\n\n"
             "WORK.tsv columns: ID ORBITS START END [FILTER_MOD FILTER_ID]\n",
             argv[0]);
@@ -176,10 +194,30 @@ int main(int argc, char** argv) {
     validate_mask_split();
     validate_row_map_algebra();
 
-    // Build and upload the canonical source cache once, then retain it while
-    // solving every pending manifest item. Equal-width geometries share one
-    // cache; asymmetric splits retain independent left and right caches.
+    // Map/build and upload the canonical source cache once, then retain it
+    // while solving every pending manifest item. Equal-width geometries share
+    // one cache; asymmetric splits retain independent left and right caches.
     double session_start = seconds_now();
+#ifdef TWCOLOUR_SIX_BY_SIX_CACHE_ARTIFACT
+    U128 seed_labelled_weight = 0;
+    uint64_t seed_records = 0;
+    double seed_load_seconds = 0;
+    std::vector<Edge> seed_edges;
+    double factory_start = seconds_now();
+    auto six_by_six_cache =
+        std::make_unique<MappedSixBySixCache>(seed_path);
+    active_six_by_six_cache = six_by_six_cache.get();
+    CanonicalFactory left_factory = six_by_six_cache->factory();
+    CanonicalFactory right_factory_storage;
+    const CanonicalFactory* right_factory = &left_factory;
+    double cache_factory_seconds = seconds_now() - factory_start;
+    double canonical_upload_start = seconds_now();
+    ProductionCanonicalDevice left_canonical =
+        upload_production_canonical(*six_by_six_cache);
+    ProductionCanonicalDevice right_canonical_storage;
+    const ProductionCanonicalDevice* right_canonical = &left_canonical;
+    double cache_upload_seconds = seconds_now() - canonical_upload_start;
+#else
     U128 seed_labelled_weight = 0;
     uint64_t seed_records = 0;
     double seed_load_start = seconds_now();
@@ -226,6 +264,7 @@ int main(int argc, char** argv) {
     // pages before constructing per-work-item host layouts so several GPU
     // workers can safely share one host.
     malloc_trim(0);
+#endif
 #endif
     std::printf(
         "PREFIX_SHARED_CACHE seed=%s paths=%zu left_canonical_sources=%zu "

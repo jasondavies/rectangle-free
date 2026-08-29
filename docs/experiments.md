@@ -15437,3 +15437,32 @@
 - Outcome: accept the right-major solve ABI.  This moves an unavoidable sort
   into the existing one-time reduction and prevents all 256 campaign work
   items from sorting their approximately 1.18-GiB inputs again.
+
+### Experiment 456: Persistent quotient 6x6 canonical cache
+
+- Goal: eliminate the recurring 6x6 canonical-factory construction from every
+  `6x12` GPU worker.  The earlier 6x11 campaign showed that constructing a
+  large half cache independently in each process creates both a long startup
+  and a very high transient host-memory requirement.
+- `six_by_twelve_cut_select build-cache` now constructs each of the 251,610
+  canonical 6x6 distributions once, applies the mandatory token-plane
+  quotient, and writes a versioned read-only artifact.  Its fixed census is
+  3,469,067,567 support representatives.  Each representative stores a
+  32-bit token mask and an 8-bit orbit-aware weight-class ordinal; class
+  weights and orbit sizes are stored once per canonical distribution.
+- The same artifact contains a 119,877,472-entry table over all multisets of
+  six 6-bit columns.  A raw labelled half is resolved to `(distribution ID,
+  row map)` by one multiset rank and one lookup; selected and complement refs
+  therefore avoid the former 720-way row/column canonicalisation.
+- The artifact occupies about 17.8 GB (16.6 GiB), is memory-mapped on the host,
+  and is uploaded directly into the production grouped-layout representation.
+  Equal-width 6+6 joins share one device copy.  Multiple workers on a host can
+  share the operating-system page cache instead of retaining private factory
+  allocations.
+- `check-cache` independently reconstructs selected and complement
+  distributions for deterministic raw masks and checks the stored IDs, row
+  maps, masks, weights, and token-plane orbits exactly.  The solver's existing
+  run provenance hashes the artifact, binding every result to its contents.
+- Status: the CPU builder and loader compile locally.  Full artifact
+  construction and the CUDA A/B gate are deferred until the concurrent 6x12
+  corpus generation releases CPU and storage bandwidth.

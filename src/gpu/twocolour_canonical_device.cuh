@@ -85,6 +85,48 @@ static ProductionCanonicalDevice upload_production_canonical(
     return result;
 }
 
+#ifdef TWCOLOUR_SIX_BY_SIX_CACHE_ARTIFACT
+static ProductionCanonicalDevice upload_production_canonical(
+    const MappedSixBySixCache& artifact) {
+    ProductionCanonicalDevice result;
+    const auto& header = artifact.header();
+    result.entry_count = size_t(header.entry_count);
+    const double start = seconds_now();
+    result.weight_spans.resize(size_t(header.canonical_count));
+    for (size_t index = 0; index < result.weight_spans.size(); ++index) {
+        const uint32_t count = artifact.class_counts[index];
+        if (!count || count > header.class_slots)
+            throw std::runtime_error("invalid artifact weight-class count");
+        result.weight_spans[index] = CanonicalWeightSpan{
+            uint32_t(index * header.class_slots), count};
+        result.maximum_distribution_weights = std::max<size_t>(
+            result.maximum_distribution_weights, count);
+    }
+    const size_t class_count =
+        size_t(header.canonical_count * header.class_slots);
+    result.class_weight_count = class_count;
+    result.masks.reserve(result.entry_count);
+    result.weight_ordinals.reserve(result.entry_count);
+    result.class_weights.reserve(class_count);
+    result.class_orbit_sizes.reserve(class_count);
+    CUDA_CHECK(cudaMemcpy(result.masks.get(), artifact.masks,
+                          result.entry_count * sizeof(CanonicalDeviceMask),
+                          cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(result.weight_ordinals.get(), artifact.ordinals,
+                          result.entry_count * sizeof(uint8_t),
+                          cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(result.class_weights.get(), artifact.class_weights,
+                          class_count * sizeof(uint32_t),
+                          cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(result.class_orbit_sizes.get(),
+                          artifact.class_orbits,
+                          class_count * sizeof(uint8_t),
+                          cudaMemcpyHostToDevice));
+    result.weight_table_seconds = seconds_now() - start;
+    return result;
+}
+#endif
+
 static DeviceWeightClassLayout build_direct_weight_class_layout_from_refs(
     const std::vector<std::array<CanonicalRef, 2>>& references,
     const CanonicalFactory& factory,
