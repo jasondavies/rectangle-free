@@ -376,12 +376,19 @@ int main(int argc, char** argv) {
             entries, PREFIX_BUCKET_COUNT);
         const uint64_t weight_count =
             right_canonical->weight_spans[reference.distribution].count;
+        const uint64_t candidates = buckets * weight_count;
+        // A physical class needs both at least one entry and one nonempty
+        // candidate slot.  min(entries,candidates) is therefore an exact
+        // upper bound; charging one class for every support entry grossly
+        // overestimates large six-row distributions.
+        const uint64_t classes = std::min(entries, candidates);
         // Final suffix/class storage, bucket and scratch metadata, candidate
         // counters, the dense prefix histogram, and one build description.
-        return entries * (sizeof(PrefixSuffix) + sizeof(WeightClassMeta)) +
+        return entries * sizeof(PrefixSuffix) +
+               classes * sizeof(WeightClassMeta) +
                buckets * (sizeof(PrefixBucket) + sizeof(DirectBucketAux) +
                           sizeof(uint32_t)) +
-               buckets * weight_count * sizeof(uint32_t) +
+               candidates * sizeof(uint32_t) +
                uint64_t(PREFIX_BUCKET_COUNT) * sizeof(uint32_t) +
                sizeof(uint32_t) + sizeof(DirectWeightBuildDesc);
     };

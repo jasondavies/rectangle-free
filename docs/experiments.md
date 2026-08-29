@@ -15499,8 +15499,16 @@
 - This change is geometry-neutral and benefits the maintained 6x11, 6x12, and
   8x8 drivers.  It should permit larger batches when large supports dominate
   while preventing late allocation failures when per-distribution metadata
-  dominates.  CUDA runtime validation remains part of the next remote A/B
-  gate.
+  dominates.
+- The first exact RTX PRO 6000 gate exposed an overly loose class bound: one
+  class per entry predicted 77.0 GB for a batch which used only about 17 GB.
+  A class requires both an entry and a nonempty `(bucket,weight)` candidate,
+  so `min(entries,buckets*weight_count)` is a tighter exact upper bound.  With
+  that correction the 1,400,499-edge pilot uses 14 rather than 17 batches,
+  reaches the independent `2^32` entry-offset cap, and retains 58.37 GB free.
+  The exact contribution and all 16 CPU joins agree.  Right construction is
+  essentially unchanged (`6.767826s` versus `6.769698s`), showing that this is
+  principally a capacity/safety correction rather than a throughput win.
 
 ### Experiment 458: 6x12 exact join-signature reuse census
 
@@ -15522,3 +15530,32 @@
   halves already map to distinct labelled distribution signatures in this
   workload.  Extra maps, coefficient aggregation, and layout indirection have
   a measured zero-work-removal ceiling.
+
+### Experiment 459: Persistent-cache CUDA production gate
+
+- Environment: one Verda FIN-02 spot RTX PRO 6000 Blackwell (96 GB), 30 host
+  CPUs, CUDA 13.0, and an architecture-specific `sm_120a` cubin.  CUDA 12.8
+  and ordinary `sm_120` compilation correctly reject the production NVFP4
+  block-scale instruction; the required build spelling is
+  `-gencode arch=compute_120a,code=sm_120a`.
+- Rebuilding the immutable cache on the worker is much cheaper than uploading
+  it over the WAN.  From the 915-MiB support table and 4-MiB canonical corpus,
+  the 30-thread build takes 21.370 seconds for distributions, 0.736 seconds
+  for references, and 3.302 seconds to flush.  Its SHA-256 exactly matches the
+  local artifact.  Uploading the resulting device representation takes
+  1.261--1.433 seconds and canonical-reference resolution takes about 16 ms.
+- Exact pilot: 1,400,499 right-major production records, 41,379 persistent
+  left layouts, and 1,135,608 right layouts reproduce contribution
+  `2442457886187284365628697993216000`.  All 16 stratified scalar joins pass.
+  The tightened production planner takes 6.770 seconds for all right layouts,
+  15.042 seconds for the NVFP4 join, and 24.719 seconds measured end to end,
+  including 1.271 seconds of deliberately broad CPU validation.  It executes
+  72,627,671,482,632 logical comparisons at 4.828 Tcomparison/s.
+- The self-identifying checkpoint hashes the 16.6-GiB artifact once per solver
+  process before measured solve time.  This portable SHA implementation costs
+  roughly 49 seconds on the worker, but is amortized across every manifest
+  item in a production process; with about 32 owners per GPU it is around 1.5
+  seconds per owner and not a campaign bottleneck.
+- Outcome: pass the CPU artifact, native CUDA compile, exact result, and device
+  memory gates.  Preserve the two pilot result records under
+  `../rectangle-free-data-v2/profiles/verda-rtxpro6000-6x12-cache-gate-20260829/`.
