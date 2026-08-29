@@ -36,11 +36,11 @@ static const MappedSixBySixCache* active_six_by_six_cache = nullptr;
 #endif
 
 static constexpr uint64_t PREFIX_DEFAULT_DEVICE_RESERVE_BYTES = UINT64_C(2) << 30;
-#ifndef TWCOLOUR_ESTIMATED_RIGHT_BYTES_PER_ENTRY
-#define TWCOLOUR_ESTIMATED_RIGHT_BYTES_PER_ENTRY 28
+#ifndef TWCOLOUR_ESTIMATED_EDGE_DEVICE_BYTES
+#define TWCOLOUR_ESTIMATED_EDGE_DEVICE_BYTES 48
 #endif
-static constexpr uint64_t PREFIX_ESTIMATED_RIGHT_BYTES_PER_ENTRY =
-    TWCOLOUR_ESTIMATED_RIGHT_BYTES_PER_ENTRY;
+static constexpr uint64_t PREFIX_ESTIMATED_EDGE_DEVICE_BYTES =
+    TWCOLOUR_ESTIMATED_EDGE_DEVICE_BYTES;
 
 namespace fs = std::filesystem;
 
@@ -365,25 +365,41 @@ int main(int argc, char** argv) {
         left_canonical.maximum_distribution_weights,
         left_canonical.weight_table_seconds);
 
-    // The fixed reserve covers builder scratch, joins, results, and allocator
-    // variation around the direct grouped layout.
-    constexpr uint64_t estimated_right_bytes_per_entry =
-        PREFIX_ESTIMATED_RIGHT_BYTES_PER_ENTRY;
-    uint64_t right_entry_budget = free_bytes > device_reserve_bytes
-        ? uint64_t(free_bytes - device_reserve_bytes) /
-              estimated_right_bytes_per_entry
-        : 1;
+    // Estimate the actual buffers allocated by the direct builder.  A fixed
+    // bytes/entry ratio misses the dense prefix map and candidate alphabet,
+    // which matter most for batches containing many small distributions.
+    auto estimated_distribution_device_bytes = [&](CanonicalRef reference) {
+        const CanonicalDescriptor descriptor =
+            right_factory->descriptors[reference.distribution];
+        const uint64_t entries = descriptor.count;
+        const uint64_t buckets = std::min<uint64_t>(
+            entries, PREFIX_BUCKET_COUNT);
+        const uint64_t weight_count =
+            right_canonical->weight_spans[reference.distribution].count;
+        // Final suffix/class storage, bucket and scratch metadata, candidate
+        // counters, the dense prefix histogram, and one build description.
+        return entries * (sizeof(PrefixSuffix) + sizeof(WeightClassMeta)) +
+               buckets * (sizeof(PrefixBucket) + sizeof(DirectBucketAux) +
+                          sizeof(uint32_t)) +
+               buckets * weight_count * sizeof(uint32_t) +
+               uint64_t(PREFIX_BUCKET_COUNT) * sizeof(uint32_t) +
+               sizeof(uint32_t) + sizeof(DirectWeightBuildDesc);
+    };
+    const uint64_t right_device_budget = free_bytes > device_reserve_bytes
+        ? uint64_t(free_bytes - device_reserve_bytes) : 1;
+    uint64_t right_entry_budget = uint64_t(UINT32_MAX) + 1;
     // DirectWeightBuildDesc stores destination offsets in uint32_t.  A single
     // layout may contain exactly 2^32 entries but cannot address beyond it.
-    right_entry_budget = std::min<uint64_t>(
-        right_entry_budget, uint64_t(UINT32_MAX) + 1);
     std::vector<std::pair<size_t, size_t>> batch_ranges;
     std::vector<std::pair<size_t, size_t>> batch_right_ranges;
+    std::vector<uint64_t> batch_estimated_device_bytes;
     size_t right_cursor = 0;
+    uint64_t maximum_estimated_device_bytes = 0;
     for (size_t begin = 0; begin < edges.size();) {
         size_t end = begin;
         size_t right_begin = right_cursor;
         uint64_t batch_right_entries = 0;
+        uint64_t batch_layout_bytes = 0;
         while (end < edges.size()) {
             PrefixKey right = edges[end].right;
             size_t group_end = end + 1;
@@ -399,17 +415,36 @@ int main(int argc, char** argv) {
                 right_factory->descriptors[references[0].distribution].count +
                 uint64_t(right_factory->descriptors[
                     references[1].distribution].count);
+            const uint64_t group_layout_bytes =
+                estimated_distribution_device_bytes(references[0]) +
+                estimated_distribution_device_bytes(references[1]);
+            const uint64_t projected_edge_bytes =
+                uint64_t(group_end - begin) *
+                PREFIX_ESTIMATED_EDGE_DEVICE_BYTES;
+            const uint64_t projected_device_bytes = batch_layout_bytes +
+                group_layout_bytes + projected_edge_bytes;
             bool exceeds_kernels = end != begin &&
                 group_end - begin > batch_edges;
             bool exceeds_entries = end != begin &&
                 batch_right_entries + group_entries > right_entry_budget;
-            if (exceeds_kernels || exceeds_entries) break;
+            bool exceeds_device = end != begin &&
+                projected_device_bytes > right_device_budget;
+            if (exceeds_kernels || exceeds_entries || exceeds_device) break;
+            if (end == begin && projected_device_bytes > right_device_budget)
+                throw std::runtime_error(
+                    "one right group exceeds the structural device budget");
             batch_right_entries += group_entries;
+            batch_layout_bytes += group_layout_bytes;
             end = group_end;
             right_cursor++;
         }
         batch_ranges.emplace_back(begin, end);
         batch_right_ranges.emplace_back(right_begin, right_cursor);
+        const uint64_t estimated_device_bytes = batch_layout_bytes +
+            uint64_t(end - begin) * PREFIX_ESTIMATED_EDGE_DEVICE_BYTES;
+        batch_estimated_device_bytes.push_back(estimated_device_bytes);
+        maximum_estimated_device_bytes = std::max(
+            maximum_estimated_device_bytes, estimated_device_bytes);
         begin = end;
     }
     if (right_cursor != right_keys.size()) {
@@ -417,12 +452,14 @@ int main(int argc, char** argv) {
     }
     std::printf(
         "PREFIX_BATCH_PLAN batches=%zu batch_edges=%zu blocks_per_edge=2 "
-        "right_entry_budget=%llu reserve_bytes=%llu "
-        "estimated_bytes_per_entry=%llu\n",
+        "right_entry_budget=%llu right_device_budget=%llu reserve_bytes=%llu "
+        "estimated_edge_bytes=%llu maximum_estimated_device_bytes=%llu\n",
         batch_ranges.size(), batch_edges,
         (unsigned long long)right_entry_budget,
+        (unsigned long long)right_device_budget,
         (unsigned long long)device_reserve_bytes,
-        (unsigned long long)estimated_right_bytes_per_entry);
+        (unsigned long long)PREFIX_ESTIMATED_EDGE_DEVICE_BYTES,
+        (unsigned long long)maximum_estimated_device_bytes);
 
     U128 contribution = 0;
     U128 covered_weight = 0;
@@ -588,10 +625,12 @@ int main(int argc, char** argv) {
             batch_number + 1 == batch_ranges.size()) {
             std::printf(
                 "PREFIX_BATCH number=%zu kernels=%zu right_groups=%zu "
-                "right_entries=%zu right_buckets=%zu gpu_seconds=%.6f "
+                "right_entries=%zu right_buckets=%zu estimated_device_bytes=%llu "
+                "gpu_seconds=%.6f "
                 "completed=%zu/%zu\n",
                 batch_number + 1, end - begin, group_keys.size(),
                 batch_right_entries, batch_right_buckets,
+                (unsigned long long)batch_estimated_device_bytes[batch_number],
                 gpu_seconds, end, edges.size());
         }
     }
@@ -658,6 +697,9 @@ int main(int argc, char** argv) {
         << "maximum_right_entries " << maximum_right_entries << "\n"
         << "maximum_right_buckets " << maximum_right_buckets << "\n"
         << "effective_right_entry_cap " << right_entry_budget << "\n"
+        << "right_device_budget " << right_device_budget << "\n"
+        << "maximum_estimated_device_bytes "
+        << maximum_estimated_device_bytes << "\n"
         << "verified " << checked << "\n"
         << "direct_comparisons " << u128_string(comparisons) << "\n"
         << "contribution " << u128_string(contribution) << "\n"

@@ -15466,3 +15466,27 @@
 - Status: the CPU builder and loader compile locally.  Full artifact
   construction and the CUDA A/B gate are deferred until the concurrent 6x12
   corpus generation releases CPU and storage bandwidth.
+
+### Experiment 457: Structural right-batch memory planning
+
+- Goal: replace the inherited 28-bytes-per-entry batching heuristic.  Device
+  memory for a grouped layout is not linear in support size alone: every
+  labelled distribution also creates a dense prefix histogram, occupied
+  bucket metadata, a variable-width candidate alphabet, class offsets, and
+  join/result records.  Many small distributions are therefore the failure
+  mode of the old estimate.
+- The planner now bounds each selected/complement description from its known
+  support count and exact canonical weight-alphabet width.  It accounts for
+  final suffixes and classes, maximum occupied buckets, builder scratch,
+  candidate counters, and 48 bytes of join/result device storage per outer
+  edge.  The 32-bit destination-offset limit remains an independent hard cap.
+- Batches are formed against the actual free memory observed after the shared
+  canonical cache and persistent left layout have been allocated.  The fixed
+  2-GiB reserve remains for allocator variation and small global buffers.
+  Planned and maximum estimated device bytes are recorded in logs and result
+  checkpoints, making a future GPU gate directly auditable.
+- This change is geometry-neutral and benefits the maintained 6x11, 6x12, and
+  8x8 drivers.  It should permit larger batches when large supports dominate
+  while preventing late allocation failures when per-distribution metadata
+  dominates.  CUDA runtime validation remains part of the next remote A/B
+  gate.
