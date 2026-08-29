@@ -181,23 +181,52 @@ for the non-CUDA campaign regression suite.
 
 The prospective 6x12 corpus uses the fixed sixteen-cut portfolio selected in
 Experiment 452. Do not run the exact tile materializer over its projected
-20.23 billion records. Build the complete read-only half-support table once,
-then rewrite an existing corpus in place with bounded lookup work:
+20.23 billion records. Build the complete read-only half-support table once:
 
 ```bash
 make six_by_twelve_cut_select
 ./build/six_by_twelve_cut_select build-table \
     CANONICAL_6x6.orbits support-table.bin
-./build/six_by_twelve_cut_select select-in-place \
-    support-table.bin CORPUS_6x12.orbits 16
 ```
 
 The table is 0.893 GiB and may be shared read-only by all generator workers.
-The selector has constant auxiliary memory, preserves every orbit weight, and
-only permutes columns before choosing which six-column half is resident. Use
-the non-destructive `select TABLE INPUT OUTPUT 16` form when enough storage is
-available. A generator can equivalently apply the same lookup immediately
-before it serializes each final record, avoiding the post-pass.
+The selector preserves every orbit weight and only permutes columns before
+choosing which six-column half is resident.
+
+For a new corpus, use the isomorph-free generator rather than materializing an
+ordinary augmentation hash table. It extends each unique retained `R6W1101`
+6x11 parent, accepts only the distinguished-column canonical parent, obtains
+the child weight directly from its automorphism group, and applies the p16 cut
+before writing:
+
+```bash
+make binary_orbit_augment_6x12
+./build/binary_orbit_augment_6x12 self-test
+
+# START/END make each invocation an independently restartable parent range;
+# END=0 means the end of this parent shard. Use a unique gNNNN prefix.
+OMP_NUM_THREADS=16 ./build/binary_orbit_augment_6x12 generate-range \
+    support-table.bin PARENT_6x11.orbits START END 256 fragments/gNNNN
+
+# Reduce owners independently; several owners may run concurrently. The
+# deleting form removes fragments only after publishing the checked output.
+./build/binary_orbit_augment_6x12 reduce-owner-delete \
+    256 OWNER solve/sNNNN.orbits fragments/g*.sNNNN.orbits
+
+./build/binary_orbit_augment_6x12 check-full \
+    support-table.bin solve/s*.orbits
+```
+
+`reduce-owner` retains its inputs and is the safer first dry run.
+`check-range` fully canonicalizes, weighs, and deduplicates pilot fragments;
+`check-full` streams the production shards and enforces the known record,
+midpoint, labelled-weight, and `2^72` coverage invariants. With 256 owners the
+301.46-GiB corpus averages 1.18 GiB per final shard. Generation needs roughly
+1--2 GiB per process including its mapped support and parent inputs;
+reconstructing the unique 6x11
+parent corpus with the existing generator remains the peak-RAM phase at about
+71 GiB. The older `six_by_twelve_cut_select select-in-place` mode remains
+available only for an already materialized corpus.
 
 `make gpu-code-dump` regenerates `build/code-dump.txt` from the current maintained
 surface for external review; the generated file is intentionally untracked.

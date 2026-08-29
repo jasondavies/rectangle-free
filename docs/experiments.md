@@ -15365,3 +15365,52 @@
   only: every selected 6+6 column permutation is an exact representation of
   the same outer orbit, so neither the proxy nor a corrupted cost ordering can
   alter the mathematical answer.
+
+### Experiment 454: Low-memory isomorph-free 6x12 corpus generation
+
+- Goal: generate the complete 20,230,535,486-record p16 corpus on the local
+  256-GiB machine without a multi-hundred-GiB child hash table or a second
+  301.46-GiB post-selection corpus.
+- `binary_orbit_augment_6x12` applies the production-proven canonical-parent
+  construction from Experiment 273 to six rows.  It reconstructs the necessary
+  ordinary orientations of each retained 6x11 parent (midpoint input already
+  contains both complement orbits), tries all 64 appended columns,
+  retains the child only when that distinguished column has the canonical
+  deletion parent, and derives the orbit weight exactly as
+  `6! 12! / |Aut(child)|`.  The p16 support selector runs before serialization.
+  Per-parent local deduplication covers coincident accepted paths without a
+  global generation hash.
+- Widths one through six were exhaustively compared with ordinary weighted
+  augmentation.  The record counts are `7, 50, 386, 3,250, 28,576, 251,610`,
+  every record and weight agrees, and each labelled-weight sum is exactly
+  `2^(6n)`.  An independent exhaustive 720-row-permutation canonicalizer also
+  agrees on random widths through twelve.
+- Restart ranges write 256 owner fragments through bounded per-thread buffers.
+  Owner reduction sorts only one approximately 1.18-GiB final shard at a time,
+  rejects a duplicate key across any generator ranges, and can atomically
+  publish before deleting its inputs.  A three-range, 7,805,168-record test
+  passed canonicality, direct automorphism weights, p16 choice, ownership, and
+  global uniqueness after reduction.
+- A realistic one-million-record 6x10 source sample first produced 7,236,612
+  unique 6x11 parents.  Extending them examined 866,423,168 candidates, emitted
+  43,997,198 records, and completed in 26.890 seconds: 32.22 million candidates
+  per second with 1,244.8 MiB peak RSS including the mapped 0.893-GiB table.
+  The complete independent range checker then validated all 43,997,198 output
+  records.  Stratified samples project the 386,479,518,720-candidate production
+  extension at about 3.3--4.0 hours on the local 16-thread machine.
+- Full known invariants are embedded in the streaming checker: 20,230,535,486
+  retained records, 3,233,916,267 midpoint records, midpoint labelled weight
+  `C(72,36)`, retained labelled weight `(2^72+C(72,36))/2`, and complement
+  coverage `2*retained-midpoint=2^72`.
+- The existing unique 6x11 corpus regeneration is expected to take roughly
+  1--1.5 hours and peak near 71 GiB.  Allowing owner reduction and full I/O
+  validation, the complete local preparation projects to roughly 5.5--8.5
+  wall-clock hours and 301.46 GiB of final storage.  This is comfortably within
+  256 GiB RAM; a 720-GiB machine is unnecessary.
+- AddressSanitizer and UndefinedBehaviorSanitizer pass the exhaustive self-test,
+  generation, owner reduction, and range validation.  The sanitizer exposed
+  and fixed unaligned mapped-record loads caused by the format's 20-byte header.
+- Outcome: accept canonical-parent streaming with fused p16 selection as the
+  production 6x12 corpus path.  Isomorph-free generation is the better local
+  strategy; the large conventional RAM estimate applied only to the discarded
+  global child hash table.

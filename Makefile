@@ -247,6 +247,11 @@ $(BUILD_DIR)/six_by_twelve_cut_select: \
 	$(CXX) -O3 -march=native -std=c++17 $(OPENMP_CFLAGS) -Isrc/gpu \
 		-o $@ $< $(OPENMP_LDFLAGS)
 
+$(BUILD_DIR)/binary_orbit_augment_6x12: \
+		tools/corpus/binary_orbit_augment_6x12.cpp
+	$(CXX) -O3 -march=native -std=c++17 $(OPENMP_CFLAGS) \
+		-o $@ $< $(OPENMP_LDFLAGS)
+
 $(BUILD_DIR)/six_by_twelve_adaptive_split: \
 		research/probes/six_by_twelve_adaptive_split.cpp \
 		src/gpu/twocolour_gpu_common.cuh
@@ -576,7 +581,8 @@ BUILD_TARGETS := 5xn_count4 partition_count4 partition_poly partition_poly_7 \
 	twobit_full_orbit_probe twocolour_prefix_distribution_probe \
 	binary_orbit_burnside_probe twocolour_7x5_canonical_census \
 	binary_orbit_augment binary_orbit_augment_6x9 binary_orbit_augment_6x10 \
-	binary_orbit_augment_6x11 six_row_distribution_census \
+	binary_orbit_augment_6x11 binary_orbit_augment_6x12 \
+	six_row_distribution_census \
 	six_by_twelve_sample six_by_twelve_split_cost \
 	six_by_twelve_column_split_census six_by_twelve_projection_census \
 	six_by_twelve_tile_portfolio_census \
