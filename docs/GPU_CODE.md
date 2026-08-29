@@ -193,6 +193,22 @@ The table is 0.893 GiB and may be shared read-only by all generator workers.
 The selector preserves every orbit weight and only permutes columns before
 choosing which six-column half is resident.
 
+Build the solve-time canonical cache from the same canonical corpus and
+support table. This is a deterministic 16.6-GiB token-plane-quotient artifact,
+not a per-shard temporary:
+
+```bash
+./build/six_by_twelve_cut_select build-cache \
+    CANONICAL_6x6.orbits support-table.bin canonical-6x6-quotient.bin
+./build/six_by_twelve_cut_select check-cache canonical-6x6-quotient.bin
+```
+
+The production `twocolour_6x12_prefix_gpu` executable takes this cache as its
+first argument in place of a seed orbit shard. It memory-maps the artifact,
+resolves labelled halves through the embedded canonical-reference table, and
+uploads the shared 6x6 representation once for all pending manifest items.
+Result provenance includes the cache digest.
+
 For a new corpus, use the isomorph-free generator rather than materializing an
 ordinary augmentation hash table. It extends each unique retained `R6W1101`
 6x11 parent, accepts only the distinguished-column canonical parent, obtains

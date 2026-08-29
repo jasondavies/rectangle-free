@@ -237,12 +237,17 @@ static std::vector<PrefixKey> read_canonical_keys(const char* path) {
             const unsigned shift = 10 * (ROWS - 1U - row);
             packed = (packed << 6) | ((key >> shift) & 63U);
         }
-        // The augmentation corpus retains its ten-bit row stride and its own
-        // equivalent canonical convention.  Normalize into the distribution
-        // factory's compact six-bit-row convention before lookup.
-        result[index] = canonical_prefix(packed, 6).key;
+        result[index] = packed;
     }
     if (!input) throw std::runtime_error("truncated canonical corpus");
+    // The augmentation corpus retains its ten-bit row stride and its own
+    // equivalent canonical convention.  Normalize into the distribution
+    // factory's compact six-bit-row convention before lookup.  Each key is
+    // independent; doing 720 column permutations serially here needlessly
+    // dominated both offline cache builders.
+#pragma omp parallel for schedule(static)
+    for (long long index = 0; index < (long long)result.size(); ++index)
+        result[size_t(index)] = canonical_prefix(result[size_t(index)], 6).key;
     std::sort(result.begin(), result.end());
     if (std::adjacent_find(result.begin(), result.end()) != result.end())
         throw std::runtime_error("duplicate canonical key");
@@ -398,6 +403,26 @@ static void build_cache_artifact(const char* canonical_path,
         throw std::runtime_error("unexpected canonical cache size");
     ReadOnlyTable support = map_table(support_table_path);
 
+    // Fail before allocating the large artifact if the independently built
+    // support table does not describe this exact canonical-key convention.
+    for (size_t index = 0; index < std::min<size_t>(16, keys.size()); ++index) {
+        const uint32_t rank = multiset_rank(column_vectors(keys[index]));
+        const uint32_t expected = uint32_t(support.entries[rank]);
+        const uint64_t actual = quotient_token_planes(
+            build_distribution(keys[index],
+                               int(six_by_six_cache::COLUMNS), false))
+                                    .entries.size();
+        if (actual != expected) {
+            throw std::runtime_error(
+                "support-table preflight mismatch: distribution=" +
+                std::to_string(index) + " expected=" +
+                std::to_string(expected) + " actual=" +
+                std::to_string(actual) + " key=" +
+                std::to_string(keys[index]) + " rank=" +
+                std::to_string(rank));
+        }
+    }
+
     Header header{};
     std::memcpy(header.magic, "R6C6Q01", 8);
     header.version = FORMAT_VERSION;
@@ -465,17 +490,39 @@ static void build_cache_artifact(const char* canonical_path,
     if (entry_cursor != ENTRY_COUNT)
         throw std::runtime_error("support table/cache census mismatch");
 
-    std::atomic<bool> failure{false};
+    enum CachePackingFailure : uint32_t {
+        CACHE_OK = 0,
+        CACHE_SUPPORT_COUNT = 1,
+        CACHE_WEIGHT_WIDTH = 2,
+        CACHE_MASK_WIDTH = 3,
+        CACHE_CLASS_WIDTH = 4,
+    };
+    std::atomic<uint32_t> failure{CACHE_OK};
+    std::atomic<uint32_t> failure_index{UINT32_MAX};
+    std::atomic<uint64_t> failure_detail{0};
+    auto record_failure = [&](uint32_t reason, uint32_t index,
+                              uint64_t detail = 0) {
+        uint32_t expected = CACHE_OK;
+        if (failure.compare_exchange_strong(expected, reason,
+                                            std::memory_order_relaxed)) {
+            failure_index.store(index, std::memory_order_relaxed);
+            failure_detail.store(detail, std::memory_order_relaxed);
+        }
+    };
     const double distribution_start = seconds_now();
 #pragma omp parallel for schedule(dynamic, 1)
     for (long long wide_index = 0;
          wide_index < (long long)keys.size(); ++wide_index) {
         const size_t index = size_t(wide_index);
         Distribution distribution = quotient_token_planes(
-            build_distribution(keys[index], ::COLUMNS, false));
+            build_distribution(keys[index],
+                               int(six_by_six_cache::COLUMNS), false));
         const Descriptor descriptor = descriptors[index];
         if (distribution.entries.size() != descriptor.count) {
-            failure.store(true, std::memory_order_relaxed);
+            record_failure(
+                CACHE_SUPPORT_COUNT, uint32_t(index),
+                (uint64_t(descriptor.count) << 32) |
+                    uint32_t(distribution.entries.size()));
             continue;
         }
         uint32_t local_weights[CLASS_SLOTS]{};
@@ -483,9 +530,12 @@ static void build_cache_artifact(const char* canonical_path,
         uint8_t local_count = 0;
         for (uint32_t item = 0; item < descriptor.count; ++item) {
             const Entry entry = distribution.entries[item];
-            if (!entry.weight || entry.weight > UINT32_MAX ||
-                entry.mask > UINT32_MAX) {
-                failure.store(true, std::memory_order_relaxed);
+            if (!entry.weight || entry.weight > UINT32_MAX) {
+                record_failure(CACHE_WEIGHT_WIDTH, uint32_t(index));
+                break;
+            }
+            if (entry.mask > UINT32_MAX) {
+                record_failure(CACHE_MASK_WIDTH, uint32_t(index));
                 break;
             }
             const uint8_t orbit = uint8_t(token_plane_orbit_size(entry.mask));
@@ -497,7 +547,7 @@ static void build_cache_artifact(const char* canonical_path,
             }
             if (ordinal == local_count) {
                 if (local_count == CLASS_SLOTS) {
-                    failure.store(true, std::memory_order_relaxed);
+                    record_failure(CACHE_CLASS_WIDTH, uint32_t(index));
                     break;
                 }
                 local_weights[local_count] = uint32_t(entry.weight);
@@ -514,17 +564,22 @@ static void build_cache_artifact(const char* canonical_path,
                     sizeof(local_orbits));
         class_counts[index] = local_count;
     }
-    if (failure.load(std::memory_order_relaxed))
-        throw std::runtime_error("canonical cache packing failed");
+    if (failure.load(std::memory_order_relaxed)) {
+        throw std::runtime_error(
+            "canonical cache packing failed: reason=" +
+            std::to_string(failure.load(std::memory_order_relaxed)) +
+            " distribution=" +
+            std::to_string(failure_index.load(std::memory_order_relaxed)) +
+            " detail=" +
+            std::to_string(failure_detail.load(std::memory_order_relaxed)));
+    }
     const double distribution_seconds = seconds_now() - distribution_start;
 
-    std::array<std::array<uint8_t, 6>, 720> permutations{};
     std::array<std::array<uint8_t, 64>, 720> row_images{};
     std::array<uint16_t, 720> inverse_ranks{};
     std::array<uint8_t, 6> permutation{0, 1, 2, 3, 4, 5};
     size_t permutation_index = 0;
     do {
-        permutations[permutation_index] = permutation;
         std::array<uint8_t, 6> inverse{};
         for (unsigned destination = 0; destination < 6; ++destination)
             inverse[permutation[destination]] = uint8_t(destination);
@@ -539,7 +594,7 @@ static void build_cache_artifact(const char* canonical_path,
     if (permutation_index != 720)
         throw std::logic_error("bad reference permutation census");
 
-    failure.store(false, std::memory_order_relaxed);
+    failure.store(CACHE_OK, std::memory_order_relaxed);
     const double reference_start = seconds_now();
 #pragma omp parallel for schedule(dynamic, 8)
     for (long long wide_index = 0;
@@ -555,7 +610,8 @@ static void build_cache_artifact(const char* canonical_path,
             const uint32_t previous =
                 __atomic_load_n(references + rank, __ATOMIC_RELAXED);
             if (previous != UINT32_MAX && (previous >> 10) != index) {
-                failure.store(true, std::memory_order_relaxed);
+                failure.store(CACHE_SUPPORT_COUNT,
+                              std::memory_order_relaxed);
             } else {
                 atomic_minimum(references + rank, packed);
             }
@@ -594,9 +650,10 @@ static void validate_cache_artifact(const char* path) {
     uint64_t cursor = 0;
     for (uint64_t index = 0; index < header.canonical_count; ++index) {
         const auto descriptor = cache.descriptors[index];
-        if (descriptor.offset != cursor || !descriptor.count ||
-            !cache.class_counts[index] ||
-            cache.class_counts[index] > header.class_slots)
+        const uint8_t class_count = cache.class_counts[index];
+        if (descriptor.offset != cursor ||
+            class_count > header.class_slots ||
+            (!descriptor.count) != (!class_count))
             throw std::runtime_error("invalid cache descriptor sequence");
         cursor += descriptor.count;
     }
@@ -645,6 +702,98 @@ static void validate_cache_artifact(const char* path) {
                 (unsigned long long)header.file_bytes,
                 (unsigned long long)header.canonical_count,
                 (unsigned long long)header.entry_count, CHECKS * 2);
+}
+
+static uint32_t inverse_six_row_map(uint32_t row_map) {
+    uint32_t inverse = 0;
+    for (unsigned source = 0; source < 6; ++source) {
+        const unsigned destination = (row_map >> (4 * source)) & 15U;
+        inverse |= source << (4 * destination);
+    }
+    return inverse;
+}
+
+static uint32_t compose_six_row_maps(uint32_t first, uint32_t second) {
+    uint32_t result = 0;
+    for (unsigned source = 0; source < 6; ++source) {
+        const unsigned middle = (first >> (4 * source)) & 15U;
+        const unsigned destination = (second >> (4 * middle)) & 15U;
+        result |= destination << (4 * source);
+    }
+    return result;
+}
+
+template <class T>
+static uint64_t unique_count(std::vector<T>& values) {
+    std::sort(values.begin(), values.end());
+    return uint64_t(std::unique(values.begin(), values.end()) -
+                    values.begin());
+}
+
+static void census_cache_references(const char* cache_path,
+                                    const char* corpus_path) {
+    MappedSixBySixCache cache(cache_path);
+    CorpusMapping corpus = map_corpus(corpus_path);
+    std::vector<PrefixKey> raw_lefts, raw_rights;
+    std::vector<std::array<uint32_t, 4>> left_halves, right_halves;
+    std::vector<std::array<uint32_t, 6>> complete_joins;
+    raw_lefts.reserve(corpus.records);
+    raw_rights.reserve(corpus.records);
+    left_halves.reserve(corpus.records);
+    right_halves.reserve(corpus.records);
+    complete_joins.reserve(corpus.records);
+    const double start = seconds_now();
+    for (uint64_t index = 0; index < corpus.records; ++index) {
+        OrbitRecord record{};
+        std::memcpy(&record,
+                    corpus.mapping + 20 + index * sizeof(OrbitRecord),
+                    sizeof(record));
+        const PrefixKey left = orbit_left_prefix(record);
+        const PrefixKey right = orbit_right_prefix(record);
+        const auto left_refs = cache.resolve(left);
+        const auto right_refs = cache.resolve(right);
+        raw_lefts.push_back(left);
+        raw_rights.push_back(right);
+        left_halves.push_back({
+            left_refs[0].distribution, left_refs[0].row_map,
+            left_refs[1].distribution, left_refs[1].row_map});
+        right_halves.push_back({
+            right_refs[0].distribution, right_refs[0].row_map,
+            right_refs[1].distribution, right_refs[1].row_map});
+        std::array<uint32_t, 6> signature{};
+        for (unsigned complement = 0; complement < 2; ++complement) {
+            signature[3 * complement] =
+                left_refs[complement].distribution;
+            signature[3 * complement + 1] =
+                right_refs[complement].distribution;
+            signature[3 * complement + 2] = compose_six_row_maps(
+                right_refs[complement].row_map,
+                inverse_six_row_map(left_refs[complement].row_map));
+        }
+        complete_joins.push_back(signature);
+    }
+    const uint64_t raw_left_count = unique_count(raw_lefts);
+    const uint64_t raw_right_count = unique_count(raw_rights);
+    const uint64_t left_half_count = unique_count(left_halves);
+    const uint64_t right_half_count = unique_count(right_halves);
+    const uint64_t complete_join_count = unique_count(complete_joins);
+    const double elapsed = seconds_now() - start;
+    std::printf(
+        "SIX_BY_SIX_REFERENCE_CENSUS records=%llu raw_left=%llu "
+        "left_half_sig=%llu left_reuse=%.6f raw_right=%llu "
+        "right_half_sig=%llu right_reuse=%.6f complete_join_sig=%llu "
+        "edge_reuse=%.6f seconds=%.6f\n",
+        (unsigned long long)corpus.records,
+        (unsigned long long)raw_left_count,
+        (unsigned long long)left_half_count,
+        left_half_count ? double(raw_left_count) / left_half_count : 0,
+        (unsigned long long)raw_right_count,
+        (unsigned long long)right_half_count,
+        right_half_count ? double(raw_right_count) / right_half_count : 0,
+        (unsigned long long)complete_join_count,
+        complete_join_count ? double(corpus.records) / complete_join_count : 0,
+        elapsed);
+    unmap_corpus(corpus);
 }
 
 static std::array<uint64_t, TILE_MENU.size()> select_records(
@@ -791,11 +940,12 @@ static void usage(const char* program) {
                  "  %s build-cache CANONICAL_6x6.orbits TABLE.bin "
                  "CACHE.bin\n"
                  "  %s check-cache CACHE.bin\n"
+                 "  %s census-refs CACHE.bin CORPUS.orbits\n"
                  "  %s select TABLE.bin INPUT.orbits OUTPUT.orbits "
                  "[MENU_SIZE=16]\n"
                  "  %s select-in-place TABLE.bin CORPUS.orbits "
                  "[MENU_SIZE=16]\n",
-                 program, program, program, program, program);
+                 program, program, program, program, program, program);
 }
 
 }  // namespace
@@ -813,6 +963,10 @@ int main(int argc, char** argv) {
         }
         if (argc == 3 && !std::strcmp(argv[1], "check-cache")) {
             validate_cache_artifact(argv[2]);
+            return 0;
+        }
+        if (argc == 4 && !std::strcmp(argv[1], "census-refs")) {
+            census_cache_references(argv[2], argv[3]);
             return 0;
         }
         if ((argc == 5 || argc == 6) && !std::strcmp(argv[1], "select")) {

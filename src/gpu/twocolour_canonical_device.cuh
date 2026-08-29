@@ -95,7 +95,8 @@ static ProductionCanonicalDevice upload_production_canonical(
     result.weight_spans.resize(size_t(header.canonical_count));
     for (size_t index = 0; index < result.weight_spans.size(); ++index) {
         const uint32_t count = artifact.class_counts[index];
-        if (!count || count > header.class_slots)
+        if (count > header.class_slots ||
+            (!artifact.descriptors[index].count) != (!count))
             throw std::runtime_error("invalid artifact weight-class count");
         result.weight_spans[index] = CanonicalWeightSpan{
             uint32_t(index * header.class_slots), count};

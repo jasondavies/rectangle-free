@@ -15463,9 +15463,20 @@
   distributions for deterministic raw masks and checks the stored IDs, row
   maps, masks, weights, and token-plane orbits exactly.  The solver's existing
   run provenance hashes the artifact, binding every result to its contents.
-- Status: the CPU builder and loader compile locally.  Full artifact
-  construction and the CUDA A/B gate are deferred until the concurrent 6x12
-  corpus generation releases CPU and storage bandwidth.
+- Full exact gate: a deliberately resource-limited two-thread build ran beside
+  corpus generation.  Distribution packing took 475.257 seconds, reference
+  expansion 15.155 seconds, and the final flush 0.278 seconds.  The resulting
+  artifact is exactly 17,871,413,248 bytes and has SHA-256
+  `67b92e49613d35fdcdbcd1d5e545a070a54210aeee560cf0813bfbf8e9f54025`.
+  The checker validates all descriptor/class bounds and independently rebuilds
+  32 deterministic selected/complement distributions; every mask, row map,
+  weight and token-plane orbit agrees.  Empty canonical distributions are
+  represented by exact zero-length spans rather than treated as malformed.
+- A preflight caught and fixed an offline-only width-name collision which had
+  initially passed twelve columns rather than six to the half constructor.
+  Canonical-key normalization is now OpenMP-parallel as well.  The remaining
+  gate is compilation and throughput measurement on the production CUDA
+  target; the immutable CPU artifact itself is accepted.
 
 ### Experiment 457: Structural right-batch memory planning
 
@@ -15490,3 +15501,24 @@
   while preventing late allocation failures when per-distribution metadata
   dominates.  CUDA runtime validation remains part of the next remote A/B
   gate.
+
+### Experiment 458: 6x12 exact join-signature reuse census
+
+- Goal: determine whether canonical-reference, linked-half, or complete-join
+  interning can eliminate layout construction or tensor joins before adding
+  hash tables and an aggregation ABI to the new solver.
+- `census-refs` uses the persistent canonical-reference artifact and measures
+  raw half keys, exact linked `(selected distribution,row map,complement
+  distribution,row map)` signatures, and the complete pair of relative-row-map
+  join signatures.  The latter is the strongest exact result-equivalence test:
+  matching signatures have identical selected and complement contractions.
+- Two independent production owner fragments contain 1,400,499 and 1,230,266
+  records.  The first has 41,379 raw/linked left halves, 1,135,608 raw/linked
+  right halves, and 1,400,499 complete join signatures.  The second has
+  41,571, 1,022,436, and 1,230,266 respectively.  Every reuse ratio is exactly
+  `1.000000` in both samples.
+- Outcome: reject exact signature interning for 6x12.  The canonical artifact
+  still removes canonicalisation and cache reconstruction, but distinct raw
+  halves already map to distinct labelled distribution signatures in this
+  workload.  Extra maps, coefficient aggregation, and layout indirection have
+  a measured zero-work-removal ceiling.
