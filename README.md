@@ -190,8 +190,8 @@ make universal_state_symmetry_probe
 
 Production GPU results use self-identifying, checksummed checkpoints bound to
 the solver, algorithm configuration, cache, input corpus, and exact work
-range. `tools/aggregate_gpu_v3.py` verifies and reduces complete 7x9 and 8x8
-campaigns.
+range. `tools/aggregate_gpu_v3.py` verifies and reduces complete 6x12, 7x9,
+and 8x8 campaigns.
 
 ## Repository map
 
@@ -215,7 +215,7 @@ Research probes are intentionally not part of `make gpu-production`.
 - `partition_poly_7` is bounded to seven rows and seven columns.
 - `partition_poly_8` is bounded to eight rows and eight columns.
 - The maintained GPU production targets are specialised for 6x9, 6x10,
-  6x11, prospective 6x12, 7x7, 7x9, and 8x8 distribution-join campaigns.
+  6x11, 6x12, 7x7, 7x9, and 8x8 distribution-join campaigns.
 - The hafnian solvers cover the 6x30 endpoint and its 6x29/6x28 low-defect
   expansions; all three exact values are recorded in `results.txt`.
 
@@ -234,6 +234,7 @@ the time used by every GPU and is therefore distinct from elapsed wall time.
 | `T_4(6,9)` independent rerun | 1 RTX PRO 6000 | 93.4 GPU-seconds | 110.1 seconds |
 | `T_4(6,10)` | 1 RTX PRO 6000 | 0.378 GPU-hours | 24.2 solver-minutes |
 | `T_4(6,11)` | 4 RTX PRO 6000 GPUs | 6.612 GPU-hours | About 1 h 52 min |
+| `T_4(6,12)` | 256 shards; 4 RTX PRO 6000 GPUs | 54.392 GPU-hours | About 16 h 18 min |
 | `T_4(7,7)` independent check | 1 L40S | 30.1 GPU-seconds | 35.6 seconds |
 | `T_4(8,8)` independent check | 1,024 shards; 8 L40S GPUs | 29.07 GPU-hours | About 4.1 hours |
 | `T_4(7,9)` independent check | 128 shards; 8 L40S GPUs | 13.85 GPU-hours | About 2 hours |
