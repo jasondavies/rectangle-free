@@ -265,12 +265,75 @@ struct Census {
     bool capped = false;
 };
 
+Partition rectangle_cycle_core(const Partition& partition,
+                               const std::vector<Rectangle>& generators) {
+    const unsigned cells = partition.size();
+    std::vector<uint8_t> active(generators.size());
+    std::vector<unsigned> degree(cells);
+    std::vector<std::vector<unsigned>> incident(cells);
+    for (unsigned edge = 0; edge < generators.size(); edge++) {
+        const Rectangle& rectangle = generators[edge];
+        unsigned char label = static_cast<unsigned char>(
+            partition[rectangle.cells[0]]);
+        bool internal = true;
+        for (unsigned cell : rectangle.cells) {
+            if (static_cast<unsigned char>(partition[cell]) != label) {
+                internal = false;
+                break;
+            }
+        }
+        if (!internal) continue;
+        active[edge] = 1;
+        for (unsigned cell : rectangle.cells) {
+            degree[cell]++;
+            incident[cell].push_back(edge);
+        }
+    }
+    std::vector<uint8_t> removed(cells);
+    std::vector<unsigned> queue;
+    for (unsigned cell = 0; cell < cells; cell++) {
+        if (degree[cell] < 2) {
+            removed[cell] = 1;
+            queue.push_back(cell);
+        }
+    }
+    for (size_t cursor = 0; cursor < queue.size(); cursor++) {
+        unsigned cell = queue[cursor];
+        for (unsigned edge : incident[cell]) {
+            if (!active[edge]) continue;
+            active[edge] = 0;
+            for (unsigned neighbour : generators[edge].cells) {
+                if (degree[neighbour]) degree[neighbour]--;
+                if (!removed[neighbour] && degree[neighbour] < 2) {
+                    removed[neighbour] = 1;
+                    queue.push_back(neighbour);
+                }
+            }
+        }
+    }
+    Partition output(cells, '\0');
+    unsigned char next = 0;
+    std::array<unsigned char, 256> core_label{};
+    core_label.fill(0xff);
+    for (unsigned cell = 0; cell < cells; cell++) {
+        unsigned char source = static_cast<unsigned char>(partition[cell]);
+        if (!removed[cell] && degree[cell]) {
+            if (core_label[source] == 0xff) core_label[source] = next++;
+            output[cell] = static_cast<char>(core_label[source]);
+        } else {
+            output[cell] = static_cast<char>(next++);
+        }
+    }
+    return normalize(output);
+}
+
 Census enumerate_lattice(
     unsigned rows,
     unsigned columns,
     bool quotient,
     uint64_t state_cap,
-    double time_cap
+    double time_cap,
+    bool cycle_core_census = false
 ) {
     const unsigned cells = rows * columns;
     if (cells > 81) throw std::runtime_error("probe supports at most 81 cells");
@@ -293,8 +356,47 @@ Census enumerate_lattice(
     uint64_t candidates = 0;
     uint64_t next_time_check = 65'536;
     bool capped = false;
+    std::unordered_set<Partition> all_cycle_cores;
+    std::unordered_map<Partition, Partition> raw_core_canonical_cache;
 
     for (unsigned depth = 0; !frontier.empty(); ++depth) {
+        uint64_t hyperforest_states = 0;
+        uint64_t cyclic_states = 0;
+        uint64_t excess_sum = 0;
+        unsigned maximum_excess = 0;
+        for (const Partition& state : frontier) {
+            unsigned rank = cells - block_count(state);
+            if (rank > 3 * depth) {
+                throw std::logic_error("rectangle-closure rank exceeds generator bound");
+            }
+            unsigned excess = 3 * depth - rank;
+            excess_sum += excess;
+            maximum_excess = std::max(maximum_excess, excess);
+            if (excess) cyclic_states++;
+            else hyperforest_states++;
+        }
+        uint64_t empty_cycle_cores = 0;
+        size_t depth_cycle_cores = 0;
+        if (cycle_core_census) {
+            std::unordered_set<Partition> depth_cores;
+            for (const Partition& state : frontier) {
+                Partition core = rectangle_cycle_core(state, generators);
+                if (block_count(core) == cells) empty_cycle_cores++;
+                if (quotient) {
+                    auto cached = raw_core_canonical_cache.find(core);
+                    if (cached != raw_core_canonical_cache.end()) {
+                        core = cached->second;
+                    } else {
+                        Partition raw = core;
+                        core = canonicalizer(core);
+                        raw_core_canonical_cache.emplace(std::move(raw), core);
+                    }
+                }
+                depth_cores.insert(core);
+                all_cycle_cores.insert(std::move(core));
+            }
+            depth_cycle_cores = depth_cores.size();
+        }
         std::vector<Partition> following;
         for (const Partition& state : frontier) {
             for (const Rectangle& rectangle : generators) {
@@ -336,6 +438,18 @@ Census enumerate_lattice(
             std::chrono::steady_clock::now() - started).count();
         std::cout << "depth=" << depth
                   << " frontier=" << frontier.size()
+                  << " hyperforest=" << hyperforest_states
+                  << " cyclic=" << cyclic_states
+                  << " cyclic_fraction="
+                  << (frontier.empty() ? 0.0
+                                       : double(cyclic_states) / frontier.size())
+                  << " mean_cycle_excess="
+                  << (frontier.empty() ? 0.0
+                                       : double(excess_sum) / frontier.size())
+                  << " maximum_cycle_excess=" << maximum_excess
+                  << " empty_cycle_cores=" << empty_cycle_cores
+                  << " depth_cycle_cores=" << depth_cycle_cores
+                  << " cumulative_cycle_cores=" << all_cycle_cores.size()
                   << " next=" << following.size()
                   << " total=" << all.size()
                   << " candidates=" << candidates
@@ -388,6 +502,28 @@ void evaluate_mobius(std::vector<Partition> states) {
 }
 
 void self_test() {
+    {
+        std::vector<Rectangle> generators = rectangles(2, 3);
+        Partition bottom(6, '\0');
+        for (unsigned cell = 0; cell < 6; cell++) bottom[cell] = char(cell);
+        Partition one_rectangle;
+        if (!join_rectangle(bottom, generators[0], one_rectangle)) {
+            throw std::runtime_error("cycle-core fixture did not join");
+        }
+        if (block_count(rectangle_cycle_core(one_rectangle, generators)) != 6) {
+            throw std::runtime_error("one rectangle must have empty cycle core");
+        }
+        Partition all_rectangles = bottom;
+        for (const Rectangle& rectangle : generators) {
+            Partition following;
+            if (join_rectangle(all_rectangles, rectangle, following)) {
+                all_rectangles = std::move(following);
+            }
+        }
+        if (block_count(rectangle_cycle_core(all_rectangles, generators)) != 1) {
+            throw std::runtime_error("2x3 rectangle cycle must survive peeling");
+        }
+    }
     for (auto [rows, columns] : {
              std::pair{2U, 3U}, std::pair{3U, 3U}, std::pair{4U, 4U}}) {
         Census labelled = enumerate_lattice(rows, columns, false, 1'000'000, 0);
@@ -414,12 +550,14 @@ int main(int argc, char** argv) try {
     bool quotient = true;
     bool mobius = false;
     bool run_self_test = false;
+    bool cycle_core_census = false;
     for (int index = 1; index < argc; ++index) {
         std::string_view option = argv[index];
         if (option == "--orbit") quotient = true;
         else if (option == "--labelled") quotient = false;
         else if (option == "--mobius") mobius = true;
         else if (option == "--self-test") run_self_test = true;
+        else if (option == "--cycle-core") cycle_core_census = true;
         else {
             if (++index >= argc) throw std::runtime_error("missing option value");
             std::string_view value = argv[index];
@@ -438,7 +576,8 @@ int main(int argc, char** argv) try {
     std::cout << "rows=" << rows << " columns=" << columns
               << " rectangles=" << rectangles(rows, columns).size()
               << " quotient=" << quotient << '\n';
-    Census census = enumerate_lattice(rows, columns, quotient, state_cap, time_cap);
+    Census census = enumerate_lattice(rows, columns, quotient, state_cap,
+                                      time_cap, cycle_core_census);
     std::cout << "status=" << (census.capped ? "capped" : "complete")
               << " states=" << census.states.size()
               << " candidates=" << census.candidates << '\n';

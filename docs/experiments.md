@@ -15624,3 +15624,38 @@
   not translate into a usable factorized join.  A future full-colour method
   may use the invariant, but it should not be added to the two-bit outer-sum
   solver.
+
+### Experiment 462: Rectangle cycle-core gate for 9x9
+
+- Goal: test whether the rejected rectangle-closure lattice can be rescued by
+  summing all acyclic attachments analytically and retaining only a small
+  cyclic dependency core.  At minimum generator depth `d`, a closure of rank
+  `r` has cycle excess `3d-r`.  Zero excess certifies a rectangle hyperforest;
+  positive excess certifies a dependent constraint family.
+- Core proxy: inside every equality block, form the hypergraph of all grid
+  rectangles contained in that block and repeatedly peel cell vertices of
+  incidence degree below two, deleting incident rectangles.  Canonicalize the
+  surviving incidence 2-core under row/column permutations and transpose.
+  A single rectangle and every hypertree peel to the empty core; the complete
+  three-rectangle cycle on `2x3` survives.  These fixtures and the existing
+  closure-lattice self-tests pass.
+- Complete censuses: the `4x4` lattice has 58 closure orbits but 26 cumulative
+  core orbits.  The `5x5` lattice has 3,350 closure orbits and 638 core orbits.
+  At depths seven and eight, respectively 95.4% and 99.6% of the `5x5`
+  frontier is cyclic; only 29 and 5 states peel to the empty core.
+- Six-row lower bound: a 180-second `6x6` run reaches 954,563 closure orbits
+  through a partial depth-eight generation.  Its complete depth-seven
+  frontier already contains 12,560 cumulative core orbits; 206,144 of 319,574
+  states are cyclic and only 58,054 have empty cores.  Thus the core census
+  grows by `24.5x` from complete `4x4` to `5x5` and by at least another
+  `19.7x` before completing `6x6`.
+- Interpretation: this is deliberately optimistic.  It identifies closures
+  with the same incidence 2-core without yet recording the multiplicity and
+  embedding data needed to sum their tree attachments exactly.  Even after
+  discarding that required information, core types already grow far too fast:
+  continuing factors near 20 would reach tens of billions by nine rows.
+- Outcome: reject cycle-core enumeration as the missing order-of-magnitude
+  route to `9x9`.  An undiscovered closed form for summing all embeddings could
+  still do more than this census, but ordinary core memoization merely reduces
+  the closure-lattice state count by a modest factor and does not change its
+  scaling class.

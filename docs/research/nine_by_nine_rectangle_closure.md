@@ -66,6 +66,17 @@ fills super-exponentially with the row count.  A GPU sort/reduce engine could
 complete the `6x6` census faster; it would not bridge the observed factors of
 58 and at least 175 on the way to nine rows.
 
+## Cycle-core follow-up
+
+Peeling incidence-degree-zero/one cells from every rectangle hypergraph inside
+an equality block removes all hypertree attachments and retains only a cyclic
+2-core.  This further quotient is real but still grows too quickly: complete
+`4x4` and `5x5` censuses contain 26 and 638 cumulative core orbits, while the
+complete depth-seven `6x6` frontier already raises the cumulative lower bound
+to 12,560.  The successive factors are `24.5x` and at least `19.7x`, before
+retaining any of the attachment multiplicities required by an exact solver.
+See Experiment 462 for the detailed depth census.
+
 ## Reproduction
 
 The research target requires Ubuntu's `libnauty-dev` package.
@@ -79,4 +90,6 @@ make rectangle_closure_lattice_probe
   --rows 5 --columns 5 --orbit
 ./build/rectangle_closure_lattice_probe \
   --rows 6 --columns 6 --orbit --time-cap 120
+./build/rectangle_closure_lattice_probe \
+  --rows 6 --columns 6 --orbit --cycle-core --time-cap 180
 ```
