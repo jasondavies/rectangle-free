@@ -15559,3 +15559,35 @@
 - Outcome: pass the CPU artifact, native CUDA compile, exact result, and device
   memory gates.  Preserve the two pilot result records under
   `../rectangle-free-data-v2/profiles/verda-rtxpro6000-6x12-cache-gate-20260829/`.
+
+### Experiment 460: Exact T_4(6,12) production campaign
+
+- Environment: one Verda FIN-02 spot instance with four RTX PRO 6000
+  Blackwell GPUs, the native `sm_120a` NVFP4 solver from Experiment 459, the
+  immutable 6x6 quotient cache, and 256 independently checkpointed right-major
+  corpus shards.  The first GPU solve began at `2026-08-29T14:18:13Z`; all
+  workers finished at `2026-08-30T06:34:29Z`, and final validation completed
+  at `06:35:57Z`.
+- Complete workload: `20,230,535,486` records and kernels,
+  `951,757,353,386,765,496` logical comparisons, labelled retained weight
+  `2,582,439,511,573,240,996,450`, and exact complement-restored coverage
+  `4,722,366,482,869,645,213,696 = 2^72`.  The campaign performed 1,024
+  independent scalar join checks.
+- Performance: `54.392071` aggregate GPU-hours, `62.633812` summed solver
+  hours, about 16 hours 18 minutes elapsed through final reduction, and
+  `4.860580519488e12` weighted logical comparisons per second.  All four GPUs
+  remained within the structural memory plan; streamed input deletion left
+  increasing volume headroom throughout the run.
+- Provenance: all 256 v3 checkpoints use one solver binary, one solver
+  configuration, and one canonical cache.  Their SHA-256 digests are
+  `4f31a942699133c62264bd053e5bfaa28cfa1da8b6857aecf260eef3e04bf92b`,
+  `24bdd61d60c04e32e71aa9166bc707ff2e9aa85de50510491cac129f2a544edf`,
+  and `67b92e49613d35fdcdbcd1d5e545a070a54210aeee560cf0813bfbf8e9f54025`,
+  respectively.  The final reducer rehashed every input shard and the local
+  solver/cache artifacts, verified the complete manifest and exact coverage,
+  and reported `FULL_CHECK OK` with no failures.
+- Exact result:
+  `T_4(6,12) = 35982993146783850713053959836003942400`.
+- Outcome: accept the 6x12 p16 corpus, persistent-cache NVFP4 solver, and exact
+  result.  All 256 result checkpoints, the final JSON reduction receipt, and
+  provider logs were pulled locally before the campaign VM was shut down.

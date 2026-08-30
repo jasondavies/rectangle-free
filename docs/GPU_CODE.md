@@ -179,9 +179,9 @@ desired checker concurrency. `tools/aggregate_8x8_results.py` remains solely for
 historical pre-transpose provider-result inventory. Run `make gpu-campaign-test`
 for the non-CUDA campaign regression suite.
 
-The prospective 6x12 corpus uses the fixed sixteen-cut portfolio selected in
-Experiment 452. Do not run the exact tile materializer over its projected
-20.23 billion records. Build the complete read-only half-support table once:
+The production 6x12 corpus uses the fixed sixteen-cut portfolio selected in
+Experiment 452. Do not run the exact tile materializer over its
+20,230,535,486 records. Build the complete read-only half-support table once:
 
 ```bash
 make six_by_twelve_cut_select
@@ -246,6 +246,20 @@ reconstructing the unique 6x11
 parent corpus with the existing generator remains the peak-RAM phase at about
 71 GiB. The older `six_by_twelve_cut_select select-in-place` mode remains
 available only for an already materialized corpus.
+
+The completed 256-shard production campaign used four RTX PRO 6000 GPUs. It
+passed the full input, binary, cache, checkpoint, coverage, and reduction
+checks and returned
+`T_4(6,12) = 35982993146783850713053959836003942400`. The solve consumed
+54.392071 aggregate GPU-hours and completed in about 16 hours 18 minutes at
+4.861 trillion logical comparisons per second. The immutable production
+artifacts have SHA-256 digests:
+
+```text
+canonical cache:      67b92e49613d35fdcdbcd1d5e545a070a54210aeee560cf0813bfbf8e9f54025
+solver binary:        4f31a942699133c62264bd053e5bfaa28cfa1da8b6857aecf260eef3e04bf92b
+solver configuration: 24bdd61d60c04e32e71aa9166bc707ff2e9aa85de50510491cac129f2a544edf
+```
 
 `make gpu-code-dump` regenerates `build/code-dump.txt` from the current maintained
 surface for external review; the generated file is intentionally untracked.
