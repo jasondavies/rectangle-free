@@ -15591,3 +15591,36 @@
 - Outcome: accept the 6x12 p16 corpus, persistent-cache NVFP4 solver, and exact
   result.  All 256 result checkpoints, the final JSON reduction receipt, and
   provider logs were pulled locally before the campaign VM was shut down.
+
+### Experiment 461: Rich global colour-cut signature gate
+
+- Goal: revisit the rejected full-colour quotient from Experiment 388 with a
+  substantially stronger invariant.  For an encoding by bit masks `x,y`, the
+  three unordered `2+2` colour cuts are `x`, `y`, and `x xor y`; their ideal
+  quotient is exactly threefold.  The earlier gate ordered them only by
+  balanced cardinality.  This gate additionally retains the sorted vector of
+  per-column degrees, canonicalized under bit complementation.
+- Exact refinement: extend each half-distribution state by the four inner-bit
+  column degrees.  Combining left/right selected and complement sectors
+  reconstructs the complete column-degree signatures of `y` and `x xor y`.
+  The probe keeps the original balance criterion first and uses the degree
+  vector only as a tie-breaker.  This is an exact orientation-specific gate;
+  a production version would also need a transpose-safe row signature.
+- State cost: on five sets of 64 records sampled from legacy solve shards 0,
+  256, 512, 768, and 1,023, the refined half supports are only
+  `1.0128x--1.0362x` larger than ordinary supports.  Thus constructing the
+  extra state is not itself the obstruction.
+- Coupling cost: the refinement destroys the selected/complement scalar
+  factorization.  Mean selected degree-sector counts range from 42,324 to
+  55,568 per record and complement counts from 49,205 to 76,942.  In 314 of
+  the 320 sampled records their Cartesian coupling exceeds ten million
+  sector pairs.  A representative weight-29 record has 46,144 selected and
+  64,368 complement sectors, or 2,970,196,992 sector pairs, before performing
+  any disjointness contraction.
+- Outcome: reject.  Even a perfect cut choice can save at most `3x`, whereas
+  explicitly retaining the degree signature introduces tens of thousands of
+  sectors and commonly billions of cross-sector combinations per record.
+  The apparent near-uniqueness of rich cut signatures on random masks does
+  not translate into a usable factorized join.  A future full-colour method
+  may use the invariant, but it should not be added to the two-bit outer-sum
+  solver.

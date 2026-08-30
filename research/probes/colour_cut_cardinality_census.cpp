@@ -1,5 +1,6 @@
 #include <iomanip>
 #include <iostream>
+#include <map>
 #include <tuple>
 
 #define PREFIX_BUCKET_TT_RANK_CENSUS_NO_MAIN
@@ -217,6 +218,142 @@ struct DistributionStats {
 
 using SupportHistogram = std::array<uint64_t, ROWS * HALF_COLUMNS + 1>;
 
+// A stronger colour-cut gate.  The four nibbles store the number of inner
+// one-bits in each physical half-column.  Keeping this information alongside
+// the support is exact; unlike the cardinality-only census it distinguishes
+// column-degree multisets of the three 2+2 colour cuts.
+struct DegreeKey {
+    uint64_t mask = 0;
+    uint16_t degrees = 0;
+
+    bool operator==(const DegreeKey& other) const {
+        return mask == other.mask && degrees == other.degrees;
+    }
+};
+
+struct DegreeMapEntry {
+    DegreeKey key;
+    uint64_t weight = 0;
+    bool used = false;
+};
+
+class DegreeMap {
+  public:
+    explicit DegreeMap(size_t capacity = 16) {
+        size_t size = 16;
+        while (size < capacity * 2) size <<= 1;
+        entries_.resize(size);
+    }
+
+    bool add(DegreeKey key, uint64_t weight, size_t state_cap) {
+        if ((count_ + 1) * 10 >= entries_.size() * 7) rehash();
+        size_t slot = size_t(mix64(key.mask ^
+                                   (uint64_t(key.degrees) << 41))) &
+                      (entries_.size() - 1);
+        while (entries_[slot].used) {
+            if (entries_[slot].key == key) {
+                entries_[slot].weight += weight;
+                return true;
+            }
+            slot = (slot + 1) & (entries_.size() - 1);
+        }
+        if (count_ >= state_cap) return false;
+        entries_[slot] = DegreeMapEntry{key, weight, true};
+        count_++;
+        return true;
+    }
+
+    const std::vector<DegreeMapEntry>& entries() const { return entries_; }
+    size_t count() const { return count_; }
+
+  private:
+    void rehash() {
+        std::vector<DegreeMapEntry> old = std::move(entries_);
+        entries_.assign(old.size() * 2, DegreeMapEntry{});
+        count_ = 0;
+        for (const DegreeMapEntry& entry : old) {
+            if (!entry.used) continue;
+            if (!add(entry.key, entry.weight, SIZE_MAX))
+                throw std::logic_error("degree-map rehash failed");
+        }
+    }
+
+    std::vector<DegreeMapEntry> entries_;
+    size_t count_ = 0;
+};
+
+using DegreeHistogram = std::vector<std::pair<uint16_t, uint64_t>>;
+
+struct DegreeHistogramData {
+    DegreeHistogram histogram;
+    uint64_t state_count = 0;
+    uint64_t transition_count = 0;
+    bool capped = false;
+};
+
+static DegreeHistogramData degree_support_histogram(uint32_t prefix,
+                                                    bool complement,
+                                                    size_t state_cap,
+                                                    uint64_t transition_cap) {
+    uint32_t original_prefix = prefix;
+    bool trace = std::getenv("COLOUR_CUT_TRACE") != nullptr;
+    std::array<uint8_t, ROWS> row_patterns{};
+    constexpr unsigned pattern_mask = (1U << HALF_COLUMNS) - 1U;
+    for (int row = ROWS - 1; row >= 0; row--) {
+        row_patterns[size_t(row)] = uint8_t(prefix & pattern_mask);
+        prefix >>= HALF_COLUMNS;
+    }
+    DegreeMap current;
+    current.add(DegreeKey{}, 1, state_cap);
+    uint64_t transitions = 0;
+    for (unsigned column = 0; column < HALF_COLUMNS; column++) {
+        unsigned active = 0;
+        for (unsigned row = 0; row < ROWS; row++) {
+            unsigned pattern = complement
+                ? row_patterns[row] ^ pattern_mask
+                : row_patterns[row];
+            if (pattern & (1U << column)) active |= 1U << row;
+        }
+        DegreeMap next(std::max<size_t>(16, current.count()));
+        for (const DegreeMapEntry& entry : current.entries()) {
+            if (!entry.used) continue;
+            const DegreeKey& key = entry.key;
+            for (const CountedIncrement& increment : counted_increments[active]) {
+                if (++transitions >= transition_cap)
+                    return DegreeHistogramData{
+                        {}, current.count(), transitions, true};
+                if (key.mask & increment.mask) continue;
+                DegreeKey child{
+                    key.mask | increment.mask,
+                    uint16_t(key.degrees |
+                             (uint16_t(increment.ones) << (4 * column)))
+                };
+                if (!next.add(child, entry.weight * increment.weight,
+                              state_cap))
+                    return DegreeHistogramData{
+                        {}, next.count(), transitions, true};
+            }
+        }
+        current = std::move(next);
+        if (trace) {
+#pragma omp critical(colour_cut_trace)
+            std::cerr << "degree_trace prefix=" << original_prefix
+                      << " complement=" << complement
+                      << " column=" << column
+                      << " states=" << current.count()
+                      << " transitions=" << transitions << '\n';
+        }
+    }
+    std::map<uint16_t, uint64_t> histogram;
+    for (const DegreeMapEntry& entry : current.entries()) {
+        if (!entry.used) continue;
+        histogram[entry.key.degrees]++;
+    }
+    return DegreeHistogramData{
+        DegreeHistogram(histogram.begin(), histogram.end()), current.count(),
+        transitions, false};
+}
+
 static SupportHistogram counted_support_histogram(uint32_t prefix,
                                                   bool complement) {
     CountedMap counted = build_counted_distribution(prefix, complement);
@@ -283,6 +420,183 @@ struct WorkStats {
     U128 retained = 0;
     uint64_t records = 0;
 };
+
+struct DegreeWorkStats {
+    U128 baseline = 0;
+    U128 retained = 0;
+    U128 refined_entries = 0;
+    U128 ordinary_entries = 0;
+    uint64_t records = 0;
+    uint64_t selected_sectors = 0;
+    uint64_t complement_sectors = 0;
+    uint64_t sector_pair_capped_records = 0;
+};
+
+struct CutSignature {
+    uint8_t balance = 0;
+    uint64_t degrees = 0;
+
+    auto tuple() const { return std::tie(balance, degrees); }
+    bool operator<=(const CutSignature& other) const {
+        return tuple() <= other.tuple();
+    }
+};
+
+static uint8_t degree_nibble(uint32_t code, unsigned column) {
+    return uint8_t((code >> (4 * column)) & 15U);
+}
+
+static uint64_t pack_sorted_degrees(std::array<uint8_t, 2 * HALF_COLUMNS> values) {
+    std::sort(values.begin(), values.end());
+    uint64_t packed = 0;
+    for (uint8_t value : values) packed = (packed << 4) | value;
+    return packed;
+}
+
+static CutSignature column_cut_signature(
+    const std::array<uint8_t, 2 * HALF_COLUMNS>& input) {
+    std::array<uint8_t, 2 * HALF_COLUMNS> complement{};
+    unsigned ones = 0;
+    for (unsigned column = 0; column < input.size(); column++) {
+        if (input[column] > ROWS)
+            throw std::logic_error("invalid column degree");
+        ones += input[column];
+        complement[column] = uint8_t(ROWS - input[column]);
+    }
+    uint64_t direct = pack_sorted_degrees(input);
+    uint64_t inverse = pack_sorted_degrees(complement);
+    return CutSignature{
+        uint8_t(std::min(ones, ROWS * unsigned(input.size()) - ones)),
+        std::min(direct, inverse)
+    };
+}
+
+using FullDegreeHistogram = std::vector<std::pair<uint32_t, uint64_t>>;
+
+static FullDegreeHistogram combine_degree_histograms(
+    const DegreeHistogram& left, const DegreeHistogram& right) {
+    FullDegreeHistogram output;
+    output.reserve(left.size() * right.size());
+    for (const auto& [left_code, left_count] : left) {
+        for (const auto& [right_code, right_count] : right) {
+            output.emplace_back(uint32_t(left_code) |
+                                    (uint32_t(right_code) << 16),
+                                left_count * right_count);
+        }
+    }
+    return output;
+}
+
+static std::array<uint8_t, 2 * HALF_COLUMNS> outer_column_degrees(
+    uint64_t key) {
+    std::array<uint8_t, 2 * HALF_COLUMNS> output{};
+    for (unsigned row = 0; row < ROWS; row++) {
+        for (unsigned column = 0; column < output.size(); column++) {
+            output[column] += uint8_t((key >> (row * output.size() + column)) & 1U);
+        }
+    }
+    return output;
+}
+
+static DegreeWorkStats estimate_degree_work(
+    const SampleRecord& record,
+    const std::unordered_map<uint32_t, size_t>& prefix_index,
+    const std::vector<std::array<DegreeHistogramData, 2>>& histograms,
+    const std::vector<std::array<uint64_t, 2>>& ordinary_counts) {
+    uint32_t left = half_prefix(record.key, 0);
+    uint32_t right = half_prefix(record.key, HALF_COLUMNS);
+    size_t left_index = prefix_index.at(left);
+    size_t right_index = prefix_index.at(right);
+    FullDegreeHistogram selected = combine_degree_histograms(
+        histograms[left_index][0].histogram,
+        histograms[right_index][0].histogram);
+    FullDegreeHistogram complement = combine_degree_histograms(
+        histograms[left_index][1].histogram,
+        histograms[right_index][1].histogram);
+    if (std::getenv("COLOUR_CUT_TRACE")) {
+#pragma omp critical(colour_cut_trace)
+        std::cerr << "degree_join_trace selected_sectors=" << selected.size()
+                  << " complement_sectors=" << complement.size()
+                  << " sector_pairs="
+                  << u128_string(U128(selected.size()) * complement.size())
+                  << '\n';
+    }
+    std::array<uint8_t, 2 * HALF_COLUMNS> x_degrees =
+        outer_column_degrees(record.key);
+    CutSignature x_signature = column_cut_signature(x_degrees);
+    std::vector<uint8_t> keep_selected(selected.size());
+    std::vector<uint8_t> keep_complement(complement.size());
+    constexpr U128 sector_pair_cap = 10'000'000;
+    if (U128(selected.size()) * complement.size() > sector_pair_cap) {
+        DegreeWorkStats result;
+        result.records = 1;
+        result.sector_pair_capped_records = 1;
+        result.selected_sectors = selected.size();
+        result.complement_sectors = complement.size();
+        for (const auto& item : selected) result.baseline += item.second;
+        for (const auto& item : complement) result.baseline += item.second;
+        for (unsigned component = 0; component < 2; component++) {
+            for (const auto& [code, count] :
+                 histograms[left_index][component].histogram) {
+                (void)code;
+                result.refined_entries += count;
+            }
+            for (const auto& [code, count] :
+                 histograms[right_index][component].histogram) {
+                (void)code;
+                result.refined_entries += count;
+            }
+            result.ordinary_entries += ordinary_counts[left_index][component];
+            result.ordinary_entries += ordinary_counts[right_index][component];
+        }
+        return result;
+    }
+    for (size_t first = 0; first < selected.size(); first++) {
+        uint32_t selected_code = selected[first].first;
+        for (size_t second = 0; second < complement.size(); second++) {
+            uint32_t complement_code = complement[second].first;
+            std::array<uint8_t, 2 * HALF_COLUMNS> y{}, z{};
+            for (unsigned column = 0; column < y.size(); column++) {
+                unsigned sy = degree_nibble(selected_code, column);
+                unsigned cy = degree_nibble(complement_code, column);
+                y[column] = uint8_t(sy + cy);
+                z[column] = uint8_t(x_degrees[column] - sy + cy);
+            }
+            if (x_signature <= column_cut_signature(y) &&
+                x_signature <= column_cut_signature(z)) {
+                keep_selected[first] = 1;
+                keep_complement[second] = 1;
+            }
+        }
+    }
+    DegreeWorkStats result;
+    result.records = 1;
+    result.selected_sectors = selected.size();
+    result.complement_sectors = complement.size();
+    for (size_t index = 0; index < selected.size(); index++) {
+        result.baseline += selected[index].second;
+        if (keep_selected[index]) result.retained += selected[index].second;
+    }
+    for (size_t index = 0; index < complement.size(); index++) {
+        result.baseline += complement[index].second;
+        if (keep_complement[index]) result.retained += complement[index].second;
+    }
+    for (unsigned component = 0; component < 2; component++) {
+        for (const auto& [code, count] :
+             histograms[left_index][component].histogram) {
+            (void)code;
+            result.refined_entries += count;
+        }
+        for (const auto& [code, count] :
+             histograms[right_index][component].histogram) {
+            (void)code;
+            result.refined_entries += count;
+        }
+        result.ordinary_entries += ordinary_counts[left_index][component];
+        result.ordinary_entries += ordinary_counts[right_index][component];
+    }
+    return result;
+}
 
 static unsigned balanced_side(unsigned cells) {
     constexpr unsigned total = ROWS * 2 * HALF_COLUMNS;
@@ -398,6 +712,18 @@ static void add_work(WorkStats& destination, const WorkStats& source) {
     destination.records += source.records;
 }
 
+static void add_degree_work(DegreeWorkStats& destination,
+                            const DegreeWorkStats& source) {
+    destination.baseline += source.baseline;
+    destination.retained += source.retained;
+    destination.refined_entries += source.refined_entries;
+    destination.ordinary_entries += source.ordinary_entries;
+    destination.records += source.records;
+    destination.selected_sectors += source.selected_sectors;
+    destination.complement_sectors += source.complement_sectors;
+    destination.sector_pair_capped_records += source.sector_pair_capped_records;
+}
+
 static void run_work_census(const std::string& path, uint64_t sample_records) {
     std::vector<SampleRecord> records = read_stride_sample(path, sample_records);
     std::vector<uint32_t> prefixes;
@@ -452,6 +778,110 @@ static void run_work_census(const std::string& path, uint64_t sample_records) {
                          static_cast<long double>(item.baseline)
                   << '\n';
     }
+}
+
+static void run_degree_work_census(const std::string& path,
+                                   uint64_t sample_records) {
+    std::vector<SampleRecord> records = read_stride_sample(path, sample_records);
+    std::vector<uint32_t> prefixes;
+    prefixes.reserve(records.size() * 2);
+    for (const SampleRecord& record : records) {
+        prefixes.push_back(half_prefix(record.key, 0));
+        prefixes.push_back(half_prefix(record.key, HALF_COLUMNS));
+    }
+    std::sort(prefixes.begin(), prefixes.end());
+    prefixes.erase(std::unique(prefixes.begin(), prefixes.end()), prefixes.end());
+    std::vector<std::array<DegreeHistogramData, 2>> histograms(prefixes.size());
+    std::vector<std::array<uint64_t, 2>> ordinary_counts(prefixes.size());
+    double build_start = seconds_now();
+#pragma omp parallel for schedule(dynamic, 1)
+    for (long long index = 0; index < (long long)prefixes.size(); index++) {
+        for (unsigned component = 0; component < 2; component++) {
+            bool complement = component != 0;
+            histograms[size_t(index)][component] = degree_support_histogram(
+                prefixes[size_t(index)], complement, 1'000'000, 5'000'000);
+            ordinary_counts[size_t(index)][component] =
+                build_full_weighted_distribution(prefixes[size_t(index)],
+                                                 complement).size();
+        }
+    }
+    double build_seconds = seconds_now() - build_start;
+    uint64_t capped_distributions = 0;
+    uint64_t complete_distributions = 0;
+    U128 complete_refined_states = 0;
+    U128 complete_ordinary_states = 0;
+    U128 attempted_transitions = 0;
+    for (size_t index = 0; index < prefixes.size(); index++) {
+        for (unsigned component = 0; component < 2; component++) {
+            const DegreeHistogramData& item = histograms[index][component];
+            attempted_transitions += item.transition_count;
+            if (item.capped) capped_distributions++;
+            else {
+                complete_distributions++;
+                complete_refined_states += item.state_count;
+                complete_ordinary_states += ordinary_counts[index][component];
+            }
+        }
+    }
+    if (capped_distributions) {
+        std::cout << "COLOUR_CUT_DEGREE_WORK path=" << path
+                  << " records=" << records.size()
+                  << " unique_halves=" << prefixes.size()
+                  << " status=capped"
+                  << " state_cap=1000000"
+                  << " transition_cap=5000000"
+                  << " capped_distributions=" << capped_distributions
+                  << " complete_distributions=" << complete_distributions
+                  << " complete_refined_ratio="
+                  << (complete_ordinary_states
+                      ? static_cast<long double>(complete_refined_states) /
+                            static_cast<long double>(complete_ordinary_states)
+                      : 0)
+                  << " attempted_transitions="
+                  << u128_string(attempted_transitions)
+                  << " build_seconds=" << build_seconds
+                  << "\n";
+        return;
+    }
+    std::unordered_map<uint32_t, size_t> prefix_index;
+    prefix_index.reserve(prefixes.size() * 2);
+    for (size_t index = 0; index < prefixes.size(); index++)
+        prefix_index.emplace(prefixes[index], index);
+    std::vector<DegreeWorkStats> per_record(records.size());
+    double census_start = seconds_now();
+#pragma omp parallel for schedule(dynamic, 1)
+    for (long long index = 0; index < (long long)records.size(); index++) {
+        per_record[size_t(index)] = estimate_degree_work(
+            records[size_t(index)], prefix_index, histograms, ordinary_counts);
+    }
+    DegreeWorkStats total;
+    for (const DegreeWorkStats& item : per_record) add_degree_work(total, item);
+    std::cout << "COLOUR_CUT_DEGREE_WORK path=" << path
+              << " records=" << total.records
+              << " unique_halves=" << prefixes.size()
+              << " baseline_pairs=" << u128_string(total.baseline)
+              << " retained_pairs=" << u128_string(total.retained);
+    if (total.sector_pair_capped_records) {
+        std::cout << " retained_ratio=unmeasured";
+    } else {
+        std::cout << " retained_ratio="
+                  << static_cast<long double>(total.retained) /
+                         static_cast<long double>(total.baseline);
+    }
+    std::cout << " refined_entry_ratio="
+              << static_cast<long double>(total.refined_entries) /
+                     static_cast<long double>(total.ordinary_entries)
+              << " mean_selected_sectors="
+              << double(total.selected_sectors) / total.records
+              << " mean_complement_sectors="
+              << double(total.complement_sectors) / total.records
+              << " sector_pair_cap=10000000"
+              << " sector_pair_capped_records="
+              << total.sector_pair_capped_records
+              << " build_seconds=" << build_seconds
+              << " census_seconds=" << seconds_now() - census_start
+              << " transpose_safe=no"
+              << " structural_gate=OK\n";
 }
 
 }  // namespace
@@ -535,6 +965,7 @@ int main(int argc, char** argv) {
         if (argc >= 3) {
             uint64_t record_samples = argc == 4 ? std::stoull(argv[3]) : 4096;
             run_work_census(argv[2], record_samples);
+            run_degree_work_census(argv[2], record_samples);
         }
     } catch (const std::exception& error) {
         std::cerr << "error: " << error.what() << '\n';
