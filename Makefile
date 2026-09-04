@@ -41,8 +41,18 @@ $(BUILD_DIR)/gpu_result_checkpoint_test: tests/gpu/gpu_result_checkpoint_test.cp
 		src/gpu/gpu_result_checkpoint.hpp src/common/sha256.hpp
 	$(CXX) -O2 -std=c++17 -Isrc/gpu -o $@ $<
 
-gpu-campaign-test:
+$(BUILD_DIR)/gpu_memory_policy_test: tests/gpu/gpu_memory_policy_test.cpp \
+		src/gpu/gpu_memory_policy.hpp
+	mkdir -p $(BUILD_DIR)
+	$(CXX) -O2 -std=c++17 -Isrc/gpu -o $@ $<
+
+gpu-campaign-test: $(BUILD_DIR)/gpu_memory_policy_test
+	./$(BUILD_DIR)/gpu_memory_policy_test
 	python3 -m unittest -v tests.gpu.test_aggregate_gpu_v3
+
+.PHONY: gpu-prefix-configuration-test
+gpu-prefix-configuration-test:
+	NVCC="$(NVCC)" python3 -m unittest -v tests.gpu.test_prefix_configuration
 
 CFLAGS_5XN ?= -O3 -march=native -std=c11
 

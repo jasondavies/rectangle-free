@@ -15659,3 +15659,32 @@
   still do more than this census, but ordinary core memoization merely reduces
   the closure-lattice state count by a modest factor and does not change its
   scaling class.
+
+### Experiment 463: Prefix contracts and retained-capacity memory planning
+
+- Review follow-up: enforce the representation limits of the maintained
+  prefix kernel. More than seven prefix pairs is rejected because eight pairs
+  can produce a 2^32-task Cartesian domain; seven-row configurations below
+  five pairs are rejected because their suffix exceeds uint32_t. Task chunks
+  must be positive uint32_t values with room for final per-warp queue claims.
+  Current production defaults and join arithmetic are unchanged.
+- Correct the shared 6-row/8x8 batch planner to bound each independently
+  retained builder allocation and the paired join/result buffers. Right-layout
+  outputs remain transient. Include terminal class offsets and scalar scratch,
+  and require the edge estimate to cover both descriptors and results. Keep
+  the configured reserve outside the budget for CUDA/Thrust temporaries.
+- Preserve high-water allocation reuse normally. If old capacities alone
+  prevent a batch's first right group from fitting, schedule an explicit
+  workspace/join/result reset before that batch. A group exceeding the fresh
+  budget still fails rather than consuming the safety reserve.
+- Local validation: host tests reproduce the asymmetric high-water failure
+  (two fresh 115-byte batches retain 200 bytes together), check transient-output
+  lifetimes, reset accounting, group accumulation and overflow rejection. All
+  13 campaign-validation tests pass. Compile-only CUDA tests pass five legal
+  geometry/prefix configurations and reject three unsafe widths and four
+  invalid/overflowing task chunks with the expected diagnostics.
+- CUDA 13.3 builds pass for the 8x8 and 6x12 solvers on both sm_89 and sm_120a,
+  and for both 7x9 production drivers on sm_89. No GPU was provisioned or
+  executed: this is a capacity/correctness hardening change, not a measured
+  throughput improvement. Runtime validation on a memory-constrained GPU
+  remains a follow-up before a new campaign.

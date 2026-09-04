@@ -2,6 +2,8 @@
 #define RECTANGLE_FREE_GPU_MEMORY_POLICY_HPP
 
 #include <cerrno>
+#include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -10,6 +12,42 @@
 #include <string>
 
 namespace gpu_memory_policy {
+
+// Byte requirements for buffers that grow independently and survive a batch,
+// plus outputs that are destroyed before the next batch.  A maximum of total
+// batch sizes is NOT a bound on the sum of retained component capacities.
+template <size_t Components>
+struct BatchMemory {
+    std::array<uint64_t, Components> persistent{};
+    uint64_t transient = 0;
+
+    static uint64_t checked_add(uint64_t a, uint64_t b) {
+        if (b > UINT64_MAX - a)
+            throw std::overflow_error("device memory estimate overflow");
+        return a + b;
+    }
+
+    BatchMemory& operator+=(const BatchMemory& other) {
+        for (size_t i = 0; i < Components; ++i)
+            persistent[i] = checked_add(persistent[i], other.persistent[i]);
+        transient = checked_add(transient, other.transient);
+        return *this;
+    }
+
+    BatchMemory retaining(const BatchMemory& previous) const {
+        BatchMemory result = *this;
+        for (size_t i = 0; i < Components; ++i)
+            result.persistent[i] = std::max(persistent[i], previous.persistent[i]);
+        return result;
+    }
+
+    uint64_t bytes() const {
+        uint64_t result = transient;
+        for (uint64_t capacity : persistent)
+            result = checked_add(result, capacity);
+        return result;
+    }
+};
 
 constexpr size_t gib(size_t value) {
     return value << 30;

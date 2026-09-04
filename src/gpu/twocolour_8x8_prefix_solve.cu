@@ -41,6 +41,9 @@ static constexpr uint64_t PREFIX_DEFAULT_DEVICE_RESERVE_BYTES = UINT64_C(2) << 3
 #endif
 static constexpr uint64_t PREFIX_ESTIMATED_EDGE_DEVICE_BYTES =
     TWCOLOUR_ESTIMATED_EDGE_DEVICE_BYTES;
+static_assert(PREFIX_ESTIMATED_EDGE_DEVICE_BYTES >=
+                  2 * (sizeof(PrefixJoinDesc) + sizeof(unsigned long long)),
+              "edge estimate must cover both join descriptors and results");
 
 namespace fs = std::filesystem;
 
@@ -368,7 +371,12 @@ int main(int argc, char** argv) {
     // Estimate the actual buffers allocated by the direct builder.  A fixed
     // bytes/entry ratio misses the dense prefix map and candidate alphabet,
     // which matter most for batches containing many small distributions.
-    auto estimated_distribution_device_bytes = [&](CanonicalRef reference) {
+    // These components correspond to DirectWeightClassWorkspace's independent
+    // high-water allocations, followed by the paired join/result allocations.
+    enum { Dense, Occupied, Failure, Descriptions, BucketAux, Candidates,
+           ClassOffsets, Maximum, JoinResults, MemoryComponents };
+    using BatchMemory = gpu_memory_policy::BatchMemory<MemoryComponents>;
+    auto estimated_distribution_memory = [&](CanonicalRef reference) {
         const CanonicalDescriptor descriptor =
             right_factory->descriptors[reference.distribution];
         const uint64_t entries = descriptor.count;
@@ -382,31 +390,51 @@ int main(int argc, char** argv) {
         // upper bound; charging one class for every support entry grossly
         // overestimates large six-row distributions.
         const uint64_t classes = std::min(entries, candidates);
-        // Final suffix/class storage, bucket and scratch metadata, candidate
-        // counters, the dense prefix histogram, and one build description.
-        return entries * sizeof(PrefixSuffix) +
-               classes * sizeof(WeightClassMeta) +
-               buckets * (sizeof(PrefixBucket) + sizeof(DirectBucketAux) +
-                          sizeof(uint32_t)) +
-               candidates * sizeof(uint32_t) +
-               uint64_t(PREFIX_BUCKET_COUNT) * sizeof(uint32_t) +
-               sizeof(uint32_t) + sizeof(DirectWeightBuildDesc);
+        BatchMemory memory;
+        memory.transient = entries * sizeof(PrefixSuffix) +
+            classes * sizeof(WeightClassMeta) + buckets * sizeof(PrefixBucket);
+        memory.persistent[Dense] = uint64_t(PREFIX_BUCKET_COUNT) * sizeof(uint32_t);
+        memory.persistent[Occupied] = sizeof(uint32_t);
+        memory.persistent[Descriptions] = sizeof(DirectWeightBuildDesc);
+        memory.persistent[BucketAux] = buckets * sizeof(DirectBucketAux);
+        memory.persistent[Candidates] = candidates * sizeof(uint32_t);
+        memory.persistent[ClassOffsets] = buckets * sizeof(uint32_t);
+        return memory;
     };
+    auto complete_batch_memory = [&](BatchMemory memory, size_t edge_count) {
+        memory.persistent[Failure] = sizeof(uint32_t);
+        memory.persistent[Maximum] = sizeof(uint32_t);
+        memory.persistent[ClassOffsets] += sizeof(uint32_t); // terminal offset
+        memory.persistent[Candidates] = std::max<uint64_t>(
+            sizeof(uint32_t), memory.persistent[Candidates]);
+        // The builder reserves at least one class, including zero-class input.
+        // Charging one extra class is a conservative bound in either case.
+        memory.transient += sizeof(WeightClassMeta);
+        memory.persistent[JoinResults] =
+            uint64_t(edge_count) * PREFIX_ESTIMATED_EDGE_DEVICE_BYTES;
+        return memory;
+    };
+    // The reserve also covers CUDA/Thrust temporary allocations, not just the
+    // explicitly modelled buffers.  Never silently spend it when already full.
     const uint64_t right_device_budget = free_bytes > device_reserve_bytes
-        ? uint64_t(free_bytes - device_reserve_bytes) : 1;
+        ? uint64_t(free_bytes - device_reserve_bytes) : 0;
     uint64_t right_entry_budget = uint64_t(UINT32_MAX) + 1;
     // DirectWeightBuildDesc stores destination offsets in uint32_t.  A single
     // layout may contain exactly 2^32 entries but cannot address beyond it.
     std::vector<std::pair<size_t, size_t>> batch_ranges;
     std::vector<std::pair<size_t, size_t>> batch_right_ranges;
     std::vector<uint64_t> batch_estimated_device_bytes;
+    std::vector<bool> batch_reset_buffers;
+    BatchMemory retained_memory;
     size_t right_cursor = 0;
     uint64_t maximum_estimated_device_bytes = 0;
     for (size_t begin = 0; begin < edges.size();) {
         size_t end = begin;
         size_t right_begin = right_cursor;
         uint64_t batch_right_entries = 0;
-        uint64_t batch_layout_bytes = 0;
+        BatchMemory batch_memory;
+        BatchMemory accepted_memory;
+        bool reset_buffers = false;
         while (end < edges.size()) {
             PrefixKey right = edges[end].right;
             size_t group_end = end + 1;
@@ -422,14 +450,22 @@ int main(int argc, char** argv) {
                 right_factory->descriptors[references[0].distribution].count +
                 uint64_t(right_factory->descriptors[
                     references[1].distribution].count);
-            const uint64_t group_layout_bytes =
-                estimated_distribution_device_bytes(references[0]) +
-                estimated_distribution_device_bytes(references[1]);
-            const uint64_t projected_edge_bytes =
-                uint64_t(group_end - begin) *
-                PREFIX_ESTIMATED_EDGE_DEVICE_BYTES;
-            const uint64_t projected_device_bytes = batch_layout_bytes +
-                group_layout_bytes + projected_edge_bytes;
+            BatchMemory next_memory = batch_memory;
+            next_memory += estimated_distribution_memory(references[0]);
+            next_memory += estimated_distribution_memory(references[1]);
+            const BatchMemory fresh_memory = complete_batch_memory(
+                next_memory, group_end - begin);
+            BatchMemory projected_memory = fresh_memory.retaining(retained_memory);
+            // Avoid a false OOM caused solely by old scratch.  Reset only at a
+            // batch boundary, and only when the first group otherwise cannot
+            // fit.  Ordinary batches retain allocation reuse.
+            if (end == begin && projected_memory.bytes() > right_device_budget &&
+                fresh_memory.bytes() <= right_device_budget) {
+                reset_buffers = true;
+                retained_memory = BatchMemory{};
+                projected_memory = fresh_memory;
+            }
+            const uint64_t projected_device_bytes = projected_memory.bytes();
             bool exceeds_kernels = end != begin &&
                 group_end - begin > batch_edges;
             bool exceeds_entries = end != begin &&
@@ -441,14 +477,16 @@ int main(int argc, char** argv) {
                 throw std::runtime_error(
                     "one right group exceeds the structural device budget");
             batch_right_entries += group_entries;
-            batch_layout_bytes += group_layout_bytes;
+            batch_memory = next_memory;
+            accepted_memory = projected_memory;
             end = group_end;
             right_cursor++;
         }
         batch_ranges.emplace_back(begin, end);
         batch_right_ranges.emplace_back(right_begin, right_cursor);
-        const uint64_t estimated_device_bytes = batch_layout_bytes +
-            uint64_t(end - begin) * PREFIX_ESTIMATED_EDGE_DEVICE_BYTES;
+        const uint64_t estimated_device_bytes = accepted_memory.bytes();
+        retained_memory = accepted_memory;
+        batch_reset_buffers.push_back(reset_buffers);
         batch_estimated_device_bytes.push_back(estimated_device_bytes);
         maximum_estimated_device_bytes = std::max(
             maximum_estimated_device_bytes, estimated_device_bytes);
@@ -492,6 +530,13 @@ int main(int argc, char** argv) {
         size_t end = batch_ranges[batch_number].second;
         size_t right_begin = batch_right_ranges[batch_number].first;
         size_t right_end = batch_right_ranges[batch_number].second;
+        if (batch_reset_buffers[batch_number]) {
+            direct_workspace.reset();
+            device_joins.reset();
+            device_results.reset();
+            std::printf("PREFIX_BUFFER_RESET batch=%zu reason=retained-capacity\n",
+                        batch_number);
+        }
         std::vector<PrefixKey> group_keys(
             right_keys.begin() + right_begin, right_keys.begin() + right_end);
         right_groups += group_keys.size();

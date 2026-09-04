@@ -131,6 +131,18 @@ The default `auto` removes the historical 16,384-edge ceiling; device-memory
 accounting remains the binding batch limit.  An explicit numeric edge ceiling
 is retained for controlled profiling.
 
+The shared 6-row/8x8 planner accounts for component-wise retained scratch and
+join/result capacities across batches, not just each batch's fresh allocations.
+If old capacities prevent the next first right group from fitting but a fresh
+workspace would fit, it schedules a batch-boundary reset (`PREFIX_BUFFER_RESET`).
+The safety reserve still covers allocator and CUDA/Thrust temporary storage.
+Prefix tuning is compile-time checked: at most seven row pairs for the 32-bit
+task scheduler, enough pairs to fit the suffix word (at least five for seven
+rows), and a positive task chunk that cannot wrap the final warp claims.
+`make gpu-campaign-test` covers the host memory model;
+`make gpu-prefix-configuration-test NVCC=/path/to/nvcc` checks accepted and
+rejected configurations without requiring a GPU.
+
 The explicit seed replaces the historical `PREFIX_CANONICAL_SEED` environment
 variable and need not itself be a work item. The 8x8 result magic is
 `RECT8X8_PREFIX_RESULT 3`; 7x9 retains `RECT7X9_PACKED_RESULT 3`. Version-2

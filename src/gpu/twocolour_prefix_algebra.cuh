@@ -18,17 +18,30 @@
 constexpr int PREFIX_PAIR_COUNT = TWCOLOUR_PREFIX_PAIR_COUNT;
 static_assert(PREFIX_PAIR_COUNT > 0 && PREFIX_PAIR_COUNT < PAIRS,
               "the physical prefix must leave a nonempty suffix");
+// Eight pairs would fit uint16_t prefixes, but their complete physical bucket
+// Cartesian domain has 2^32 tasks.  Keep the maintained uint32_t scheduler
+// rather than silently accepting a configuration whose task count can wrap.
+static_assert(PREFIX_PAIR_COUNT <= 7,
+              "the uint32_t bucket scheduler supports at most seven prefix pairs");
 #ifndef TWCOLOUR_PREFIX_TASK_CHUNK
 #define TWCOLOUR_PREFIX_TASK_CHUNK 16
 #endif
 constexpr uint32_t PREFIX_TASK_CHUNK = TWCOLOUR_PREFIX_TASK_CHUNK;
-static_assert(PREFIX_TASK_CHUNK > 0, "the dynamic task chunk must advance");
+static_assert(TWCOLOUR_PREFIX_TASK_CHUNK > 0 &&
+                  uint64_t(TWCOLOUR_PREFIX_TASK_CHUNK) <= UINT32_MAX,
+              "the dynamic task chunk must be a positive uint32_t");
+static_assert(PREFIX_PAIR_COUNT > 7 ||
+                  (UINT64_C(1) << (4 * PREFIX_PAIR_COUNT)) +
+                      (uint64_t(THREADS / 32) + 1) * PREFIX_TASK_CHUNK <= UINT32_MAX,
+              "the dynamic task queue must not wrap, including final warp claims");
 
 #if GRID_ROWS <= 7
 using PrefixSuffix = uint32_t;
 #else
 using PrefixSuffix = uint64_t;
 #endif
+static_assert(2 * (PAIRS - PREFIX_PAIR_COUNT) <= 8 * sizeof(PrefixSuffix),
+              "the selected prefix leaves more suffix bits than PrefixSuffix can hold");
 
 // Six rows have only 2*C(6,2)=30 token coordinates.  Keeping their universal
 // canonical cache in 64-bit words wastes nearly thirteen GiB for the complete
