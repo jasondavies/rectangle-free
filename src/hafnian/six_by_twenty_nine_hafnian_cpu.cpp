@@ -16,7 +16,9 @@
 #include <omp.h>
 #endif
 
-#ifdef SIX_BY_TWENTY_EIGHT
+#if defined(SIX_BY_TWENTY_NINE_OPTIMIZED)
+#include "six_by_twenty_nine_optimized_catalog.hpp"
+#elif defined(SIX_BY_TWENTY_EIGHT)
 #include "six_by_twenty_eight_catalog.hpp"
 #else
 #include "six_by_twenty_nine_catalog.hpp"
@@ -26,7 +28,9 @@ namespace {
 
 using Clock=std::chrono::steady_clock;
 constexpr unsigned MAX_N=64,MAX_HALF=32;
-#ifdef SIX_BY_TWENTY_EIGHT
+#if defined(SIX_BY_TWENTY_NINE_OPTIMIZED)
+using DefectQuery=six_by_twenty_nine_optimized::Query;
+#elif defined(SIX_BY_TWENTY_EIGHT)
 using DefectQuery=six_by_twenty_eight::Query;
 #else
 using DefectQuery=six_by_twenty_nine::Query;
@@ -177,7 +181,9 @@ int main(int argc,char** argv) {
             else throw std::runtime_error(
                 "usage: six_by_twenty_nine_hafnian_cpu --query Q --prime P --begin B --end E --threads N");
         }
-#ifdef SIX_BY_TWENTY_EIGHT
+#if defined(SIX_BY_TWENTY_NINE_OPTIMIZED)
+        auto catalog=six_by_twenty_nine_optimized::build_catalog();
+#elif defined(SIX_BY_TWENTY_EIGHT)
         auto catalog=six_by_twenty_eight::build_catalog();
 #else
         auto catalog=six_by_twenty_nine::build_catalog();
@@ -206,7 +212,12 @@ int main(int argc,char** argv) {
 #pragma omp for schedule(dynamic,1)
 #endif
             for(uint64_t term=begin;term<end;++term) {
+                // Production v2 checkpoints index the global Gray ordering.
+#ifdef SIX_BY_TWENTY_NINE_OPTIMIZED
+                sums[thread]+=trace_term(query,term^(term>>1),mod);
+#else
                 sums[thread]+=trace_term(query,term,mod);
+#endif
                 if(sums[thread]>=(UINT64_C(1)<<62))sums[thread]%=prime;
             }
         }

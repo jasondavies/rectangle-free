@@ -15688,3 +15688,61 @@
   executed: this is a capacity/correctness hardening change, not a measured
   throughput improvement. Runtime validation on a memory-constrained GPU
   remains a follow-up before a new campaign.
+
+### Experiment 464: Optimised 6x29 monomer/CRT campaign and shared hafnian engine
+
+- Review found that 6x29 still used independent-term runtime-Montgomery
+  kernels and nine complete prime images. Extract the accepted 6x28 execution
+  engine into `hafnian_residual_engine.cuh`, and share its persistent device
+  workspace, Gray dispatch, specialised fields and exact whole-chunk fallback.
+  Extract the exact matching bound and persistent multi-GPU scheduler as well.
+  The original CPU catalog/evaluator and v1 reducer remain independent controls.
+- Mathematical improvement: the zero-defect order-62 dummy-augmented query
+  counts matchings leaving two tokens unused. The unused token pairs have
+  exactly five row/colour orbits with multiplicities 90, 720, 240, 540 and
+  180. Replace that query by the weighted sum of five order-58 perfect
+  matchings, removing the dummy factorial for these five queries. This leaves
+  33 queries: seven order 58, one order 56 and twenty-five order 54.
+- Certified CRT: reconstruct each matching count before applying the defect
+  coefficients, powers of two and 29!. All queries fit three 31-bit primes:
+  bound powers are 85 for the five new minors, 89 for the original
+  one-monomer queries, 81 for order 56 and 76--77 for order 54. Work falls
+  from 261 images / 30,802,968,576 sign terms to 99 images /
+  11,072,962,560 terms, a 64.05% reduction before the kernel improvement.
+- Catalog identity is
+  `b0738ab5e49081ace71fc0a63201ae4374e31ea035ab65bd4c1bc002b75319a6`.
+  V2 results use global Gray indices, validate each query against an immutable
+  catalog fixture, reject mixed solver binaries and cannot resume v1 pieces.
+  Local tests cover exact minor/dummy identities on small graphs, full
+  synthetic CRT reduction, unaligned restart boundaries, and rehashed invalid
+  metadata. The extracted 6x28 catalog retains its previous exact digest and
+  adaptive-prime census; both GPU drivers compile with CUDA 13.3 for sm_120.
+- Environment: eight RTX PRO 6000 Blackwell Server Edition GPUs on one spot
+  worker, driver 580.126.09. CPU/GPU checks cover all 33 queries at all three
+  primes on ranges `[0,16)`, `[12345,12473)`, and the final seventeen terms:
+  all 297 checks pass, including twelve exact fallback chunks. One-million-
+  term A/B gates cover the five new minors and original size classes under
+  the Mersenne prime; measured kernel speedups are 7.93--9.03x over the
+  independent runtime-Montgomery control, with equal residues in every case.
+- Complete production rerun: solve starts at 2026-09-04T22:52:21Z and finishes
+  at 22:54:23Z (122 seconds). Including CPU/GPU and A/B gates from 22:51:43Z
+  takes 160 seconds, excluding provisioning and upload. Sum of query timers
+  is 794.032479 seconds (0.220565 GPU-hours); sum of eight worker-process
+  timers is 815.636 seconds (0.226566 GPU-worker-hours). This is about 18x
+  below the historical 4.14-GPU-hour campaign, not a controlled same-binary
+  end-to-end A/B comparison. Query 23 takes the independent fallback for all
+  four chunks at each prime; those twelve fallbacks are exact and included
+  in the timings, not discarded from the performance result.
+- All 99 complete result files were pulled locally. Independent final
+  reduction reproduces
+  `T_4(6,29) = 17358733447918084452169454975226757275803964484580835695001600000000`.
+  All 87 original query/prime comparisons agree, including the new weighted
+  five-minor sum against the original order-62 query. Retain result files,
+  gate logs, per-query counts and `verification.json` under
+  `../rectangle-free-data-v2/verda-6x29-verify-20260904/`.
+- Cleanup: the first noninteractive CLI delete unexpectedly requested a
+  terminal. Agent mode successfully deleted this campaign's instance and
+  volume; subsequent instance and volume listings are both empty. No
+  provider-specific IDs or addresses are added to the repository.
+- Outcome: accept the 33-query formulation, per-query CRT and shared engine.
+  The exact answer was already in `results.txt`; no duplicate result is added.

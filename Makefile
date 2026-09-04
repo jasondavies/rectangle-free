@@ -342,7 +342,13 @@ $(BUILD_DIR)/six_by_twenty_nine_hafnian_cpu: src/hafnian/six_by_twenty_nine_hafn
 		src/hafnian/six_by_twenty_nine_catalog.hpp src/common/sha256.hpp
 	$(CXX) -O3 -march=native -std=c++17 $(OPENMP_CFLAGS) -o $@ $< $(OPENMP_LDFLAGS)
 
+$(BUILD_DIR)/six_by_twenty_nine_optimized_cpu: src/hafnian/six_by_twenty_nine_hafnian_cpu.cpp \
+		src/hafnian/six_by_twenty_nine_optimized_catalog.hpp src/hafnian/hafnian_matching_bound.hpp \
+		src/hafnian/six_by_twenty_nine_catalog.hpp src/common/sha256.hpp
+	$(CXX) -O3 -std=c++17 $(OPENMP_CFLAGS) -DSIX_BY_TWENTY_NINE_OPTIMIZED=1 -o $@ $< $(OPENMP_LDFLAGS)
+
 $(BUILD_DIR)/six_by_twenty_eight_catalog_test: tests/hafnian/six_by_twenty_eight_catalog_test.cpp \
+		src/hafnian/hafnian_matching_bound.hpp \
 		src/hafnian/six_by_twenty_eight_catalog.hpp \
 		src/hafnian/six_by_twenty_nine_catalog.hpp src/common/sha256.hpp
 	$(CXX) -O3 -march=native -std=c++17 -o $@ $<
@@ -356,16 +362,21 @@ fixed-montgomery-arithmetic-test: $(BUILD_DIR)/fixed_montgomery_arithmetic_test
 	./$(BUILD_DIR)/fixed_montgomery_arithmetic_test
 
 $(BUILD_DIR)/six_by_twenty_eight_hafnian_cpu: src/hafnian/six_by_twenty_nine_hafnian_cpu.cpp \
+		src/hafnian/hafnian_matching_bound.hpp \
 		src/hafnian/six_by_twenty_eight_catalog.hpp \
 		src/hafnian/six_by_twenty_nine_catalog.hpp src/common/sha256.hpp
 	$(CXX) -O3 -march=native -std=c++17 $(OPENMP_CFLAGS) \
 		-DSIX_BY_TWENTY_EIGHT=1 -o $@ $< $(OPENMP_LDFLAGS)
 
 $(BUILD_DIR)/six_by_twenty_nine_hafnian_gpu: src/hafnian/six_by_twenty_nine_hafnian_gpu.cu \
+		src/hafnian/six_by_twenty_nine_optimized_catalog.hpp src/hafnian/hafnian_matching_bound.hpp \
+		src/hafnian/hafnian_residual_engine.cuh src/hafnian/hafnian_gray_gpu_core.cuh \
+		src/hafnian/hafnian_gray_resolvent_gpu_core.cuh \
 		src/hafnian/six_by_twenty_nine_catalog.hpp src/hafnian/hafnian_gpu_core.cuh src/common/sha256.hpp
 	$(NVCC) $(NVCCFLAGS) -std=c++17 -o $@ $<
 
 $(BUILD_DIR)/six_by_twenty_eight_hafnian_gpu: src/hafnian/six_by_twenty_eight_hafnian_gpu.cu \
+		src/hafnian/hafnian_residual_engine.cuh src/hafnian/hafnian_matching_bound.hpp \
 		src/hafnian/six_by_twenty_eight_catalog.hpp src/hafnian/six_by_twenty_nine_catalog.hpp \
 		src/hafnian/hafnian_gpu_core.cuh src/hafnian/hafnian_gray_gpu_core.cuh \
 		src/hafnian/hafnian_gray_resolvent_gpu_core.cuh \
@@ -373,6 +384,7 @@ $(BUILD_DIR)/six_by_twenty_eight_hafnian_gpu: src/hafnian/six_by_twenty_eight_ha
 	$(NVCC) $(NVCCFLAGS) -std=c++17 -o $@ $<
 
 $(BUILD_DIR)/six_by_twenty_eight_runtime_montgomery_control: \
+		src/hafnian/hafnian_residual_engine.cuh src/hafnian/hafnian_matching_bound.hpp \
 		src/hafnian/six_by_twenty_eight_hafnian_gpu.cu \
 		src/hafnian/six_by_twenty_eight_catalog.hpp src/hafnian/six_by_twenty_nine_catalog.hpp \
 		src/hafnian/hafnian_gpu_core.cuh src/hafnian/hafnian_gray_gpu_core.cuh \
@@ -385,6 +397,12 @@ six-by-twenty-nine-hafnian-test: six_by_twenty_nine_hafnian_cpu
 	./$(BUILD_DIR)/six_by_twenty_nine_hafnian_cpu --query 0 --prime 2147483647 --begin 0 --end 16 --threads 1 | \
 		grep -q 'residue=791700040.*exact=OK'
 	python3 -m unittest -v tests.hafnian.test_six_by_twenty_nine_hafnian
+
+.PHONY: six-by-twenty-nine-optimized-test
+six-by-twenty-nine-optimized-test: $(BUILD_DIR)/six_by_twenty_nine_optimized_cpu
+	./$(BUILD_DIR)/six_by_twenty_nine_optimized_cpu --query 0 --prime 2147483647 \
+		--begin 12345 --end 12361 --threads 1 | grep -q 'residue=1077004600.*exact=OK'
+	python3 -m unittest -v tests.hafnian.test_six_by_twenty_nine_optimized
 
 .PHONY: six-by-twenty-eight-hafnian-test
 six-by-twenty-eight-hafnian-test: six_by_twenty_eight_catalog_test \

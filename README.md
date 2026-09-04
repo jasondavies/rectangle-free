@@ -86,7 +86,8 @@ T_4(6,30) = 30! * 2^30 * hafnian(A).
 
 The implementation evaluates the hafnian modulo several primes on GPU and
 uses CRT for the exact integer. Defect expansions reduce 6x29 to 29 residual
-hafnians and 6x28 to 36,398 symmetry-quotiented residual queries.
+hafnians (now evaluated as 33 smaller queries using a monomer decomposition)
+and 6x28 to 36,398 symmetry-quotiented residual queries.
 
 See [six_by_thirty_hafnian.md](docs/hafnian/six_by_thirty_hafnian.md) and
 [six_by_twenty_nine_hafnian.md](docs/hafnian/six_by_twenty_nine_hafnian.md).
@@ -239,7 +240,7 @@ the time used by every GPU and is therefore distinct from elapsed wall time.
 | `T_4(8,8)` independent check | 1,024 shards; 8 L40S GPUs | 29.07 GPU-hours | About 4.1 hours |
 | `T_4(7,9)` independent check | 128 shards; 8 L40S GPUs | 13.85 GPU-hours | About 2 hours |
 | `T_4(6,30)` | 8 RTX PRO 6000 GPUs | 0.79 GPU-hours | About 10 minutes |
-| `T_4(6,29)` | 8 RTX PRO 6000 GPUs; interrupted and resumed | 4.14 GPU-hours | About 39 minutes including setup |
+| `T_4(6,29)` independent check | 33 queries; 8 RTX PRO 6000 GPUs | 0.221 timed GPU-hours | 2 min 2 s solving; 2 min 40 s including validation gates |
 | `T_4(6,28)` | 8 L40S + 4 RTX PRO 6000 GPUs; interrupted and resumed | 23.43 GPU-hours | About 2 h 48 min including setup and recovery |
 
 The exact integers are collected in [results.txt](results.txt), while the

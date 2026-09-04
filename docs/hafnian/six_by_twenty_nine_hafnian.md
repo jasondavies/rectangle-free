@@ -39,25 +39,55 @@ The augmented orders are 62, 58, 56, and 54. Therefore
 T_4(6,29) = 29! * sum_D coefficient(D) * 2^(29-d) * pm(G_D^+) / r!.
 ```
 
-The shared CUDA core evaluates each perfect-matching count with the exact
-Glynn power-trace hafnian formula. Its compile-time graph-order
-specializations share one implementation and use finite-field Montgomery
-arithmetic. Bounding every residual matching count by the corresponding
-complete-graph matching count proves `T_4(6,29) < 2^272`. Nine 31-bit primes
-give a 279-bit CRT modulus and therefore determine the integer uniquely.
+The original campaign evaluated these 29 hafnians with nine 31-bit primes,
+using the bound `T_4(6,29) < 2^272` and reconstructing the final colouring
+count directly. Its v1 files remain readable by the historical reducer.
+
+## Optimised production formulation
+
+The zero-defect query need not use two dummy vertices. Instead, choose the
+two unused tokens. Their unordered pairs have five `S_6 x S_4` orbits, with
+multiplicities 90, 720, 240, 540 and 180 (sum 1,770). Thus
+
+```text
+m_29(H) = sum_{five orbits O} |O| * pm(H - representative(O)).
+```
+
+This replaces the single order-62 query with five order-58 queries. There
+are now 33 queries: seven of order 58, one of order 56, and 25 of order 54.
+The five new coefficients account for the choice of unused tokens, so no
+dummy factorial remains for those queries. Their removed-token masks denote
+monomers rather than defect supports.
+
+Reconstruct each matching count independently before multiplying by its
+coefficient, `2^(29-d)`, and `29!`. The shared exact degree bound gives powers
+85 for the five new minors, 89 for the original one-monomer queries, and at
+most 81 for the remaining queries. Three 31-bit primes suffice for every
+query. Total work is 11,072,962,560 sign terms versus 30,802,968,576 originally.
+
+`hafnian_residual_engine.cuh` shares the persistent workspace, Gray-chain
+dispatch, fixed-field arithmetic, checkpoint writer and exact fallback with
+6x28. Checkpoints use global Gray indices and a distinct v2 catalog; they
+must never be combined with the historical binary-order v1 pieces. A fresh
+verification campaign also requires one solver binary digest throughout.
 
 ## Build and validate
 
 ```bash
 make six-by-twenty-nine-hafnian-test
+make six-by-twenty-nine-optimized-test
 
 make NVCCFLAGS='-O3 -std=c++17 -arch=sm_120 -lineinfo' \
   six_by_twenty_nine_hafnian_gpu
 ```
 
-The CPU and GPU range evaluators must agree for representatives of all four
-graph orders. The original `6x30` CUDA fixture also tests the shared kernel at
-order 60.
+The optimised CPU evaluator is `build/six_by_twenty_nine_optimized_cpu`;
+the original CPU target retains the historical catalog and binary ordering.
+`tools/check_six_by_twenty_nine_optimized.py` checks all 33 queries under all
+three primes at three ranges, including unaligned Gray boundaries and the
+end of the term domain. Its `--historical` mode checks the complete result
+and all 87 original query/prime combinations, including the weighted sum of
+the five minors against the old dummy-augmented query.
 
 ## Run
 
@@ -68,8 +98,9 @@ python3 tools/run_six_by_twenty_nine_hafnian_gpu.py \
   --output hafnian-6x29-results
 ```
 
-Jobs are scheduled largest-first and checkpoint exact cumulative sign ranges
-after every bounded chunk. Re-running the driver resumes retained prefixes.
-The reducer authenticates every payload, requires exact nonoverlapping
-coverage of all 29 queries for each prime, checks the defect-sector census,
-and performs CRT only after complete modular reduction.
+The shared scheduler assigns largest jobs first and runs one persistent
+process per GPU. Results are published after each 2^24-term chunk; restarting
+resumes exact retained prefixes. `tools/reduce_six_by_twenty_nine_optimized.py`
+authenticates each payload, validates metadata against the certified catalog,
+rejects gaps/overlaps and mixed binaries, and requires complete per-query CRT
+coverage before combining exact matching counts.
