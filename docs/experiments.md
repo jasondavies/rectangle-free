@@ -15746,3 +15746,38 @@
   provider-specific IDs or addresses are added to the repository.
 - Outcome: accept the 33-query formulation, per-query CRT and shared engine.
   The exact answer was already in `results.txt`; no duplicate result is added.
+
+### Experiment 465: Single-load dual-orientation suffix fragments
+
+- Review finding: the shared 8x8 dual-orientation join calls its fragment
+  loader twice on the same suffix range, once per token-plane orientation.
+  CUDA 12.8 and 13.3 both retain duplicate same-address 64-bit loads in the
+  native Ada kernel, including the reversed tile orientation. The Blackwell
+  NVFP4 implementation uses the same repeated-loader structure.
+- Change: let each fragment loader optionally produce the opposite-plane
+  fragment from its already-loaded suffixes. Use that form in both branches
+  of the dual-orientation BMMA and NVFP4 joins. Ordinary single-orientation
+  callers retain their existing interface and do not compute an extra
+  fragment. Predicate arithmetic, tile orientation, padding validity, weight
+  handling and support-orbit multiplicities are unchanged. No runtime tuning
+  flag or fallback is added.
+- Local instruction gate: compile the before/after 8x8 source with CUDA 13.3,
+  `-O3 -std=c++17 -lineinfo`, and native `sm_89` / `sm_120a` cubins. The
+  join's static `LDG.E.64` instruction count falls from 15 to 12 on Ada and
+  from 21 to 18 on Blackwell. The duplicate orientation loads disappear;
+  these static counts are not dynamic load counts or predicted speedups.
+  Both before/after kernels use 48 registers per thread, zero stack/local
+  memory and no spills. Shared-memory use is unchanged on each architecture.
+- Regression coverage: `make gpu-fragment-test` executes the actual
+  host/device loaders without requiring a GPU. Independent bit-by-bit
+  references check both fragment families, all 32 lanes, all A tile counts
+  0--16 and B counts 0--8, nonzero offsets, both plane orientations, zero/full
+  masks, fixed-point masks, every individual suffix bit and deterministic
+  random masks. Cover 6-row prefix widths 3/4/7, 7-row width 5 and 8-row
+  width 7. The existing prefix-configuration, memory-policy and 13 checkpoint
+  aggregation regressions also pass. Compile the 6x12, packed 7x9 and 8x8
+  production targets for both Ada and Blackwell.
+- Status: implementation and local correctness/instruction gates only.
+  No cloud worker was provisioned and no device kernel was executed. A
+  matched full-shard GPU A/B, with exact contribution parity, is still
+  required before claiming an end-to-end performance improvement.

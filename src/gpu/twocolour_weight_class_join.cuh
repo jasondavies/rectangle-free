@@ -94,7 +94,7 @@ struct PtxFragmentB {
     bool valid1;
 };
 
-static __device__ __forceinline__ uint32_t weight_class_suffix_word(
+static __host__ __device__ __forceinline__ uint32_t weight_class_suffix_word(
     uint64_t suffix, unsigned word) {
     return word == 0 ? uint32_t(suffix)
                      : word == 1 ? uint32_t(suffix >> 32) : 0;
@@ -112,9 +112,13 @@ static __device__ __forceinline__ void weight_class_inline_bmma_16x8(
           "r"(zero), "r"(zero));
 }
 
-static __device__ __forceinline__ PtxFragmentA load_weight_class_ptx_a(
+// An optional second fragment derives the opposite plane orientation from the
+// same raw loads. All production callers pass either nullptr or a local
+// fragment, so this choice is resolved at compile time after inlining.
+static __host__ __device__ __forceinline__ PtxFragmentA load_weight_class_ptx_a(
     const PrefixSuffix* __restrict__ suffixes, uint32_t offset,
-    uint32_t count, uint32_t base, unsigned lane, bool swap_planes) {
+    uint32_t count, uint32_t base, unsigned lane, bool swap_planes,
+    PtxFragmentA* opposite = nullptr) {
     const unsigned group = lane >> 2;
     const unsigned word = lane & 3U;
     const uint32_t row0 = group;
@@ -132,12 +136,20 @@ static __device__ __forceinline__ PtxFragmentA load_weight_class_ptx_a(
     }
     fragment.bits0 = weight_class_suffix_word(suffix0, word);
     fragment.bits1 = weight_class_suffix_word(suffix1, word);
+    if (opposite) {
+        *opposite = fragment;
+        opposite->bits0 = weight_class_suffix_word(
+            swap_suffix_token_planes(suffix0), word);
+        opposite->bits1 = weight_class_suffix_word(
+            swap_suffix_token_planes(suffix1), word);
+    }
     return fragment;
 }
 
-static __device__ __forceinline__ PtxFragmentB load_weight_class_ptx_b(
+static __host__ __device__ __forceinline__ PtxFragmentB load_weight_class_ptx_b(
     const PrefixSuffix* __restrict__ suffixes, uint32_t offset,
-    uint32_t count, uint32_t base, unsigned lane, bool swap_planes) {
+    uint32_t count, uint32_t base, unsigned lane, bool swap_planes,
+    PtxFragmentB* opposite = nullptr) {
     const unsigned group = lane >> 2;
     const unsigned word = lane & 3U;
     const uint32_t output0 = 2 * word;
@@ -149,6 +161,11 @@ static __device__ __forceinline__ PtxFragmentB load_weight_class_ptx_b(
     fragment.bits = weight_class_suffix_word(suffix, word);
     fragment.valid0 = output0 < count;
     fragment.valid1 = output1 < count;
+    if (opposite) {
+        *opposite = fragment;
+        opposite->bits = weight_class_suffix_word(
+            swap_suffix_token_planes(suffix), word);
+    }
     return fragment;
 }
 
@@ -213,7 +230,8 @@ weight_class_fragment_count(PtxFragmentA a, PtxFragmentB b) {
 
 // Evaluate both token-plane orientations in one traversal when both physical
 // prefixes are compatible.  The lower-padding orientation is unchanged; the
-// operand unaffected by token-plane exchange is loaded once per tile pair.
+// Both operands are loaded once per tile pair; derive the two orientations of
+// the affected operand from those same raw suffixes.
 static __device__ __forceinline__ unsigned long long
 weight_class_predicate_join_dual(
     const PrefixSuffix* __restrict__ left_suffixes, PrefixBucket left,
@@ -237,14 +255,12 @@ weight_class_predicate_join_dual(
                  right_base += 8) {
                 uint32_t right_count = min(uint32_t(8),
                                            right.count - right_base);
+                PtxFragmentB swapped_b;
                 PtxFragmentB b = load_weight_class_ptx_b(
                     right_suffixes, right.entry_offset, right_count,
-                    right_base, lane, false);
+                    right_base, lane, false, &swapped_b);
                 sum += weight_class_fragment_count(a, b);
-                b = load_weight_class_ptx_b(
-                    right_suffixes, right.entry_offset, right_count,
-                    right_base, lane, true);
-                sum += weight_class_fragment_count(a, b);
+                sum += weight_class_fragment_count(a, swapped_b);
             }
         }
     } else {
@@ -252,12 +268,10 @@ weight_class_predicate_join_dual(
              right_base += 16) {
             uint32_t right_count = min(uint32_t(16),
                                        right.count - right_base);
+            PtxFragmentA swapped_a;
             PtxFragmentA a = load_weight_class_ptx_a(
                 right_suffixes, right.entry_offset, right_count, right_base,
-                lane, false);
-            PtxFragmentA swapped_a = load_weight_class_ptx_a(
-                right_suffixes, right.entry_offset, right_count, right_base,
-                lane, true);
+                lane, false, &swapped_a);
             for (uint32_t left_base = 0; left_base < left.count;
                  left_base += 8) {
                 uint32_t left_count = min(uint32_t(8),
@@ -273,11 +287,9 @@ weight_class_predicate_join_dual(
     return sum;
 }
 
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200
-
 // Spread eight logical bits into eight FP4 E2M1 nibbles.  E2M1 code 0x2 is
 // exactly +1.0, while zero remains 0x0.
-static __device__ __forceinline__ uint32_t weight_class_fp4_byte(
+static __host__ __device__ __forceinline__ uint32_t weight_class_fp4_byte(
     uint32_t bits) {
     bits &= 0xffU;
     bits = (bits | (bits << 12)) & 0x000f000fU;
@@ -302,10 +314,11 @@ struct WeightClassFp4B {
     bool valid1;
 };
 
-static __device__ __forceinline__ WeightClassFp4A
+static __host__ __device__ __forceinline__ WeightClassFp4A
 load_weight_class_fp4_a(
     const PrefixSuffix* __restrict__ suffixes, uint32_t offset,
-    uint32_t count, uint32_t base, unsigned lane, bool swap_planes) {
+    uint32_t count, uint32_t base, unsigned lane, bool swap_planes,
+    WeightClassFp4A* opposite = nullptr) {
     const unsigned group = lane >> 2;
     const unsigned word = lane & 3U;
     const uint32_t row0 = group;
@@ -327,13 +340,25 @@ load_weight_class_fp4_a(
         uint32_t(suffix0 >> (8 * (word + 4))));
     fragment.bits3 = weight_class_fp4_byte(
         uint32_t(suffix1 >> (8 * (word + 4))));
+    if (opposite) {
+        *opposite = fragment;
+        suffix0 = swap_suffix_token_planes(suffix0);
+        suffix1 = swap_suffix_token_planes(suffix1);
+        opposite->bits0 = weight_class_fp4_byte(uint32_t(suffix0 >> (8 * word)));
+        opposite->bits1 = weight_class_fp4_byte(uint32_t(suffix1 >> (8 * word)));
+        opposite->bits2 = weight_class_fp4_byte(
+            uint32_t(suffix0 >> (8 * (word + 4))));
+        opposite->bits3 = weight_class_fp4_byte(
+            uint32_t(suffix1 >> (8 * (word + 4))));
+    }
     return fragment;
 }
 
-static __device__ __forceinline__ WeightClassFp4B
+static __host__ __device__ __forceinline__ WeightClassFp4B
 load_weight_class_fp4_b(
     const PrefixSuffix* __restrict__ suffixes, uint32_t offset,
-    uint32_t count, uint32_t base, unsigned lane, bool swap_planes) {
+    uint32_t count, uint32_t base, unsigned lane, bool swap_planes,
+    WeightClassFp4B* opposite = nullptr) {
     const unsigned group = lane >> 2;
     const unsigned word = lane & 3U;
     const uint32_t output0 = 2 * word;
@@ -347,8 +372,17 @@ load_weight_class_fp4_b(
         uint32_t(suffix >> (8 * (word + 4))));
     fragment.valid0 = output0 < count;
     fragment.valid1 = output1 < count;
+    if (opposite) {
+        *opposite = fragment;
+        suffix = swap_suffix_token_planes(suffix);
+        opposite->bits0 = weight_class_fp4_byte(uint32_t(suffix >> (8 * word)));
+        opposite->bits1 = weight_class_fp4_byte(
+            uint32_t(suffix >> (8 * (word + 4))));
+    }
     return fragment;
 }
+
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1200
 
 static __device__ __forceinline__ unsigned long long
 weight_class_fp4_fragment_count(
@@ -442,14 +476,12 @@ weight_class_predicate_join_fp4_dual(
                  right_base += 8) {
                 uint32_t right_count = min(uint32_t(8),
                                            right.count - right_base);
+                WeightClassFp4B swapped_b;
                 WeightClassFp4B b = load_weight_class_fp4_b(
                     right_suffixes, right.entry_offset, right_count,
-                    right_base, lane, false);
+                    right_base, lane, false, &swapped_b);
                 sum += weight_class_fp4_fragment_count(a, b, lane);
-                b = load_weight_class_fp4_b(
-                    right_suffixes, right.entry_offset, right_count,
-                    right_base, lane, true);
-                sum += weight_class_fp4_fragment_count(a, b, lane);
+                sum += weight_class_fp4_fragment_count(a, swapped_b, lane);
             }
         }
     } else {
@@ -457,12 +489,10 @@ weight_class_predicate_join_fp4_dual(
              right_base += 16) {
             uint32_t right_count = min(uint32_t(16),
                                        right.count - right_base);
+            WeightClassFp4A swapped_a;
             WeightClassFp4A a = load_weight_class_fp4_a(
                 right_suffixes, right.entry_offset, right_count, right_base,
-                lane, false);
-            WeightClassFp4A swapped_a = load_weight_class_fp4_a(
-                right_suffixes, right.entry_offset, right_count, right_base,
-                lane, true);
+                lane, false, &swapped_a);
             for (uint32_t left_base = 0; left_base < left.count;
                  left_base += 8) {
                 uint32_t left_count = min(uint32_t(8),

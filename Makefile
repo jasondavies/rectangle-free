@@ -54,6 +54,10 @@ gpu-campaign-test: $(BUILD_DIR)/gpu_memory_policy_test
 gpu-prefix-configuration-test:
 	NVCC="$(NVCC)" python3 -m unittest -v tests.gpu.test_prefix_configuration
 
+.PHONY: gpu-fragment-test
+gpu-fragment-test:
+	NVCC="$(NVCC)" python3 -m unittest -v tests.gpu.test_dual_fragment_load
+
 CFLAGS_5XN ?= -O3 -march=native -std=c11
 
 ifneq ($(LTO),0)
