@@ -108,5 +108,6 @@ void solve_graph_poly(const Graph* input_g, RowGraphCache* cache, RowGraphCache*
                       GraphCanonWorkspace* ws, long long* local_canon_calls,
                       long long* local_cache_hits, long long* local_raw_cache_hits,
                       ProfileStats* profile, GraphResult* out_result);
+void simplify_graph_poly_multiplier(Graph* g, GraphPoly* multiplier);
 
 #endif

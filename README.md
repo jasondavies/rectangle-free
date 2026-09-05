@@ -154,12 +154,19 @@ The partition solvers support deterministic sharding:
 ```bash
 ./build/partition_poly 6 8 --task-start 0 --task-end 100 --poly-out a.poly
 ./build/partition_poly 6 8 --task-start 100 --task-end 200 --poly-out b.poly
-./merge_poly.py --poly-out merged.poly a.poly b.poly
+python3 tools/merge_poly.py --poly-out merged.poly a.poly b.poly
 ```
 
 Useful shared options include `--prefix-depth`, `--task-start`, `--task-end`,
 `--reorder`, `--adaptive-subdivide`, and their corresponding `--no-*`
 controls. Profiling is selected by building the `_profile` targets.
+
+New polynomial shards use checksummed `RECT_POLY_V2` files, written by atomic
+replacement. Merging requires matching source and task-space identities and
+non-overlapping ranges; a saved merged shard must cover a contiguous range.
+Historical V1 files require explicit `--allow-legacy` because their task mapping
+cannot be verified. Run `make partition-test` for shard validation and
+undefined-behaviour-checked cache/graph regression tests.
 
 Exercise the exact hafnian implementations with:
 
@@ -177,6 +184,7 @@ validation procedure are documented in [GPU_CODE.md](docs/GPU_CODE.md).
 Run the non-CUDA regression suites with:
 
 ```bash
+make partition-test
 make gpu_result_checkpoint_test
 ./build/gpu_result_checkpoint_test
 make gpu-campaign-test

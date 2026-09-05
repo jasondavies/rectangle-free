@@ -1488,7 +1488,11 @@ static void print_final_output(const MainOptions* opts, const RunConfig* run, co
             .task_start = run->active_task_start,
             .task_end = run->active_task_end,
             .full_tasks = run->full_tasks,
+            .prefix_depth = run->prefix_depth,
+            .reorder = opts->reorder_partitions_flag,
+            .count_k4 = RECT_COUNT_K4,
         };
+        poly_task_space_digest(meta.prefix_depth, meta.reorder, meta.full_tasks, meta.task_space);
         write_poly_file(opts->poly_out_path, poly, &meta);
 #if RECT_COUNT_K4
         printf("\nWrote fixed-4 shard to %s\n", opts->poly_out_path);

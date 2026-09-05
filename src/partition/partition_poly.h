@@ -158,6 +158,10 @@ typedef struct {
     long long task_start;
     long long task_end;
     long long full_tasks;
+    int prefix_depth;
+    int reorder;
+    int count_k4;
+    char task_space[65];
 } PolyFileMeta;
 
 typedef struct {
@@ -767,5 +771,7 @@ PolyCoeff poly_eval(Poly p, long long x);
 void print_u128(PolyCoeff n);
 void print_poly(Poly p);
 void write_poly_file(const char* path, const Poly* poly, const PolyFileMeta* meta);
+void poly_task_space_digest(int prefix_depth, int reorder, long long full_tasks,
+                            char out[65]);
 
 #endif

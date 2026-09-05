@@ -119,65 +119,16 @@ int row_graph_cache_lookup_rows(RowGraphCache* cache, uint64_t key_hash, uint32_
     return 0;
 }
 
+// Mask only when necessary; both callers share probing and replacement policy.
 void store_row_graph_cache_entry(RowGraphCache* cache, uint64_t key_hash, uint32_t key_n,
-                                 const Graph* g, AdjWord row_mask,
-                                 const GraphResult* value) {
-#if !RECT_COUNT_K4
-    if (!row_graph_cache_value_fits(value)) return;
-#endif
-    int cache_idx = (int)(cache_index_mix(key_hash) & (uint64_t)cache->mask);
-    int empty_slot = -1;
-    int oldest_same_n_slot = -1;
-    int oldest_other_n_slot = -1;
-    uint64_t oldest_same_n_stamp = UINT64_MAX;
-    uint64_t oldest_other_n_stamp = UINT64_MAX;
-    for (int k = 0; k < cache->probe; k++) {
-        int p = (cache_idx + k) & cache->mask;
-        if (row_graph_cache_slot_matches_graph(cache, p, key_hash, key_n, g, row_mask)) {
-            empty_slot = p;
-            break;
-        }
-        if (!cache->keys[p].used) {
-            if (empty_slot < 0) empty_slot = p;
-            continue;
-        }
-
-        uint64_t stamp = cache->stamps[p];
-        if (cache->keys[p].key_n != key_n) {
-            if (stamp < oldest_other_n_stamp) {
-                oldest_other_n_stamp = stamp;
-                oldest_other_n_slot = p;
-            }
-        } else if (stamp < oldest_same_n_stamp) {
-            oldest_same_n_stamp = stamp;
-            oldest_same_n_slot = p;
-        }
-    }
-    int best_slot = empty_slot;
-    if (best_slot < 0) {
-        best_slot = (oldest_other_n_slot >= 0) ? oldest_other_n_slot : oldest_same_n_slot;
-    }
-    if (best_slot < 0) best_slot = cache_idx;
-    cache->keys[best_slot].key_hash = key_hash;
-    cache->keys[best_slot].key_n = key_n;
-    AdjWord* slot_rows = row_graph_cache_row_slot(cache, best_slot);
+                                 const Graph* g, AdjWord row_mask, const GraphResult* value) {
     if (row_mask == (AdjWord)ADJWORD_MASK) {
-        memcpy(slot_rows, g->adj, (size_t)key_n * sizeof(AdjWord));
-    } else {
-        for (uint32_t i = 0; i < key_n; i++) {
-            slot_rows[i] = g->adj[i] & row_mask;
-        }
+        store_row_graph_cache_entry_rows(cache,key_hash,key_n,g->adj,value);
+        return;
     }
-#if RECT_COUNT_K4
-    *row_graph_cache_coeff_slot(cache, best_slot) = *value;
-#else
-    cache->x_pows[best_slot] = value->x_pow;
-    cache->degs[best_slot] = value->deg;
-    GraphCacheValue* coeffs = row_graph_cache_coeff_slot(cache, best_slot);
-    for (int i = 0; i <= value->deg; i++) coeffs[i] = (GraphCacheValue)value->coeffs[i];
-#endif
-    cache->keys[best_slot].used = 1;
-    row_graph_cache_touch_slot(cache, best_slot);
+    AdjWord rows[MAX_GRAPH_VERTICES];
+    for(uint32_t i=0;i<key_n;i++) rows[i]=g->adj[i]&row_mask;
+    store_row_graph_cache_entry_rows(cache,key_hash,key_n,rows,value);
 }
 
 void store_row_graph_cache_entry_rows(RowGraphCache* cache, uint64_t key_hash, uint32_t key_n,
@@ -198,8 +149,10 @@ void store_row_graph_cache_entry_rows(RowGraphCache* cache, uint64_t key_hash, u
             break;
         }
         if (!cache->keys[p].used) {
-            if (empty_slot < 0) empty_slot = p;
-            continue;
+            // Slots are never deleted. No matching key can lie beyond the
+            // first unused slot (the same invariant used by lookup).
+            empty_slot = p;
+            break;
         }
 
         uint64_t stamp = cache->stamps[p];

@@ -429,7 +429,7 @@ static int simplify_graph_count4(Graph* g, uint64_t* multiplier,
 }
 #endif
 
-static void simplify_graph_poly_multiplier(Graph* g, GraphPoly* multiplier) {
+void simplify_graph_poly_multiplier(Graph* g, GraphPoly* multiplier) {
     int changed = 1;
     while (changed && g->n > SMALL_GRAPH_LOOKUP_MAX_N) {
         changed = 0;
@@ -729,25 +729,17 @@ done:
             phase_t0 = omp_get_wtime();
         }
         int max_deg = -1, u = -1, v = -1;
-        graph_choose_branch_edge(branch_g, &u, &v, &max_deg);
-        int use_addition_contraction = 0;
-        if (g_addition_contraction_fill_limit > 0) {
-            int fill_u = -1;
-            int fill_v = -1;
-            int fill = graph_choose_fill_nonedge(branch_g,
-                                                 g_addition_contraction_fill_limit,
-                                                 &fill_u, &fill_v);
-            if (fill <= g_addition_contraction_fill_limit && fill_u >= 0 && fill_v >= 0) {
-                u = fill_u;
-                v = fill_v;
-                use_addition_contraction = 1;
-            }
+        // Keep adaptive work accounting independent of the selected backend.
+        for (int i = 0; i < branch_g->n; i++) {
+            int degree = __builtin_popcountll((uint64_t)branch_g->adj[i] & branch_g->vertex_mask);
+            if (degree > max_deg) max_deg = degree;
         }
+        int use_addition_contraction = 0;
         if (PROFILE_BUILD && profile && branch_g->n >= 0 && branch_g->n <= MAX_GRAPH_VERTICES) {
             hard_pick_t += omp_get_wtime() - phase_t0;
         }
-        if (u != -1 && max_deg > 0) record_hard_graph_node(profile, branch_g->n, max_deg);
-        if (u != -1 && max_deg > 0) hard_miss_log_record(branch_g, hash, max_deg);
+        if (max_deg > 0) record_hard_graph_node(profile, branch_g->n, max_deg);
+        if (max_deg > 0) hard_miss_log_record(branch_g, hash, max_deg);
         outcome = SG_OUTCOME_HARD_MISS;
         if (PROFILE_BUILD && g_profile_separators && profile &&
             branch_g->n >= 10 && branch_g->n <= MAX_GRAPH_VERTICES) {
@@ -775,6 +767,19 @@ done:
                 profile->treewidth_time_by_n[branch_g->n] += omp_get_wtime() - treewidth_t0;
                 if (solved_by_treewidth) profile->treewidth_successes_by_n[branch_g->n]++;
             }
+        }
+
+        if (!solved_by_treewidth) {
+            if (PROFILE_BUILD && profile) phase_t0 = omp_get_wtime();
+            if (g_addition_contraction_fill_limit > 0) {
+                int fill = graph_choose_fill_nonedge(branch_g,
+                    g_addition_contraction_fill_limit, &u, &v);
+                use_addition_contraction =
+                    fill <= g_addition_contraction_fill_limit && u >= 0 && v >= 0;
+            }
+            if (!use_addition_contraction)
+                graph_choose_branch_edge(branch_g, &u, &v, &max_deg);
+            if (PROFILE_BUILD && profile) hard_pick_t += omp_get_wtime() - phase_t0;
         }
 
         if (!solved_by_treewidth && u != -1 && v != -1) {

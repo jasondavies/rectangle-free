@@ -1,4 +1,7 @@
 #include "partition_poly_internal.h"
+#ifdef RECT_RESIDUAL_CENSUS
+#include "../../research/probes/partition_residual_census.h"
+#endif
 
 struct TerminalAggregator {
 #if RECT_COUNT_K4
@@ -81,6 +84,9 @@ void terminal_aggregator_flush(TerminalAggregator* aggregator,
     (void)profile;
 #else
     if (aggregator->count == 0) return;
+#ifdef RECT_RESIDUAL_CENSUS
+    residual_census_begin();
+#endif
     double t0 = (PROFILE_BUILD && profile) ? omp_get_wtime() : 0.0;
     for (size_t i = 0; i < aggregator->capacity; i++) {
         TerminalAggregateEntry* entry = &aggregator->entries[i];
@@ -91,10 +97,16 @@ void terminal_aggregator_flush(TerminalAggregator* aggregator,
                          local_canon_calls, local_cache_hits, local_raw_cache_hits,
                          profile, &graph_result);
         poly_mul_graph_ref(&entry->weight, &graph_result, &contribution);
+#ifdef RECT_RESIDUAL_CENSUS
+        residual_census_visit(&entry->graph, &entry->weight, &contribution, ws);
+#endif
         poly_accumulate_checked(aggregator->total, &contribution);
         entry->used = 0;
     }
     aggregator->count = 0;
+#ifdef RECT_RESIDUAL_CENSUS
+    residual_census_end(cache, raw_cache, ws);
+#endif
     if (PROFILE_BUILD && profile) {
         profile->terminal_aggregate_flushes++;
         profile->terminal_aggregate_time += omp_get_wtime() - t0;

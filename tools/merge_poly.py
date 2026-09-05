@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import os
+import re
+import tempfile
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 
@@ -15,6 +19,13 @@ class PolyFileMeta:
     task_start: int
     task_end: int
     full_tasks: int
+    version: int = 1
+    algorithm: str = ""
+    solver_source: str = ""
+    mode: str = "polynomial"
+    task_space: str = ""
+    prefix_depth: int = 0
+    reorder: int = 0
 
 
 @dataclass
@@ -53,105 +64,110 @@ def fail(message: str) -> "None":
 
 
 def parse_poly_file(path: Path) -> tuple[Poly, PolyFileMeta]:
+    """Strict V1/V2 reader. Legacy task identity remains unverified."""
     try:
-        with path.open("r", encoding="ascii") as handle:
-            lines = [line.rstrip("\r\n") for line in handle]
-    except OSError:
-        fail(f"Failed to open {path} for reading")
-
-    if not lines:
-        fail(f"Failed to read header from {path}")
-    if lines[0] != "RECT_POLY_V1":
-        fail(f"Invalid polynomial file header in {path}")
-
-    rows = -1
-    cols = -1
-    task_start = 0
-    task_end = 0
-    full_tasks = -1
-    coeffs: dict[int, int] = {}
-
-    for line in lines[1:]:
-        if line == "end":
-            break
-        if line.startswith("rows "):
-            rows = parse_int(line[5:], str(path))
-            continue
-        if line.startswith("cols "):
-            cols = parse_int(line[5:], str(path))
-            continue
-        if line.startswith("task_start "):
-            task_start = parse_int(line[11:], str(path))
-            continue
-        if line.startswith("task_end "):
-            task_end = parse_int(line[9:], str(path))
-            continue
-        if line.startswith("full_tasks "):
-            full_tasks = parse_int(line[11:], str(path))
-            continue
-        if line.startswith("deg "):
-            continue
-        if line.startswith("coeff "):
-            payload = line[6:]
-            try:
-                idx_text, value_text = payload.split(" ", 1)
-            except ValueError:
-                fail(f"Invalid coefficient line in {path}: {line}")
-            idx = parse_int(idx_text, str(path))
-            if idx < 0:
-                fail(f"Invalid coefficient line in {path}: {line}")
-            value_text = value_text.lstrip(" ")
-            if not value_text:
-                fail(f"Invalid coefficient line in {path}: {line}")
-            coeffs[idx] = parse_int(value_text, str(path))
-            continue
-        fail(f"Unrecognised line in {path}: {line}")
-
-    if rows < 0 or cols < 0 or full_tasks < 0:
+        data = path.read_bytes()
+        lines = data.decode("ascii").splitlines()
+    except (OSError, UnicodeError) as exc:
+        fail(f"Cannot read {path}: {exc}")
+    if not lines or lines[0] not in ("RECT_POLY_V1", "RECT_POLY_V2"):
+        fail(f"Invalid header in {path}")
+    version = int(lines[0][-1])
+    if lines[-1] != "end" or lines.count("end") != 1:
+        fail(f"Missing or misplaced end marker in {path}")
+    if version == 2:
+        if data != ("\n".join(lines) + "\n").encode("ascii"):
+            fail(f"Noncanonical V2 line endings in {path}")
+        if len(lines) < 3 or not re.fullmatch(r"sha256 [0-9a-f]{64}", lines[-2]):
+            fail(f"Missing checksum in {path}")
+        payload = ("\n".join(lines[:-2]) + "\n").encode("ascii")
+        if hashlib.sha256(payload).hexdigest() != lines[-2][7:]:
+            fail(f"Checksum mismatch in {path}")
+        body = lines[1:-2]
+    else:
+        body = lines[1:-1]
+    common = {"rows", "cols", "task_start", "task_end", "full_tasks", "deg"}
+    extra = {"algorithm", "solver_source", "mode", "prefix_depth", "reorder", "task_space"}
+    allowed = common | (extra if version == 2 else set())
+    fields, coeffs = {}, {}
+    for line in body:
+        parts = line.split()
+        if len(parts) == 3 and parts[0] == "coeff":
+            idx = parse_int(parts[1], str(path))
+            if idx < 0 or idx in coeffs:
+                fail(f"Invalid or duplicate coefficient in {path}")
+            coeffs[idx] = parse_int(parts[2], str(path))
+        elif len(parts) == 2 and parts[0] in allowed and parts[0] not in fields:
+            fields[parts[0]] = parts[1]
+        else:
+            fail(f"Unknown, duplicate or malformed field in {path}: {line}")
+    if fields.keys() != allowed:
         fail(f"Incomplete metadata in {path}")
-
-    degree = 0
-    for idx, value in coeffs.items():
-        if value != 0 and idx > degree:
-            degree = idx
-    dense_coeffs = [0] * (degree + 1)
-    for idx, value in coeffs.items():
-        if idx < len(dense_coeffs):
-            dense_coeffs[idx] = value
-
-    return Poly(dense_coeffs), PolyFileMeta(
-        rows=rows,
-        cols=cols,
-        task_start=task_start,
-        task_end=task_end,
-        full_tasks=full_tasks,
-    )
+    nums = {k: parse_int(fields[k], str(path)) for k in common}
+    degree = nums["deg"]
+    if nums["rows"] <= 0 or nums["cols"] <= 0 or not 0 <= degree <= nums["rows"] * nums["cols"]:
+        fail(f"Invalid geometry or degree in {path}")
+    if len(coeffs) != degree + 1 or any(i not in coeffs for i in range(degree + 1)):
+        fail(f"Missing or out-of-range coefficients in {path}")
+    if not 0 <= nums["task_start"] <= nums["task_end"] <= nums["full_tasks"]:
+        fail(f"Invalid task range in {path}")
+    if nums["task_start"] == nums["task_end"] and any(coeffs.values()):
+        fail(f"Nonzero contribution for an empty task range in {path}")
+    kwargs = {}
+    if version == 2:
+        if fields["algorithm"] != "partition-structure-v2":
+            fail(f"Unsupported algorithm in {path}")
+        if fields["mode"] not in ("polynomial", "count4"):
+            fail(f"Invalid mode in {path}")
+        if fields["mode"] == "count4" and degree != 0:
+            fail(f"Count4 shard has polynomial coefficients in {path}")
+        for key in ("task_space", "solver_source"):
+            if not re.fullmatch(r"[0-9a-f]{64}", fields[key]):
+                fail(f"Invalid {key} in {path}")
+        depth = parse_int(fields["prefix_depth"], str(path))
+        reorder = parse_int(fields["reorder"], str(path))
+        if depth not in (0, 2, 3, 4) or depth > nums["cols"] or reorder not in (0, 1):
+            fail(f"Invalid task configuration in {path}")
+        kwargs = dict(algorithm=fields["algorithm"], solver_source=fields["solver_source"],
+                      task_space=fields["task_space"], mode=fields["mode"],
+                      prefix_depth=depth, reorder=reorder)
+    meta = PolyFileMeta(**{k: nums[k] for k in common - {"deg"}}, version=version, **kwargs)
+    return Poly([coeffs[i] for i in range(degree + 1)]), meta
 
 
 def parse_int(text: str, label: str) -> int:
-    if not text:
-        fail(f"Missing integer for {label}")
-    try:
-        return int(text, 10)
-    except ValueError:
+    if not re.fullmatch(r"[+-]?[0-9]+", text):
         fail(f"Invalid integer for {label}: {text}")
+    return int(text, 10)
 
 
 def write_poly_file(path: Path, poly: Poly, meta: PolyFileMeta) -> None:
+    lines = [f"RECT_POLY_V{meta.version}"]
+    if meta.version == 2:
+        lines += [f"algorithm {meta.algorithm}", f"solver_source {meta.solver_source}", f"mode {meta.mode}"]
+    lines += [f"rows {meta.rows}", f"cols {meta.cols}"]
+    if meta.version == 2:
+        lines += [f"prefix_depth {meta.prefix_depth}", f"reorder {meta.reorder}", f"task_space {meta.task_space}"]
+    lines += [f"task_start {meta.task_start}", f"task_end {meta.task_end}",
+              f"full_tasks {meta.full_tasks}", f"deg {poly.deg}"]
+    lines += [f"coeff {i} {value}" for i, value in enumerate(poly.coeffs)]
+    payload = ("\n".join(lines) + "\n").encode("ascii")
+    if meta.version == 2:
+        payload += f"sha256 {hashlib.sha256(payload).hexdigest()}\n".encode("ascii")
+    payload += b"end\n"
+    temporary = None
     try:
-        with path.open("w", encoding="ascii") as handle:
-            handle.write("RECT_POLY_V1\n")
-            handle.write(f"rows {meta.rows}\n")
-            handle.write(f"cols {meta.cols}\n")
-            handle.write(f"task_start {meta.task_start}\n")
-            handle.write(f"task_end {meta.task_end}\n")
-            handle.write(f"full_tasks {meta.full_tasks}\n")
-            handle.write(f"deg {poly.deg}\n")
-            for idx, value in enumerate(poly.coeffs):
-                handle.write(f"coeff {idx} {value}\n")
-            handle.write("end\n")
-    except OSError:
-        fail(f"Failed to open {path} for writing")
+        with tempfile.NamedTemporaryFile(dir=path.parent, prefix=path.name + ".tmp.", delete=False) as handle:
+            temporary = Path(handle.name)
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except OSError as exc:
+        fail(f"Cannot write {path}: {exc}")
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def format_poly(poly: Poly) -> str:
@@ -181,104 +197,61 @@ def format_poly(poly: Poly) -> str:
     return "P(x) = 0" if not terms else "P(x) = " + "".join(terms)
 
 
-def merge_shards(inputs: list[Path], poly_out_path: Path | None) -> int:
+def merge_shards(inputs: list[Path], poly_out_path: Path | None, *, allow_legacy: bool = False) -> int:
     if not inputs:
         fail("At least one input shard is required")
-
-    merged = Poly.zero()
-    merged_meta: PolyFileMeta | None = None
-    task_seen: list[bool] | None = None
-    covered_tasks = 0
-    first_poly: Poly | None = None
-    first_meta: PolyFileMeta | None = None
-
-    for index, input_path in enumerate(inputs):
-        current_poly, current_meta = parse_poly_file(input_path)
-
-        if (
-            current_meta.task_start < 0
-            or current_meta.task_end < current_meta.task_start
-            or current_meta.task_end > current_meta.full_tasks
-        ):
-            fail(f"Invalid task selection in shard: {input_path}")
-
-        if index == 0:
-            merged_meta = current_meta
-            first_poly = current_poly
-            first_meta = current_meta
-            try:
-                task_seen = [False] * merged_meta.full_tasks
-            except MemoryError:
-                fail("Failed to allocate merge task bitmap")
-        else:
-            assert merged_meta is not None
-            if (
-                current_meta.rows != merged_meta.rows
-                or current_meta.cols != merged_meta.cols
-                or current_meta.full_tasks != merged_meta.full_tasks
-            ):
-                fail(f"Incompatible polynomial shard: {input_path}")
-
-        assert task_seen is not None
-        for task in range(current_meta.task_start, current_meta.task_end):
-            if task_seen[task]:
-                fail(f"Overlapping shard task {task} in {input_path}")
-            task_seen[task] = True
-            covered_tasks += 1
-
-        merged = merged.add(current_poly)
-
-    if task_seen is None or merged_meta is None:
-        fail("Failed to allocate merge task tracking")
-
-    seen_indices = [index for index, seen in enumerate(task_seen) if seen]
-    if seen_indices:
-        min_task = seen_indices[0]
-        max_task = seen_indices[-1] + 1
+    merged, meta, identity = Poly.zero(), None, None
+    intervals = []
+    for path in inputs:
+        poly, current = parse_poly_file(path)
+        if current.version == 1 and not allow_legacy:
+            fail("Legacy shards lack task provenance; use --allow-legacy only for an audited historical campaign")
+        current_identity = (current.version, current.rows, current.cols, current.full_tasks,
+                            current.algorithm, current.solver_source, current.mode,
+                            current.task_space, current.prefix_depth, current.reorder)
+        if meta is None:
+            meta, identity = current, current_identity
+        elif current_identity != identity:
+            fail(f"Incompatible polynomial shard: {path}")
+        if current.task_start < current.task_end:
+            intervals.append((current.task_start, current.task_end, str(path)))
+        merged = merged.add(poly)
+    assert meta is not None
+    intervals.sort()
+    covered, previous_end, contiguous = 0, None, True
+    for start, end, path in intervals:
+        if previous_end is not None:
+            if start < previous_end:
+                fail(f"Overlapping shard task {start} in {path}")
+            if start != previous_end:
+                contiguous = False
+        covered += end - start
+        previous_end = end
+    if not contiguous and poly_out_path is not None:
+        fail("Cannot write a merged shard with gaps in its task range")
+    meta = replace(meta, task_start=intervals[0][0] if intervals else 0,
+                   task_end=intervals[-1][1] if intervals else 0)
+    if meta.version == 1:
+        print("Warning: legacy task-space identity is unverified.", file=sys.stderr)
+    print(f"Merged {len(inputs)} shard(s) for {meta.rows}x{meta.cols}")
+    print(f"Covered tasks: {covered} / {meta.full_tasks}")
+    if meta.mode == "count4":
+        print(f"T_4 = {merged.coeffs[0]}")
     else:
-        min_task = 0
-        max_task = 0
-
-    merged_meta.task_start = min_task
-    merged_meta.task_end = max_task
-    contiguous_cover = all(task_seen[task] for task in range(min_task, max_task))
-
-    if covered_tasks == merged_meta.full_tasks:
-        merged_meta.task_start = 0
-        merged_meta.task_end = merged_meta.full_tasks
-        contiguous_cover = True
-
-    if not contiguous_cover and len(inputs) == 1:
-        assert first_poly is not None and first_meta is not None
-        merged = first_poly
-        merged_meta = first_meta
-    elif not contiguous_cover and poly_out_path is not None:
-        fail(
-            f"Cannot write merged shard {poly_out_path}: input tasks are non-contiguous and incomplete"
-        )
-
-    print(f"Merged {len(inputs)} shard(s) for {merged_meta.rows}x{merged_meta.cols}")
-    print(f"Covered tasks: {covered_tasks} / {merged_meta.full_tasks}")
-    print()
-    print("Chromatic Polynomial P(x):")
-    print(format_poly(merged))
-    print()
-    print("Values:")
-    print(f"P(4) = {merged.eval(4)}")
-    print(f"P(5) = {merged.eval(5)}")
-
+        print(format_poly(merged))
+        print(f"P(4) = {merged.eval(4)}")
+        print(f"P(5) = {merged.eval(5)}")
     if poly_out_path is not None:
-        write_poly_file(poly_out_path, merged, merged_meta)
-        print()
+        write_poly_file(poly_out_path, merged, meta)
         print(f"Wrote merged polynomial to {poly_out_path}")
-
     return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Merge RECT_POLY_V1 polynomial shards.",
+        description="Validate and merge V2 polynomial shards, or explicit historical V1.",
     )
+    parser.add_argument("--allow-legacy", action="store_true", help="allow audited historical V1 shards")
     parser.add_argument("--poly-out", dest="poly_out", help="write the merged shard to this file")
     parser.add_argument("inputs", nargs="+", help="input shard files")
     return parser
@@ -286,7 +259,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    return merge_shards([Path(path) for path in args.inputs], Path(args.poly_out) if args.poly_out else None)
+    return merge_shards([Path(path) for path in args.inputs], Path(args.poly_out) if args.poly_out else None, allow_legacy=args.allow_legacy)
 
 
 if __name__ == "__main__":

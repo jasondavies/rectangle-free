@@ -15905,3 +15905,99 @@
   stronger continuation needs an exact index/group contraction that avoids
   visiting most template pairs, with its own construction and memory gate.
   Production kernels and campaign runtime estimates remain unchanged.
+
+### Experiment 468: Partition build and polynomial-shard safeguards
+
+- Scope: CPU partition/chromatic-polynomial solvers; no GPU or cloud changes.
+  Partition targets now depend on their shared headers and build recipe.
+  `make -n -W src/partition/partition_poly.h partition_poly_8_profile` now
+  schedules a rebuild. The previous default `gpu-production` goal is preserved.
+- Extract polynomial output from arithmetic into `result_io.c`. New
+  `RECT_POLY_V2` shards identify geometry, polynomial/count4 mode, prefix depth,
+  reordering, source-content SHA-256, and the actual ordered partition/task
+  mapping. This is source/task provenance, not a digest of compiler binaries
+  or every external cache artifact. A payload checksum detects damaged files.
+  Writes use unique temporary files, flush/fsync, and atomic replacement;
+  they are not an exclusive work-claim protocol.
+- Strict reducer: require complete metadata, every coefficient exactly once,
+  valid ranges and a terminal marker; reject mixed identities, overlapping
+  ranges, checksum failures, and gapped saved aggregates. Interval-based
+  coverage replaces allocation proportional to the complete task universe.
+  V1 historical files require `--allow-legacy`: they cannot retroactively
+  acquire verified task identity. V1 and V2 cannot be mixed.
+- `make partition-test` passes 12 tests: all 335 tracked historical shards,
+  actual 4x3 split/unsplit full-coefficient equality, changed task-map rejection,
+  malformed/truncated/tampered files, atomic replacement failure, huge task
+  spaces, collision-heavy cache insertion, and 48 random graph polynomials
+  against an independent treewidth solver with branch/backend variations and
+  non-dense relabellings. SHA-256 is checked against hashlib on 140 lengths.
+  The UBSan graph-test build deliberately rejects a signed coefficient overflow;
+  this does not make unchecked production arithmetic arbitrary precision.
+- Count4 smoke test: a new 4x3 shard round-trips through the same reducer and
+  gives `T_4 = 12870096`. Count4, 7-row polynomial and 8-row profile builds pass.
+
+### Experiment 469: Cache insertion and deferred polynomial branch selection
+
+- Consolidate the two graph-cache insertion implementations into one policy.
+  Stop at the first unused slot: slots are never deleted, and lookup already
+  relies on this invariant. Preserve exact key comparisons and replacement
+  priority; masked callers materialize masked rows only when needed.
+- Run the treewidth gate before scoring recursive branches. For unsolved
+  graphs, select a profitable fill nonedge first and score deletion edges only
+  if necessary. Preserve hard-node/adaptive-work accounting before the gate.
+  Fixed-k4 branch selection is unchanged. No production tuning flags added.
+- Local single-thread 8x5, prefix-depth 2, task `[0,1)`, default adaptive/cache
+  configuration, GCC `-O3 -march=native -flto`. Three runs per immutable binary,
+  ordered ABC/CBA/ABC; A is the pre-change solver, B cache-only, C both changes.
+  Full printed polynomial coefficients agree in every run.
+
+  | Variant | Worker times (s) | Mean process wall (s) |
+  | --- | --- | ---: |
+  | Baseline | 10.27, 10.19, 10.15 | 12.4101 |
+  | Cache only | 10.04, 10.04, 10.06 | 12.2516 |
+  | Cache + branch order | 9.89, 9.90, 9.89 | 12.0960 |
+
+- Cache-only reduces mean worker time by 1.54%; the combination by 3.04%
+  (2.53% process-wall reduction). These are modest CPU sample improvements,
+  not a new full-grid campaign estimate. Task `[0,1)` gives
+  `P(4) = 4206252739472179200`, `P(5) = 81067546619730819086400`.
+- Held-out heavier 8x5 task `[1,2)`, same settings, ABBA order: baseline
+  worker times 84.10 / 83.97 s; combined 82.60 / 82.53 s. Mean worker time
+  falls 1.75%; mean process wall falls from 86.2321 to 84.7534 s (1.71%).
+  All four complete polynomials agree, with `P(4) = 78456786107545036800`.
+- Final-source smoke run after integrating output safeguards and census hooks
+  (disabled in production): 8x5 task `[0,1)` takes 12.1517 s process wall,
+  9.99 s worker time, and matches every census polynomial coefficient. This
+  is a single sanity run, not an additional matched A/B series.
+
+### Experiment 470: Simplified terminal-residual aggregation census
+
+- Isolated `partition_residual_census` target. Production builds contain no
+  census calls. Sample existing terminal-aggregation flushes, apply the actual
+  polynomial simplifier, multiply its exact factor into each incoming weight,
+  then count identical dense residuals. A second table also uses the existing
+  bounded WL canonicalizer; it is not a complete isomorphism census.
+- Independently solve and aggregate both tables and compare every coefficient
+  with the original flush contribution. Never substitute the experimental
+  answer into production. Validation uses a private cache with the global hard
+  cache disabled, so it cannot warm production caches or charge adaptive work.
+
+  | Work item | Sampled flushes | Original distinct terminals | Simplified keys | WL-keyed residuals |
+  | --- | ---: | ---: | ---: | ---: |
+  | 8x4 task `[0,1)` | 2 / 2 | 3,441 | 1,189 | 1,006 |
+  | 8x5 task `[0,1)` | 57 / 1,823 | 175,104 | 86,329 | 72,634 |
+
+- Both regroupings pass full-coefficient checks on every sampled flush.
+  The 8x5 sample removes 50.7% of distinct terminal solves with simplification
+  alone, or 58.5% including bounded WL keys. Timed normalization/insertion is
+  0.0311 s and additional WL keying/insertion 0.0951 s over the sample; these
+  exclude independent validation solves. This is a reuse census, not an A/B
+  speedup: current raw/canonical caches already make some repeats cheap.
+- Reproduce: `make partition_residual_census`, then
+  `OMP_NUM_THREADS=1 RECT_HARD_CACHE_BITS=0 RECT_CENSUS_STRIDE=32 RECT_CENSUS_FLUSHES=64 build/partition_residual_census 8 5 --prefix-depth 2 --task-end 1`.
+  Use stride 1 and 8x4 for the small exhaustive-flush check. Default sample cap
+  bounds validation work but does not stop the underlying selected task.
+- Decision: proceed next to an A/B prototype of simplified dense-residual
+  aggregation, retaining raw aggregation as the control. Do not enable an
+  extra WL pass by default based on deduplication ratios alone. No claimed
+  full-grid speedup or production aggregation change from this experiment.
