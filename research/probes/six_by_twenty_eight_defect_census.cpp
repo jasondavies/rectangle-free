@@ -27,6 +27,8 @@
 #endif
 
 #include "../../src/hafnian/six_by_twenty_nine_catalog.hpp"
+#include "six_by_twenty_seven_common_core.hpp"
+#include "common_core_catalog_io.hpp"
 
 namespace {
 
@@ -61,6 +63,10 @@ struct Options {
     uint64_t matching_max_states = 0;
     uint64_t matching_max_roots = 0;
     double matching_max_seconds = 0;
+    unsigned common_core_samples = 0;
+    unsigned common_core_parents = 4;
+    uint64_t common_core_seed = 475;
+    std::string export_catalog;
 };
 
 uint64_t parse_u64(const char* text) {
@@ -323,7 +329,7 @@ unsigned required_matching_primes(unsigned bound_power) {
 
 FriedlandSummary friedland_summary(const Geometry& geometry,
                                    const std::vector<Record>& orbit,
-                                   unsigned slack) {
+                                   unsigned slack,std::vector<uint8_t>* prime_counts=nullptr) {
     // lcm(2,4,...,36).  This makes the sum of the exponents
     // ceil(log2(d!))/(2d) exact as a rational number.
     constexpr uint64_t EXPONENT_DENOMINATOR = 24504480;
@@ -370,6 +376,7 @@ FriedlandSummary friedland_summary(const Geometry& geometry,
             (unmatched_choices <= 1 ? 0 :
              64U - unsigned(__builtin_clzll(unmatched_choices - 1)));
         const unsigned prime_count = required_matching_primes(bound_power);
+        if(prime_counts)prime_counts->push_back(uint8_t(prime_count));
         const unsigned augmented_vertices = vertices + unmatched;
         if (!augmented_vertices || (augmented_vertices & 1))
             throw std::runtime_error("invalid augmented matching order");
@@ -690,8 +697,9 @@ int run_orbit_census(const Geometry& geometry,
               << " bits=" << bound_bits
               << " required_31bit_primes=" << (bound_bits + 30) / 31
               << " exact=OK\n";
+    std::vector<uint8_t> prime_counts;
     const FriedlandSummary friedland =
-        friedland_summary(geometry, orbit, options.slack);
+        friedland_summary(geometry, orbit, options.slack,options.export_catalog.empty()?nullptr:&prime_counts);
     U128 adaptive_sign_terms = 0;
     for (unsigned primes = 1; primes < friedland.queries_by_prime_count.size();
          primes++) {
@@ -742,9 +750,35 @@ int run_orbit_census(const Geometry& geometry,
     if (options.slack == 3 &&
         adaptive_sign_terms != U128(UINT64_C(134616715362304)))
         throw std::runtime_error("6x27 adaptive workload mismatch");
+    if(!options.export_catalog.empty()) {
+        auto digest=common_catalog::write(options.export_catalog,options.slack,orbit,prime_counts);
+        std::printf("CORE_CATALOG queries=%zu digest=%s exact=OK\n",orbit.size(),digest.c_str());
+        std::fflush(stdout);
+    }
     if (options.matching_max_states || options.matching_max_seconds ||
         options.matching_max_roots)
         SharedMatchingCounter(geometry, options).run(orbit, options.slack);
+    if (options.common_core_samples) {
+        using Key = std::pair<unsigned,unsigned>;
+        std::map<Key,six_by_common_core::Sample> samples;
+        for (const Record& r : orbit) {
+            auto [excess,count]=sector_of(r.key);
+            unsigned order=60+2*options.slack-2*count-2*excess;
+            if (!count || !excess || order<42 || order>48) continue;
+            auto item=samples.try_emplace(Key{excess,count},six_by_common_core::Sample{
+                options.common_core_samples,options.common_core_seed});
+            item.first->second.add(occupied_from_key(r.key));
+        }
+        for (const auto& [key,sample] : samples) {
+            auto [excess,count]=key;
+            six_by_common_core::census(geometry,sample,excess,count,options.slack,
+                options.common_core_parents,[&](uint64_t parent) {
+                    return layers[count-1][excess-1].count(parent)!=0;
+                });
+        }
+        std::printf("CORE27_DONE elapsed=%.6f seed=%" PRIu64 " exact_structure=OK\n",
+                    elapsed(),options.common_core_seed);
+    }
     return 0;
 }
 
@@ -770,20 +804,34 @@ int main(int argc, char** argv) try {
             options.matching_max_roots = parse_u64(argv[++argument]);
         else if (value == "--matching-max-seconds" && argument + 1 < argc)
             options.matching_max_seconds = parse_double(argv[++argument]);
+        else if (value == "--common-core-samples" && argument + 1 < argc)
+            options.common_core_samples = unsigned(parse_u64(argv[++argument]));
+        else if (value == "--common-core-parents" && argument + 1 < argc)
+            options.common_core_parents = unsigned(parse_u64(argv[++argument]));
+        else if (value == "--common-core-seed" && argument + 1 < argc)
+            options.common_core_seed = parse_u64(argv[++argument]);
+        else if (value == "--export-catalog" && argument + 1 < argc)
+            options.export_catalog=argv[++argument];
         else
             throw std::runtime_error(
                 "usage: six_by_twenty_eight_defect_census "
                 "[--slack 1|2|3] [--threads N] [--max-configurations N] "
                 "[--graph-isomorphism] [--raw] "
                 "[--matching-max-states N] [--matching-max-roots N] "
-                "[--matching-max-seconds S]");
+                "[--matching-max-seconds S] [--common-core-samples N] "
+                "[--common-core-parents N] [--common-core-seed N] [--export-catalog FILE]");
     }
     if (!options.threads || options.slack < 1 || options.slack > 3)
         throw std::runtime_error(
             "slack must be one, two, or three and threads positive");
+    if (!options.common_core_parents || options.common_core_parents>16 ||
+        options.common_core_samples>1024 || (options.raw_census&&options.common_core_samples))
+        throw std::runtime_error("common-core gate needs orbit mode, <=1024 samples, and 1..16 parents");
     if (options.raw_census && options.slack != 1)
         throw std::runtime_error(
             "raw census is retained only for the bounded 6x29 regression");
+    if(options.raw_census&&!options.export_catalog.empty())
+        throw std::runtime_error("catalog export requires orbit mode");
 #ifdef _OPENMP
     omp_set_dynamic(0);
     omp_set_num_threads(int(options.threads));

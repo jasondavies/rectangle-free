@@ -355,12 +355,55 @@ $(BUILD_DIR)/six_by_thirty_matching_probe: research/probes/six_by_thirty_matchin
 	$(CXX) -O3 -march=native -std=c++17 $(OPENMP_CFLAGS) -o $@ $< $(OPENMP_LDFLAGS)
 
 $(BUILD_DIR)/six_by_twenty_eight_defect_census: research/probes/six_by_twenty_eight_defect_census.cpp \
+		research/probes/six_by_twenty_seven_common_core.hpp \
+		research/probes/common_core_catalog_io.hpp \
 		src/hafnian/six_by_twenty_nine_catalog.hpp src/common/sha256.hpp
 	$(CXX) -O3 -march=native -std=c++17 $(OPENMP_CFLAGS) -o $@ $< \
 		$(OPENMP_LDFLAGS) -lnauty
 
 $(BUILD_DIR)/colour_plane_permanent_probe: research/probes/colour_plane_permanent_probe.cpp
 	$(CXX) -O3 -march=native -std=c++17 -o $@ $<
+
+$(BUILD_DIR)/hafnian_common_core_test: tests/hafnian/common_core_test.cpp \
+		research/probes/six_by_twenty_seven_common_core.hpp src/hafnian/six_by_twenty_nine_catalog.hpp
+	$(CXX) -O2 -g -std=c++17 -fsanitize=undefined -fno-sanitize-recover=all -o $@ $<
+
+.PHONY: hafnian-common-core-test
+hafnian-common-core-test: $(BUILD_DIR)/hafnian_common_core_test $(BUILD_DIR)/hafnian_common_core_bench
+	./$(BUILD_DIR)/hafnian_common_core_test
+	python3 research/probes/hafnian_common_core_identity.py --self-test
+	./$(BUILD_DIR)/hafnian_common_core_bench --self-test
+
+$(BUILD_DIR)/hafnian_common_core_bench: research/probes/hafnian_common_core_bench.cpp \
+		research/probes/hafnian_gray_update_probe.cpp research/probes/six_by_twenty_seven_common_core.hpp \
+		src/hafnian/six_by_twenty_eight_catalog.hpp src/hafnian/six_by_twenty_nine_catalog.hpp \
+		src/hafnian/hafnian_matching_bound.hpp src/common/sha256.hpp
+	$(CXX) -O3 -march=native -std=c++17 $(OPENMP_CFLAGS) -o $@ $< $(OPENMP_LDFLAGS)
+
+$(BUILD_DIR)/hafnian_common_core_gpu: research/gpu/hafnian_common_core_gpu.cu \
+		research/probes/hafnian_common_core_bench.cpp research/probes/hafnian_gray_update_probe.cpp \
+		research/probes/six_by_twenty_seven_common_core.hpp \
+		src/hafnian/six_by_twenty_eight_catalog.hpp src/hafnian/six_by_twenty_nine_catalog.hpp
+	$(NVCC) $(NVCCFLAGS) -Xcompiler $(OPENMP_CFLAGS) -o $@ $<
+
+$(BUILD_DIR)/hafnian_common_core_host: research/gpu/hafnian_common_core_gpu.cu \
+		research/probes/hafnian_common_core_bench.cpp research/probes/hafnian_gray_update_probe.cpp \
+		research/probes/six_by_twenty_seven_common_core.hpp \
+		src/hafnian/six_by_twenty_eight_catalog.hpp src/hafnian/six_by_twenty_nine_catalog.hpp
+	$(CXX) -x c++ -O2 -std=c++17 $(OPENMP_CFLAGS) -DCORE_HOST_EMULATION -o $@ $< $(OPENMP_LDFLAGS)
+
+.PHONY: hafnian-common-core-cooperative-test
+hafnian-common-core-cooperative-test: $(BUILD_DIR)/hafnian_common_core_host
+	OMP_WAIT_POLICY=ACTIVE ./$(BUILD_DIR)/hafnian_common_core_host --self-test
+
+$(BUILD_DIR)/hafnian_common_core_plan: research/probes/hafnian_common_core_plan.cpp \
+		research/probes/common_core_catalog_io.hpp research/probes/six_by_twenty_seven_common_core.hpp \
+		src/hafnian/six_by_twenty_nine_catalog.hpp src/common/sha256.hpp
+	$(CXX) -O3 -march=native -std=c++17 $(OPENMP_CFLAGS) -o $@ $< $(OPENMP_LDFLAGS)
+
+.PHONY: hafnian-common-core-plan-test
+hafnian-common-core-plan-test: $(BUILD_DIR)/hafnian_common_core_plan six_by_twenty_eight_defect_census
+	python3 tests/hafnian/common_core_plan_test.py
 
 .PHONY: six-by-twenty-eight-census-test
 six-by-twenty-eight-census-test: six_by_twenty_eight_defect_census

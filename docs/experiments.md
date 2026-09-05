@@ -16182,3 +16182,201 @@
   in production. Keep the implementation isolated in the research header
   and its compile-time-only A/B/verification targets. Saving individual
   edge updates must justify the added packing and transposition work.
+
+### Experiment 475: Shared-core residual-hafnian census for 6x27
+
+- Test cross-query algebraic reuse, rather than the already-rejected global
+  recursive matching memo or generic large derivative table (Experiment 405).
+  Extend the exact defect census with bounded deterministic per-sector query
+  samples. Every tested parent is present in the reachable defect DP, every
+  child is a genuine disjoint size-three extension, and canonical child IDs
+  are deduplicated inside each proposed group.
+- Reproduce all 45,007,139 6x27 residual queries, the exact sector coefficients,
+  and 134,616,715,362,304 adaptive sign terms. Sample 128 canonical queries
+  in each of six order-42--48 sectors using seed 475; test at most four
+  reachable parent orbits and greedy boundary pools of size 5/7/9/11.
+  Runtime is 5m52s wall, peak RSS 29,807,268 KiB, on the local 16-thread host.
+  Lightweight tests ran concurrently; this is a diagnostic, not an A/B timing.
+- Main order-42 sector: a nine-token pool yields 10.554688 distinct residual
+  queries per sampled group on average, sharing a 36-vertex core and leaving
+  six live boundary vertices. An eleven-token pool yields 15.398438 queries
+  sharing a 34-vertex core and leaving eight boundary vertices. Corresponding
+  order-44 means are 10.718750 and 16.460938. Both order-46 sectors have
+  similarly useful groups; all their sampled roots find valid parents.
+- The sampled `(e=6,d=3)` order-48 sector has 91/128 roots without a valid
+  size-three-deletion parent. Keep them as singletons in the reported means.
+  Orders 42/44/46 dominate 94.89% of the existing adaptive work, but these
+  local groups are not yet a disjoint global campaign partition.
+- Explicit core-first reference pairing preserves the signed core block
+  across every member. UBSan tests cover sampling order independence,
+  duplicate removal, membership, parity, dummy vertices and 1,106 signed-core
+  member checks. Existing slack-one/slack-two orbit/graph/CRT regressions pass.
+- Additional exact algebra gate: after summing only common-core signs, the
+  boundary can be evaluated as a small polynomial-valued hafnian. The core
+  determinant series and dressed boundary matrix are reused across all
+  children; a small boundary-subset memo shares related minors. Independent
+  perfect-matching enumeration agrees on 1,326 small minors over two primes,
+  including singular cores and signed weights. This avoids boundary-sign
+  enumeration mathematically; it is not a fast implementation yet.
+- Decision: **positive structural/algebra gate; proceed to a bounded CPU
+  arithmetic benchmark**, not production or a GPU campaign. Do not interpret
+  mean group size or the illustrative `rebuild_ratio8` as a speedup. Moment
+  construction, boundary polynomial arithmetic, global overlap, rank handling
+  and the unmeasured small-order baseline remain decisive.
+- Derivation, detailed sector table, limitations and commands are in
+  [the common-core gate note](hafnian/common_core_gate.md). Local artifacts:
+  `build/common-core-6x27.{log,time}`, `build/common-core-6x28-smoke.log`,
+  and `build/common-core-{tests,regression}.log`. No cloud resources, result
+  values, production defaults or campaign checkpoint formats were changed.
+
+### Experiment 476: Complete shared-core CPU arithmetic and once-only ownership
+
+- Implement the Experiment 475 partial-core formula in a local C++ probe:
+  characteristic series, sparse 0/1 boundary moments and memoized polynomial
+  hafnian minors. All replacement boundary work is timed. Keep this isolated
+  from production CUDA, campaign checkpoint formats and result values.
+- Four real 6x27 roots span the dominant order-42/44/46 sectors. Test pool
+  caps 7/9/11, 128 deterministic full-domain signs and two alternating-order
+  repetitions per case. Compare every sampled partial-core child summand
+  with an individual evaluation of the same formula. Independently compare
+  the CPU four-term resolvent control against full Hessenberg recomputation.
+  All comparisons pass, with no sampled resolvent breakdowns.
+- Pool-9 groups (10–11 queries) are 7.45–8.30x faster than separate
+  partial-core evaluations; pool-11 groups (14–18 queries) are 6.79–8.75x
+  faster. Including the eliminated boundary-sign domain, the CPU four-term
+  resolvent comparison gives 31.71–38.56x and 59.77–78.88x respectively.
+  These are normalized CPU work estimates, **not GPU speedups**: the reference
+  is not the tuned production eight-term CUDA hybrid. Boundary polynomials
+  consume roughly half of the pool-11 arithmetic time.
+- Trim each tested group to six requested children to reflect ownership
+  losses. Within-method sharing remains 4.75–4.86x for pool 9 and 3.80–4.11x
+  for pool 11; normalized CPU resolvent ratios fall to 20.79–23.45x and
+  34.46–38.12x. These are isolated sequential reruns, not a full 6x27 plan.
+  A second-prime real-order benchmark passes all comparisons with similar
+  ratios. Do not use the locally largest groups alone to project a campaign.
+- Construct an actual disjoint assignment of every query in the full 6x28
+  `(e=4,d=4)` sector using all 664 reachable parents. Two parent orderings
+  cover over 99.9% of its 33,077 queries with multi-query groups. Mean assigned
+  group sizes fall to 3.53/4.96/6.53 for caps 7/9/11, considerably below the
+  individually best groups. Unassigned queries remain singleton fallbacks;
+  exact-once ownership preserves coefficient total 8,126,516,160. No inference
+  of full 6x27 coverage is made from the additional sparse logged-union check.
+- Complete a real 18-query 6x28 group, summing all 524,288 common-core signs.
+  Its first-prime arithmetic takes 32.54 s on eight CPU threads, excluding
+  catalog construction. Both primes 2,147,483,647 and 2,147,483,629 agree with
+  all 18 saved production augmented-hafnian residues (36 comparisons). The independent
+  full-Glynn result payload hashes, query/catalog identities and range coverage
+  are checked before comparing normalized residues. This does not reuse or
+  equate partial-core and full-Glynn sign terms.
+- Extend the test target with 1,350 complete small C++ minors over two primes,
+  checked against both brute matching enumeration and full-Glynn/Hessenberg.
+  The previous 1,326 Python weighted-minor and 1,106 structural tests remain.
+  The C++ complete-minor self-test also passes UBSan.
+- Decision: **positive CPU feasibility gate; a bounded CUDA prototype is
+  justified**, not a new production campaign or a revised 6x27 GPU-hour
+  estimate. Real GPU boundary arithmetic and a full once-only 6x27 assignment
+  are still required. Details and reproduction commands are in
+  [the common-core note](hafnian/common_core_gate.md).
+- Local artifacts: `build/common-core-bench-final.log`,
+  `build/common-core-coverage6x28.log`,
+  `build/common-core-coverage6x27-sample.log`,
+  `build/common-core-complete6x28.log`, `build/common-core-parity6x28.log`,
+  their second-prime `-p2.log` companions, `build/common-core-bench-p2.log`,
+  `build/common-core-bench-trim6-isolated.log`,
+  `build/common-core-bench-ubsan.log`, and `build/common-core-tests-final.log`.
+  No cloud resources were used.
+
+### Experiment 477: Shared-core CUDA prototype on a single Blackwell GPU
+
+- Port the exact partial-core formula to an isolated cooperative CTA kernel.
+  Keep core Hessenberg, characteristic series, boundary moments and the
+  compact polynomial-minor memo in shared memory. Compute dependency levels
+  in parallel. Specialize exact products for two 31-bit pseudo-Mersenne primes.
+  No production solver or checkpoint format changes.
+- A host OpenMP mode executes the same cooperative body with real barriers.
+  It exposed a zero-pivot skip race: the next iteration could overwrite the
+  pivot before every thread copied it. Add the required barrier before the
+  uniform skip. All 3,960 child/sign tests then pass on both host and CUDA,
+  with complete small counts checked against direct matching enumeration.
+- Compile for Ada sm_89 and Blackwell sm_120: 39–40 registers, zero spills.
+  Benchmark on one Verda spot RTX PRO 6000 Blackwell, not a multi-GPU rental.
+  The 18-query group uses 44,192 shared bytes and two resident CTAs per SM.
+- Same complete 6x28 query group, first prime: fresh maintained-solver totals
+  are 6.040600 and 6.034173 seconds, all Gray-enabled with zero failures.
+  Shared-core kernel times are 1.3945/0.9334/0.7047 seconds for 64/128/256
+  threads. Each prototype run sums all 524,288 core signs for all 18 queries.
+- Including descriptor packing, allocation, H2D, kernel and D2H, repeated
+  prototype solve times are 0.796077/0.784199 seconds: **7.64x** versus the
+  control's reported solve section. For the first six queries, control times
+  total 2.024197/2.002336 seconds and prototype times are 0.623290/0.623266:
+  **3.23x**. This explicitly tests reduced reuse rather than reporting only
+  the best 18-query group.
+- These are complete-group solve-section comparisons, not a full campaign
+  end-to-end benchmark. Both exclude catalog construction/reference checks;
+  the control also excludes its rank-factor setup and includes per-query
+  result publication. Do not substitute the 7.64x ratio into the historical
+  6x27 campaign estimate.
+- Complete group residues agree with saved production results over both
+  primes (36 comparisons), and with the fresh first-prime control. Validate
+  payload checksums, catalog/query identity and full sign-range coverage.
+  CUDA memcheck/racecheck find zero errors/hazards, including a real group;
+  synccheck also passes the singular-core/exhaustive-small test set.
+- Probe real 6x27 order-42/44/46 groups, six children, both fields, caps 9/11,
+  32,768 core signs and 128 independent CPU comparisons per launch. All
+  pass. First-prime cap-11 kernels take 20.05/21.55/24.49 ms. Cap 9 is faster
+  per sign but has twice the full sign-domain size; compare total work.
+- Decision: **positive CUDA gate**. The next task is full once-only 6x27
+  grouping, representative owned-group timings and remaining CRT-field
+  validation, not launching a campaign. Details/commands are in
+  [the common-core note](hafnian/common_core_gate.md); local artifacts and
+  control result files are under `build/common-core-gpu-477/`.
+- Download all artifacts and delete the temporary VM and OS disk. Rental
+  duration is approximately ten minutes, about $0.16 at the observed spot
+  rate including the small disk charge, before provider billing adjustments.
+
+### Experiment 478: Full 6x27 ownership plan and workload-weighted GPU projection
+
+- Export the complete exact census once, including original coefficients and
+  certified per-query prime counts. The checksummed catalog is 765,121,451
+  bytes; its digest is
+  `1d751d9f049779cba61d6f2edd002daa0df7c3e08b73860007afe0bf2b35b9e4`.
+  Generation/export takes 5m53s, peak RSS 28.40 GiB on the local 16-thread host.
+- Build parent families in bounded parallel chunks, then greedily assign only
+  unowned child IDs in a deterministic parent order. Group order-42--48
+  residuals; preserve every other query as an explicit independent fallback.
+  Cap-11, seed-478 assignment takes 4m07s and 2.57 GiB peak RSS.
+- All 45,007,139 queries are assigned once: 7,266,103 multi-query groups cover
+  44,953,960 queries (mean 6.1868), with 53,179 singleton leftovers. The plan
+  is 895,777,176 bytes and binds the input catalog digest. Its digest is
+  `175e9b5bab86a7073827d5c1fbcadeb5f61a9f15edc11c443e6e6b5138f4f433`.
+- Independent full audit takes 42s, peak RSS 1.05 GiB: verify IDs/coverage,
+  coefficient total 47,983,269,684,673, every canonical residual embedding,
+  core parity and artifact checksums. Tests reject truncation, duplicate IDs
+  even with a repaired checksum, incomplete catalogs and accidental overwrite.
+  Complete 6x28 plan bytes agree between one and four producer threads.
+- Histogram actual field images by order/core/pool/active-child count/prime.
+  Later images exclude children whose certified CRT coverage is already
+  sufficient. Sample up to three real assigned groups per stratum: 757 cases
+  cover all 256 grouped strata. No best-group speedup is substituted globally.
+- Extend the isolated CUDA prototype to all four existing 31-bit fields and
+  a persistent-process sample sweep. Four-prime host/CUDA small tests pass
+  7,920 child/sign checks and direct complete-count comparisons; memcheck
+  passes. Third-prime complete 6x28 group agrees with all 18 saved residues.
+- On one spot RTX PRO 6000, measure each owned-group case for 32,768 core
+  signs, checking 128 CPU-reference positions. Weighted grouped kernel time:
+  order 42: 156.75 GPUh; 44: 82.99; 46: 58.24; 48: 15.38;
+  **total 313.36 GPU-hours**. Sample-min/max weighting gives 307.01--320.56h,
+  an observed spread rather than a confidence interval. No grouped bins are
+  unmeasured, and the histogram preserves all original adaptive sign work.
+- Grouped work covers 98.2118% of the original adaptive sign terms. The
+  omitted independent tail is 2,407,173,980,160 terms, not zero cost. The
+  313-hour number also excludes production reduction/I/O/dispatch/restarts;
+  it is **not a full campaign end-to-end forecast**.
+- Decision: feasible full assignment and positive workload-weighted GPU gate.
+  Next implement a persistent runner/result reduction and benchmark the
+  independent tail, including unsupported matrix orders. Do not launch a
+  campaign or change existing result values yet. Artifacts are under
+  `build/common-core-{export6x27,plan6x27}*` and `build/common-core-gpu-478/`;
+  [the common-core note](hafnian/common_core_gate.md) gives commands/details.
+- The temporary single-GPU spot worker and OS disk were deleted after pulling
+  all artifacts. No production solver defaults or result formats changed.
