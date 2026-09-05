@@ -339,8 +339,20 @@ colour-plane-permanent-test: colour_plane_permanent_probe
 $(BUILD_DIR)/six_by_thirty_hafnian: src/hafnian/six_by_thirty_hafnian.cpp src/common/sha256.hpp
 	$(CXX) -O3 -march=native -std=c++17 $(OPENMP_CFLAGS) -o $@ $< $(OPENMP_LDFLAGS)
 
-$(BUILD_DIR)/six_by_thirty_hafnian_gpu: src/hafnian/six_by_thirty_hafnian_gpu.cu src/hafnian/hafnian_gpu_core.cuh src/common/sha256.hpp
+THIRTY_OPTIMIZED_HEADERS = src/hafnian/six_by_thirty_optimized_catalog.hpp \
+	src/hafnian/six_by_twenty_nine_catalog.hpp src/hafnian/hafnian_matching_bound.hpp \
+	src/hafnian/hafnian_residual_engine.cuh src/hafnian/hafnian_gpu_core.cuh \
+	src/hafnian/hafnian_gray_gpu_core.cuh src/hafnian/hafnian_gray_resolvent_gpu_core.cuh \
+	src/common/sha256.hpp
+
+$(BUILD_DIR)/six_by_thirty_hafnian_gpu: src/hafnian/six_by_thirty_hafnian_gpu.cu $(THIRTY_OPTIMIZED_HEADERS)
 	$(NVCC) $(NVCCFLAGS) -std=c++17 -o $@ $<
+
+$(BUILD_DIR)/six_by_thirty_optimized_cpu: src/hafnian/six_by_twenty_nine_hafnian_cpu.cpp $(THIRTY_OPTIMIZED_HEADERS)
+	$(CXX) -O3 -std=c++17 $(OPENMP_CFLAGS) -DSIX_BY_THIRTY_OPTIMIZED=1 -o $@ $< $(OPENMP_LDFLAGS)
+
+$(BUILD_DIR)/six_by_thirty_hafnian_gpu_control: src/hafnian/six_by_thirty_hafnian_gpu.cu $(THIRTY_OPTIMIZED_HEADERS)
+	$(NVCC) $(NVCCFLAGS) -DHAFNIAN_RUNTIME_MONTGOMERY_CONTROL=1 -o $@ $<
 
 $(BUILD_DIR)/six_by_twenty_nine_hafnian_cpu: src/hafnian/six_by_twenty_nine_hafnian_cpu.cpp \
 		src/hafnian/six_by_twenty_nine_catalog.hpp src/common/sha256.hpp
@@ -423,6 +435,10 @@ six-by-twenty-eight-hafnian-test: six_by_twenty_eight_catalog_test \
 six-by-thirty-hafnian-test: six_by_thirty_hafnian
 	./$(BUILD_DIR)/six_by_thirty_hafnian --self-test
 	python3 -m unittest -v tests.hafnian.test_six_by_thirty_hafnian
+
+.PHONY: six-by-thirty-optimized-test
+six-by-thirty-optimized-test: $(BUILD_DIR)/six_by_thirty_optimized_cpu $(BUILD_DIR)/six_by_twenty_nine_optimized_cpu
+	python3 -m unittest -v tests.hafnian.test_six_by_thirty_optimized tests.hafnian.test_six_by_twenty_nine_optimized
 
 $(BUILD_DIR)/twocolour_gpu_64.bin: twocolour_4x4_probe
 	./$(BUILD_DIR)/twocolour_4x4_probe 1024 0 64 -1 0 $@
@@ -633,6 +649,7 @@ BUILD_TARGETS := 5xn_count4 partition_count4 partition_poly partition_poly_7 \
 	colour_plane_permanent_probe \
 	six_by_thirty_hafnian \
 	six_by_thirty_hafnian_gpu \
+	six_by_thirty_optimized_cpu six_by_thirty_hafnian_gpu_control \
 	six_by_twenty_eight_catalog_test \
 	six_by_twenty_eight_hafnian_cpu \
 	six_by_twenty_eight_hafnian_gpu \

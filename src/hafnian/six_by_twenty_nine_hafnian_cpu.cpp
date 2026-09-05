@@ -16,7 +16,9 @@
 #include <omp.h>
 #endif
 
-#if defined(SIX_BY_TWENTY_NINE_OPTIMIZED)
+#if defined(SIX_BY_THIRTY_OPTIMIZED)
+#include "six_by_thirty_optimized_catalog.hpp"
+#elif defined(SIX_BY_TWENTY_NINE_OPTIMIZED)
 #include "six_by_twenty_nine_optimized_catalog.hpp"
 #elif defined(SIX_BY_TWENTY_EIGHT)
 #include "six_by_twenty_eight_catalog.hpp"
@@ -28,7 +30,9 @@ namespace {
 
 using Clock=std::chrono::steady_clock;
 constexpr unsigned MAX_N=64,MAX_HALF=32;
-#if defined(SIX_BY_TWENTY_NINE_OPTIMIZED)
+#if defined(SIX_BY_THIRTY_OPTIMIZED)
+using DefectQuery=six_by_thirty_optimized::Query;
+#elif defined(SIX_BY_TWENTY_NINE_OPTIMIZED)
 using DefectQuery=six_by_twenty_nine_optimized::Query;
 #elif defined(SIX_BY_TWENTY_EIGHT)
 using DefectQuery=six_by_twenty_eight::Query;
@@ -181,7 +185,9 @@ int main(int argc,char** argv) {
             else throw std::runtime_error(
                 "usage: six_by_twenty_nine_hafnian_cpu --query Q --prime P --begin B --end E --threads N");
         }
-#if defined(SIX_BY_TWENTY_NINE_OPTIMIZED)
+#if defined(SIX_BY_THIRTY_OPTIMIZED)
+        auto catalog=six_by_thirty_optimized::build_catalog();
+#elif defined(SIX_BY_TWENTY_NINE_OPTIMIZED)
         auto catalog=six_by_twenty_nine_optimized::build_catalog();
 #elif defined(SIX_BY_TWENTY_EIGHT)
         auto catalog=six_by_twenty_eight::build_catalog();
@@ -213,7 +219,7 @@ int main(int argc,char** argv) {
 #endif
             for(uint64_t term=begin;term<end;++term) {
                 // Production v2 checkpoints index the global Gray ordering.
-#ifdef SIX_BY_TWENTY_NINE_OPTIMIZED
+#if defined(SIX_BY_TWENTY_NINE_OPTIMIZED) || defined(SIX_BY_THIRTY_OPTIMIZED)
                 sums[thread]+=trace_term(query,term^(term>>1),mod);
 #else
                 sums[thread]+=trace_term(query,term,mod);
@@ -225,7 +231,9 @@ int main(int argc,char** argv) {
         for(uint64_t sum:sums)result=mod.add(result,uint32_t(sum%prime));
         double seconds=std::chrono::duration<double>(Clock::now()-started).count();
         std::printf(
-#ifdef SIX_BY_TWENTY_EIGHT
+#if defined(SIX_BY_THIRTY_OPTIMIZED)
+            "HAFNIAN_6X30_CPU catalog=%s query=%u query_sha=%s vertices=%u prime=%u "
+#elif defined(SIX_BY_TWENTY_EIGHT)
             "HAFNIAN_6X28_CPU catalog=%s query=%u query_sha=%s vertices=%u prime=%u "
 #else
             "HAFNIAN_6X29_CPU catalog=%s query=%u query_sha=%s vertices=%u prime=%u "

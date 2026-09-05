@@ -15781,3 +15781,50 @@
   No cloud worker was provisioned and no device kernel was executed. A
   matched full-shard GPU A/B, with exact contribution parity, is still
   required before claiming an end-to-end performance improvement.
+
+### Experiment 466: Shared optimised endpoint minor for 6x30
+
+- Goal: apply the accepted 6x29/6x28 execution and CRT improvements to the
+  original 6x30 solver without expanding an unmeasured order-60 Gray gate.
+- Exact additional reduction: expand the perfect matching at a fixed token
+  vertex of `H = K4 x KG(6,2)`. Its stabilizer acts transitively on its 18
+  neighbours, so `pm(H) = 18 * pm(H - {u,v})` for any incident edge uv.
+  Canonicalizing all 18 choices independently confirms one deletion orbit.
+  This leaves one 58-vertex minor, already inside the measured Gray kernel
+  gate, with canonical occupied mask `1125904201809920`.
+- The minor's conservative matching bound is `2^85`. Three 31-bit prime
+  images suffice when CRT reconstructs the minor before multiplying by
+  `18 * 2^30 * 30!`. Each image has `2^28` sign terms, so total term work is
+  805,306,368 instead of the original 5,368,709,120: an 85% reduction before
+  the kernel improvement. This is not a measured 6.67x runtime claim.
+- Implementation: replace the duplicated endpoint CUDA driver with a small
+  catalog adapter to `hafnian_residual_engine.cuh`. Reuse the persistent
+  campaign runner and extract the exact per-query reducer shared by 6x29 and
+  6x30. The original 60-vertex CPU solver and v1 reducer remain independent
+  historical controls. A runtime-Montgomery GPU control on the same new minor
+  is available for matched range A/B tests. V2 endpoint checkpoints reject
+  old endpoint pieces, 6x29 pieces, changed catalogs and mixed binaries.
+- Catalog digest:
+  `cb4bc5458e88cc41cf4d8bed042906680accf24bdcb37d5d68d225a013f07744`.
+  Query digest:
+  `be1ea46dab7e26b5107bf1bc4aa392668c4cb0bd97c11f09cdd5bd504b61c338`.
+- Existing computation reuse: this is exactly minor 3 from Experiment 464.
+  Revalidating its source campaign gives minor count
+  `1133887175503385561722350`. Multiplying by the endpoint factor reproduces
+  `T_4(6,30) = 5813026373117572187494156438960699897545098374101961015296000000000`
+  exactly. The three source-query timings are 18.541285847, 18.745252429 and
+  18.769222697 seconds, totaling 56.055761 GPU-seconds, with no fallback
+  chunks. This is reuse of measured 6x29 work, not a new endpoint campaign or
+  a standalone end-to-end timing. Preserve the original timing in README.
+- Local gates: the actual endpoint GPU catalog lists correctly without a
+  device; native Ada and Blackwell production builds and the Blackwell
+  control compile. Independent CPU evaluators agree on all nine prime/range
+  combinations (initial, unaligned and final terms) with the existing 6x29
+  minor. Direct enumeration verifies the analogous Laplace identity on
+  `K4 x KG(4,2)`. Synthetic split-CRT, provenance rejection, historical
+  endpoint and 6x29 reduction tests pass. A three-GPU runner dry-run assigns
+  one complete prime image per GPU without launching CUDA work.
+- Status: code and exact identity validation complete; no cloud resources
+  provisioned. A fresh GPU range gate and A/B remain necessary before a new
+  production run. The default runner has three jobs and needs at most three
+  GPUs; manually split prime ranges if more devices are desired.

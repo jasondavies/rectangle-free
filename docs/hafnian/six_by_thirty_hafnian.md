@@ -17,98 +17,92 @@ remaining singleton colours. Therefore
 T_4(6,30) = 30! * 2^30 * pm(H) = 30! * 2^30 * haf(A_H).
 ```
 
-## Algorithm
+## Optimised production algorithm
 
-The production solver uses the exact Glynn power-trace formula. A supported
-perfect matching partitions the 60 vertices into 30 reference pairs. Fixing
-one sign leaves `2^29 = 536,870,912` independent terms. For each sign vector it
-computes the leading characteristic-polynomial coefficients of `A X D` by:
+Expand a perfect matching at a fixed vertex. Its 18 neighbours are equivalent
+under row and colour permutations, so for any edge uv,
 
-1. finite-field similarity reduction to upper-Hessenberg form;
-2. the La Budde characteristic-polynomial recurrence, truncated after degree
-   30;
-3. Newton identities for `tr((A X D)^k)`;
-4. the coefficient of
-   `exp(sum_k tr((A X D)^k) z^k / (2k))`.
+```text
+pm(H) = 18 * pm(H - {u,v})
+T_4(6,30) = 30! * 2^30 * 18 * haf(A_minor).
+```
 
-All arithmetic is modulo an odd 31-bit prime. Ten primes near `2^31` provide a
-310-bit CRT modulus, exceeding the exact bound `T_4(6,30) <= 60! < 2^273`.
+The minor has 58 vertices and needs `2^28` sign terms per prime. It uses the
+same persistent Gray-chain, fixed-field and exact fallback engine as 6x29 and
+6x28; no new order-60 Gray kernel is required.
 
-The CPU implementation uses Barrett reduction and OpenMP. The CUDA version
-uses 32-bit Montgomery arithmetic and one cooperative CTA per sign term. Its
-60x60 matrix and truncated polynomial occupy approximately 22.5 KiB of shared
-memory. Kernels operate on bounded chunks. After every chunk, the CUDA solver
-atomically publishes the exact cumulative range completed so far; an interrupted
-file can therefore be retained and the uncovered suffix launched separately.
+The certified degree bound gives `pm(A_minor) <= 2^85`. Reconstruct that
+small integer first using primes 2147483647, 2147483629 and 2147483587, then
+multiply by 18, `2^30` and `30!` in arbitrary precision. Total work is
+805,306,368 sign terms, versus 5,368,709,120 in the original ten-prime solver.
 
 ## Build and validation
 
 ```bash
-make six_by_thirty_hafnian
-./build/six_by_thirty_hafnian --self-test
-python3 -m unittest -v tests.hafnian.test_six_by_thirty_hafnian
-```
-
-Build CUDA on a target architecture, for example Blackwell:
-
-```bash
+make six-by-thirty-hafnian-test six-by-thirty-optimized-test
 make NVCCFLAGS='-O3 -std=c++17 -arch=sm_120 -lineinfo' six_by_thirty_hafnian_gpu
-./build/six_by_thirty_hafnian_gpu --self-test
+./build/six_by_thirty_hafnian_gpu --list
 ```
 
-The self-tests verify the graph census and compare the formula with brute-force
-perfect-matching counts on many small random graphs under two primes. During
-development, CUDA ranges were also compared bit-for-bit with the independent
-CPU implementation under multiple primes, ranges, launch widths, and chunk
-sizes.
+Use `-arch=sm_89` for Ada. The host tests cover the Laplace identity on a
+smaller token graph, certified CRT, checkpoint provenance, and exact ranges
+against the independently implemented 6x29 minor evaluator.
 
-## Sharded execution
-
-One CPU range:
+Before a GPU campaign, compare short, unaligned and final term ranges against:
 
 ```bash
-./build/six_by_thirty_hafnian --run --prime 2147483647 \
-  --begin 0 --end 1048576 --threads 16 --output results/p0-r0.result
+./build/six_by_thirty_optimized_cpu --query 0 --prime 2147483647 \
+  --begin 12345 --end 12473 --threads 1
+./build/six_by_thirty_hafnian_gpu --run --query 0 --prime 2147483647 \
+  --begin 12345 --end 12473 --output gate.result
 ```
 
-One GPU range:
+Both use global Gray indices. Repeat for the other two primes and compare
+the CPU residue with `partial_glynn_sum`. The optional
+`six_by_thirty_hafnian_gpu_control` Make target uses the independent
+runtime-Montgomery kernel on the same minor for matched A/B timings.
 
-```bash
-./build/six_by_thirty_hafnian_gpu --run --prime 2147483647 \
-  --begin 0 --end 536870912 --threads 256 --chunk-terms 1048576 \
-  --output results/p0.result
-```
-
-Ranges for each prime must form an exact, nonoverlapping cover of `[0,2^29)`.
-The reducer checks geometry, algorithm version, payload digest, and coverage:
-
-```bash
-python3 tools/reduce_six_by_thirty_hafnian.py results/*.result
-```
-
-It first reconstructs the Glynn sum modulo each prime, converts it to the
-perfect-matching and `T_4(6,30)` residues, then performs CRT. It prints
-`exact=OK` only after the combined modulus exceeds `60!`.
-
-The multi-GPU driver assigns primes dynamically and resumes from every
-atomically published prefix:
+## Resumable execution
 
 ```bash
 python3 tools/run_six_by_thirty_hafnian_gpu.py \
   --binary ./build/six_by_thirty_hafnian_gpu \
-  --gpus 0,1,2,3 --output hafnian-6x30-results
+  --gpus 0 --output hafnian-6x30-v2-results
+python3 tools/reduce_six_by_thirty_optimized.py \
+  --directory hafnian-6x30-v2-results
 ```
 
-If a worker is interrupted, its last result records the exact covered endpoint.
-The next invocation retains that segment and starts a new nonoverlapping suffix.
+There are three prime jobs, so the current runner can use at most three GPUs
+(`--gpus 0,1,2`). Each prime must cover `[0,2^28)` exactly. Results bind the
+catalog, query, arithmetic backend, binary, term range and payload checksum.
+The shared runner resumes from completed prefixes; fresh validation of a new
+binary requires a separate result directory.
 
-## Initial benchmark
+For manual sharding, use `--query 0 --begin B --end E` and distinct output
+paths. Do not use overlapping ranges or mix these results with v1 files.
 
-On an RTX PRO 6000 Blackwell already occupied by another campaign, a 65,536
-term exact sample took 0.0779 seconds (about 841,000 terms/s). The matching
-16-thread CPU sample took 3.781 seconds. Both produced residue `1808785296`
-modulo `2147483579`.
+## Existing independent result and reuse
 
-At that measured GPU rate, one complete prime takes about 10.6 minutes. Ten
-primes require about 1.8 GPU-hours in total, or approximately 25--30 minutes on
-four similar GPUs before CRT and independent validation.
+The edge minor is exactly query 3 of the optimised 6x29 catalog. Its count is
+
+```text
+pm(A_minor) = 1133887175503385561722350.
+```
+
+Saved, validated 6x29 residues reproduce the historical endpoint answer:
+
+```bash
+python3 tools/check_six_by_thirty_optimized.py --from-6x29 PATH_TO_6X29_RESULTS
+```
+
+This derives a separate identity check without rewriting source provenance or
+pretending a new GPU campaign ran. Those three prime images took 56.055761
+GPU-seconds in the 6x29 campaign. That suggests roughly one GPU-minute of
+solve work on comparable hardware, excluding setup, but a standalone v2
+campaign has not yet been timed.
+
+The original independent 60-vertex CPU solver remains
+`six_by_thirty_hafnian`. Its binary-order ranges cover `[0,2^29)`, and its
+v1 result files use `tools/reduce_six_by_thirty_hafnian.py`. They are not
+range-comparable with the new minor. The historical full GPU campaign used
+0.79 GPU-hours; it predates the optimisations above.

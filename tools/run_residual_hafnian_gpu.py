@@ -57,7 +57,7 @@ class Runner:
         result: dict[tuple[int, int], list[tuple[int, int, Path]]] = {}
         for path in directory.glob("p*-q*-b*.result"):
             fields = self.campaign.read_result(path)
-            if self.width == 29 and fields["solver_binary_sha256"] != self.binary_digest:
+            if self.width in (29, 30) and fields["solver_binary_sha256"] != self.binary_digest:
                 raise ValueError(f"{path}: different verification solver binary")
             identity = int(fields["prime"]), int(fields["query_id"])
             result.setdefault(identity, []).append(

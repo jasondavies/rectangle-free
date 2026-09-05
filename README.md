@@ -85,7 +85,9 @@ T_4(6,30) = 30! * 2^30 * hafnian(A).
 ```
 
 The implementation evaluates the hafnian modulo several primes on GPU and
-uses CRT for the exact integer. Defect expansions reduce 6x29 to 29 residual
+uses CRT for the exact integer. For 6x30, edge symmetry further reduces the
+count to 18 times one 58-vertex minor, using the shared optimised kernel and
+three prime images. Defect expansions reduce 6x29 to 29 residual
 hafnians (now evaluated as 33 smaller queries using a monomer decomposition)
 and 6x28 to 36,398 symmetry-quotiented residual queries.
 
@@ -239,13 +241,17 @@ the time used by every GPU and is therefore distinct from elapsed wall time.
 | `T_4(7,7)` independent check | 1 L40S | 30.1 GPU-seconds | 35.6 seconds |
 | `T_4(8,8)` independent check | 1,024 shards; 8 L40S GPUs | 29.07 GPU-hours | About 4.1 hours |
 | `T_4(7,9)` independent check | 128 shards; 8 L40S GPUs | 13.85 GPU-hours | About 2 hours |
-| `T_4(6,30)` | 8 RTX PRO 6000 GPUs | 0.79 GPU-hours | About 10 minutes |
+| `T_4(6,30)` original solver | 8 RTX PRO 6000 GPUs | 0.79 GPU-hours | About 10 minutes |
 | `T_4(6,29)` independent check | 33 queries; 8 RTX PRO 6000 GPUs | 0.221 timed GPU-hours | 2 min 2 s solving; 2 min 40 s including validation gates |
 | `T_4(6,28)` | 8 L40S + 4 RTX PRO 6000 GPUs; interrupted and resumed | 23.43 GPU-hours | About 2 h 48 min including setup and recovery |
 
 The exact integers are collected in [results.txt](results.txt), while the
 algorithms, validation checks, and detailed timing breakdowns are recorded in
 [experiments.md](docs/experiments.md).
+
+The newer 6x30 edge-minor formulation also reproduces the answer from saved
+6x29 results. Its three required prime images took 56.06 GPU-seconds within
+that campaign; this is not a standalone 6x30 rerun timing.
 
 ## Acknowledgements and OEIS
 

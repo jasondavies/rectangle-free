@@ -224,7 +224,9 @@ inline void build_query_graph(const Geometry& geometry,Query& query,unsigned wid
             throw std::runtime_error("reference matching reorder failed");
 
     Sha256 hash;
-    const std::string header=width==29
+    const std::string header=width==30
+        ? "six-by-thirty-edge-minor-query-v2\n"
+        : width==29
         ? "six-by-twenty-nine-residual-query-v1\n"
         : "six-by-twenty-eight-residual-query-v1\n";
     hash.update(header);
