@@ -15828,3 +15828,80 @@
   provisioned. A fresh GPU range gate and A/B remain necessary before a new
   production run. The default runner has three jobs and needs at most three
   GPUs; manually split prime ranges if more devices are desired.
+
+### Experiment 467: Column-flip parity contraction for 8x8
+
+- Goal: test whether summing column orientations analytically can replace
+  the weighted-disjointness join with substantially less work. This is an
+  isolated CPU research gate, not a production solver change or GPU timing.
+- Exact formulation: enumerate unordered binary partitions of the active
+  rows in each nonempty column. Associate one flip variable with each
+  column. If columns i and j use row pair e monochromatically, validity
+  requires `x_i XOR x_j = 1 XOR h_i(e) XOR h_j(e)`. A contradictory parity
+  cycle contributes zero; otherwise the number of orientations is
+  `2^(number of connected components)`. Empty columns have no flip variable.
+- Implementation: contract within-half parity constraints first. Store
+  each free component's two token planes, extracting row pairs occupied
+  in both planes into a fixed mask. Fold invisible flips into integer
+  weights; canonicalize component signs/order and merge identical templates.
+  Thus this compares compressed parity templates against the existing
+  token-plane-quotiented supports, not against raw assignments. Cross-half
+  joins reject fixed-mask conflicts, then solve a bipartite parity system
+  with at most eight variables. Star-shaped systems bypass DSU searches.
+- Correctness: `make column-flip-parity-test` exhausts all 4,096 active
+  3-row/4-column masks embedded in eight rows, plus larger fixtures,
+  contradictory/consistent cycles and the template-cap guard. Every
+  uncapped half in the census is expanded back into the complete weighted
+  support and checked entry-by-entry against an independent distribution
+  DP. Up to 32 sampled template pairs per logical join are checked by
+  exhaustive orientation expansion. Address/undefined-behaviour sanitizers
+  pass the self-test. A separate 64-record sample verifies all 128 complete
+  selected/complement joins against the independent CPU prefix join.
+- Main census: 64 stride samples from each of 16 transpose-quotient solve
+  shards `s0000,s0064,...,s0960` (1,024 records / 2,048 logical joins).
+  Raw-template cap 16,777,216 per half; up to 8,192 deterministic uniform
+  pair samples with replacement per logical join. No joins were capped.
+  The 16,678,004 sampled pairs estimate work/rejection rates; template
+  counts, pair products and baseline padded BMMA tile counts are exact
+  for this sample. Counts below include repeated half uses, not a census
+  of unique canonical-cache objects.
+
+  | Quantity | Sample result |
+  | --- | ---: |
+  | Existing quotient support entries | 58,159,143 |
+  | Merged parity templates | 34,979,279 |
+  | Support-count compression | 1.663x |
+  | Parity templates with one remaining flip | 62.23% |
+  | Cartesian template pairs | 33,744,439,572 |
+  | Estimated pairs surviving fixed-mask rejection | 3,173,814,628 |
+  | Estimated component-pair tests | 14,942,943,605 |
+  | Existing prefix/weight-class BMMA tiles | 545,383,317 |
+
+- Why the initial tiny-half examples overstated the opportunity: most
+  templates retain only one flip, which is already accounted for by the
+  production token-plane quotient. Even after merging, this prototype's
+  56-byte template uses about 4.21x the entry payload of the baseline's
+  eight-byte suffixes across the sample. This excludes baseline bucket/class
+  metadata and is not a total-VRAM estimate; a compact template layout could
+  improve it. Fixed-mask rejection eliminates an estimated 90.59% of raw
+  template pairs but still visits them all. There are 61.87 raw template
+  pairs and about 27.40 component tests per baseline BMMA tile. These are
+  different primitives, not an instruction-level or runtime equivalence.
+- Complete-join CPU control: four stride samples per same shard, 64 records,
+  128 complete joins, no cap exclusions. With one CPU thread and no other
+  probe running, parity joins total 7.1842 s versus 1.2647 s for the CPU
+  prefix reference (5.68x slower). Model construction/validation are excluded
+  from both join timers; complete probe wall time is 10.6016 s. This is not
+  a CUDA A/B or a prediction of GPU speed. The reference implements the
+  same prefix/orbit mathematics without executing tensor instructions.
+- Reproduce: build `column_flip_8x8_census`; pass the comma-separated shard
+  paths followed by `64 16777216 8192 0` for the census, or
+  `4 16777216 8192 1000000000000` with `OMP_NUM_THREADS=1` for full joins.
+  Logs, including sampled raw keys, are in external data directory
+  `profiles/8x8-column-flip-20260905/{census-1024,full-joins-64}.log`.
+- Decision: reject the straightforward Cartesian parity replacement as
+  the next major-win implementation; do not spend cloud time on a direct
+  CUDA port yet. This does not disprove every parity-based algorithm. A
+  stronger continuation needs an exact index/group contraction that avoids
+  visiting most template pairs, with its own construction and memory gate.
+  Production kernels and campaign runtime estimates remain unchanged.

@@ -553,6 +553,16 @@ $(BUILD_DIR)/twocolour_8x8_solve_gpu: src/gpu/twocolour_8x8_prefix_solve.cu \
 		src/gpu/gpu_memory_policy.hpp src/gpu/gpu_result_checkpoint.hpp src/common/sha256.hpp
 	$(NVCC) $(NVCCFLAGS) -Xcompiler=-fopenmp -o $@ $<
 
+$(BUILD_DIR)/column_flip_8x8_census: research/probes/column_flip_8x8_census.cpp \
+		research/probes/column_flip_parity.hpp research/probes/pair_projection_8x8_census.cpp \
+		research/probes/prefix_bmma_cost_census.cpp research/probes/prefix_bucket_tt_rank_census.cpp \
+		research/probes/prefix_hierarchy_8x8_census.cpp
+	$(CXX) -O3 -std=c++17 -fopenmp -march=native -o $@ $<
+
+.PHONY: column-flip-parity-test
+column-flip-parity-test: $(BUILD_DIR)/column_flip_8x8_census
+	./$(BUILD_DIR)/column_flip_8x8_census --self-test
+
 $(BUILD_DIR)/prefix_portfolio_8x8_oracle: research/probes/prefix_portfolio_8x8_oracle.cpp \
 		research/probes/prefix_hierarchy_8x8_census.cpp
 	$(CXX) -O3 -std=c++17 -fopenmp -march=native -o $@ $<
@@ -668,7 +678,7 @@ BUILD_TARGETS := 5xn_count4 partition_count4 partition_poly partition_poly_7 \
 	colour_cut_cardinality_census \
 	prefix_bmma_portfolio_8x8_oracle column_split_8x8_oracle \
 	column_split_8x8_transform column_split_8x8_selector \
-	pair_projection_8x8_census behavioral_distribution_8x8_census \
+	pair_projection_8x8_census behavioral_distribution_8x8_census column_flip_8x8_census \
 	demanded_query_reuse_8x8_census weight_class_bitset_8x8_census \
 	offline_row_gauge_8x8_census \
 	universal_state_symmetry_probe twocolour_3x4_probe twocolour_7x7_solve \
