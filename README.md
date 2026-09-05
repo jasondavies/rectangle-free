@@ -161,6 +161,11 @@ Useful shared options include `--prefix-depth`, `--task-start`, `--task-end`,
 `--reorder`, `--adaptive-subdivide`, and their corresponding `--no-*`
 controls. Profiling is selected by building the `_profile` targets.
 
+For a longer 8-row polynomial run, `make partition_poly_8_pgo` builds a
+profile-guided executable at `build/partition_poly_8_pgo`. The build trains on
+one 8x5 task; profiles live separately under `build/pgo/partition_poly_8`.
+Rebuild on the intended host/compiler before benchmarking or campaigning.
+
 New polynomial shards use checksummed `RECT_POLY_V2` files, written by atomic
 replacement. Merging requires matching source and task-space identities and
 non-overlapping ranges; a saved merged shard must cover a contiguous range.

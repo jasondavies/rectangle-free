@@ -16058,3 +16058,79 @@
   without enabling a runtime flag or changing default aggregation. This
   does not rule out every broader/global residual-sharing scheme, but the
   earlier 51% key-reduction census must not be treated as a speedup.
+
+### Experiment 472: Refresh the partition PGO build after hot-path cleanup
+
+- Revalidate the existing Experiment 195 optimization on the current solver,
+  rather than count its historical benefit as a new algorithmic speedup.
+  Local host: Ryzen 7 9700X, eight physical cores / sixteen logical threads.
+  Train on 8x5 prefix-depth-2 task `[0,1)` only; test that task, held-out
+  `[1,2)`, and held-out `[1,2)` with eight OpenMP threads. Timings are
+  sequential ABBA process-wall measurements with full-polynomial equality.
+- Found and fixed a build regression from the directory reorganization:
+  the profile directory and executable both named `build/partition_poly_8_pgo`,
+  causing the linker to fail with "Is a directory". Profiles now live under
+  `build/pgo/partition_poly_8`. Generation and profile-use compilation use the
+  same temporary output path there; only the successfully optimized executable
+  is moved to the public binary path. A failed training/build must not install
+  an instrumented executable as the production PGO binary.
+- Reject an existing directory at the intended executable path rather than
+  letting `mv` silently install inside it. The build-path regression test
+  checks separate profile/output paths and identical generation/use paths.
+- Initial refresh builds without missing-profile warnings. Training-task
+  process-wall means are 12.2771 s ordinary and 11.6682 s PGO (4.96% lower).
+  Corresponding reported solver times are 9.97 / 10.25 s ordinary and
+  9.41 / 9.57 s PGO. Full coefficients match in all four runs.
+- Held-out single-thread ABBA: 85.1908 s ordinary versus 81.5258 s PGO,
+  a 4.30% process-wall reduction. Eight-thread held-out ABBA: 17.7878 s
+  versus 17.1056 s, a 3.84% reduction. Every full polynomial agrees;
+  no estimate is based only on matching P(4).
+- Decision: retain PGO as the recommended optional long-run build. The
+  measured gain is roughly 4–5% on these samples, not an additional gain
+  on top of the historical PGO numbers. No automatic default change.
+- The ordinary default build remains unchanged; PGO is host/compiler-specific
+  and explicitly selected with `make partition_poly_8_pgo`. Logs and binary
+  digests are retained under `build/pgo-refresh-{t0,t1,t1-8threads}`.
+- Final build/test gates: all 13 partition regression tests pass, the repaired
+  PGO recipe completes without missing-profile warnings, and the final installed
+  executable reproduces every coefficient of the 8x4 `[0,4)` control.
+
+### Experiment 473: Exact packed-neighbour histograms for WL refinement
+
+- Probe a cheaper replacement for `popcount(row & colour_mask)` across all
+  colour classes. When the signature fits one 64-bit word, assign each vertex
+  a unit at bit `5*colour`. Adding the neighbour units gives the same packed
+  counts; dense rows instead subtract non-neighbour units from the whole-row
+  sum. Simple graphs on at most 32 vertices need at most 31 in each field.
+- Use this only with 3–12 colour classes and fewer selected neighbour or
+  non-neighbour terms than classes. Retain the original fill otherwise,
+  including all two-/three-word cases. Ordering, bounded enumeration, graph
+  keys and fallback behavior are intended to remain bit-for-bit identical.
+  This is an isolated `partition_wl_histogram_ab` build, not a default change.
+- A dedicated UBSan test checks 162,816 ordinary/complement signatures over
+  sizes 1–32 and one-word colour counts, including empty and almost-full rows.
+  The verify build additionally compares every substituted signature with
+  the original implementation during real solver execution.
+- First single-thread 8x5 task `[0,1)` ABBA: control mean wall 12.2463 s,
+  candidate 12.2414 s (0.04% reduction, indistinguishable from noise). All
+  full polynomial coefficients match. This is not evidence of a speedup.
+- Reproduce with `make partition_wl_histogram_ab partition_wl_histogram_test`
+  and the existing `research/probes/partition_aggregate_ab.py` driver, setting
+  `--candidate build/partition_wl_histogram_ab`. Logs are under
+  `build/wl-histogram-t0` and `build/wl-histogram-t1-8threads`.
+- Held-out eight-thread 8x5 `[1,2)` ABBA: 17.7755 s control versus 18.0358 s
+  candidate, 1.46% slower. Every full polynomial still matches.
+- Separate profile pair on single-thread task 0: refinement popcounts fall
+  from 533,746,011 to 185,117,962 (65.3%), but refinement time increases from
+  1.016 s to 1.217 s. Complete WL-key time rises from 2.210 to 2.416 s.
+  This is a reminder that neighbour iteration, unit preparation and branching
+  are not free replacements for the removed popcounts. WL successes, rounds,
+  hard-node counts and complete polynomial outputs are unchanged.
+- The real-solver verify build completes task 0 while comparing every
+  substituted signature to the original. All four final smoke/profile outputs
+  (control, histogram, verify and rebuilt PGO) agree coefficient-for-coefficient.
+  Logs: `build/wl-histogram-{control-profile,candidate-profile,verify}.log`
+  and `build/pgo-final-smoke.log`.
+- Decision: reject this histogram variant as a default. Keep its isolated
+  research target and exactness tests. Incremental split-cell refinement is
+  a different, still-untested approach; this result does not reject it.

@@ -2,6 +2,7 @@ import contextlib
 import hashlib
 import io
 import os
+import shlex
 from pathlib import Path
 import subprocess
 import tempfile
@@ -15,6 +16,24 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class Shards(unittest.TestCase):
+    def test_pgo_build_paths(self):
+        output = subprocess.check_output(
+            ['make', '-Bn', 'BUILD_DIR=build', 'partition_poly_8_pgo'], cwd=ROOT,
+            env={**os.environ, 'MAKEFLAGS': '', 'MFLAGS': ''}, text=True)
+        commands = [shlex.split(line) for line in output.splitlines()
+                    if '-o ' in line and '-fprofile-' in line]
+        self.assertEqual(len(commands), 2)
+        generate, use = commands
+        training = Path(generate[generate.index('-o') + 1])
+        profile = Path(next(x.split('=', 1)[1] for x in generate
+                            if x.startswith('-fprofile-generate=')))
+        self.assertNotEqual(training, profile)
+        self.assertNotEqual(training, ROOT/'build/partition_poly_8_pgo')
+        self.assertEqual(training, Path(use[use.index('-o') + 1]))
+        self.assertIn('-fprofile-use=' + str(profile), use)
+        self.assertIn('mv -f ' + str(training) + ' build/partition_poly_8_pgo', output)
+        self.assertIn('test ! -d "build/partition_poly_8_pgo"', output)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

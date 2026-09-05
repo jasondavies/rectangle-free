@@ -20,7 +20,7 @@ PARTITION_POLY_DEFAULT_ADAPTIVE_CFLAGS ?= -DDEFAULT_ADAPTIVE_SUBDIVIDE=1 -DDEFAU
 LDFLAGS ?= -lm $(OPENMP_LDFLAGS)
 PARTITION_POLY_7_CACHE_CFLAGS ?= -DRAW_CACHE_BITS=14 -DRAW_CACHE_PROBE=16 -DCACHE_PROBE=12 -DDEFAULT_HARD_CACHE_BITS=22 -DDEFAULT_HARD_CACHE_MAX_ENTRIES=2000000
 PARTITION_POLY_8_CACHE_CFLAGS ?= -DDEFAULT_HARD_CACHE_BITS=22 -DDEFAULT_HARD_CACHE_MAX_ENTRIES=2000000 -DDEFAULT_TREEWIDTH_LIMIT=5 -DDEFAULT_TREEWIDTH_MIN_N=18 -DDEFAULT_TERMINAL_AGGREGATE_BITS=12 -DDEFAULT_TERMINAL_AGGREGATE_MULTI_BITS=10
-PARTITION_POLY_8_PGO_DIR := $(abspath $(BUILD_DIR))/partition_poly_8_pgo
+PARTITION_POLY_8_PGO_DIR := $(abspath $(BUILD_DIR))/pgo/partition_poly_8
 PARTITION_SHARED_SRCS := src/partition/runtime.c src/partition/partitions.c src/partition/poly.c src/partition/graph.c src/partition/cache.c src/partition/main.c src/partition/solver.c src/partition/treewidth.c src/partition/aggregate.c src/partition/canon.c
 PARTITION_SHARED_SRCS += src/partition/result_io.c src/common/sha256_c.c
 PARTITION_HEADERS := $(wildcard src/partition/*.h) src/common/sha256_c.h
@@ -94,6 +94,12 @@ $(BUILD_DIR)/partition_residual_census: $(PARTITION_SHARED_SRCS) $(PARTITION_HEA
 $(BUILD_DIR)/partition_residual_ab $(BUILD_DIR)/partition_residual_ab_profile: $(PARTITION_SHARED_SRCS) $(PARTITION_HEADERS) research/probes/partition_residual_aggregate_impl.h Makefile | $(BUILD_DIR)
 	$(CC) $(PARTITION_CFLAGS) $(if $(filter %_profile,$@),$(PARTITION_PROFILE_CFLAGS)) $(PARTITION_POLY_DEFAULT_ADAPTIVE_CFLAGS) $(PARTITION_POLY_8_CACHE_CFLAGS) -DRECT_RESIDUAL_AGGREGATE_AB=1 -DMAX_ROWS=8 -DMAX_COLS=8 -DDEFAULT_ROWS=8 -DDEFAULT_COLS=8 -DCACHE_BITS=18 -o $@ $(PARTITION_SHARED_SRCS) $(LDFLAGS)
 
+$(BUILD_DIR)/partition_wl_histogram_ab $(BUILD_DIR)/partition_wl_histogram_ab_profile $(BUILD_DIR)/partition_wl_histogram_verify: $(PARTITION_SHARED_SRCS) $(PARTITION_HEADERS) research/probes/partition_wl_histogram.h Makefile | $(BUILD_DIR)
+	$(CC) $(PARTITION_CFLAGS) $(if $(filter %_profile,$@),$(PARTITION_PROFILE_CFLAGS)) $(if $(filter %_verify,$@),-DRECT_WL_HISTOGRAM_VERIFY=1) $(PARTITION_POLY_DEFAULT_ADAPTIVE_CFLAGS) $(PARTITION_POLY_8_CACHE_CFLAGS) -DRECT_WL_HISTOGRAM_AB=1 -DMAX_ROWS=8 -DMAX_COLS=8 -DDEFAULT_ROWS=8 -DDEFAULT_COLS=8 -DCACHE_BITS=18 -o $@ $(PARTITION_SHARED_SRCS) $(LDFLAGS)
+
+$(BUILD_DIR)/partition_wl_histogram_test: tests/partition/wl_histogram_test.c research/probes/partition_wl_histogram.h Makefile | $(BUILD_DIR)
+	$(CC) -O2 -g -fsanitize=undefined -fno-sanitize-recover=all -o $@ $<
+
 $(BUILD_DIR)/5xn_count4: src/small/5xn_count4.c
 	$(CC) $(CFLAGS_5XN) -o $@ $<
 
@@ -116,11 +122,13 @@ $(BUILD_DIR)/partition_poly_8: $(PARTITION_SHARED_SRCS)
 	$(CC) $(PARTITION_CFLAGS) $(PARTITION_POLY_DEFAULT_ADAPTIVE_CFLAGS) $(PARTITION_POLY_8_CACHE_CFLAGS) -DMAX_ROWS=8 -DMAX_COLS=8 -DDEFAULT_ROWS=8 -DDEFAULT_COLS=8 -DCACHE_BITS=18 -o $@ $(PARTITION_SHARED_SRCS) $(LDFLAGS)
 
 $(BUILD_DIR)/partition_poly_8_pgo: $(PARTITION_SHARED_SRCS)
+	@test ! -d "$@" || { echo "PGO output $@ is a directory; move it aside before rebuilding." >&2; exit 1; }
 	$(RM) -r $(PARTITION_POLY_8_PGO_DIR)
 	mkdir -p $(PARTITION_POLY_8_PGO_DIR)
-	$(CC) $(PARTITION_CFLAGS) -fprofile-generate=$(PARTITION_POLY_8_PGO_DIR) $(PARTITION_POLY_DEFAULT_ADAPTIVE_CFLAGS) $(PARTITION_POLY_8_CACHE_CFLAGS) -DMAX_ROWS=8 -DMAX_COLS=8 -DDEFAULT_ROWS=8 -DDEFAULT_COLS=8 -DCACHE_BITS=18 -o $@ $(PARTITION_SHARED_SRCS) $(LDFLAGS) -fprofile-generate=$(PARTITION_POLY_8_PGO_DIR)
-	OMP_NUM_THREADS=1 RECT_PROGRESS_STEP=1000000 ./$@ 8 5 --prefix-depth 2 --task-start 0 --task-end 1 >/dev/null
-	$(CC) $(PARTITION_CFLAGS) -fprofile-use=$(PARTITION_POLY_8_PGO_DIR) -fprofile-correction $(PARTITION_POLY_DEFAULT_ADAPTIVE_CFLAGS) $(PARTITION_POLY_8_CACHE_CFLAGS) -DMAX_ROWS=8 -DMAX_COLS=8 -DDEFAULT_ROWS=8 -DDEFAULT_COLS=8 -DCACHE_BITS=18 -o $@ $(PARTITION_SHARED_SRCS) $(LDFLAGS) -fprofile-use=$(PARTITION_POLY_8_PGO_DIR) -fprofile-correction
+	$(CC) $(PARTITION_CFLAGS) -fprofile-generate=$(PARTITION_POLY_8_PGO_DIR) $(PARTITION_POLY_DEFAULT_ADAPTIVE_CFLAGS) $(PARTITION_POLY_8_CACHE_CFLAGS) -DMAX_ROWS=8 -DMAX_COLS=8 -DDEFAULT_ROWS=8 -DDEFAULT_COLS=8 -DCACHE_BITS=18 -o $(PARTITION_POLY_8_PGO_DIR)/solver $(PARTITION_SHARED_SRCS) $(LDFLAGS) -fprofile-generate=$(PARTITION_POLY_8_PGO_DIR)
+	OMP_NUM_THREADS=1 RECT_PROGRESS_STEP=1000000 $(PARTITION_POLY_8_PGO_DIR)/solver 8 5 --prefix-depth 2 --task-start 0 --task-end 1 >/dev/null
+	$(CC) $(PARTITION_CFLAGS) -fprofile-use=$(PARTITION_POLY_8_PGO_DIR) -fprofile-correction $(PARTITION_POLY_DEFAULT_ADAPTIVE_CFLAGS) $(PARTITION_POLY_8_CACHE_CFLAGS) -DMAX_ROWS=8 -DMAX_COLS=8 -DDEFAULT_ROWS=8 -DDEFAULT_COLS=8 -DCACHE_BITS=18 -o $(PARTITION_POLY_8_PGO_DIR)/solver $(PARTITION_SHARED_SRCS) $(LDFLAGS) -fprofile-use=$(PARTITION_POLY_8_PGO_DIR) -fprofile-correction
+	mv -f $(PARTITION_POLY_8_PGO_DIR)/solver $@
 
 $(BUILD_DIR)/partition_poly_8_profile: $(PARTITION_SHARED_SRCS)
 	$(CC) $(PARTITION_CFLAGS) $(PARTITION_PROFILE_CFLAGS) $(PARTITION_POLY_DEFAULT_ADAPTIVE_CFLAGS) $(PARTITION_POLY_8_CACHE_CFLAGS) -DMAX_ROWS=8 -DMAX_COLS=8 -DDEFAULT_ROWS=8 -DDEFAULT_COLS=8 -DCACHE_BITS=18 -o $@ $(PARTITION_SHARED_SRCS) $(LDFLAGS)
@@ -659,6 +667,7 @@ $(BUILD_DIR)/twocolour_7x7_solve: src/gpu/twocolour_7x7_solve.c
 BUILD_TARGETS := 5xn_count4 partition_count4 partition_poly partition_poly_7 \
 	partition_graph_test partition_residual_census \
 	partition_residual_ab partition_residual_ab_profile partition_residual_ab_test \
+	partition_wl_histogram_ab partition_wl_histogram_ab_profile partition_wl_histogram_verify partition_wl_histogram_test \
 	partition_poly_8 partition_poly_8_pgo partition_poly_profile \
 	partition_poly_7_profile partition_poly_8_profile small_graph_lookup_gen \
 	right_prefix_overlap_census prefix_hierarchy_8x8_census \

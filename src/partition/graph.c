@@ -101,6 +101,10 @@ static inline uint64_t graph_pack_upper_mask_from_dense_rows(uint32_t n, const A
 #define WL_CANON_COUNT_BITS 5
 #define WL_CANON_SIG_WORDS ((WL_CANON_MAX_N * WL_CANON_COUNT_BITS + 63) / 64)
 
+#ifdef RECT_WL_HISTOGRAM_AB
+#include "../../research/probes/partition_wl_histogram.h"
+#endif
+
 typedef struct {
     uint8_t vertex;
     uint8_t old_colour;
@@ -507,7 +511,9 @@ static int graph_try_wl_canon(int n, const AdjWord* rows, Graph* canon,
         double refine_t0 = 0.0;
         if (PROFILE_BUILD && profile) {
             profile->wl_canon_refine_iterations++;
+#ifndef RECT_WL_HISTOGRAM_AB
             profile->wl_canon_refine_popcounts += (long long)n * (long long)colour_count;
+#endif
             refine_t0 = omp_get_wtime();
         }
         uint32_t colour_masks[WL_CANON_MAX_N] = {0};
@@ -516,8 +522,40 @@ static int graph_try_wl_canon(int n, const AdjWord* rows, Graph* canon,
         }
 
         int active_words = wl_colour_signature32_active_words(colour_count);
+#ifdef RECT_WL_HISTOGRAM_AB
+        uint64_t units[WL_CANON_MAX_N], all_units = 0;
+        int histogram_enabled = active_words == 1 && colour_count >= 3;
+        if (histogram_enabled) for (int v = 0; v < n; v++) {
+            units[v] = UINT64_C(1) << (WL_CANON_COUNT_BITS * colours[v]);
+            all_units += units[v];
+        }
+#endif
         for (int v = 0; v < n; v++) {
             uint32_t row = (uint32_t)rows[v] & mask;
+#ifdef RECT_WL_HISTOGRAM_AB
+            if (histogram_enabled) {
+                int degree = __builtin_popcount(row);
+                int complement = degree > n / 2;
+                int terms = complement ? n - degree : degree;
+                if (PROFILE_BUILD && profile) profile->wl_canon_refine_popcounts++;
+                if (terms < colour_count) {
+                    sigs[v].vertex = (uint8_t)v;
+                    sigs[v].old_colour = (uint8_t)colours[v];
+                    sigs[v].packed_counts[0] = wl_neighbor_histogram32(
+                        row, mask, units, all_units, complement);
+#ifdef RECT_WL_HISTOGRAM_VERIFY
+                    WlColourSignature32 reference;
+                    wl_colour_signature32_fill(&reference, (uint8_t)v,
+                        (uint8_t)colours[v], row, colour_masks, colour_count, active_words);
+                    if (wl_colour_signature32_cmp(&reference, &sigs[v], active_words) != 0)
+                        abort();
+#endif
+                    continue;
+                }
+            }
+            if (PROFILE_BUILD && profile)
+                profile->wl_canon_refine_popcounts += colour_count;
+#endif
             wl_colour_signature32_fill(&sigs[v], (uint8_t)v,
                                        (uint8_t)colours[v], row,
                                        colour_masks, colour_count,
