@@ -100,6 +100,12 @@ $(BUILD_DIR)/partition_wl_histogram_ab $(BUILD_DIR)/partition_wl_histogram_ab_pr
 $(BUILD_DIR)/partition_wl_histogram_test: tests/partition/wl_histogram_test.c research/probes/partition_wl_histogram.h Makefile | $(BUILD_DIR)
 	$(CC) -O2 -g -fsanitize=undefined -fno-sanitize-recover=all -o $@ $<
 
+$(BUILD_DIR)/partition_append_block_ab $(BUILD_DIR)/partition_append_block_ab_profile $(BUILD_DIR)/partition_append_block_verify: $(PARTITION_SHARED_SRCS) $(PARTITION_HEADERS) research/probes/partition_append_block.h Makefile | $(BUILD_DIR)
+	$(CC) $(PARTITION_CFLAGS) $(if $(filter %_profile,$@),$(PARTITION_PROFILE_CFLAGS)) $(if $(filter %_verify,$@),-DRECT_APPEND_BLOCK_VERIFY=1) $(PARTITION_POLY_DEFAULT_ADAPTIVE_CFLAGS) $(PARTITION_POLY_8_CACHE_CFLAGS) -DRECT_APPEND_BLOCK_AB=1 -DMAX_ROWS=8 -DMAX_COLS=8 -DDEFAULT_ROWS=8 -DDEFAULT_COLS=8 -DCACHE_BITS=18 -o $@ $(PARTITION_SHARED_SRCS) $(LDFLAGS)
+
+$(BUILD_DIR)/partition_append_block_test: tests/partition/append_block_test.c research/probes/partition_append_block.h Makefile | $(BUILD_DIR)
+	$(CC) -O2 -g -fsanitize=undefined -fno-sanitize-recover=all -o $@ $<
+
 $(BUILD_DIR)/5xn_count4: src/small/5xn_count4.c
 	$(CC) $(CFLAGS_5XN) -o $@ $<
 
@@ -668,6 +674,7 @@ BUILD_TARGETS := 5xn_count4 partition_count4 partition_poly partition_poly_7 \
 	partition_graph_test partition_residual_census \
 	partition_residual_ab partition_residual_ab_profile partition_residual_ab_test \
 	partition_wl_histogram_ab partition_wl_histogram_ab_profile partition_wl_histogram_verify partition_wl_histogram_test \
+	partition_append_block_ab partition_append_block_ab_profile partition_append_block_verify partition_append_block_test \
 	partition_poly_8 partition_poly_8_pgo partition_poly_profile \
 	partition_poly_7_profile partition_poly_8_profile small_graph_lookup_gen \
 	right_prefix_overlap_census prefix_hierarchy_8x8_census \

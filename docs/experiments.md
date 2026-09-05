@@ -16134,3 +16134,51 @@
 - Decision: reject this histogram variant as a default. Keep its isolated
   research target and exactness tests. Incremental split-cell refinement is
   a different, still-untested approach; this result does not reject it.
+
+### Experiment 474: Batch partial-graph adjacency updates by overlap block
+
+- Target the roughly 33.6 million partial-graph appends in the 8x5 task-0
+  profile (about 2.6 s of instrumented append time). Earlier append/pop
+  experiments changed state copying/restoration; this probe instead changes
+  how cross-column edges and their undo records are constructed.
+- At most four complex blocks occur in an eight-row partition. Pack the
+  forward overlap rows into four nibbles and transpose the 4x4 bit matrix
+  with two shift/XOR stages. Update and save each touched old adjacency row
+  once, rather than once per incident edge with a touched-row membership
+  test. Reuse the existing forward table; no additional lookup table,
+  initialization cost, or reverse-table cache traffic is introduced.
+- The candidate applies to reversible pushes, including the terminal hot
+  path. Keep the original append implementation as an independent verifier.
+  The isolated build rejects geometries with more than four complex blocks
+  per column; production behavior and runtime options remain unchanged.
+- UBSan checks all 65,536 possible overlap-block transposes and their inverse.
+  A real 8x5 task-0 verification run compares every appended graph with the
+  original implementation and checks restoration of every old adjacency row.
+  Its complete polynomial matches the control.
+- Sequential ABBA on the local Ryzen 7 9700X, fresh processes with startup
+  included and identical ordinary compiler options (not PGO):
+  - 8x5 prefix-depth-2 `[0,1)`, one thread: control 12.1580 s versus
+    candidate 12.2136 s, 0.46% slower.
+  - Held-out `[1,2)`, eight threads: control 17.7471 s versus candidate
+    17.9129 s, 0.93% slower.
+  - Every full polynomial coefficient agrees in all eight timed runs.
+- Reproduce with `make partition_append_block_ab partition_append_block_test`
+  and `research/probes/partition_aggregate_ab.py --candidate
+  build/partition_append_block_ab`, choosing the task/thread arguments above.
+  Logs and binary hashes are under `build/append-block-t0` and
+  `build/append-block-t1-8threads`; verification log:
+  `build/append-block-verify.log`.
+- A separate profile pair records the same 33,593,967 append calls, but
+  append time rises from 2.581 s to 2.659 s (3.0%). This supports rejecting
+  the proposed local optimization too; instrumented whole-run time is not
+  the acceptance metric and includes noise in unrelated solver work.
+- Final checks after extracting the candidate into its research header:
+  all 13 partition regression tests pass, exhaustive transpose tests pass,
+  both profile polynomials match the timed control, and the rebuilt verifier
+  matches every coefficient of the 8x4 `[0,4)` control. Profile logs are
+  `build/append-block-{control,candidate}-profile.log`; final verifier and
+  regression logs are `build/append-block-{final-verify,regression}.log`.
+- Decision: no demonstrated end-to-end gain; do not enable the candidate
+  in production. Keep the implementation isolated in the research header
+  and its compile-time-only A/B/verification targets. Saving individual
+  edge updates must justify the added packing and transposition work.

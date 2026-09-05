@@ -1,5 +1,12 @@
 #include "partition_poly_internal.h"
 
+#ifdef RECT_APPEND_BLOCK_AB
+#if MAX_COMPLEX_PER_COL > 4
+#error "append-block probe requires at most four complex blocks per column"
+#endif
+#include "../../research/probes/partition_append_block.h"
+#endif
+
 // --- SYMMETRY LOGIC ---
 
 #define REP_ORBIT_MARK_WORDS ((CANON_PARTITION_ID_LIMIT + 63u) / 64u)
@@ -1623,6 +1630,14 @@ static int partial_graph_push_checked(PartialGraphState* st, int depth, int pid,
                                       PartialGraphAppendFrame* frame) {
     if (!partial_graph_candidate_can_fit(st, pid, cols_left)) return 0;
 
+#ifdef RECT_APPEND_BLOCK_VERIFY
+    PartialGraphState reference = *st;
+    if (partitions[pid].num_complex < 0 ||
+        partitions[pid].num_complex > MAX_COMPLEX_PER_COL ||
+        reference.g.n > MAX_GRAPH_VERTICES - partitions[pid].num_complex) abort();
+    partial_graph_append(&reference, depth, pid, stack);
+#endif
+
     frame->old_n = st->g.n;
     frame->old_vertex_mask = st->g.vertex_mask;
     frame->touched_prev_count = 0;
@@ -1648,6 +1663,9 @@ static int partial_graph_push_checked(PartialGraphState* st, int depth, int pid,
         st->g.adj[u] |= ((uint64_t)intra_mask_get(pid, i1)) << base_new;
     }
 
+#ifdef RECT_APPEND_BLOCK_AB
+    partition_append_overlap_blocks(st, depth, pid, stack, base_new, num_complex, frame);
+#else
     uint64_t touched_prev_mask = 0;
     for (int prev = 0; prev < depth; prev++) {
         int prev_pid = stack[prev];
@@ -1672,6 +1690,24 @@ static int partial_graph_push_checked(PartialGraphState* st, int depth, int pid,
             }
         }
     }
+
+#endif
+#ifdef RECT_APPEND_BLOCK_VERIFY
+    if (st->g.n != reference.g.n || st->g.vertex_mask != reference.g.vertex_mask ||
+        memcmp(st->g.adj, reference.g.adj, st->g.n * sizeof(AdjWord))) {
+        fprintf(stderr, "append-block graph mismatch\n");
+        abort();
+    }
+    PartialGraphState restored = *st;
+    partial_graph_pop(&restored, frame);
+    for (int i = 0; i < frame->old_n; i++) {
+        AdjWord expected = reference.g.adj[i] & frame->old_vertex_mask;
+        if (restored.g.adj[i] != expected) {
+            fprintf(stderr, "append-block restore mismatch\n");
+            abort();
+        }
+    }
+#endif
 
 #if RECT_COUNT_K4_FEASIBILITY
     uint32_t shadow = frame->pair_shadow;
