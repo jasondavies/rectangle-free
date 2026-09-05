@@ -16001,3 +16001,60 @@
   aggregation, retaining raw aggregation as the control. Do not enable an
   extra WL pass by default based on deduplication ratios alone. No claimed
   full-grid speedup or production aggregation change from this experiment.
+
+### Experiment 471: A/B simplified-residual terminal aggregation
+
+- Follow up Experiment 470 with actual substitution, not only a reuse census.
+  Keep the first raw-graph table. At each flush simplify each distinct graph,
+  densely relabel its residual, fold the removed polynomial multiplier into
+  its incoming weight, and merge identical residuals in a reusable second
+  table. Solve only those residuals. No extra WL canonicalization pass.
+  This is an isolated `partition_residual_ab` build; normal targets do not
+  allocate or execute this second stage. Fixed-k4 is unchanged.
+- Sequential single-thread ABBA runs, default adaptive/cache settings,
+  GCC `-O3 -march=native -flto`. Compare the complete printed polynomial in
+  every run. Process wall time includes process startup and table preparation;
+  profiling builds are separate and are not the performance acceptance gate.
+
+  | Geometry / prefix-depth-2 range | Control mean wall (s) | Candidate mean wall (s) | Change |
+  | --- | ---: | ---: | ---: |
+  | 8x4 `[0,4)` | 2.6569 | 2.6687 | 0.44% slower |
+  | 8x5 `[0,1)` | 12.1117 | 12.2595 | 1.22% slower |
+  | 8x5 `[1,2)` | 85.1182 | 86.4364 | 1.55% slower |
+
+- On 8x5 `[0,1)`, raw terminal keys fall from 5,599,786 to 2,782,182
+  (50.3% reduction). Nevertheless the expensive hard-node count is exactly
+  694,895 in both profiled variants. Raw-cache hits fall from 4,649,841 to
+  1,830,329, while canonicalization calls slightly increase from 2,336,814
+  to 2,338,679. Thus the eliminated calls overwhelmingly correspond to
+  existing cheap cache hits, not avoided recursive work.
+- Second-table preparation takes 0.7222 / 0.7209 s in the two profiled
+  candidate runs. Total profiled ABBA wall means are 17.0098 s control and
+  17.0784 s candidate. Recursive solver timings are inclusive and must not
+  be summed as exclusive phase costs.
+- The heavier task reduces 57,467,815 raw keys to 30,966,095 residuals,
+  again without a wall-time gain. Every complete polynomial agrees in
+  all three unprofiled single-thread ABBA sets and the profiled ABBA set.
+- Four-thread 8x4 `[0,16)` ABBA also preserves every coefficient, despite
+  different worker/flush assignments. Control/candidate wall means are
+  3.5665 / 3.6081 s (candidate 1.17% slower); logs are in
+  `build/residual-ab-8x4-threads4`.
+- Regression gates: all 12 `partition-test` tests pass. The graph test now
+  additionally checks 200 weighted terminal fixtures, including empty/small
+  graphs and a common cyclic residual with different removed-vertex factors,
+  against independent cycle/path/leaf formulas. Tiny tables force repeated
+  flushes. Both control and candidate pass this suite under UBSan; deliberate
+  coefficient overflow still fails loudly. Candidate test command:
+  `make partition_residual_ab_test` followed by
+  `PARTITION_GRAPH_TEST_BINARY=build/partition_residual_ab_test python3 -m unittest -v tests.partition.test_graph`.
+- Reproduce: build `partition_poly_8`, `partition_residual_ab` and their
+  `_profile` variants. Run
+  `python3 research/probes/partition_aggregate_ab.py --output build/new-ab -- 8 5 --prefix-depth 2 --task-end 1`.
+  The driver saves complete logs, binary SHA-256, selected environment,
+  measurements, and polynomial digests; it rejects any full-polynomial
+  mismatch. Local logs are in `build/residual-ab-{8x4,8x5-t0,8x5-t1,profile}`.
+- Decision: reject this per-flush simplified-residual second stage as a
+  production optimization. Preserve the isolated probe for reproduction,
+  without enabling a runtime flag or changing default aggregation. This
+  does not rule out every broader/global residual-sharing scheme, but the
+  earlier 51% key-reduction census must not be treated as a speedup.

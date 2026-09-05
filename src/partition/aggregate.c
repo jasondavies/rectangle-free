@@ -13,6 +13,11 @@ struct TerminalAggregator {
     size_t count;
     size_t flush_at;
     ResultAccum* total;
+#ifdef RECT_RESIDUAL_AGGREGATE_AB
+    struct TerminalAggregateEntry* residual_entries;
+    uint64_t residual_inputs, residual_unique;
+    double residual_prepare_seconds;
+#endif
 #endif
 };
 
@@ -42,6 +47,9 @@ static int terminal_graph_equal(const Graph* a, const Graph* b) {
     return a->n == b->n && a->vertex_mask == b->vertex_mask &&
            memcmp(a->adj, b->adj, (size_t)a->n * sizeof(a->adj[0])) == 0;
 }
+#ifdef RECT_RESIDUAL_AGGREGATE_AB
+#include "../../research/probes/partition_residual_aggregate_impl.h"
+#endif
 #endif
 
 TerminalAggregator* terminal_aggregator_create(int bits, ResultAccum* total) {
@@ -64,6 +72,10 @@ TerminalAggregator* terminal_aggregator_create(int bits, ResultAccum* total) {
         fprintf(stderr, "Failed to allocate terminal aggregator entries\n");
         exit(1);
     }
+#ifdef RECT_RESIDUAL_AGGREGATE_AB
+    aggregator->residual_entries = checked_calloc(
+        aggregator->capacity, sizeof(TerminalAggregateEntry), "residual entries");
+#endif
 #endif
     return aggregator;
 }
@@ -88,8 +100,12 @@ void terminal_aggregator_flush(TerminalAggregator* aggregator,
     residual_census_begin();
 #endif
     double t0 = (PROFILE_BUILD && profile) ? omp_get_wtime() : 0.0;
+    TerminalAggregateEntry* pending = aggregator->entries;
+#ifdef RECT_RESIDUAL_AGGREGATE_AB
+    pending = prepare_residual_entries(aggregator, profile);
+#endif
     for (size_t i = 0; i < aggregator->capacity; i++) {
-        TerminalAggregateEntry* entry = &aggregator->entries[i];
+        TerminalAggregateEntry* entry = &pending[i];
         if (!entry->used) continue;
         GraphResult graph_result;
         ResultAccum contribution;
@@ -173,6 +189,13 @@ void terminal_aggregator_destroy(TerminalAggregator* aggregator) {
     if (!aggregator) return;
 #if !RECT_COUNT_K4
     free(aggregator->entries);
+#ifdef RECT_RESIDUAL_AGGREGATE_AB
+    printf("RESIDUAL_AB raw=%llu normalized=%llu prepare_seconds=%.6f profiled=%d\n",
+           (unsigned long long)aggregator->residual_inputs,
+           (unsigned long long)aggregator->residual_unique,
+           aggregator->residual_prepare_seconds, PROFILE_BUILD);
+    free(aggregator->residual_entries);
+#endif
 #endif
     free(aggregator);
 }

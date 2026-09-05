@@ -82,6 +82,47 @@ int main(int argc,char** argv) {
             solve(&sparse,&c,&raw,&got);assert(same(&got,&expected));
         }
     }
+    // Repeated residuals with different removed-vertex factors and polynomial
+    // weights. Tiny tables force many flushes; the reference uses a treewidth
+    // cycle polynomial and known leaf/path factors, without the simplifier.
+    Poly aggregate_total, direct_total;
+    poly_zero(&aggregate_total);poly_zero(&direct_total);
+    TerminalAggregator* aggregator=terminal_aggregator_create(3,&aggregate_total);
+    GraphCanonWorkspace ws={0};long long canon=0,hits=0,raw_hits=0;
+    for(int sample=0;sample<200;sample++) {
+        Graph g={0};g.n=sample<8?sample:9+sample%5;
+        g.vertex_mask=graph_row_mask(g.n);
+        if(g.n>=9)for(int i=0;i<9;i++)edge(&g,i,(i+1)%9);
+        else for(int i=1;i<g.n;i++)edge(&g,i-1,i);
+        for(int i=9;i<g.n;i++) {
+            if(sample%3>=1)edge(&g,i,0);
+            if(sample%3==2)edge(&g,i,1);
+        }
+        Poly weight,contribution;poly_one_ref(&weight);
+        weight.deg=2;weight.coeffs[0]=sample%7-3;
+        weight.coeffs[1]=sample%11;weight.coeffs[2]=1;
+        GraphPoly reference;
+        if(g.n>=9) {
+            Graph core={.n=9,.vertex_mask=511};
+            for(int i=0;i<9;i++)core.adj[i]=g.adj[i]&511;
+            assert(solve_graph_poly_treewidth(&core,6,&reference,NULL));
+            for(int i=9;i<g.n;i++)
+                graph_poly_mul_linear_ref(&reference,sample%3,&reference);
+        } else {
+            graph_poly_one_ref(&reference);
+            for(int i=0;i<g.n;i++)
+                graph_poly_mul_linear_ref(&reference,i?1:0,&reference);
+        }
+        poly_mul_graph_ref(&weight,&reference,&contribution);
+        poly_accumulate_checked(&direct_total,&contribution);
+        assert(terminal_aggregator_defer(aggregator,&g,&weight,&c,&raw,&ws,
+                                         &canon,&hits,&raw_hits,NULL));
+    }
+    terminal_aggregator_flush(aggregator,&c,&raw,&ws,&canon,&hits,&raw_hits,NULL);
+    terminal_aggregator_destroy(aggregator);
+    assert(aggregate_total.deg==direct_total.deg);
+    assert(!memcmp(aggregate_total.coeffs,direct_total.coeffs,
+                   (direct_total.deg+1)*sizeof(PolyCoeff)));
     free_cache(&c);free_cache(&raw);small_graph_lookup_free();
     puts("PARTITION_GRAPH_TEST exact=OK");return 0;
 }

@@ -84,9 +84,15 @@ partition-test: $(BUILD_DIR)/partition_poly_7 $(BUILD_DIR)/partition_graph_test
 $(BUILD_DIR)/partition_graph_test: tests/partition/graph_test.c $(filter-out src/partition/main.c,$(PARTITION_SHARED_SRCS)) $(PARTITION_HEADERS) Makefile | $(BUILD_DIR)
 	$(CC) -O2 -g $(OPENMP_CFLAGS) -DMAX_ROWS=8 -DMAX_COLS=8 -fsanitize=undefined -fno-sanitize-recover=all -o $@ tests/partition/graph_test.c $(filter-out src/partition/main.c,$(PARTITION_SHARED_SRCS)) -lm $(OPENMP_LDFLAGS)
 
+$(BUILD_DIR)/partition_residual_ab_test: tests/partition/graph_test.c $(filter-out src/partition/main.c,$(PARTITION_SHARED_SRCS)) $(PARTITION_HEADERS) research/probes/partition_residual_aggregate_impl.h Makefile | $(BUILD_DIR)
+	$(CC) -O2 -g $(OPENMP_CFLAGS) -DRECT_RESIDUAL_AGGREGATE_AB=1 -DMAX_ROWS=8 -DMAX_COLS=8 -fsanitize=undefined -fno-sanitize-recover=all -o $@ tests/partition/graph_test.c $(filter-out src/partition/main.c,$(PARTITION_SHARED_SRCS)) -lm $(OPENMP_LDFLAGS)
+
 $(BUILD_DIR)/partition_residual_census: $(PARTITION_SHARED_SRCS) $(PARTITION_HEADERS) \
 		research/probes/partition_residual_census.c research/probes/partition_residual_census.h Makefile | $(BUILD_DIR)
 	$(CC) $(PARTITION_CFLAGS) $(PARTITION_POLY_DEFAULT_ADAPTIVE_CFLAGS) $(PARTITION_POLY_8_CACHE_CFLAGS) -DRECT_RESIDUAL_CENSUS=1 -DMAX_ROWS=8 -DMAX_COLS=8 -o $@ $(PARTITION_SHARED_SRCS) research/probes/partition_residual_census.c $(LDFLAGS)
+
+$(BUILD_DIR)/partition_residual_ab $(BUILD_DIR)/partition_residual_ab_profile: $(PARTITION_SHARED_SRCS) $(PARTITION_HEADERS) research/probes/partition_residual_aggregate_impl.h Makefile | $(BUILD_DIR)
+	$(CC) $(PARTITION_CFLAGS) $(if $(filter %_profile,$@),$(PARTITION_PROFILE_CFLAGS)) $(PARTITION_POLY_DEFAULT_ADAPTIVE_CFLAGS) $(PARTITION_POLY_8_CACHE_CFLAGS) -DRECT_RESIDUAL_AGGREGATE_AB=1 -DMAX_ROWS=8 -DMAX_COLS=8 -DDEFAULT_ROWS=8 -DDEFAULT_COLS=8 -DCACHE_BITS=18 -o $@ $(PARTITION_SHARED_SRCS) $(LDFLAGS)
 
 $(BUILD_DIR)/5xn_count4: src/small/5xn_count4.c
 	$(CC) $(CFLAGS_5XN) -o $@ $<
@@ -652,6 +658,7 @@ $(BUILD_DIR)/twocolour_7x7_solve: src/gpu/twocolour_7x7_solve.c
 
 BUILD_TARGETS := 5xn_count4 partition_count4 partition_poly partition_poly_7 \
 	partition_graph_test partition_residual_census \
+	partition_residual_ab partition_residual_ab_profile partition_residual_ab_test \
 	partition_poly_8 partition_poly_8_pgo partition_poly_profile \
 	partition_poly_7_profile partition_poly_8_profile small_graph_lookup_gen \
 	right_prefix_overlap_census prefix_hierarchy_8x8_census \
