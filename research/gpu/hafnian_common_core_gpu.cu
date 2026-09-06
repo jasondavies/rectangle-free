@@ -13,12 +13,35 @@
 #define CORE_SYNC() _Pragma("omp barrier")
 #endif
 
+// Experiment 479: accepted research default. Set all three OPT switches to
+// zero for the exact control. No switch changes sign domains or query IDs.
+#ifndef CORE_OPT_HESS
+#define CORE_OPT_HESS 1
+#endif
+#ifndef CORE_OPT_BOUNDARY
+#define CORE_OPT_BOUNDARY 1
+#endif
+#ifndef CORE_OPT_SCRATCH
+#define CORE_OPT_SCRATCH 1
+#endif
+#ifndef CORE_PROFILE
+#define CORE_PROFILE 0
+#endif
+#if CORE_PROFILE && !defined(CORE_HOST_EMULATION)
+#define CORE_STAMP(i) do { CORE_SYNC(); if(tid==0)phase[i]=clock64(); } while(0)
+#else
+#define CORE_STAMP(i) do {} while(0)
+#endif
+
 namespace core_gpu {
 constexpr unsigned MAX_C=48, MAX_Q=11, MAX_MASK=1u<<MAX_Q;
 struct Input {
-    unsigned c,q,n,degree,stride,states,queries,words;
+    unsigned c,q,n,degree,stride,states,queries,words,matrix_stride,pairs;
     unsigned starts[7]{}; // even boundary subset sizes 0,2,...,10
     unsigned masks[MAX_MASK]{},slot[MAX_MASK]{},answers[256]{};
+    unsigned pair_i[MAX_Q*MAX_Q]{},pair_j[MAX_Q*MAX_Q]{};
+    unsigned transition_begin[MAX_MASK+1]{};
+    uint16_t child_slot[MAX_MASK*MAX_Q]{},edge_slot[MAX_MASK*MAX_Q]{};
     uint32_t inverse[49]{};
     uint8_t adjacency[64*64]{};
 };
@@ -39,11 +62,30 @@ Input pack(const common_bench::Problem& p,uint32_t prime) {
         in.starts[level]=start;
     }
     for(unsigned j=0;j<p.masks.size();++j)in.answers[j]=in.slot[p.masks[j]];
+    unsigned pair_slot[MAX_Q*MAX_Q];
+    std::fill(std::begin(pair_slot),std::end(pair_slot),UINT32_MAX);
+    unsigned transitions=0;
+    for(unsigned idx=0;idx<plan.size();++idx){
+        in.transition_begin[idx]=transitions;
+        unsigned mask=plan[idx];if(!mask)continue;
+        unsigned first=unsigned(__builtin_ctz(mask)),rest=mask^(1u<<first);
+        for(unsigned j=first+1;j<in.q;++j)if(rest&(1u<<j)){
+            unsigned& edge=pair_slot[first*in.q+j];
+            if(edge==UINT32_MAX){edge=in.pairs++;in.pair_i[edge]=first;in.pair_j[edge]=j;}
+            in.child_slot[transitions]=uint16_t(in.slot[rest^(1u<<j)]);
+            in.edge_slot[transitions++]=uint16_t(edge);
+        }
+    }
+    in.transition_begin[plan.size()]=transitions;
     for(unsigned j=1;j<=p.core;++j)in.inverse[j]=Mod{prime}.inverse(j);
     for(unsigned i=0;i<in.n;++i)for(unsigned j=0;j<in.n;++j)
         in.adjacency[i*in.n+j]=p.adjacency.at(i,j);
-    in.words=in.c*in.c+(in.c+1)*in.stride+in.stride+in.c+2+
-        in.q*in.q*in.stride+2*in.c*in.q+in.states*in.stride;
+    in.matrix_stride=in.c+(CORE_OPT_HESS?1:0);
+    unsigned core_words=in.c*in.matrix_stride+(in.c+1)*in.stride+in.c+2;
+    unsigned k_words=(CORE_OPT_BOUNDARY?in.pairs:in.q*in.q)*in.stride;
+    in.words=CORE_OPT_SCRATCH ? in.stride+k_words+
+        std::max({core_words,2*in.c*in.q,in.states*in.stride}) :
+        core_words+in.stride+k_words+2*in.c*in.q+in.states*in.stride;
     return in;
 }
 
@@ -51,13 +93,14 @@ template<uint32_t P> struct Field {
     CORE_DEVICE static uint32_t add(uint32_t a,uint32_t b){uint32_t s=a+b;return s>=P?s-P:s;}
     CORE_DEVICE static uint32_t neg(uint32_t a){return a?P-a:0;}
     CORE_DEVICE static uint32_t sub(uint32_t a,uint32_t b){return a>=b?a-b:P-(b-a);}
-    CORE_DEVICE static uint32_t mul(uint32_t a,uint32_t b){
+    CORE_DEVICE static uint32_t reduce(uint64_t t){
         constexpr uint64_t mask=UINT64_C(2147483647),delta=UINT64_C(2147483648)-P;
-        uint64_t t=uint64_t(a)*b;
-        // Certified fields are 2^31-d, d<=69. Two folds leave <2p.
+        // Also valid for a sum of four products: the first fold is below
+        // 2^31+69*(2^33-1), and the second remains below 2p.
         t=(t&mask)+(t>>31)*delta;t=(t&mask)+(t>>31)*delta;
         return uint32_t(t>=P?t-P:t);
     }
+    CORE_DEVICE static uint32_t mul(uint32_t a,uint32_t b){return reduce(uint64_t(a)*b);}
     CORE_DEVICE static uint32_t inverse(uint32_t a){
         uint32_t out=1;for(uint32_t e=P-2;e;e>>=1){if(e&1)out=mul(out,a);a=mul(a,a);}return out;
     }
@@ -65,61 +108,102 @@ template<uint32_t P> struct Field {
 
 template<uint32_t P>
 CORE_DEVICE void term(const Input& in,uint64_t signs,uint32_t* scratch,
-                      uint32_t* output,unsigned tid,unsigned nt) {
+                      uint32_t* output,unsigned tid,unsigned nt,uint64_t* phase=nullptr) {
     using F=Field<P>;
-    unsigned c=in.c,q=in.q,m=in.degree,s=in.stride,n=in.n;
+    CORE_STAMP(0);
+    unsigned c=in.c,q=in.q,m=in.degree,s=in.stride,n=in.n,hs=in.matrix_stride;
+    unsigned nk=CORE_OPT_BOUNDARY?in.pairs:q*q;
+#if CORE_OPT_SCRATCH
+    uint32_t* f=scratch;
+    uint32_t* k=f+s;
+    uint32_t* h=k+nk*s;
+    uint32_t* poly=h+c*hs;
+    uint32_t* factors=poly+(c+1)*s;
+    uint32_t* pivot=factors+c;
+    uint32_t* power=h;
+    uint32_t* next=power+c*q;
+    uint32_t* memo=h;
+#else
     uint32_t* h=scratch;
-    uint32_t* poly=h+c*c;
+    uint32_t* poly=h+c*hs;
     uint32_t* f=poly+(c+1)*s;
     uint32_t* factors=f+s;
     uint32_t* pivot=factors+c;
     uint32_t* k=pivot+2;
-    uint32_t* power=k+q*q*s;
+    uint32_t* power=k+nk*s;
     uint32_t* next=power+c*q;
     uint32_t* memo=next+c*q;
+#endif
     for(unsigned i=tid;i<in.words;i+=nt)scratch[i]=0;
     CORE_SYNC();
     for(unsigned ij=tid;ij<c*c;ij+=nt){unsigned i=ij/c,j=ij%c;
         bool positive=i/2==0||(signs&(UINT64_C(1)<<(i/2-1)));
-        h[ij]=in.adjacency[(i^1)*n+j]?(positive?1:P-1):0;
+        h[i*hs+j]=in.adjacency[(i^1)*n+j]?(positive?1:P-1):0;
     }
     CORE_SYNC();
     for(unsigned col=0;col+2<c;++col) {
-        if(tid==0){unsigned r=col+1;while(r<c&&!h[r*c+col])++r;*pivot=r;}
+        if(tid==0){unsigned r=col+1;while(r<c&&!h[r*hs+col])++r;*pivot=r;}
         CORE_SYNC();
         unsigned r=*pivot;
         // All threads must copy the pivot before a zero-column skip lets
         // thread zero publish the next column's pivot.
         CORE_SYNC();
         if(r==c)continue; // identical branch across CTA
-        for(unsigned j=tid;j<c;j+=nt){uint32_t t=h[r*c+j];h[r*c+j]=h[(col+1)*c+j];h[(col+1)*c+j]=t;}
+#if CORE_OPT_HESS
+        if(r!=col+1){
+#endif
+        for(unsigned j=tid;j<c;j+=nt){uint32_t t=h[r*hs+j];h[r*hs+j]=h[(col+1)*hs+j];h[(col+1)*hs+j]=t;}
         CORE_SYNC();
-        for(unsigned i=tid;i<c;i+=nt){uint32_t t=h[i*c+r];h[i*c+r]=h[i*c+col+1];h[i*c+col+1]=t;}
+        for(unsigned i=tid;i<c;i+=nt){uint32_t t=h[i*hs+r];h[i*hs+r]=h[i*hs+col+1];h[i*hs+col+1]=t;}
         CORE_SYNC();
-        if(tid==0)pivot[1]=F::inverse(h[(col+1)*c+col]);
+#if CORE_OPT_HESS
+        }
+#endif
+        if(tid==0)pivot[1]=F::inverse(h[(col+1)*hs+col]);
         CORE_SYNC();
-        for(unsigned i=col+2+tid;i<c;i+=nt)factors[i]=F::mul(h[i*c+col],pivot[1]);
+        for(unsigned i=col+2+tid;i<c;i+=nt)factors[i]=F::mul(h[i*hs+col],pivot[1]);
         CORE_SYNC();
         // Commuting row eliminations followed by their joint inverse-column
         // update. The pivot row and every factor are stable during each pass.
+#if CORE_OPT_HESS
+        unsigned width=c-col,cells=(c-col-2)*width;
+        for(unsigned ij=tid;ij<cells;ij+=nt){unsigned i=col+2+ij/width,j=col+ij%width;
+            h[i*hs+j]=F::sub(h[i*hs+j],F::mul(factors[i],h[(col+1)*hs+j]));}
+#else
         for(unsigned ij=tid;ij<c*c;ij+=nt){unsigned i=ij/c,j=ij%c;
-            if(i>col+1&&j>=col)h[ij]=F::sub(h[ij],F::mul(factors[i],h[(col+1)*c+j]));}
+            if(i>col+1&&j>=col)h[i*hs+j]=F::sub(h[i*hs+j],F::mul(factors[i],h[(col+1)*hs+j]));}
+#endif
         CORE_SYNC();
-        for(unsigned i=tid;i<c;i+=nt){uint32_t value=h[i*c+col+1];
-            for(unsigned j=col+2;j<c;++j)value=F::add(value,F::mul(factors[j],h[i*c+j]));
-            h[i*c+col+1]=value;}
+        for(unsigned i=tid;i<c;i+=nt){uint32_t value=h[i*hs+col+1];
+            for(unsigned j=col+2;j<c;++j)value=F::add(value,F::mul(factors[j],h[i*hs+j]));
+            h[i*hs+col+1]=value;}
         CORE_SYNC();
     }
+    CORE_STAMP(1);
     if(tid==0)poly[0]=1;
     CORE_SYNC();
     for(unsigned size=1;size<=c;++size) {
+#if CORE_OPT_HESS
+        if(tid==0){uint32_t product=1;
+            for(unsigned dist=1;dist<size&&dist<m;++dist){
+                product=F::mul(product,h[(size-dist)*hs+size-dist-1]);
+                factors[dist]=F::mul(product,h[(size-dist-1)*hs+size-1]);}}
+        CORE_SYNC();
+#endif
         for(unsigned d=tid;d<=m&&d<=size;d+=nt) {
             uint32_t value=d<size?poly[(size-1)*s+d]:0;
-            if(d)value=F::sub(value,F::mul(h[(size-1)*c+size-1],poly[(size-1)*s+d-1]));
+            if(d)value=F::sub(value,F::mul(h[(size-1)*hs+size-1],poly[(size-1)*s+d-1]));
+#if !CORE_OPT_HESS
             uint32_t product=1;
+#endif
             for(unsigned dist=1;dist<size&&dist+1<=d;++dist){
-                product=F::mul(product,h[(size-dist)*c+size-dist-1]);
-                value=F::sub(value,F::mul(F::mul(product,h[(size-dist-1)*c+size-1]),poly[(size-dist-1)*s+d-dist-1]));}
+#if CORE_OPT_HESS
+                value=F::sub(value,F::mul(factors[dist],poly[(size-dist-1)*s+d-dist-1]));
+#else
+                product=F::mul(product,h[(size-dist)*hs+size-dist-1]);
+                value=F::sub(value,F::mul(F::mul(product,h[(size-dist-1)*hs+size-1]),poly[(size-dist-1)*s+d-dist-1]));
+#endif
+            }
             poly[size*s+d]=value;
         }
         CORE_SYNC();
@@ -127,13 +211,21 @@ CORE_DEVICE void term(const Input& in,uint64_t signs,uint32_t* scratch,
     if(tid==0){f[0]=1;for(unsigned d=1;d<=m;++d){uint32_t value=0;
         for(unsigned j=1;j<=d;++j)value=F::add(value,F::mul(2*d-j,F::mul(poly[c*s+j],f[d-j])));
         f[d]=F::neg(F::mul(value,in.inverse[2*d]));}}
-    for(unsigned ij=tid;ij<q*q;ij+=nt)k[ij*s]=in.adjacency[(c+ij/q)*n+c+ij%q];
+#if CORE_OPT_SCRATCH
+    // f must finish reading poly before moment buffers overwrite its arena.
+    CORE_SYNC();
+#endif
+    CORE_STAMP(2);
+    for(unsigned ij=tid;ij<nk;ij+=nt){
+        unsigned i=CORE_OPT_BOUNDARY?in.pair_i[ij]:ij/q,j=CORE_OPT_BOUNDARY?in.pair_j[ij]:ij%q;
+        k[ij*s]=in.adjacency[(c+i)*n+c+j];}
     for(unsigned vj=tid;vj<c*q;vj+=nt){unsigned v=vj/q,j=vj%q;
         bool positive=v/2==0||(signs&(UINT64_C(1)<<(v/2-1)));
         power[vj]=in.adjacency[(v^1)*n+c+j]?(positive?1:P-1):0;}
     CORE_SYNC();
     for(unsigned d=1;d<=m;++d) {
-        for(unsigned ij=tid;ij<q*q;ij+=nt){unsigned i=ij/q,j=ij%q;uint32_t value=0;
+        for(unsigned ij=tid;ij<nk;ij+=nt){
+            unsigned i=CORE_OPT_BOUNDARY?in.pair_i[ij]:ij/q,j=CORE_OPT_BOUNDARY?in.pair_j[ij]:ij%q;uint32_t value=0;
             for(unsigned v=0;v<c;++v)if(in.adjacency[(c+i)*n+v])value=F::add(value,power[v*q+j]);
             k[ij*s+d]=value;}
         if(d<m){
@@ -146,11 +238,36 @@ CORE_DEVICE void term(const Input& in,uint64_t signs,uint32_t* scratch,
         }
         CORE_SYNC();
     }
+    CORE_STAMP(3);
+#if CORE_OPT_SCRATCH
+    // moment powers are dead; reset their arena before using it as memo.
+    for(unsigned i=tid;i<in.states*s;i+=nt)memo[i]=0;
+    CORE_SYNC();
+#endif
     if(tid==0)memo[in.slot[0]*s]=1;
     CORE_SYNC();
     for(unsigned level=1;level<=5;++level) {
         for(unsigned idx=in.starts[level]*s+tid;idx<in.starts[level+1]*s;idx+=nt){
-            unsigned slot=idx/s,d=idx%s,mask=in.masks[slot];
+            unsigned slot=idx/s,d=idx%s;
+#if CORE_OPT_BOUNDARY
+            unsigned begin=in.transition_begin[slot],end=in.transition_begin[slot+1];
+            // hafnian of a two-vertex matrix is its sole off-diagonal entry.
+            if(level==1){memo[idx]=k[in.edge_slot[begin]*s+d];continue;}
+            uint32_t value=0;
+            for(unsigned t=begin;t<end;++t){
+                const uint32_t* child=memo+in.child_slot[t]*s;
+                const uint32_t* edge=k+in.edge_slot[t]*s;
+                unsigned a=0;
+                for(;a+3<=d;a+=4){uint64_t pending=uint64_t(edge[a])*child[d-a];
+                    pending+=uint64_t(edge[a+1])*child[d-a-1];
+                    pending+=uint64_t(edge[a+2])*child[d-a-2];
+                    pending+=uint64_t(edge[a+3])*child[d-a-3];
+                    value=F::add(value,F::reduce(pending));}
+                uint64_t pending=0;for(;a<=d;++a)pending+=uint64_t(edge[a])*child[d-a];
+                value=F::add(value,F::reduce(pending));
+            }
+#else
+            unsigned mask=in.masks[slot];
             unsigned first=0;while(!(mask&(1u<<first)))++first;
             unsigned rest=mask^(1u<<first);uint32_t value=0;
             for(unsigned j=first+1;j<q;++j)if(rest&(1u<<j)) {
@@ -158,26 +275,30 @@ CORE_DEVICE void term(const Input& in,uint64_t signs,uint32_t* scratch,
                 const uint32_t* edge=k+(first*q+j)*s;
                 for(unsigned a=0;a<=d;++a)value=F::add(value,F::mul(edge[a],child[d-a]));
             }
+#endif
             memo[idx]=value;
         }
         CORE_SYNC();
     }
+    CORE_STAMP(4);
     unsigned ones=0;for(uint64_t b=signs;b;b&=b-1)++ones;
     bool negative=m&&((m-1-ones)&1);
     for(unsigned j=tid;j<in.queries;j+=nt){uint32_t value=0;
         for(unsigned d=0;d<=m;++d)value=F::add(value,F::mul(f[d],memo[in.answers[j]*s+m-d]));
         output[j]=negative?F::neg(value):value;}
     CORE_SYNC();
+    CORE_STAMP(5);
 }
 } // namespace core_gpu
 
 namespace core_gpu {
 #ifndef CORE_HOST_EMULATION
 void checked(cudaError_t e){if(e!=cudaSuccess)throw std::runtime_error(cudaGetErrorString(e));}
-template<uint32_t P> __global__ void kernel(const Input* in,uint64_t begin,uint32_t* output) {
+template<uint32_t P> __global__ void kernel(const Input* in,uint64_t begin,uint32_t* output,uint64_t* phases) {
     extern __shared__ uint32_t scratch[];
     uint64_t index=begin+blockIdx.x;
-    term<P>(*in,index^(index>>1),scratch,output+size_t(blockIdx.x)*in->queries,threadIdx.x,blockDim.x);
+    term<P>(*in,index^(index>>1),scratch,output+size_t(blockIdx.x)*in->queries,threadIdx.x,blockDim.x,
+        CORE_PROFILE?phases+size_t(blockIdx.x)*6:nullptr);
 }
 #endif
 
@@ -195,16 +316,30 @@ std::vector<uint32_t> execute(const Input& in,uint64_t begin,unsigned count,unsi
     elapsed=common_bench::seconds(started,Clock::now());
 #else
     Input* device_in=nullptr;uint32_t* device_out=nullptr;
+    uint64_t* device_phases=nullptr;
+#if CORE_PROFILE
+    checked(cudaMalloc(&device_phases,size_t(count)*6*sizeof(uint64_t)));
+#endif
     checked(cudaMalloc(&device_in,sizeof(Input)));checked(cudaMalloc(&device_out,out.size()*sizeof(uint32_t)));
     checked(cudaMemcpy(device_in,&in,sizeof(Input),cudaMemcpyHostToDevice));
     checked(cudaFuncSetAttribute(kernel<P>,cudaFuncAttributeMaxDynamicSharedMemorySize,in.words*sizeof(uint32_t)));
     int active=0;checked(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&active,kernel<P>,threads,in.words*sizeof(uint32_t)));
     cudaEvent_t start,stop;checked(cudaEventCreate(&start));checked(cudaEventCreate(&stop));
     checked(cudaEventRecord(start));
-    kernel<P><<<count,threads,in.words*sizeof(uint32_t)>>>(device_in,begin,device_out);
+    kernel<P><<<count,threads,in.words*sizeof(uint32_t)>>>(device_in,begin,device_out,device_phases);
     checked(cudaGetLastError());checked(cudaEventRecord(stop));checked(cudaEventSynchronize(stop));
     float ms=0;checked(cudaEventElapsedTime(&ms,start,stop));elapsed=ms/1000.0;
     checked(cudaMemcpy(out.data(),device_out,out.size()*sizeof(uint32_t),cudaMemcpyDeviceToHost));
+#if CORE_PROFILE
+    std::vector<uint64_t> phases(size_t(count)*6);
+    checked(cudaMemcpy(phases.data(),device_phases,phases.size()*sizeof(uint64_t),cudaMemcpyDeviceToHost));
+    uint64_t cycles[5]{};
+    for(unsigned i=0;i<count;++i)for(unsigned j=0;j<5;++j)cycles[j]+=phases[i*6+j+1]-phases[i*6+j];
+    std::printf("CORE_CUDA_PHASE cycles_init_hess=%llu cycles_poly=%llu cycles_moments=%llu cycles_boundary=%llu cycles_output=%llu scope=summed_CTA_elapsed_cycles_instrumented\n",
+        (unsigned long long)cycles[0],(unsigned long long)cycles[1],(unsigned long long)cycles[2],
+        (unsigned long long)cycles[3],(unsigned long long)cycles[4]);
+    checked(cudaFree(device_phases));
+#endif
     std::printf("CORE_CUDA_LAUNCH prime=%u core=%u pool=%u queries=%u states=%u shared_bytes=%zu threads=%u active_ctas_per_sm=%d signs=%u kernel_s=%.6f\n",
         P,in.c,in.q,in.queries,in.states,in.words*sizeof(uint32_t),threads,active,count,elapsed);
     checked(cudaEventDestroy(start));checked(cudaEventDestroy(stop));checked(cudaFree(device_out));checked(cudaFree(device_in));
@@ -246,6 +381,10 @@ void self_test(unsigned threads) {
             auto got=prime==2147483647u?Field<2147483647u>::mul(a,b):prime==2147483629u?Field<2147483629u>::mul(a,b):
                 prime==2147483587u?Field<2147483587u>::mul(a,b):Field<2147483579u>::mul(a,b);
             if(got!=Mod{prime}.mul(a,b))throw std::runtime_error("field product mismatch");
+            uint64_t pending=4*uint64_t(a)*b;
+            auto reduced=prime==2147483647u?Field<2147483647u>::reduce(pending):prime==2147483629u?Field<2147483629u>::reduce(pending):
+                prime==2147483587u?Field<2147483587u>::reduce(pending):Field<2147483579u>::reduce(pending);
+            if(reduced!=pending%prime)throw std::runtime_error("four-product reduction mismatch");
 #endif
         }
         for(unsigned c:{0u,2u,6u,10u})for(unsigned q:{5u,7u})for(unsigned mode:{0u,1u}) {
@@ -268,6 +407,8 @@ void self_test(unsigned threads) {
 } // namespace core_gpu
 
 int main(int argc,char** argv)try {
+    std::printf("CORE_CUDA_CONFIG hess=%d boundary=%d scratch=%d profile=%d\n",
+        CORE_OPT_HESS,CORE_OPT_BOUNDARY,CORE_OPT_SCRATCH,CORE_PROFILE);
     std::string path;unsigned count=4096,threads=128,cap=11,limit=0,slack=3,order=0;
     uint32_t prime=2147483647;bool test=false,complete=false,sweep=false;
 #ifdef CORE_HOST_EMULATION

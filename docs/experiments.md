@@ -16380,3 +16380,78 @@
   [the common-core note](hafnian/common_core_gate.md) gives commands/details.
 - The temporary single-GPU spot worker and OS disk were deleted after pulling
   all artifacts. No production solver defaults or result formats changed.
+
+### Experiment 479: shared-core CUDA arithmetic and workspace A/B
+
+- Follow up the 6x27 shared-core review with three independent changes:
+  (H) active-region Hessenberg iteration, identity-swap skipping, padded
+  matrix stride and shared characteristic-polynomial factors;
+  (B) only consumed upper-triangular boundary series, precompiled subset
+  transitions, direct size-two hafnian entries and four-product delayed
+  modular reduction; (S) shared scratch storage for non-overlapping core,
+  moment and boundary-memo lifetimes. The sign formula and query ownership
+  remain unchanged. Test every H/B/S combination locally.
+- First use a **39-case unweighted pilot**, twice in opposite variant order,
+  on one standard RTX PRO 6000 Blackwell spot GPU. Relative to control:
+
+  | Candidate | Pilot kernel speedup |
+  | --- | ---: |
+  | H only | 1.024x |
+  | B only | 1.172x |
+  | S only | 1.140x |
+  | H+B | 1.200x |
+  | H+B+S | 1.466x |
+
+  A separate B+S/H+B+S pilot confirms that adding H to B+S saves a further
+  approximately 6% of pilot kernel time. These pilot ratios are not campaign
+  projections and must not be multiplied together.
+- Rerun **all 757 actual owned-group/field cases across all 256 grouped
+  strata**, with 32,768 core signs and 128 spread CPU-reference checks per
+  case. Do two complete passes, reversing control/candidate order:
+
+  | Kernel | First weighted projection | Reverse-order repeat |
+  | --- | ---: | ---: |
+  | Same-worker control | 304.879 GPU-h | 305.172 GPU-h |
+  | H+B+S | 175.037 GPU-h | 175.064 GPU-h |
+
+  Accepted mean: **175.05 grouped GPU-hours**, versus 305.03 for the matched
+  control: **1.743x throughput, 42.61% less kernel time**. The historical
+  Experiment 478 control was 313.36 hours; do not attribute that small
+  between-worker difference to these code changes. Candidate within-stratum
+  fastest/slowest-sample projections are approximately 173.1--176.6 hours,
+  not confidence bounds or full-campaign allowances.
+- The first candidate pass projects 92.36/46.30/29.29/7.09 GPU-hours for
+  residual orders 42/44/46/48 respectively. Query coverage, coefficient
+  coverage and the **2,407,173,980,160 independent-tail sign terms** are
+  unchanged. Tail computation, production dispatch, reduction, I/O and
+  interruption overhead are still excluded. This is not a 175-hour complete
+  6x27 campaign forecast.
+- Separate phase instrumentation records summed CTA elapsed cycles, including
+  waits, not exclusive SM work. On the 34-core/11-boundary/17-child example,
+  scratch falls from 36,632 to 21,600 bytes and the occupancy calculator goes
+  from two to four CTAs/SM. Boundary recurrence falls from 33.5% to 16.3% of
+  instrumented CTA elapsed cycles. Do not infer additive kernel savings from
+  those cycle fractions: occupancy and overlap also changed. Normal timing
+  binaries contain no phase stamps. Projection rejects instrumented logs
+  and mixtures of different A/B configurations.
+- Exactness: all eight combinations pass UBSan/cooperative CPU checks,
+  including 7,920 small child/sign checks per variant over four primes and
+  real pool-11 cases at orders 42/44/46/48. Independently check four-product
+  modular reduction at extreme residues. GPU small complete/brute checks,
+  real and small racecheck, real memcheck and synccheck pass. Eighteen full
+  6x28 group results under each of primes 2,147,483,647 and 2,147,483,587
+  match independently checksummed saved campaign results: **36 exact full
+  residue comparisons**. Accepted candidate CUDA builds use 40 registers
+  without spills on sm_89 and sm_120; Ada execution was not benchmarked.
+- Accept H+B+S as the isolated research prototype default. Explicit zero
+  compile definitions retain the unoptimised comparison; maintained campaign
+  solvers, result formats and results.txt remain untouched. New bounded A/B
+  driver and variant/projection tests make this reproducible. Artifacts are
+  in `build/common-core-gpu-479/`, with downloaded log checksums verified.
+  A briefly provisioned confidential-computing variant could not initialise
+  CUDA (CC GPU not ready); it was deleted without altering security settings.
+  The standard benchmark worker and its OS disk were also deleted after the
+  checks and downloads.
+- Next: optimise the once-only assignment using measured group costs, then
+  implement persistent grouped execution and measure the independent tail.
+  No full 6x27 campaign has been launched.

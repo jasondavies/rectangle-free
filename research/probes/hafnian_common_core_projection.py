@@ -37,7 +37,14 @@ def main():
         raise ValueError("histogram loses original adaptive work")
     samples = defaultdict(list)
     identities = set()
+    configurations = set()
     for path in args.timings:
+        for configuration in records(path, "CORE_CUDA_CONFIG"):
+            if int(configuration.get("profile", "0")):
+                raise ValueError("instrumented phase timings cannot project campaign runtime")
+            configurations.add(tuple(int(configuration[k]) for k in ("hess", "boundary", "scratch")))
+            if len(configurations) > 1:
+                raise ValueError("cannot combine different A/B configurations in one projection")
         for row in records(path, "CORE_CUDA_SWEEP"):
             if row["exact"] != "OK":
                 raise ValueError("unvalidated timing")

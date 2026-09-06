@@ -1,7 +1,9 @@
 # Shared-core residual hafnians: 6x27 research gate
 
-Status through Experiment 478: **full once-only 6x27 assignment audited;
-the grouped kernels project to about 313 RTX PRO 6000 GPU-hours**.
+Status through Experiment 479: **full once-only 6x27 assignment audited;
+the optimised grouped kernels project to about 175 RTX PRO 6000 GPU-hours**.
+Matched control/candidate sweeps give 305 versus 175 hours (1.743x); the
+earlier Experiment 478 control projected 313 hours on a different worker.
 That projection excludes independent leftovers and production overhead;
 it is not yet a complete campaign estimate. Earlier gates are retained below
 as the experimental record.
@@ -406,6 +408,75 @@ Next: implement the persistent grouped runner and its distinct result/reducer
 format, and implement/benchmark the independent tail (including currently
 unsupported matrix orders). Only then quote a complete campaign estimate or
 launch a 6x27 production run. Historical result values remain unchanged.
+
+## Accepted kernel optimisation (Experiment 479)
+
+Three independently gated changes are now the research CUDA default:
+
+1. **Hessenberg:** skip identity row/column swaps, visit only the active
+   matrix region, pad the shared matrix stride and reuse characteristic
+   recurrence factors across coefficients.
+2. **Boundary:** precompute subset transitions and only the consumed upper
+   triangle of the dressed symmetric matrix; copy size-two hafnians directly;
+   accumulate four 31-bit products before modular reduction. Four products
+   fit in `uint64_t`; both pseudo-Mersenne folds remain valid on that range.
+3. **Scratch:** share an arena among the core work, moment powers and boundary
+   memo, whose lifetimes are disjoint. Preserve the determinant series and
+   boundary series separately; barrier before reusing core storage and clear
+   the boundary memo before reading its constant/zero coefficients.
+
+The 39-case diagnostic pilot gives 1.024x/1.172x/1.140x for the individual
+changes, 1.200x for the first two and 1.466x combined. A separate comparison
+also favours retaining the Hessenberg changes alongside boundary+scratch.
+These ratios are not multiplied and are not the campaign weighting.
+
+The complete 757-case, three-field sweep is repeated twice, reversing kernel
+order. Matched projections are 304.879/305.172 GPU-hours for control and
+175.037/175.064 for the candidate: **42.61% less grouped kernel time**.
+The order-42/44/46/48 candidate contributions are approximately
+92.36/46.30/29.29/7.09 hours. The independent tail and production overhead
+remain outside this projection. The assignment/corpus has not changed.
+
+On one 34-core/11-pool/17-child example, shared bytes fall 36,632 -> 21,600
+and calculated occupancy rises from two to four CTAs/SM. The phase logger
+records summed CTA elapsed cycles, including stalls; these are diagnostic,
+not exclusive SM utilisation or an additive attribution of speedup. Timing
+binaries compile out the logger. The projection tool rejects instrumented
+logs and different kernel configurations mixed in one projection.
+
+All eight compile-time combinations pass cooperative CPU/UBSan tests over
+four fields, including real large-core cases. The accepted candidate passes
+CUDA memory, race and synchronization checks and matches 36 complete saved
+6x28 campaign residues (18 queries over two fields). It compiles without
+spills at 40 registers for both sm_89 and sm_120; no Ada timing is claimed.
+
+Reproduce local exactness checks:
+
+```sh
+make hafnian-common-core-variants-test hafnian-common-core-projection-test
+python3 tests/hafnian/common_core_variants_test.py \
+  --groups build/common-core-plan6x27.log
+```
+
+For CUDA A/B, compile separate binaries with explicit values for **all three**
+`CORE_OPT_HESS`, `CORE_OPT_BOUNDARY`, `CORE_OPT_SCRATCH` definitions. The
+control is `0,0,0`; the accepted default is `1,1,1`. Phase binaries additionally
+set `CORE_PROFILE=1` and must never supply performance projections. The
+bounded driver does not provision workers:
+
+```sh
+python3 research/probes/hafnian_common_core_ab.py \
+  --binaries build/common-core-gpu-479 --plan build/common-core-plan6x27.log \
+  --output build/common-core-new-ab --variants control all --full --repeats 2
+```
+
+Logs and download checksums are in `build/common-core-gpu-479/`. Both temporary
+workers and their disks were deleted; the first, confidential-computing
+worker could not initialise CUDA and supplied no benchmark results.
+No maintained production solver, historical result or campaign checkpoint
+format changed. Next improve group selection using actual measured costs,
+then implement persistent execution and measure the independent tail before
+quoting a complete 6x27 campaign cost.
 
 ## Historical CPU-gate decision
 

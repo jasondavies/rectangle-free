@@ -396,6 +396,14 @@ $(BUILD_DIR)/hafnian_common_core_host: research/gpu/hafnian_common_core_gpu.cu \
 hafnian-common-core-cooperative-test: $(BUILD_DIR)/hafnian_common_core_host
 	OMP_WAIT_POLICY=ACTIVE ./$(BUILD_DIR)/hafnian_common_core_host --self-test
 
+.PHONY: hafnian-common-core-variants-test
+hafnian-common-core-variants-test:
+	python3 tests/hafnian/common_core_variants_test.py
+
+.PHONY: hafnian-common-core-projection-test
+hafnian-common-core-projection-test:
+	python3 tests/hafnian/common_core_projection_test.py
+
 $(BUILD_DIR)/hafnian_common_core_plan: research/probes/hafnian_common_core_plan.cpp \
 		research/probes/common_core_catalog_io.hpp research/probes/six_by_twenty_seven_common_core.hpp \
 		src/hafnian/six_by_twenty_nine_catalog.hpp src/common/sha256.hpp
