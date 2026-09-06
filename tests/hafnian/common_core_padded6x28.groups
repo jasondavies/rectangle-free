@@ -1,0 +1,4 @@
+# Six genuine 6x28 queries from a seven-token boundary, padded to eleven
+# tokens without adding children. The common core shrinks from 44 to 40.
+# Full normalized residues must equal independently counted residual hafnians.
+CORE27_GROUP e=4 d=4 root=36311170735145280 cap=11 parent=36029420873449496 boundary=9288957716071207 core=40 tail=8 queries=6 members=36029558319350160:8606712064,36311165367910680:281474993488128,36311170735145280:281749854618112,36311170744844312:281749871394816,36592709068292116:9007207844676096,36592508272771456:9007207861452800,

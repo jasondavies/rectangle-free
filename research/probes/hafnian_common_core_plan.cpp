@@ -1,10 +1,12 @@
 // Bounded-memory, exact-once research assignment. No production result IDs.
 #include "common_core_catalog_io.hpp"
 #include "six_by_twenty_seven_common_core.hpp"
+#include "common_core_cost.hpp"
 #include <omp.h>
 #include <chrono>
 #include <numeric>
 #include <tuple>
+#include <memory>
 
 namespace {
 using namespace six_by_common_core;
@@ -72,13 +74,16 @@ void verify(const std::string& path,const std::vector<Entry>& rows,unsigned slac
 }
 
 void build(const std::string& path,const std::vector<Entry>& rows,unsigned slack,const std::string& digest,
-           unsigned cap,unsigned threads,uint64_t seed) {
+           unsigned cap,unsigned threads,uint64_t seed,const std::string& source,
+           const std::string& costs,unsigned anchors) {
     auto started=Clock::now();Index index(rows);std::vector<uint8_t> owned(rows.size());
+    std::unique_ptr<common_cost::Model> model;
+    if(!source.empty())model=std::make_unique<common_cost::Model>(costs);
     six_by_twenty_nine::Geometry geometry;std::vector<uint64_t> triples;
     for(const auto& s:six_by_twenty_nine::weighted_supports(geometry))if(s.excess==1)triples.push_back(s.mask);
     std::sort(triples.begin(),triples.end());
     std::vector<uint32_t> parents;
-    for(size_t i=0;i<rows.size();++i){auto key=rows[i].key;unsigned e=excess(key),d=defects(key);
+    if(source.empty())for(size_t i=0;i<rows.size();++i){auto key=rows[i].key;unsigned e=excess(key),d=defects(key);
         if(e+1<=2*slack&&d+1<=2*slack){unsigned child_order=60+2*slack-2*(e+1)-2*(d+1);
             // Deliberately leave the larger, unbenchmarked orders as exact
             // independent fallbacks rather than inventing their GPU cost.
@@ -120,6 +125,62 @@ void build(const std::string& path,const std::vector<Entry>& rows,unsigned slack
         }
         if(ids.size()==1)++singletons;
     };
+    if(!source.empty()){
+        using Owned=common_cost::OwnedGroup;
+        common_catalog::File input(source,false);char magic[8],identity[64];input.get(magic,8);
+        if(std::memcmp(magic,"HCPLAN01",8)||input.get64()!=slack)throw std::runtime_error("source header mismatch");
+        if(input.get64()>cap)throw std::runtime_error("cannot lower the source plan boundary cap");
+        input.get64(); // source seed, independently verified by main
+        if(input.get64()!=rows.size())throw std::runtime_error("source count mismatch");
+        input.get(identity,64);if(std::string(identity,64)!=digest)throw std::runtime_error("source catalog mismatch");
+        std::vector<std::vector<Owned>> batch;std::vector<Owned> family;
+        uint64_t families=0,improved=0,read_groups=0,estimated_groups=0;
+        U128 before=0,after=0;
+        auto flush=[&]{if(batch.empty())return;
+            std::vector<std::vector<Owned>> repaired(batch.size());std::vector<std::string> errors(batch.size());
+            #pragma omp parallel for num_threads(threads) schedule(dynamic,1)
+            for(size_t i=0;i<batch.size();++i)try{
+                repaired[i]=common_cost::repair(batch[i],*model,rows,slack,cap,anchors);
+            }catch(const std::exception& e){errors[i]=e.what();}
+            for(size_t i=0;i<batch.size();++i){if(!errors[i].empty())throw std::runtime_error(errors[i]);
+                auto old=common_cost::total_cost(batch[i],*model,rows,slack),now=common_cost::total_cost(repaired[i],*model,rows,slack);
+                before+=old;after+=now;improved+=now<old;++families;
+                std::vector<uint32_t> want,got;
+                for(const auto& g:batch[i])want.insert(want.end(),g.ids.begin(),g.ids.end());
+                for(const auto& g:repaired[i])got.insert(got.end(),g.ids.begin(),g.ids.end());
+                std::sort(want.begin(),want.end());std::sort(got.begin(),got.end());
+                if(want!=got)throw std::runtime_error("repair changed owned query set");
+                for(const auto& g:repaired[i]){bool estimated=false;model->cost(g,rows,slack,&estimated);
+                    estimated_groups+=estimated;emit(g.group,g.ids);}
+            }
+            batch.clear();
+            if(families%8192==0){std::printf("CORE_REPLAN_PROGRESS families=%llu improved=%llu model_before_h=%.6f model_after_h=%.6f seconds=%.3f\n",
+                (unsigned long long)families,(unsigned long long)improved,double(before)/3.6e15,double(after)/3.6e15,
+                std::chrono::duration<double>(Clock::now()-started).count());std::fflush(stdout);}
+        };
+        auto finish_family=[&]{if(!family.empty()){batch.push_back(std::move(family));family.clear();if(batch.size()==128)flush();}};
+        std::printf("CORE_REPLAN_START model_sha256=%s anchors=%u cap=%u scope=model_not_measured\n",model->digest.c_str(),anchors,cap);std::fflush(stdout);
+        for(;;){uint64_t parent=input.get64();if(parent==UINT64_MAX)break;
+            uint64_t boundary=input.get64(),count=input.get64();
+            if(!count||count>440)throw std::runtime_error("invalid source group count");
+            Owned x;x.group.parent=parent;x.group.boundary=boundary;
+            for(unsigned i=0;i<count;++i){uint64_t id=input.get64(),removed=input.get64();
+                if(id>=rows.size())throw std::runtime_error("source query out of range");
+                x.ids.push_back(uint32_t(id));x.group.children.push_back({removed,rows[id].key&full,uint32_t(id)});}
+            ++read_groups;
+            if(count==1){finish_family();flush();emit(x.group,x.ids);continue;}
+            if(!family.empty()&&(family.front().group.parent!=parent||
+                defects(rows[family.front().ids.front()].key)!=defects(rows[x.ids.front()].key)))finish_family();
+            family.push_back(std::move(x));
+        }
+        finish_family();flush();
+        if(input.get64()!=read_groups)throw std::runtime_error("source group count mismatch");
+        auto source_digest=input.finish_read();
+        std::printf("CORE_REPLAN_DONE families=%llu improved=%llu source_groups=%llu output_groups=%llu estimated_groups=%llu model_before_h=%.9f model_after_h=%.9f source_sha256=%s model_sha256=%s scope=model_not_measured\n",
+            (unsigned long long)families,(unsigned long long)improved,(unsigned long long)read_groups,
+            (unsigned long long)group_count,(unsigned long long)estimated_groups,double(before)/3.6e15,double(after)/3.6e15,
+            source_digest.c_str(),model->digest.c_str());
+    }
     constexpr size_t CHUNK=1024;
     std::printf("CORE_PLAN_START queries=%zu parents=%zu cap=%u threads=%u\n",rows.size(),parents.size(),cap,threads);std::fflush(stdout);
     for(size_t begin=0;begin<parents.size();begin+=CHUNK){size_t count=std::min(CHUNK,parents.size()-begin);
@@ -167,7 +228,7 @@ void build(const std::string& path,const std::vector<Entry>& rows,unsigned slack
 }
 }
 int main(int argc,char** argv)try {
-    std::string catalog,path;bool audit=false,maps=false;unsigned cap=11,threads=8;uint64_t seed=478;
+    std::string catalog,path,source,costs;bool audit=false,maps=false;unsigned cap=11,threads=8,anchors=0;uint64_t seed=478;
     for(int i=1;i<argc;++i){std::string a=argv[i];
         if(a=="--catalog"&&i+1<argc)catalog=argv[++i];
         else if(a=="--output"&&i+1<argc)path=argv[++i];
@@ -176,10 +237,17 @@ int main(int argc,char** argv)try {
         else if(a=="--cap"&&i+1<argc)cap=std::stoul(argv[++i]);
         else if(a=="--threads"&&i+1<argc)threads=std::stoul(argv[++i]);
         else if(a=="--seed"&&i+1<argc)seed=std::stoull(argv[++i]);
-        else throw std::runtime_error("usage: --catalog FILE --output FILE|--verify FILE [--all-maps --cap 7|9|11 --threads N --seed N]");}
+        else if(a=="--replan"&&i+1<argc)source=argv[++i];
+        else if(a=="--costs"&&i+1<argc)costs=argv[++i];
+        else if(a=="--repair-anchors"&&i+1<argc)anchors=std::stoul(argv[++i]);
+        else throw std::runtime_error("usage: --catalog FILE --output FILE|--verify FILE [--all-maps --cap 7|9|11 --threads N --seed N] [--replan PLAN --costs TABLE --repair-anchors 0..8]");}
     if(path.empty()||catalog.empty()||!threads||threads>16||(cap!=7&&cap!=9&&cap!=11))throw std::runtime_error("invalid plan options");
+    if(source.empty()!=costs.empty()||anchors>8||(audit&&!source.empty()))throw std::runtime_error("invalid replan options");
     unsigned slack;std::string digest;auto rows=common_catalog::read(catalog,slack,digest);
     omp_set_dynamic(0);omp_set_num_threads(int(threads));
-    if(audit)verify(path,rows,slack,digest,maps);else build(path,rows,slack,digest,cap,threads,seed);
+    if(audit)verify(path,rows,slack,digest,maps);else {
+        if(!source.empty())verify(source,rows,slack,digest,false);
+        build(path,rows,slack,digest,cap,threads,seed,source,costs,anchors);
+    }
     return 0;
 }catch(const std::exception& e){std::fprintf(stderr,"error: %s\n",e.what());return 1;}

@@ -16455,3 +16455,76 @@
 - Next: optimise the once-only assignment using measured group costs, then
   implement persistent grouped execution and measure the independent tail.
   No full 6x27 campaign has been launched.
+
+### Experiment 480: cost-aware common-core boundaries and local regrouping
+
+- Commit Experiment 479 first (`d9da14d`), then keep its accepted CUDA binary
+  unchanged. Export its six full timing logs (two repetitions, three fields)
+  into a 256-bin cost table, in integer picoseconds per core sign. The table
+  records source hashes and requires the uninstrumented accepted kernel.
+  Group cost includes the exponential sign count and each child's actual
+  required prime images. Interpolate missing interior group sizes; clamp
+  below the smallest observed size; reject unknown shapes and larger sizes
+  outside the calibration. Those are heuristic costs, not timing guarantees.
+- Add an explicit `--replan PLAN --costs TABLE` path. Preserve every parent's
+  already-owned query set and every coefficient; leave all singleton/tail
+  work untouched. First choose a cheaper odd boundary up to eleven tokens,
+  even if adding tokens admits **no additional queries**. This moves vertices
+  out of the signed core, reducing its exponent, at the cost of a larger
+  polynomial boundary. Also merge groups when this lowers the cost model.
+  A second bounded pass tests two-group repartitions using two deterministic
+  anchors and the 7/9/11 boundary menu. Every accepted move strictly improves
+  the integer objective; no cross-parent reassignment is attempted.
+- The complete first repair takes 38.2s including source verification, at
+  2.56 GiB peak RSS. Its model changes 175.050 -> 142.409 grouped GPU-hours.
+  The subsequent two-anchor pass takes 2m17s, also about 2.56 GiB, and predicts
+  140.961 hours. These numbers alone do not establish a speedup.
+- Both resulting plans pass an independent full audit of all **45,007,139
+  query IDs and every canonical row-map embedding**, preserving coefficient
+  sum **47,983,269,684,673**. The final audit takes 40.3s and 1.05 GiB RSS.
+  The first audit overlapped CPU repair and took 107s. The final plan has
+  7,316,815 groups including the unchanged 53,179 singletons: only 2,467 fewer
+  groups than the original. The material gain is cheaper boundary/core
+  choices, not an inflated query-reuse ratio.
+- Benchmark the original and both new plans on the same standard single
+  RTX PRO 6000 spot worker. The old plan has 757 measured group/field cases;
+  each new plan has 513, covering all 171 of its grouped timing strata. Each
+  case uses 32,768 signs and 128 spread CPU-reference checks. Run plans in
+  forward then reverse order, keeping the CUDA kernel fixed:
+
+  | Plan | First weighted GPU projection | Reverse-order repeat |
+  | --- | ---: | ---: |
+  | Original ownership/boundaries | 174.241 GPU-h | 174.242 GPU-h |
+  | Cost-aware boundaries and merges | 141.822 GPU-h | 141.837 GPU-h |
+  | Plus bounded two-group repair | 140.362 GPU-h | 140.341 GPU-h |
+
+  Accept the final plan: mean **140.35 grouped GPU-hours**, **19.45% less
+  time / 1.241x throughput** than the matched original plan. Within-stratum
+  fastest/slowest-sample projections are approximately 138.8--141.8 hours;
+  they are not confidence intervals. The first final-plan sweep attributes
+  71.93/38.17/24.24/6.03 GPU-hours to orders 42/44/46/48. Do not count the
+  small difference from Experiment 479's 175.05-hour baseline as a code gain.
+- Exact regression specifically exercising padding: retain six genuine
+  6x28 queries while enlarging their boundary from seven to eleven tokens,
+  shrinking the common core from 44 to 40. Sum all 524,288 new core signs
+  for each of two fields. All **12 complete normalized residues** agree
+  with independently checksummed saved campaign results. The fixture is
+  `tests/hafnian/common_core_padded6x28.groups`. Existing four-field GPU
+  self-tests also pass. No GPU kernel arithmetic changed in this experiment.
+- Tests cover complete small-catalog repaired ownership and row maps,
+  byte-identical output with one versus four producer threads, interpolation
+  and small-size clamping, incompatible model rejection and rejection of a
+  lowered source boundary cap. Existing identity, planner and projection
+  regressions pass. CPU and GPU support the padding independently of whether
+  it adds queries; it is not a change to the mathematical result.
+- Final artifact: `build/common-core-6x27-repair480.plan`, SHA-256 footer
+  `387b52f312cd2837de62671e39b53a3bf1de8513a9aaa785813bf2e70cf9b9b4`.
+  Model digest: `3c65677968d87ecbc4115a3c18087dfd34e13d30ced14fa3f3d94688c4983c8f`.
+  The intermediate is `build/common-core-6x27-cost480.plan`; source artifacts
+  are preserved. Timings, independent residue checks and verified downloaded
+  checksums are under `build/common-core-gpu-480/`. Worker and disk deleted.
+- The **2,407,173,980,160 independent-tail sign terms**, production reduction,
+  dispatch, I/O and restart overhead remain outside 140.35 hours. No full
+  6x27 solve has run. Next implement persistent grouped execution and measure
+  the tail to obtain a complete campaign estimate. Global cross-parent
+  assignment and larger boundary pools remain separate research options.

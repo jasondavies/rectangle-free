@@ -50,4 +50,32 @@ with tempfile.TemporaryDirectory(prefix="common-core-plan-") as tmp:
     run([planner, "--catalog", catalog2, "--output", plan2, "--threads", 4])
     assert plan1.read_bytes() == plan2.read_bytes(), "ownership depends on thread count"
     assert "maps=all" in run([planner, "--catalog", catalog2, "--verify", plan2, "--all-maps"])
-print("CORE_PLAN_TEST roundtrip=OK no_overwrite=OK truncation=OK duplicate_id=OK incomplete_catalog=OK parallel_determinism=OK")
+    # Synthetic costs exercise ownership-preserving repair, not a runtime
+    # estimate. All grouped shapes in the small complete catalog are covered.
+    costs = base / "costs"
+    with costs.open("w") as out:
+        out.write("HCCOST01 hess=1 boundary=1 scratch=1\n")
+        for n in (42, 44, 46, 48):
+            for q in (5, 7, 9, 11):
+                # Odd sizes interpolate; one-child later CRT images clamp
+                # below the smallest measured-size endpoint.
+                for g in range(2, 257, 2):
+                    for p in range(4):
+                        out.write(f"{n} {n-q+3} {q} {g} {p} {250000+3000*g} 1\n")
+    repaired1, repaired2 = base / "repair1", base / "repair2"
+    for target, threads in ((repaired1, 1), (repaired2, 4)):
+        text = run([planner, "--catalog", catalog2, "--output", target,
+                    "--replan", plan1, "--costs", costs, "--repair-anchors", 2,
+                    "--threads", threads])
+        summary = next(l for l in text.splitlines() if l.startswith("CORE_REPLAN_DONE "))
+        fields = dict(x.split("=", 1) for x in summary.split()[1:])
+        assert float(fields["model_after_h"]) <= float(fields["model_before_h"])
+        assert "maps=all" in run([planner, "--catalog", catalog2, "--verify", target, "--all-maps"])
+    assert repaired1.read_bytes() == repaired2.read_bytes(), "repair depends on producer scheduling"
+    run([planner, "--catalog", catalog2, "--output", base / "lower-cap", "--replan", plan1,
+         "--costs", costs, "--cap", 7], good=False)
+    bad_costs = base / "bad-costs"
+    bad_costs.write_text("HCCOST01 hess=0 boundary=1 scratch=1\n")
+    run([planner, "--catalog", catalog2, "--output", base / "bad-repair", "--replan", plan1,
+         "--costs", bad_costs], good=False)
+print("CORE_PLAN_TEST roundtrip=OK no_overwrite=OK truncation=OK duplicate_id=OK incomplete_catalog=OK parallel_determinism=OK repair=OK repair_determinism=OK model_rejection=OK")

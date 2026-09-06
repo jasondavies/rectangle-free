@@ -76,6 +76,17 @@ int main() {
     bool rejected=false;
     try{grow(f,f.children.front().removed,6);}catch(const std::runtime_error&){rejected=true;}
     assert(rejected);
+    Group padded=grow(f,f.children.front().removed,7);
+    const unsigned queries=padded.size();
+    while(bits(padded.boundary)<11){uint64_t spare=full&~(padded.parent|padded.boundary);
+        assert(spare);padded.boundary|=spare&-spare;}
+    validate(f,padded,padded.children.front().canonical,48,0);
+    assert(padded.size()==queries);
+    for(const auto& child:padded.children){
+        uint64_t core=full&~(padded.parent|padded.boundary),tail=padded.boundary&~child.removed;
+        assert(!(core&tail));
+        assert((core|tail)==(full&~(padded.parent|child.removed)));
+    }
     std::cout<<"COMMON_CORE_TEST members="<<checked
-             <<" sampling=OK dedup=OK pairing=OK signed_core=OK exact=OK\n";
+             <<" sampling=OK dedup=OK pairing=OK signed_core=OK boundary_padding=OK exact=OK\n";
 }

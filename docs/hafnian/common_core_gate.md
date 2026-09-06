@@ -1,9 +1,10 @@
 # Shared-core residual hafnians: 6x27 research gate
 
-Status through Experiment 479: **full once-only 6x27 assignment audited;
-the optimised grouped kernels project to about 175 RTX PRO 6000 GPU-hours**.
-Matched control/candidate sweeps give 305 versus 175 hours (1.743x); the
-earlier Experiment 478 control projected 313 hours on a different worker.
+Status through Experiment 480: **full once-only 6x27 assignment audited;
+optimised kernels plus cost-aware grouping project to about 140 RTX PRO 6000
+GPU-hours**. The new plan saves 19.45% against the original plan with the same
+kernel on the same worker (174.24 -> 140.35 hours). Experiment 479 improved
+the kernel from 305 to 175 hours; Experiment 478's older control was 313 hours.
 That projection excludes independent leftovers and production overhead;
 it is not yet a complete campaign estimate. Earlier gates are retained below
 as the experimental record.
@@ -477,6 +478,73 @@ No maintained production solver, historical result or campaign checkpoint
 format changed. Next improve group selection using actual measured costs,
 then implement persistent execution and measure the independent tail before
 quoting a complete 6x27 campaign cost.
+
+## Accepted cost-aware plan (Experiment 480)
+
+Boundary size is a computational choice, not the query identity. Adding two
+unused-by-defect tokens to a boundary removes one signed pair from the core,
+halving its sign domain even if the group has no new children. The boundary
+polynomial gets more expensive, so select the trade-off using actual timings.
+
+The new planner repair keeps the old parent's owned queries and coefficients
+fixed. It first tests odd boundaries up to eleven tokens and beneficial
+merges; then tests bounded two-group rearrangements using two deterministic
+anchors and a 7/9/11 menu. Every accepted change improves an integer cost
+model including core-sign count and actual per-query CRT requirements.
+Interpolation/clamping in that model is a search heuristic, not evidence of
+speedup. Unknown shapes and group sizes above the measured range are refused.
+
+Models predicted 175.05 -> 142.41 -> 140.96 grouped GPU-hours. Fresh full
+sweeps on one GPU, with the CUDA binary unchanged, measured:
+
+| Plan | Forward run | Reverse-order run |
+| --- | ---: | ---: |
+| Original | 174.241 h | 174.242 h |
+| Boundary choices / merges | 141.822 h | 141.837 h |
+| Plus bounded regrouping | 140.362 h | 140.341 h |
+
+The last plan is accepted: **140.35 grouped GPU-hours**, 1.241x throughput.
+All 513 samples cover its 171 grouped strata, each at 32,768 signs with 128
+CPU-reference comparisons. Both plans preserve all 45,007,139 query IDs and
+47,983,269,684,673 coefficient weight, with every row-map embedding audited.
+The final plan has 7,316,815 groups, including the unchanged 53,179 singletons.
+Boundary choices, not greater query reuse, account for most of the gain.
+
+An explicit six-query 6x28 fixture moves four additional tokens to its
+boundary (core 44 -> 40) without adding queries. All twelve complete residues
+over two primes match saved independent campaign results. The fixture is in
+`tests/hafnian/common_core_padded6x28.groups`. Small complete-catalog repairs
+also validate ownership, row maps and deterministic output across producer
+thread counts. The kernel and historical result formats are unchanged.
+
+To reproduce the **two-stage** accepted plan (outputs must not already exist):
+
+```sh
+python3 research/probes/hafnian_common_core_cost.py \
+  --output build/common-core-480.costs \
+  build/common-core-gpu-479/full/all-r{0,1}-p{2147483647,2147483629,2147483587}.log
+make build/hafnian_common_core_plan
+build/hafnian_common_core_plan --catalog build/common-core-6x27.catalog \
+  --replan build/common-core-6x27.plan --costs build/common-core-480.costs \
+  --output build/common-core-6x27-cost480.plan --threads 16
+build/hafnian_common_core_plan --catalog build/common-core-6x27.catalog \
+  --replan build/common-core-6x27-cost480.plan --costs build/common-core-480.costs \
+  --repair-anchors 2 --output build/common-core-6x27-repair480.plan --threads 16
+build/hafnian_common_core_plan --catalog build/common-core-6x27.catalog \
+  --verify build/common-core-6x27-repair480.plan --all-maps --threads 16
+```
+
+The two planning steps took 38s and 2m17s at about 2.56 GiB RSS. Final full
+row-map verification took 40s at about 1.05 GiB. The accepted final plan digest
+is `387b52f312cd2837de62671e39b53a3bf1de8513a9aaa785813bf2e70cf9b9b4`.
+The model's source timing hashes are recorded in its table; GPU logs and
+download checksum verification are under `build/common-core-gpu-480/`.
+The worker and disk have been deleted.
+
+The tail, including larger orders, still has 2,407,173,980,160 independent sign
+terms, and persistent execution/reduction/dispatch/restart overhead remains.
+Consequently 140 hours is **not a complete campaign estimate**. Cross-parent
+reassignment and boundary sizes above eleven have not been tested here.
 
 ## Historical CPU-gate decision
 

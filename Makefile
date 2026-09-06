@@ -405,7 +405,7 @@ hafnian-common-core-projection-test:
 	python3 tests/hafnian/common_core_projection_test.py
 
 $(BUILD_DIR)/hafnian_common_core_plan: research/probes/hafnian_common_core_plan.cpp \
-		research/probes/common_core_catalog_io.hpp research/probes/six_by_twenty_seven_common_core.hpp \
+		research/probes/common_core_catalog_io.hpp research/probes/common_core_cost.hpp research/probes/six_by_twenty_seven_common_core.hpp \
 		src/hafnian/six_by_twenty_nine_catalog.hpp src/common/sha256.hpp
 	$(CXX) -O3 -march=native -std=c++17 $(OPENMP_CFLAGS) -o $@ $< $(OPENMP_LDFLAGS)
 
