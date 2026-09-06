@@ -4,6 +4,7 @@
 // scheduling/occupancy and supplies no GPU timing evidence.
 #define COMMON_CORE_NO_MAIN
 #include "../probes/hafnian_common_core_bench.cpp"
+#include "../probes/common_core_boundary_order.hpp"
 #ifndef CORE_HOST_EMULATION
 #include <cuda_runtime.h>
 #define CORE_DEVICE __device__
@@ -27,6 +28,33 @@
 #ifndef CORE_PROFILE
 #define CORE_PROFILE 0
 #endif
+// Bounded research candidates; retain the accepted kernel as the default.
+#ifndef CORE_OPT_WARP_POLY
+#define CORE_OPT_WARP_POLY 0
+#endif
+#ifndef CORE_OPT_SPARSE_MOMENTS
+#define CORE_OPT_SPARSE_MOMENTS 0
+#endif
+#ifndef CORE_BOUNDARY_ORDER
+#define CORE_BOUNDARY_ORDER 0
+#endif
+#ifndef CORE_MAX_POOL
+#define CORE_MAX_POOL 11
+#endif
+#if (CORE_OPT_WARP_POLY != 0 && CORE_OPT_WARP_POLY != 1) || (CORE_OPT_SPARSE_MOMENTS != 0 && CORE_OPT_SPARSE_MOMENTS != 1)
+#error "Kernel candidate switches must be 0 or 1"
+#endif
+#if CORE_BOUNDARY_ORDER < 0 || CORE_BOUNDARY_ORDER > 64
+#error "Boundary ordering is a bounded 0..64-trial offline search"
+#endif
+#if CORE_MAX_POOL != 11 && CORE_MAX_POOL != 13
+#error "Only bounded pool 11/13 experiments are supported"
+#endif
+#if CORE_OPT_WARP_POLY && !defined(CORE_HOST_EMULATION)
+#define CORE_POLY_SYNC() __syncwarp()
+#else
+#define CORE_POLY_SYNC() CORE_SYNC()
+#endif
 #if CORE_PROFILE && !defined(CORE_HOST_EMULATION)
 #define CORE_STAMP(i) do { CORE_SYNC(); if(tid==0)phase[i]=clock64(); } while(0)
 #else
@@ -34,7 +62,7 @@
 #endif
 
 namespace core_gpu {
-constexpr unsigned MAX_C=48, MAX_Q=11, MAX_MASK=1u<<MAX_Q;
+constexpr unsigned MAX_C=48, MAX_Q=CORE_MAX_POOL, MAX_MASK=1u<<MAX_Q;
 struct Input {
     unsigned c,q,n,degree,stride,states,queries,words,matrix_stride,pairs;
     unsigned starts[7]{}; // even boundary subset sizes 0,2,...,10
@@ -44,11 +72,25 @@ struct Input {
     uint16_t child_slot[MAX_MASK*MAX_Q]{},edge_slot[MAX_MASK*MAX_Q]{};
     uint32_t inverse[49]{};
     uint8_t adjacency[64*64]{};
+    uint8_t core_degree[MAX_C]{},boundary_degree[MAX_Q]{};
+    uint8_t core_neighbors[MAX_C*MAX_C]{},boundary_neighbors[MAX_Q*MAX_C]{};
 };
 
-Input pack(const common_bench::Problem& p,uint32_t prime) {
-    if(p.core>MAX_C||p.q>MAX_Q||p.adjacency.n>64||p.masks.size()>256)
+Input pack(const common_bench::Problem& original,uint32_t prime) {
+    if(original.core>MAX_C||original.q>MAX_Q||original.adjacency.n>64||original.masks.size()>256)
         throw std::runtime_error("CUDA gate dimensions exceeded");
+    auto p=original;
+#if CORE_BOUNDARY_ORDER
+    auto order=common_boundary::choose(p.q,p.masks,CORE_BOUNDARY_ORDER);
+    for(unsigned i=0;i<p.adjacency.n;++i)for(unsigned j=0;j<p.adjacency.n;++j){
+        unsigned old_i=i<p.core?i:p.core+order[i-p.core];
+        unsigned old_j=j<p.core?j:p.core+order[j-p.core];
+        p.adjacency.at(i,j)=original.adjacency.at(old_i,old_j);
+    }
+    for(auto& mask:p.masks){unsigned relabelled=0;
+        for(unsigned j=0;j<p.q;++j)if(mask&(1u<<order[j]))relabelled|=1u<<j;
+        mask=relabelled;}
+#endif
     Input in{};in.c=p.core;in.q=p.q;in.n=p.adjacency.n;
     in.degree=p.core/2;in.stride=in.degree+1;in.queries=p.masks.size();
     common_bench::Workspace w(p,Mod{prime});
@@ -80,8 +122,13 @@ Input pack(const common_bench::Problem& p,uint32_t prime) {
     for(unsigned j=1;j<=p.core;++j)in.inverse[j]=Mod{prime}.inverse(j);
     for(unsigned i=0;i<in.n;++i)for(unsigned j=0;j<in.n;++j)
         in.adjacency[i*in.n+j]=p.adjacency.at(i,j);
+    for(unsigned i=0;i<in.c;++i)for(unsigned j=0;j<in.c;++j)
+        if(in.adjacency[(i^1)*in.n+j])in.core_neighbors[i*MAX_C+in.core_degree[i]++]=j;
+    for(unsigned i=0;i<in.q;++i)for(unsigned j=0;j<in.c;++j)
+        if(in.adjacency[(in.c+i)*in.n+j])in.boundary_neighbors[i*MAX_C+in.boundary_degree[i]++]=j;
     in.matrix_stride=in.c+(CORE_OPT_HESS?1:0);
-    unsigned core_words=in.c*in.matrix_stride+(in.c+1)*in.stride+in.c+2;
+    unsigned core_words=in.c*in.matrix_stride+(in.c+1)*in.stride+
+        (CORE_OPT_WARP_POLY?std::max(in.c,32u):in.c)+2;
     unsigned k_words=(CORE_OPT_BOUNDARY?in.pairs:in.q*in.q)*in.stride;
     in.words=CORE_OPT_SCRATCH ? in.stride+k_words+
         std::max({core_words,2*in.c*in.q,in.states*in.stride}) :
@@ -119,7 +166,7 @@ CORE_DEVICE void term(const Input& in,uint64_t signs,uint32_t* scratch,
     uint32_t* h=k+nk*s;
     uint32_t* poly=h+c*hs;
     uint32_t* factors=poly+(c+1)*s;
-    uint32_t* pivot=factors+c;
+    uint32_t* pivot=factors+(CORE_OPT_WARP_POLY&&c<32?32:c);
     uint32_t* power=h;
     uint32_t* next=power+c*q;
     uint32_t* memo=h;
@@ -128,7 +175,7 @@ CORE_DEVICE void term(const Input& in,uint64_t signs,uint32_t* scratch,
     uint32_t* poly=h+c*hs;
     uint32_t* f=poly+(c+1)*s;
     uint32_t* factors=f+s;
-    uint32_t* pivot=factors+c;
+    uint32_t* pivot=factors+(CORE_OPT_WARP_POLY&&c<32?32:c);
     uint32_t* k=pivot+2;
     uint32_t* power=k+nk*s;
     uint32_t* next=power+c*q;
@@ -180,17 +227,23 @@ CORE_DEVICE void term(const Input& in,uint64_t signs,uint32_t* scratch,
         CORE_SYNC();
     }
     CORE_STAMP(1);
+#if CORE_OPT_WARP_POLY
+    if(tid<32){
+    const unsigned poly_nt=nt<32?nt:32;
+#else
+    const unsigned poly_nt=nt;
+#endif
     if(tid==0)poly[0]=1;
-    CORE_SYNC();
+    CORE_POLY_SYNC();
     for(unsigned size=1;size<=c;++size) {
 #if CORE_OPT_HESS
         if(tid==0){uint32_t product=1;
             for(unsigned dist=1;dist<size&&dist<m;++dist){
                 product=F::mul(product,h[(size-dist)*hs+size-dist-1]);
                 factors[dist]=F::mul(product,h[(size-dist-1)*hs+size-1]);}}
-        CORE_SYNC();
+        CORE_POLY_SYNC();
 #endif
-        for(unsigned d=tid;d<=m&&d<=size;d+=nt) {
+        for(unsigned d=tid;d<=m&&d<=size;d+=poly_nt) {
             uint32_t value=d<size?poly[(size-1)*s+d]:0;
             if(d)value=F::sub(value,F::mul(h[(size-1)*hs+size-1],poly[(size-1)*s+d-1]));
 #if !CORE_OPT_HESS
@@ -206,11 +259,31 @@ CORE_DEVICE void term(const Input& in,uint64_t signs,uint32_t* scratch,
             }
             poly[size*s+d]=value;
         }
-        CORE_SYNC();
+        CORE_POLY_SYNC();
     }
+#if CORE_OPT_WARP_POLY
+    if(tid==0)f[0]=1;
+    CORE_POLY_SYNC();
+    for(unsigned d=1;d<=m;++d){uint32_t value=0;
+        for(unsigned j=tid+1;j<=d;j+=poly_nt)
+            value=F::add(value,F::mul(2*d-j,F::mul(poly[c*s+j],f[d-j])));
+#ifndef CORE_HOST_EMULATION
+        for(unsigned delta=16;delta;delta>>=1)
+            value=F::add(value,__shfl_down_sync(0xffffffffu,value,delta));
+#else
+        factors[tid]=value;CORE_POLY_SYNC();
+        if(tid==0)for(unsigned j=1;j<poly_nt;++j)value=F::add(value,factors[j]);
+#endif
+        if(tid==0)f[d]=F::neg(F::mul(value,in.inverse[2*d]));
+        CORE_POLY_SYNC();
+    }
+    } // Other warps wait at the phase boundary, not at every coefficient row.
+    CORE_SYNC();
+#else
     if(tid==0){f[0]=1;for(unsigned d=1;d<=m;++d){uint32_t value=0;
         for(unsigned j=1;j<=d;++j)value=F::add(value,F::mul(2*d-j,F::mul(poly[c*s+j],f[d-j])));
         f[d]=F::neg(F::mul(value,in.inverse[2*d]));}}
+#endif
 #if CORE_OPT_SCRATCH
     // f must finish reading poly before moment buffers overwrite its arena.
     CORE_SYNC();
@@ -226,11 +299,25 @@ CORE_DEVICE void term(const Input& in,uint64_t signs,uint32_t* scratch,
     for(unsigned d=1;d<=m;++d) {
         for(unsigned ij=tid;ij<nk;ij+=nt){
             unsigned i=CORE_OPT_BOUNDARY?in.pair_i[ij]:ij/q,j=CORE_OPT_BOUNDARY?in.pair_j[ij]:ij%q;uint32_t value=0;
+#if CORE_OPT_SPARSE_MOMENTS
+            uint64_t pending=0;
+            for(unsigned a=0;a<in.boundary_degree[i];++a)
+                pending+=power[unsigned(in.boundary_neighbors[i*MAX_C+a])*q+j];
+            value=F::reduce(pending); // <=48*(P-1), comfortably within uint64_t.
+#else
             for(unsigned v=0;v<c;++v)if(in.adjacency[(c+i)*n+v])value=F::add(value,power[v*q+j]);
+#endif
             k[ij*s+d]=value;}
         if(d<m){
             for(unsigned vj=tid;vj<c*q;vj+=nt){unsigned v=vj/q,j=vj%q;uint32_t value=0;
+#if CORE_OPT_SPARSE_MOMENTS
+                uint64_t pending=0;
+                for(unsigned a=0;a<in.core_degree[v];++a)
+                    pending+=power[unsigned(in.core_neighbors[v*MAX_C+a])*q+j];
+                value=F::reduce(pending);
+#else
                 for(unsigned u=0;u<c;++u)if(in.adjacency[(v^1)*n+u])value=F::add(value,power[u*q+j]);
+#endif
                 bool positive=v/2==0||(signs&(UINT64_C(1)<<(v/2-1)));
                 next[vj]=positive?value:F::neg(value);}
             CORE_SYNC();
@@ -385,6 +472,10 @@ void self_test(unsigned threads) {
             auto reduced=prime==2147483647u?Field<2147483647u>::reduce(pending):prime==2147483629u?Field<2147483629u>::reduce(pending):
                 prime==2147483587u?Field<2147483587u>::reduce(pending):Field<2147483579u>::reduce(pending);
             if(reduced!=pending%prime)throw std::runtime_error("four-product reduction mismatch");
+            pending=48*uint64_t(a);
+            reduced=prime==2147483647u?Field<2147483647u>::reduce(pending):prime==2147483629u?Field<2147483629u>::reduce(pending):
+                prime==2147483587u?Field<2147483587u>::reduce(pending):Field<2147483579u>::reduce(pending);
+            if(reduced!=pending%prime)throw std::runtime_error("neighbour sum reduction mismatch");
 #endif
         }
         for(unsigned c:{0u,2u,6u,10u})for(unsigned q:{5u,7u})for(unsigned mode:{0u,1u}) {
@@ -407,8 +498,6 @@ void self_test(unsigned threads) {
 } // namespace core_gpu
 
 int main(int argc,char** argv)try {
-    std::printf("CORE_CUDA_CONFIG hess=%d boundary=%d scratch=%d profile=%d\n",
-        CORE_OPT_HESS,CORE_OPT_BOUNDARY,CORE_OPT_SCRATCH,CORE_PROFILE);
     std::string path;unsigned count=4096,threads=128,cap=11,limit=0,slack=3,order=0;
     uint32_t prime=2147483647;bool test=false,complete=false,sweep=false;
 #ifdef CORE_HOST_EMULATION
@@ -427,6 +516,9 @@ int main(int argc,char** argv)try {
         else if(a=="--prime"&&i+1<argc)prime=uint32_t(number(argv[++i]));
         else throw std::runtime_error("usage: --self-test | --groups LOG [--count N --cap 7|9|11 --order N --query-limit N --threads N --prime P --complete6x28]");
     }
+    std::printf("CORE_CUDA_CONFIG hess=%d boundary=%d scratch=%d profile=%d warp_poly=%d sparse_moments=%d boundary_order=%d max_pool=%d threads=%u\n",
+        CORE_OPT_HESS,CORE_OPT_BOUNDARY,CORE_OPT_SCRATCH,CORE_PROFILE,
+        CORE_OPT_WARP_POLY,CORE_OPT_SPARSE_MOMENTS,CORE_BOUNDARY_ORDER,CORE_MAX_POOL,threads);
     const std::array<uint32_t,4> primes{2147483647,2147483629,2147483587,2147483579};
     auto prime_it=std::find(primes.begin(),primes.end(),prime);
     if(prime_it==primes.end())throw std::runtime_error("uncertified prime");

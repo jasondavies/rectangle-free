@@ -27,6 +27,10 @@ def main():
                 config = dict(x.split("=", 1) for x in line.split()[1:])
                 if any(int(config[k]) != 1 for k in ("hess", "boundary", "scratch")) or int(config["profile"]):
                     raise ValueError("cost model requires uninstrumented accepted-kernel timings")
+                if any(int(config.get(k, 0)) for k in ("warp_poly", "sparse_moments", "boundary_order")):
+                    raise ValueError("HCCOST01 cannot describe experimental kernel candidates")
+                if int(config.get("threads", 256)) != 256 or int(config.get("max_pool", 11)) != 11:
+                    raise ValueError("HCCOST01 requires the original 256-thread pool-11 configuration")
             elif line.startswith("CORE_CUDA_SWEEP "):
                 if config is None:
                     raise ValueError("missing kernel configuration")

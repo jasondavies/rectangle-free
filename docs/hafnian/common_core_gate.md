@@ -1,14 +1,73 @@
 # Shared-core residual hafnians: 6x27 research gate
 
-Status through Experiment 480: **full once-only 6x27 assignment audited;
-optimised kernels plus cost-aware grouping project to about 140 RTX PRO 6000
-GPU-hours**. The new plan saves 19.45% against the original plan with the same
-kernel on the same worker (174.24 -> 140.35 hours). Experiment 479 improved
-the kernel from 305 to 175 hours; Experiment 478's older control was 313 hours.
+Status through Experiment 483: **the new measured kernel configuration
+projects the Experiment-480 grouped workload to 112.17 RTX PRO 6000
+GPU-hours**, versus 140.38 for the matched control (20.1% less time).
+An independently audited extension groups nearly all order-50 leftovers;
+that new grouped work projects to another 2.82 hours. These are not yet one
+integrated production plan. Uniform thirteen-token padding was rejected.
+The earlier cost-aware plan saved 19.45% (174.24 -> 140.35 hours).
+Experiment 479 improved the kernel from 305 to 175 hours; Experiment 478's
+older control was 313 hours.
 That projection excludes independent leftovers and production overhead;
 it is not yet a complete campaign estimate. Earlier gates are retained below
 as the experimental record.
 Nothing here changes the production solver or campaign checkpoint format.
+
+## Latest measured configuration and remaining integration
+
+Experiment 481 adds three opt-in research settings:
+
+- `CORE_OPT_WARP_POLY=1`: warp-local characteristic-polynomial phase and
+  cooperative determinant-series sums.
+- `CORE_OPT_SPARSE_MOMENTS=1`: precomputed neighbours and one reduction per
+  bounded sum, rather than repeated adjacency tests/modular additions.
+- `CORE_BOUNDARY_ORDER=16`: deterministic offline boundary-coordinate search
+  to reduce the reachable subset recurrence; preserve every query and sign.
+
+Use **128 threads** with this combination. The control is all three settings
+zero at 256 threads, with the accepted H/B/S switches still all one. Full
+513-case/three-field repeated sweeps give 140.389725/140.368259 control,
+117.242664/117.250037 warp+sparse, and 112.165440/112.174780 with ordering.
+The search and packing time is excluded from kernel timing. No complete
+campaign time is claimed. The switches remain opt-in to preserve the current
+HCCOST01 model contract, which rejects new-kernel timings instead of silently
+using an incompatible model; production integration needs a versioned model.
+
+The explicit fresh-plan gate `--group-max-order 50` covers 36,857 additional
+queries in 5,546 shared groups, leaving 62 order-50 singletons. All 201 new
+group/field samples pass their CPU reference checks and project to 2.817296
+grouped hours. Six complete residues for three order-50 6x28 queries match
+historical results. The full assignment/row-map audit passes, but this fresh
+plan must be combined explicitly with the Experiment-480 repaired groups;
+do not replace the old plan by its header or add two overlapping outputs.
+The extension reduces the independent tail to **552,100,429,824 signs**.
+Their runtime, production overhead and larger orders still require timing.
+
+Experiment 483's `CORE_MAX_POOL=13` is a bounded probe only. Twelve complete
+padded residues match the historical 6x28 results, and CUDA memory/race/sync
+checks pass. Nevertheless, two full sweeps project uniform padding to
+129.313893/129.307225 hours, worse than pool eleven. Even a per-field/stratum
+oracle projects only 110.59 hours and is not an audited selection policy.
+Do not integrate mixed widths from the encouraging unweighted pilot.
+
+Reproduce local gates:
+
+```sh
+make hafnian-common-core-candidates-test hafnian-common-core-plan-test \
+     hafnian-common-core-projection-test
+python3 tests/hafnian/common_core_variants_test.py \
+  --candidates --groups build/common-core-repair480.log
+build/hafnian_common_core_plan --catalog build/common-core-6x27.catalog \
+  --output build/common-core-new-order50.plan --group-max-order 50 --threads 16
+build/hafnian_common_core_plan --catalog build/common-core-6x27.catalog \
+  --verify build/common-core-new-order50.plan --all-maps --threads 16
+```
+
+GPU binaries require explicit H/B/S and candidate defines for reproducible
+A/B. `hafnian_common_core_ab.py --threads 128` selects the candidate launch.
+Raw timing and verification artifacts are under `build/common-core-gpu-481/`;
+Experiments 481--483 record the decisions and scope separately.
 
 ## What is shared
 

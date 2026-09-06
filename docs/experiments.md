@@ -16528,3 +16528,128 @@
   6x27 solve has run. Next implement persistent grouped execution and measure
   the tail to obtain a complete campaign estimate. Global cross-parent
   assignment and larger boundary pools remain separate research options.
+
+### Experiment 481: warp-local polynomial, sparse moments and boundary ordering
+
+- Follow the read-only review with three separately testable research
+  candidates. `CORE_OPT_WARP_POLY=1` executes the characteristic-polynomial
+  phase on one warp, replaces its internal CTA barriers with warp barriers,
+  and cooperatively sums the determinant-series recurrence. Other warps
+  rejoin at the phase boundary. `CORE_OPT_SPARSE_MOMENTS=1` precomputes core
+  and boundary neighbour lists and reduces each bounded sum of at most 48
+  residues once. No tensor or approximate arithmetic is introduced.
+- `CORE_BOUNDARY_ORDER=16` searches sixteen deterministic permutations of
+  the boundary coordinates, retaining the incumbent unless the reachable
+  subset recurrence has fewer nontrivial convolutions (then fewer states/
+  edge series). Permute both adjacency axes and all child masks consistently;
+  preserve child output order and core signs. This search is outside the
+  timed kernel and is not yet a scalable campaign producer.
+- One standard RTX PRO 6000 spot GPU, CUDA 12.8, driver 580.126.09. Run a
+  16-case unweighted pilot twice, reversing candidate order, at 64/128/256
+  threads. At 256 threads, summed first-pass kernel seconds are
+  0.200187 control, 0.193198 warp-only, 0.179846 sparse-only, 0.171207 combined,
+  and 0.169104 combined+ordering. At 128 threads the latter two are
+  0.163990/0.161744; 64 threads is slower. These pilot ratios are diagnostic,
+  not workload-weighted campaign estimates.
+- Full sweeps retain the accepted Experiment-480 assignment: all 513
+  group/field samples covering 171 grouped strata, 32,768 signs and 128
+  CPU-reference comparisons per sample, repeated twice. Compare the old
+  256-thread kernel with the new 128-thread configurations:
+
+  | Configuration | First grouped GPU-h | Repeat grouped GPU-h |
+  | --- | ---: | ---: |
+  | Accepted old control | 140.389725 | 140.368259 |
+  | Warp + sparse moments | 117.242664 | 117.250037 |
+  | Plus boundary ordering | 112.165440 | 112.174780 |
+
+  The complete combination saves **20.0948%**, 1.25148x throughput, on the
+  same workload. Ordering alone saves a further approximately 4.33% against
+  the combined kernel. Sample-min/max weighting is approximately
+  109.4--115.1 hours, not a confidence interval. All grouped bins are covered.
+- CPU/UBSan tests cover all four warp/sparse combinations, both ordered
+  pool-11/pool-13 configurations, real large-core cases, all four primes,
+  and independent checks of the bounded neighbour-sum reduction. A separate
+  100-case ordering test checks deterministic permutations, graph relabelling
+  and a nonworsening structural objective. Projection rejects mixed thread
+  counts/orderings/candidate configurations; the old HCCOST01 exporter
+  explicitly rejects these new kernels instead of mislabelling their costs.
+- The combined ordered code compiles for Ada and Blackwell without spills;
+  measured Blackwell combined variants use 48 registers versus 40 for the
+  warp-only variant. No Ada execution is claimed. CUDA memory/race/sync checks
+  on the wider pool-13 path report no errors or hazards. Twelve complete
+  normalized pool-13 residues agree with independently checksummed 6x28
+  campaign results (six genuine queries, two fields).
+- GPU logs are under `build/common-core-gpu-481/`; the temporary worker's SSH
+  connectivity repeatedly failed despite a running provider status. Recovery
+  retained the OS disk. Incomplete runs are excluded, and no cause is inferred
+  from the connectivity failures. Separate timing and instrumented runs are
+  never concurrent. No production result or checkpoint format changes.
+  Downloaded archive checksums verify; the last complete order-50 residues
+  were also pulled and independently validated before deleting the worker
+  and OS disk. Final provider inventories contain no VMs or volumes. An
+  initial sanitizer invocation rejected a mismatched fixture geometry before
+  launching a kernel; the corrected 6x27 fixture supplies the passing checks.
+- This is an accepted measured configuration, not a production integration:
+  the new research switches remain opt-in while the old timing-table/default
+  contract is retained. The **2,407,173,980,160 independent-tail terms** and
+  producer/reduction/dispatch/I/O/restart overhead are still excluded from
+  112.17 hours. Reusing or optimizing offline boundary-order construction is
+  required before quoting complete wall time.
+
+### Experiment 482: extend exact-once grouping to order 50
+
+- Add an explicit `--group-max-order 50` gate to fresh plan construction;
+  retain 48 by default and reject unsupported values or attempts to combine
+  the gate with replan/verify modes. Order-50 groups fit the existing core
+  dimension limits. This changes eligible families, not the counting formula.
+- The complete 6x27 plan now has 7,287,971 groups and 16,322 singleton
+  leftovers. All 45,007,139 query IDs and coefficient sum 47,983,269,684,673
+  pass the full row-map audit. Plan digest:
+  `adca4de3fbf6fe05739ebb9995ef462861a9cec5fdd202610e154da77fac3352`.
+  Construction takes 244.15 seconds internally and peaks at about 2.57 GiB.
+  Small complete-catalog tests also check one/four-thread byte identity.
+- Of 36,919 order-50 queries, 36,857 are grouped into 5,546 multi-query
+  groups; 62 remain independent. Assigned order-50 sign domains shrink from
+  1,858,194,112,512 to 23,976,738,816, including those leftovers. This 77.5x
+  sign-count ratio is **not** a runtime speedup: shared terms have different
+  arithmetic. The complete plan's independent tail is now
+  552,100,429,824 signs, still unmeasured as a complete campaign workload.
+- Artifacts: `build/common-core-order50-481.{log,time}`,
+  `build/common-core-6x27-order50-481.plan`, and its full verification log.
+  This fresh plan is not the Experiment-480 repaired plan with a changed
+  header. Combining its order-50 groups with the accepted repaired groups
+  requires an explicit, re-audited production assignment.
+- All 201 order-50 group/field samples (67 per field) pass 128 spread CPU
+  sign comparisons. Weighted grouped time is **2.817296 GPU-hours**;
+  sample-min/max weighting is 2.707031--2.919717 hours, not confidence bounds.
+  The 62 independent order-50 queries are excluded. Three genuine order-50
+  6x28 queries also match all six complete normalized residues under two
+  primes against the independently checksummed historical campaign. Each
+  complete check sums 1,048,576 core signs.
+
+### Experiment 483: bounded thirteen-token boundary gate
+
+- Extend only the research workspace/kernel gate to pool thirteen. The
+  padding tool retains exactly the same children and fills the boundary
+  with the lowest available tokens; the core loses two vertices relative
+  to pool eleven. The requested child boundary has ten live vertices, so
+  the existing five-level even-subset recurrence remains sufficient.
+- The 16-case pilot gives sign-domain-normalized pool-13/pool-11 cost ratios
+  from approximately 0.537 to 1.262, unweighted mean 0.820. Small groups can
+  benefit substantially, but that mean misrepresents the campaign mix.
+- The first full 513-case/three-field, 128-thread sweep projects uniform
+  padding to **129.313893 grouped GPU-hours**, versus 112.165440 for the
+  optimized pool-eleven kernel. Reject uniform padding. Even an optimistic
+  per-field/per-stratum choice from these measurements projects 110.590613
+  hours, only about 1.4% better, and does not constitute a valid shared
+  per-group selection policy or audited replacement plan.
+- Complete padded 6x28 counts match twelve historical field residues. The
+  public pool-13 fixture also exercises real 6x27 orders 42/44/46/48 against
+  the independent CPU formula over all four primes. Projection's explicit
+  `--pad-pool 13` reports a **uniform-padding hypothesis**, not an existing
+  production assignment. No plan cap or production default is widened.
+- A second complete sweep, with the last field rerun after VM recovery,
+  gives 129.307225 hours, confirming the negative uniform-padding decision.
+- Keep the bounded probe for research; do not integrate a mixed-width
+  planner on the strength of the small unweighted pilot. Logs and fixtures
+  are under `build/common-core-gpu-481/` and `tests/hafnian/`.

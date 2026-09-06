@@ -75,6 +75,7 @@ struct Problem {
 
 Problem make_problem(const six_by_twenty_nine::Geometry& geometry,const Input& in,unsigned slack=3) {
     if(in.e>2*slack)throw std::runtime_error("excess exceeds slack");
+    if(bits(in.boundary)>13)throw std::runtime_error("boundary pool exceeds bounded gate");
     std::vector<unsigned> vertices;
     uint64_t live=full&~(in.parent|in.boundary);
     for(unsigned i=0;i<60;++i)if(live&(UINT64_C(1)<<i))vertices.push_back(i);
@@ -109,7 +110,7 @@ struct Workspace {
     explicit Workspace(const Problem& p,const Mod& mod):c(p.core),q(p.q),m(c/2),stride(m+1),
         memo(size_t(1u<<q)*stride),k(size_t(q)*q*stride),power(c*q),next(c*q),
         f(stride),inverse(2*m+1) {
-        if(q>11)throw std::runtime_error("boundary pool exceeds bounded gate");
+        if(q>13)throw std::runtime_error("boundary pool exceeds bounded gate");
         for(unsigned i=1;i<inverse.size();++i)inverse[i]=mod.inverse(i);
         std::vector<bool> seen(1u<<q);
         auto visit=[&](auto&& self,unsigned mask)->void {

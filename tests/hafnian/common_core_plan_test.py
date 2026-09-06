@@ -50,6 +50,15 @@ with tempfile.TemporaryDirectory(prefix="common-core-plan-") as tmp:
     run([planner, "--catalog", catalog2, "--output", plan2, "--threads", 4])
     assert plan1.read_bytes() == plan2.read_bytes(), "ownership depends on thread count"
     assert "maps=all" in run([planner, "--catalog", catalog2, "--verify", plan2, "--all-maps"])
+    # The explicit order-50 gate must still produce complete exact ownership.
+    wide1, wide2 = base / "wide1", base / "wide2"
+    for target, threads in ((wide1, 1), (wide2, 4)):
+        run([planner, "--catalog", catalog2, "--output", target,
+             "--group-max-order", 50, "--threads", threads])
+        assert "maps=all" in run([planner, "--catalog", catalog2, "--verify", target, "--all-maps"])
+    assert wide1.read_bytes() == wide2.read_bytes()
+    run([planner, "--catalog", catalog2, "--output", base / "unsupported-order",
+         "--group-max-order", 52], good=False)
     # Synthetic costs exercise ownership-preserving repair, not a runtime
     # estimate. All grouped shapes in the small complete catalog are covered.
     costs = base / "costs"

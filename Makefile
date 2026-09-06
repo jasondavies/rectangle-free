@@ -381,12 +381,14 @@ $(BUILD_DIR)/hafnian_common_core_bench: research/probes/hafnian_common_core_benc
 	$(CXX) -O3 -march=native -std=c++17 $(OPENMP_CFLAGS) -o $@ $< $(OPENMP_LDFLAGS)
 
 $(BUILD_DIR)/hafnian_common_core_gpu: research/gpu/hafnian_common_core_gpu.cu \
+		research/probes/common_core_boundary_order.hpp \
 		research/probes/hafnian_common_core_bench.cpp research/probes/hafnian_gray_update_probe.cpp \
 		research/probes/six_by_twenty_seven_common_core.hpp \
 		src/hafnian/six_by_twenty_eight_catalog.hpp src/hafnian/six_by_twenty_nine_catalog.hpp
 	$(NVCC) $(NVCCFLAGS) -Xcompiler $(OPENMP_CFLAGS) -o $@ $<
 
 $(BUILD_DIR)/hafnian_common_core_host: research/gpu/hafnian_common_core_gpu.cu \
+		research/probes/common_core_boundary_order.hpp \
 		research/probes/hafnian_common_core_bench.cpp research/probes/hafnian_gray_update_probe.cpp \
 		research/probes/six_by_twenty_seven_common_core.hpp \
 		src/hafnian/six_by_twenty_eight_catalog.hpp src/hafnian/six_by_twenty_nine_catalog.hpp
@@ -399,6 +401,15 @@ hafnian-common-core-cooperative-test: $(BUILD_DIR)/hafnian_common_core_host
 .PHONY: hafnian-common-core-variants-test
 hafnian-common-core-variants-test:
 	python3 tests/hafnian/common_core_variants_test.py
+
+$(BUILD_DIR)/hafnian_common_core_boundary_order_test: tests/hafnian/common_core_boundary_order_test.cpp \
+		research/probes/common_core_boundary_order.hpp
+	$(CXX) -O2 -std=c++17 -fsanitize=undefined -fno-sanitize-recover=all -o $@ $<
+
+.PHONY: hafnian-common-core-candidates-test
+hafnian-common-core-candidates-test: $(BUILD_DIR)/hafnian_common_core_boundary_order_test
+	./$(BUILD_DIR)/hafnian_common_core_boundary_order_test
+	python3 tests/hafnian/common_core_variants_test.py --candidates
 
 .PHONY: hafnian-common-core-projection-test
 hafnian-common-core-projection-test:

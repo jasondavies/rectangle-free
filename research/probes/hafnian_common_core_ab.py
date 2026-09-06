@@ -21,6 +21,7 @@ def main():
     parser.add_argument("--variants", nargs="+", default=["control", "hess", "boundary", "scratch", "hb", "all"])
     parser.add_argument("--full", action="store_true", help="all three prime sweeps, rather than bounded pilot")
     parser.add_argument("--repeats", type=int, default=2)
+    parser.add_argument("--threads", type=int, choices=(64, 128, 256), default=256)
     args = parser.parse_args()
     if args.repeats < 1:
         parser.error("--repeats must be positive")
@@ -65,7 +66,7 @@ def main():
                 with target.open("x") as log:
                     subprocess.run([
                         str((args.binaries / name).resolve()), "--sweep", "--groups", str(plan),
-                        "--prime", str(prime), "--count", "32768", "--threads", "256",
+                        "--prime", str(prime), "--count", "32768", "--threads", str(args.threads),
                     ], check=True, env=env, stdout=log, stderr=log)
                 print(f"CORE_AB_COMPLETE variant={name} repeat={repeat} prime={prime} log={target}", flush=True)
 

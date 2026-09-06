@@ -75,7 +75,7 @@ void verify(const std::string& path,const std::vector<Entry>& rows,unsigned slac
 
 void build(const std::string& path,const std::vector<Entry>& rows,unsigned slack,const std::string& digest,
            unsigned cap,unsigned threads,uint64_t seed,const std::string& source,
-           const std::string& costs,unsigned anchors) {
+           const std::string& costs,unsigned anchors,unsigned max_order) {
     auto started=Clock::now();Index index(rows);std::vector<uint8_t> owned(rows.size());
     std::unique_ptr<common_cost::Model> model;
     if(!source.empty())model=std::make_unique<common_cost::Model>(costs);
@@ -87,7 +87,7 @@ void build(const std::string& path,const std::vector<Entry>& rows,unsigned slack
         if(e+1<=2*slack&&d+1<=2*slack){unsigned child_order=60+2*slack-2*(e+1)-2*(d+1);
             // Deliberately leave the larger, unbenchmarked orders as exact
             // independent fallbacks rather than inventing their GPU cost.
-            if(child_order>=42&&child_order<=48)parents.push_back(uint32_t(i));}
+            if(child_order>=42&&child_order<=max_order)parents.push_back(uint32_t(i));}
     }
     std::sort(parents.begin(),parents.end(),[&](uint32_t a,uint32_t b){return std::make_pair(hash(rows[a].key^seed),rows[a].key)<std::make_pair(hash(rows[b].key^seed),rows[b].key);});
     common_catalog::File out(path,true);out.put("HCPLAN01",8);out.put64(slack);out.put64(cap);out.put64(seed);out.put64(rows.size());out.put(digest.data(),64);
@@ -228,7 +228,7 @@ void build(const std::string& path,const std::vector<Entry>& rows,unsigned slack
 }
 }
 int main(int argc,char** argv)try {
-    std::string catalog,path,source,costs;bool audit=false,maps=false;unsigned cap=11,threads=8,anchors=0;uint64_t seed=478;
+    std::string catalog,path,source,costs;bool audit=false,maps=false;unsigned cap=11,threads=8,anchors=0,max_order=48;uint64_t seed=478;
     for(int i=1;i<argc;++i){std::string a=argv[i];
         if(a=="--catalog"&&i+1<argc)catalog=argv[++i];
         else if(a=="--output"&&i+1<argc)path=argv[++i];
@@ -240,14 +240,17 @@ int main(int argc,char** argv)try {
         else if(a=="--replan"&&i+1<argc)source=argv[++i];
         else if(a=="--costs"&&i+1<argc)costs=argv[++i];
         else if(a=="--repair-anchors"&&i+1<argc)anchors=std::stoul(argv[++i]);
-        else throw std::runtime_error("usage: --catalog FILE --output FILE|--verify FILE [--all-maps --cap 7|9|11 --threads N --seed N] [--replan PLAN --costs TABLE --repair-anchors 0..8]");}
+        else if(a=="--group-max-order"&&i+1<argc)max_order=std::stoul(argv[++i]);
+        else throw std::runtime_error("usage: --catalog FILE --output FILE|--verify FILE [--all-maps --cap 7|9|11 --threads N --seed N --group-max-order 48|50] [--replan PLAN --costs TABLE --repair-anchors 0..8]");}
     if(path.empty()||catalog.empty()||!threads||threads>16||(cap!=7&&cap!=9&&cap!=11))throw std::runtime_error("invalid plan options");
     if(source.empty()!=costs.empty()||anchors>8||(audit&&!source.empty()))throw std::runtime_error("invalid replan options");
+    if((max_order!=48&&max_order!=50)||(max_order!=48&&(!source.empty()||audit)))
+        throw std::runtime_error("group order gate applies only to fresh plans");
     unsigned slack;std::string digest;auto rows=common_catalog::read(catalog,slack,digest);
     omp_set_dynamic(0);omp_set_num_threads(int(threads));
     if(audit)verify(path,rows,slack,digest,maps);else {
         if(!source.empty())verify(source,rows,slack,digest,false);
-        build(path,rows,slack,digest,cap,threads,seed,source,costs,anchors);
+        build(path,rows,slack,digest,cap,threads,seed,source,costs,anchors,max_order);
     }
     return 0;
 }catch(const std::exception& e){std::fprintf(stderr,"error: %s\n",e.what());return 1;}
