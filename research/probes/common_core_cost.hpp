@@ -18,17 +18,26 @@ struct OwnedGroup {Group group;std::vector<uint32_t> ids;};
 struct Model {
     using Shape=std::tuple<unsigned,unsigned,unsigned,unsigned>;
     std::map<Shape,std::map<unsigned,uint64_t>> table;
-    std::string digest;
+    std::string digest,configuration;
     explicit Model(const std::string& path) {
         std::ifstream in(path);if(!in)throw std::runtime_error("cannot read cost model");
         std::string line;Sha256 sha;
-        if(!std::getline(in,line)||line!="HCCOST01 hess=1 boundary=1 scratch=1")
+        if(!std::getline(in,line))throw std::runtime_error("missing cost model/kernel");
+        bool v2=line.rfind("HCCOST02 ",0)==0;
+        if(v2){
+            const std::string prefix="HCCOST02 hess=1 boundary=1 scratch=1 warp_poly=1 sparse_moments=1 boundary_order=16 max_pool=11 threads=128";
+            bool valid=false;
+            for(unsigned a=0;a<2;++a)for(unsigned b=0;b<2;++b)for(unsigned c=0;c<2;++c)
+                valid|=line==prefix+" inverse_chain="+std::to_string(a)+" live_moments="+std::to_string(b)+" sync_clear="+std::to_string(c);
+            if(!valid)throw std::runtime_error("unsupported cost model/kernel");
+        }else if(line!="HCCOST01 hess=1 boundary=1 scratch=1")
             throw std::runtime_error("unsupported cost model/kernel");
+        configuration=line;
         sha.update(line+"\n");
         while(std::getline(in,line)){sha.update(line+"\n");if(line.empty()||line[0]=='#')continue;
             std::istringstream fields(line);unsigned n,c,q,g,p,count;uint64_t ps;std::string extra;
             if(!(fields>>n>>c>>q>>g>>p>>ps>>count)||(fields>>extra)||
-               n<42||n>48||(n&1)||q<5||q>11||!(q&1)||n!=c+q-3||
+               n<42||n>(v2?50u:48u)||(n&1)||q<5||q>11||!(q&1)||n!=c+q-3||c<2||c>48||
                !g||g>256||p>3||!ps||ps>1000000000||!count||
                !table[{n,c,q,p}].emplace(g,ps).second)
                 throw std::runtime_error("invalid/duplicate cost model row");

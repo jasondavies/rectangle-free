@@ -1,5 +1,90 @@
 # Shared-core residual hafnians: 6x27 research gate
 
+Experiment 491 completes the local CPU follow-ons. Ordered-journal reduction
+passes exact A/B replay parity with 15–17% lower elapsed time on bounded local
+synthetic workload. The full audited plan gains a 55.6-MiB in-memory offset
+index; queue processes reuse the audit and worker across tasks, rebuilding
+validation after every restart. Fresh commands/manifests are under
+`build/common-core-491/`. The ~119-GPU-hour forecast is unchanged; these costs
+were largely outside that projection. No GPU or cloud instance was used.
+
+Experiment 490 completes the local production audit and cost-balanced manifest:
+45,007,139 queries covered exactly once, coefficient sum 47,983,269,684,673,
+7,282,729 groups, 13,100 independent queries. The 64 work items are assigned
+to eight workers with projected loads **14.83–14.88 hours** (118.862 total).
+The manifest and generated commands bind the audited inputs and tested binary;
+all interval/queue coverage checks pass. No worker is rented or solve launched.
+Next: supervised multi-worker checkpoint/pull/reduction rehearsal, then the
+full campaign. See [the campaign instructions](common_core_campaign.md).
+
+Experiment 489's order-52/54 extension now **passes the GPU gate**. It groups
+3,222 of 3,273 old independent queries into 447 shared groups, preserving all
+other assignments. The targeted compute projects to **1.12 GPU-hours versus
+25.09** for independent evaluation on the same RTX PRO 6000. Six complete
+counts (18 prime residues) match independent full-matrix evaluation; all 17
+matched narrow-pool samples beat their own independent children (1.76–32.57x).
+Accept the extension for a fresh campaign plan, retaining the 51 unsupported
+target queries as independent. Existing plans/journals are not overwritten.
+
+The revised full solve forecast is **about 119 RTX PRO 6000 GPU-hours**, or
+roughly 15 hours on eight work-balanced GPUs before setup, audit/reduction and
+interruptions. This replaces only the previously measured order-52/54 compute
+component and conservatively retains old overhead. It is a stratified sampled
+projection, not a completed campaign or measured whole-campaign speedup.
+Logs and four checked journals are under `build/common-core-489/`.
+
+Experiment 488 enables bounded durable transaction batching (32 ranges or
+approximately one second, plus an in-flight request). The VM storage replay
+reduces journal time **96.4%**, with exact A/B payload parity, crash-recovery
+tests and all eleven GPU-pilot counts/33 archived residues passing again.
+That experiment's full solve forecast was **about 142 RTX PRO 6000 GPU-hours**,
+roughly 18 hours on eight balanced GPUs before setup and interruptions.
+This is a computation-plus-storage projection, not measured end-to-end GPU
+speedup. The temporary worker/disk have been deleted. No campaign was launched.
+
+Experiment 487 completes the integrated timing gate on one RTX PRO 6000.
+The full plan now projects to **about 166 GPU-hours**, including approximately
+101 hours of shared computation, 39 hours of independent work and 26 hours of
+preparation/checkpoint overhead. Two repeated stratified sweeps, including
+off-zero Gray windows, give 165.74 and 165.94 hours. Eight work-balanced GPUs
+would need about 21 hours before audit/reduction, setup and interruption
+allowances; multi-GPU storage contention has not been measured. This is a
+sampled forecast, not a completed campaign. Durable transactions alone account
+for about 25 hours: bounded group-commit batching is the next practical target.
+The benchmark VM/disk were deleted after journal and log verification.
+
+Experiment 486 connects the independent tail (orders 42 through 66) to the
+same version-2 checkpoint/reduction workflow. A bounded RTX PRO 6000 pilot
+passes stop/resume, all eleven complete query comparisons (33 archived
+residues), 252 independent-reference ranges, memcheck and synccheck. The VM
+and disk have been deleted. The remaining gate is representative campaign
+timing, not an unimplemented tail or checkpoint path.
+
+Experiment 485 extracts the shared arithmetic into maintained headers and
+adds a persistent service, durable sign-range journals and exact per-query
+CRT reduction. See [the campaign runner](common_core_campaign.md).
+The notes below preserve the earlier research status and measured projections.
+
+Experiment 484's full repeated GPU gate accepts shared fixed inverse chains,
+live-only moment columns, and redundant barrier/memo-clear removal:
+**112.22 -> 102.35 grouped GPU-hours (8.79% less)** on the same RTX PRO 6000.
+These are Experiment-480 grouped kernels, not the complete 6x27 campaign.
+The settings remain independently opt-in
+(`CORE_OPT_INVERSE_CHAIN`, `CORE_OPT_LIVE_MOMENTS`, `CORE_OPT_SYNC_CLEAR`).
+Local UBSan/cooperative gates and CUDA memory/race/synchronization gates pass.
+The reduced-output runner is exact and performance-neutral in its pilot;
+it is a pre-production component, not a checkpointed campaign solver.
+HCCOST02 binds the new configuration; measured pool-eleven curves have been
+exported. All-width/order-50 retuning is pending because the benchmark VM
+repeatedly lost SSH connectivity. All completed logs were pulled and the VM
+and disk deleted. No resources remain from this experiment.
+
+The repaired plan and order-50 extension are now explicitly combined and
+fully audited: **45,007,139 queries, 7,285,504 groups, 16,322 singletons**,
+all row maps and coefficient coverage verified. Primary shared groups are
+unchanged; 5,546 donor groups cover 36,857 previously independent queries.
+This is an audited assignment, not a newly measured full-campaign estimate.
+
 Status through Experiment 483: **the new measured kernel configuration
 projects the Experiment-480 grouped workload to 112.17 RTX PRO 6000
 GPU-hours**, versus 140.38 for the matched control (20.1% less time).
@@ -13,6 +98,41 @@ That projection excludes independent leftovers and production overhead;
 it is not yet a complete campaign estimate. Earlier gates are retained below
 as the experimental record.
 Nothing here changes the production solver or campaign checkpoint format.
+
+The prime-independent recurrence plan and representation-independent inverse
+chains are now shared headers under `src/hafnian/`. Production inverse calls
+use the same existing chains; no production arithmetic algorithm changed.
+`prepare()` no longer allocates a CPU polynomial workspace, and `set_field()`
+reuses the small integer-inverse table. Callers can retain prepared metadata
+across chunks; the research one-shot wrapper still prepares per invocation.
+
+Local pre-integration gates:
+
+```sh
+make hafnian-common-core-preintegration-test
+python3 tests/hafnian/common_core_variants_test.py \
+  --preintegration --groups build/common-core-repair480.log
+```
+
+Bounded GPU reduction A/B (the reference still downloads all per-sign values
+so every reduced total can be checked):
+
+```sh
+build/hafnian_common_core_gpu --sweep --groups SAMPLE_LOG --threads 128 \
+  --count 131072 --reduced-ab 32768
+build/hafnian_common_core_plan --catalog build/common-core-6x27.catalog \
+  --output NEW_PLAN --merge build/common-core-6x27-repair480.plan \
+  --extension build/common-core-6x27-order50-481.plan --threads 16
+build/hafnian_common_core_plan --catalog build/common-core-6x27.catalog \
+  --verify NEW_PLAN --all-maps --threads 16
+```
+
+Compile the GPU binary with the three Experiment-481 settings and the three
+Experiment-484 settings all enabled (ordering is 16, all other switches 1).
+`--reduced-ab` reports prepared-group time including device reduction and
+download, excluding reference checks and CPU problem construction. It is
+not a production campaign command. Remaining work is all-width retuning,
+production provenance/checkpoint wiring, and a representative campaign pilot.
 
 ## Latest measured configuration and remaining integration
 

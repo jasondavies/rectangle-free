@@ -4,6 +4,7 @@
 #include "hafnian_gray_update_probe.cpp"
 #undef main
 #include "six_by_twenty_seven_common_core.hpp"
+#include "../../src/hafnian/hafnian_boundary_plan.hpp"
 #include <fstream>
 #include <sstream>
 #include <set>
@@ -112,17 +113,7 @@ struct Workspace {
         f(stride),inverse(2*m+1) {
         if(q>13)throw std::runtime_error("boundary pool exceeds bounded gate");
         for(unsigned i=1;i<inverse.size();++i)inverse[i]=mod.inverse(i);
-        std::vector<bool> seen(1u<<q);
-        auto visit=[&](auto&& self,unsigned mask)->void {
-            if(seen[mask])return;seen[mask]=true;
-            if(mask) {
-                unsigned first=unsigned(__builtin_ctz(mask)),rest=mask^(1u<<first);
-                for(unsigned candidates=rest;candidates;candidates&=candidates-1)
-                    self(self,rest^(candidates&-candidates));
-            }
-            plan.push_back(mask);
-        };
-        for(unsigned mask:p.masks)visit(visit,mask);
+        plan=hafnian_boundary_plan(q,p.masks);
     }
 };
 
@@ -462,7 +453,7 @@ void coverage() {
 
 #ifndef COMMON_CORE_NO_MAIN
 int main(int argc,char** argv)try {
-    std::string path;unsigned steps=64,repeats=2,per_sector=1,query_limit=0;uint32_t prime=2147483647U;
+    std::string path;unsigned steps=64,repeats=2,per_sector=1,query_limit=0,selected_order=0;uint32_t prime=2147483647U;
     bool test=false,cover=false,full_group=false;unsigned threads=8;
     for(int i=1;i<argc;++i){std::string a=argv[i];
         if(a=="--self-test")test=true;
@@ -475,9 +466,12 @@ int main(int argc,char** argv)try {
         else if(a=="--per-sector"&&i+1<argc)per_sector=unsigned(number(argv[++i]));
         else if(a=="--query-limit"&&i+1<argc)query_limit=unsigned(number(argv[++i]));
         else if(a=="--prime"&&i+1<argc)prime=uint32_t(number(argv[++i]));
-        else throw std::runtime_error("usage: common-core-bench [--self-test] [--coverage6x28] [--groups LOG --steps N --repeats N --per-sector N --query-limit N --prime P] [--complete6x28 --groups LOG --threads N --prime P]");
+        else if(a=="--order"&&i+1<argc)selected_order=unsigned(number(argv[++i]));
+        else throw std::runtime_error("usage: common-core-bench [--self-test] [--coverage6x28] [--groups LOG --steps N --repeats N --per-sector N --query-limit N --prime P --order N] [--complete6x28 --groups LOG --threads N --prime P]");
     }
     if(prime!=2147483647U&&prime!=2147483629U)throw std::runtime_error("benchmark prime not certified");
+    if(selected_order&&(selected_order<42||selected_order>54||(selected_order&1)))
+        throw std::runtime_error("CPU order gate supports even orders 42..54");
     if(test)common_bench::self_test();
     if(cover){common_bench::coverage();return 0;}
     if(!threads||threads>16)throw std::runtime_error("threads must be 1..16");
@@ -494,15 +488,19 @@ int main(int argc,char** argv)try {
                std::make_pair(six_by_common_core::hash(b.root),b.cap);});
     std::map<std::tuple<unsigned,unsigned,unsigned>,unsigned> counts;
     six_by_twenty_nine::Geometry geometry;
+    unsigned cases=0;
     for(auto in:groups) {
+        if(selected_order&&in.prime_index!=UINT32_MAX&&in.prime_index!=(prime==2147483647U?0u:1u))continue;
         unsigned order=66-2*in.e-2*in.d;
-        if(order<42||order>46||in.cap<7)continue;
+        if((selected_order?order!=selected_order:(order<42||order>46))||in.cap<7)continue;
         if(counts[{in.e,in.d,in.cap}]++>=per_sector)continue;
         // Sensitivity check for smaller assigned groups; this is a trimmed
         // sample, not a claim to be a full 6x27 ownership plan.
         if(query_limit&&in.members.size()>query_limit)in.members.resize(query_limit);
         common_bench::benchmark(common_bench::make_problem(geometry,in),in,steps,repeats,Mod{prime});
+        ++cases;
     }
+    if(selected_order&&!cases)throw std::runtime_error("no matching CPU order samples");
     return 0;
 }catch(const std::exception& e){std::fprintf(stderr,"error: %s\n",e.what());return 1;}
 #endif

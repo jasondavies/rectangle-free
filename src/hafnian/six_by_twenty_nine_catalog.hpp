@@ -152,16 +152,27 @@ struct Query {
     std::string digest;
 };
 
-inline bool find_perfect_matching(
-    const std::vector<uint64_t>& neighbours,uint64_t remaining,
+template<class Mask> inline unsigned matching_first_bit(Mask mask) {
+    uint64_t low=uint64_t(mask);
+    if(low)return unsigned(__builtin_ctzll(low));
+    if constexpr(sizeof(Mask)>8)return 64+unsigned(__builtin_ctzll(uint64_t(mask>>64)));
+    throw std::runtime_error("empty matching bit scan");
+}
+template<class Mask> inline unsigned matching_popcount(Mask mask) {
+    unsigned result=unsigned(__builtin_popcountll(uint64_t(mask)));
+    if constexpr(sizeof(Mask)>8)result+=unsigned(__builtin_popcountll(uint64_t(mask>>64)));
+    return result;
+}
+template<class Mask> inline bool find_perfect_matching(
+    const std::vector<Mask>& neighbours,Mask remaining,
     std::vector<std::pair<unsigned,unsigned>>& matching) {
     if(!remaining)return true;
-    unsigned pivot=0,best_degree=65;
-    uint64_t scan=remaining;
+    unsigned pivot=0,best_degree=unsigned(neighbours.size()+1);
+    Mask scan=remaining;
     while(scan) {
-        unsigned vertex=unsigned(__builtin_ctzll(scan));
+        unsigned vertex=matching_first_bit(scan);
         scan&=scan-1;
-        unsigned degree=unsigned(__builtin_popcountll(neighbours[vertex]&remaining));
+        unsigned degree=matching_popcount(neighbours[vertex]&remaining);
         if(degree<best_degree) {
             best_degree=degree;
             pivot=vertex;
@@ -169,26 +180,26 @@ inline bool find_perfect_matching(
         }
     }
     if(!best_degree)return false;
-    uint64_t candidates=neighbours[pivot]&remaining;
-    uint64_t without_pivot=remaining&~(UINT64_C(1)<<pivot);
+    Mask candidates=neighbours[pivot]&remaining;
+    Mask without_pivot=remaining&~(Mask(1)<<pivot);
     while(candidates) {
-        unsigned mate=unsigned(__builtin_ctzll(candidates));
+        unsigned mate=matching_first_bit(candidates);
         candidates&=candidates-1;
         matching.push_back({pivot,mate});
         if(find_perfect_matching(neighbours,
-                without_pivot&~(UINT64_C(1)<<mate),matching))return true;
+                without_pivot&~(Mask(1)<<mate),matching))return true;
         matching.pop_back();
     }
     return false;
 }
 
-inline void build_query_graph(const Geometry& geometry,Query& query,unsigned width=WIDTH) {
+inline void build_query_graph(const Geometry& geometry,Query& query,unsigned width=WIDTH,bool allow_no_matching=false) {
     std::vector<unsigned> originals;
     for(unsigned token=0;token<TOKENS;++token)
         if(!(query.occupied&(UINT64_C(1)<<token)))originals.push_back(token);
     unsigned original_count=unsigned(originals.size());
     query.vertices=uint8_t(original_count+query.unmatched);
-    if(query.vertices%2||query.vertices<48||query.vertices>64)
+    if(query.vertices%2||query.vertices<42||query.vertices>66)
         throw std::runtime_error("unexpected augmented graph order");
     unsigned n=query.vertices;
     std::vector<uint8_t> natural(size_t(n)*n);
@@ -205,22 +216,26 @@ inline void build_query_graph(const Geometry& geometry,Query& query,unsigned wid
         for(unsigned original=0;original<original_count;++original)
             natural[dummy*n+original]=natural[original*n+dummy]=1;
 
-    std::vector<uint64_t> neighbours(n);
-    for(unsigned i=0;i<n;++i)for(unsigned j=0;j<n;++j)
-        if(natural[i*n+j])neighbours[i]|=UINT64_C(1)<<j;
     std::vector<std::pair<unsigned,unsigned>> matching;
-    uint64_t full=n==64?UINT64_MAX:((UINT64_C(1)<<n)-1);
-    if(!find_perfect_matching(neighbours,full,matching)||matching.size()!=n/2)
+    auto match=[&](auto tag){using Mask=decltype(tag);std::vector<Mask> neighbours(n);
+        for(unsigned i=0;i<n;++i)for(unsigned j=0;j<n;++j)
+            if(natural[i*n+j])neighbours[i]|=Mask(1)<<j;
+        Mask full=~Mask(0);if(n<sizeof(Mask)*8)full=(Mask(1)<<n)-1;
+        return find_perfect_matching(neighbours,full,matching);};
+    bool matched=n<=64?match(uint64_t(0)):match(static_cast<unsigned __int128>(0));
+    if(!matched&&!allow_no_matching)
         throw std::runtime_error("augmented residual graph has no perfect matching");
+    query.order.clear();
     std::sort(matching.begin(),matching.end());
     query.order.reserve(n);
     for(auto [first,second]:matching)query.order.push_back(uint8_t(first));
     for(auto [first,second]:matching)query.order.push_back(uint8_t(second));
+    if(!matched){query.order.resize(n);std::iota(query.order.begin(),query.order.end(),0);}
     query.adjacency.resize(size_t(n)*n);
     for(unsigned i=0;i<n;++i)for(unsigned j=0;j<n;++j)
         query.adjacency[i*n+j]=natural[query.order[i]*n+query.order[j]];
     for(unsigned pair=0;pair<n/2;++pair)
-        if(!query.adjacency[pair*n+pair+n/2])
+        if(matched&&!query.adjacency[pair*n+pair+n/2])
             throw std::runtime_error("reference matching reorder failed");
 
     Sha256 hash;
@@ -228,6 +243,7 @@ inline void build_query_graph(const Geometry& geometry,Query& query,unsigned wid
         ? "six-by-thirty-edge-minor-query-v2\n"
         : width==29
         ? "six-by-twenty-nine-residual-query-v1\n"
+        : width==27 ? "six-by-twenty-seven-residual-query-v1\n"
         : "six-by-twenty-eight-residual-query-v1\n";
     hash.update(header);
     uint8_t metadata[4]={query.defect_count,query.excess,query.unmatched,query.vertices};

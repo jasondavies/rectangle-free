@@ -36,7 +36,8 @@ def main():
         result = run()
         assert result.returncode != 0 and "different A/B" in result.stderr
         for field, value in (("warp_poly", 1), ("sparse_moments", 1), ("boundary_order", 16),
-                             ("threads", 128), ("max_pool", 13)):
+                             ("threads", 128), ("max_pool", 13), ("inverse_chain", 1),
+                             ("live_moments", 1), ("sync_clear", 1)):
             write(second, 1, extra=f"{field}={value}")
             result = run()
             assert result.returncode != 0 and "different A/B" in result.stderr

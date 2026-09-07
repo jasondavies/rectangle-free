@@ -18,6 +18,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--groups", type=Path)
     parser.add_argument("--candidates", action="store_true", help="test warp/sparse candidates on the accepted H/B/S kernel")
+    parser.add_argument("--preintegration", action="store_true", help="test inverse, live-moment and synchronization candidates independently")
     args = parser.parse_args()
     out = ROOT / "build/common-core-variants-test"
     out.mkdir(parents=True, exist_ok=True)
@@ -25,8 +26,14 @@ def main():
     variants = ([(1, 1, 1, w, s, 0, 11) for w, s in itertools.product((0, 1), repeat=2)]
                 + [(1, 1, 1, 1, 1, 16, pool) for pool in (11, 13)]) if args.candidates else [
         (*v, 0, 0, 0, 11) for v in itertools.product((0, 1), repeat=3)]
-    for hess, boundary, scratch, warp, sparse, order_trials, pool in variants:
-        name = f"h{hess}b{boundary}s{scratch}w{warp}m{sparse}o{order_trials}q{pool}"
+    variants = [(v, (0, 0, 0)) for v in variants]
+    if args.preintegration:
+        variants = [((1, 1, 1, 1, 1, 16, 11), opt) for opt in
+                    ((0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 1))]
+        variants += [((1, b, s, w, 1, 16, 13), (1, 1, 1))
+                     for b, s, w in ((0, 0, 0), (0, 1, 0), (1, 0, 1))]
+    for (hess, boundary, scratch, warp, sparse, order_trials, pool), (inverse, live, sync) in variants:
+        name = f"h{hess}b{boundary}s{scratch}w{warp}m{sparse}o{order_trials}q{pool}i{inverse}l{live}c{sync}"
         exe = out / name
         with (out / f"{name}.log").open("w") as log:
             subprocess.run([
@@ -36,9 +43,11 @@ def main():
                 f"-DCORE_OPT_BOUNDARY={boundary}", f"-DCORE_OPT_SCRATCH={scratch}",
                 f"-DCORE_OPT_WARP_POLY={warp}", f"-DCORE_OPT_SPARSE_MOMENTS={sparse}",
                 f"-DCORE_BOUNDARY_ORDER={order_trials}", f"-DCORE_MAX_POOL={pool}",
+                f"-DCORE_OPT_INVERSE_CHAIN={inverse}", f"-DCORE_OPT_LIVE_MOMENTS={live}",
+                f"-DCORE_OPT_SYNC_CLEAR={sync}",
                 str(ROOT / "research/gpu/hafnian_common_core_gpu.cu"), "-o", str(exe),
             ], check=True, stdout=log, stderr=log)
-            subprocess.run([str(exe), "--self-test"], check=True, env=env,
+            subprocess.run([str(exe), "--self-test", *(["--reduced-ab", "3"] if args.preintegration else [])], check=True, env=env,
                            stdout=log, stderr=log)
             if pool == 13:
                 for prime in (2147483647, 2147483629, 2147483587, 2147483579):

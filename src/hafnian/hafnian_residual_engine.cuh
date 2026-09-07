@@ -100,6 +100,8 @@ struct Options {
     unsigned blocks=0,threads=0;
     std::string batch;
     bool list=false,self_test=false,run=false;
+    bool quiet=false;
+    unsigned report_width=Campaign::WIDTH;
 };
 
 Options parse_options(int argc,char** argv) {
@@ -180,8 +182,9 @@ class DeviceWorkspace {
         hafnian_cuda_check(cudaDeviceGetAttribute(
             &compute_minor,cudaDevAttrComputeCapabilityMinor,device),
             "compute capability minor");
-        hafnian_cuda_check(cudaMalloc(&adjacency,64*64),"allocate adjacency");
-        hafnian_cuda_check(cudaMalloc(&inverses,33*sizeof(uint32_t)),"allocate inverses");
+        constexpr unsigned maximum=Campaign::WIDTH==27?66:64;
+        hafnian_cuda_check(cudaMalloc(&adjacency,maximum*maximum),"allocate adjacency");
+        hafnian_cuda_check(cudaMalloc(&inverses,(maximum/2+1)*sizeof(uint32_t)),"allocate inverses");
         hafnian_cuda_check(cudaMalloc(&gray_failures,sizeof(uint32_t)),
             "allocate Gray failure counter");
     }
@@ -226,7 +229,7 @@ template<unsigned N,class ActiveMod>
 std::string run_query(const Query& query,const Catalog& catalog,const Task& task,
     const Options& options,DeviceWorkspace& workspace,
     const std::string& binary_digest) {
-    static_assert(N==48||N==50||N==52||N==54||N==56||N==58||N==60||N==64);
+    static_assert(N>=42&&N<=66&&N%2==0);
     constexpr unsigned HALF=N/2;
     constexpr unsigned GRAY_CHAIN=N==48?6:(N<=58?7:0);
     constexpr uint64_t TOTAL_TERMS=UINT64_C(1)<<(HALF-1);
@@ -354,7 +357,7 @@ std::string run_query(const Query& query,const Catalog& catalog,const Task& task
             "gray_active_blocks_per_sm %u\ngray_chunks %u\ngray_failures %u\n"
             "gray_fallback_chunks %u\nchunk_terms %" PRIu64
             "\nelapsed_seconds %.9f\nstatus complete\n",
-            FORMAT,ALGORITHM,Campaign::WIDTH,catalog.digest.c_str(),query.id,query.digest.c_str(),
+            FORMAT,ALGORITHM,options.report_width,catalog.digest.c_str(),query.id,query.digest.c_str(),
             query.occupied,query.defect_count,query.excess,query.unmatched,
             query.defect_coefficient,query.matching_bound_power,N,
             N+1,binary_digest.c_str(),task.prime,task.begin,
@@ -444,12 +447,12 @@ std::string run_query(const Query& query,const Catalog& catalog,const Task& task
         }
         double elapsed=std::chrono::duration<double>(Clock::now()-started).count();
         final_result=publish(chunk_end,elapsed);
-        std::printf(
+        if(!options.quiet)std::printf(
             "HAFNIAN_6X%u_PROGRESS query=%u vertices=%u stride=%u prime=%u "
             "begin=%" PRIu64 " end=%" PRIu64
             " gray=%u gray_failures=%u fallback_chunks=%u"
             " elapsed=%.6f terms_per_second=%.3f\n",
-            Campaign::WIDTH,query.id,N,N+1,task.prime,task.begin,chunk_end,
+            options.report_width,query.id,N,N+1,task.prime,task.begin,chunk_end,
             unsigned(gray_enabled),gray_failures_total,gray_fallback_chunks,
             elapsed,double(chunk_end-task.begin)/elapsed);
         std::fflush(stdout);
@@ -461,6 +464,20 @@ template<class Mod>
 std::string dispatch_mod(const Query& query,const Catalog& catalog,const Task& task,
     const Options& options,DeviceWorkspace& workspace,
     const std::string& binary_digest) {
+    if constexpr(Campaign::WIDTH==27) {
+        switch(query.vertices) {
+            case 42:return run_query<42,Mod>(query,catalog,task,options,workspace,binary_digest);
+            case 44:return run_query<44,Mod>(query,catalog,task,options,workspace,binary_digest);
+            case 46:return run_query<46,Mod>(query,catalog,task,options,workspace,binary_digest);
+            case 48:return run_query<48,Mod>(query,catalog,task,options,workspace,binary_digest);
+            case 50:return run_query<50,Mod>(query,catalog,task,options,workspace,binary_digest);
+            case 52:return run_query<52,Mod>(query,catalog,task,options,workspace,binary_digest);
+            case 60:return run_query<60,Mod>(query,catalog,task,options,workspace,binary_digest);
+            case 62:return run_query<62,Mod>(query,catalog,task,options,workspace,binary_digest);
+            case 64:return run_query<64,Mod>(query,catalog,task,options,workspace,binary_digest);
+            case 66:return run_query<66,Mod>(query,catalog,task,options,workspace,binary_digest);
+        }
+    }
     switch(query.vertices) {
         case 48:if constexpr(Campaign::WIDTH==28) return run_query<48,Mod>(query,catalog,task,options,workspace,binary_digest);
             else throw std::runtime_error("order outside campaign");
@@ -483,6 +500,16 @@ template<class Mod>
 std::string dispatch_fixed_small(const Query& query,const Catalog& catalog,
     const Task& task,const Options& options,DeviceWorkspace& workspace,
     const std::string& binary_digest) {
+    if constexpr(Campaign::WIDTH==27) {
+        switch(query.vertices) {
+            case 42:return run_query<42,Mod>(query,catalog,task,options,workspace,binary_digest);
+            case 44:return run_query<44,Mod>(query,catalog,task,options,workspace,binary_digest);
+            case 46:return run_query<46,Mod>(query,catalog,task,options,workspace,binary_digest);
+            case 48:return run_query<48,Mod>(query,catalog,task,options,workspace,binary_digest);
+            case 50:return run_query<50,Mod>(query,catalog,task,options,workspace,binary_digest);
+            case 52:return run_query<52,Mod>(query,catalog,task,options,workspace,binary_digest);
+        }
+    }
     switch(query.vertices) {
         case 48:if constexpr(Campaign::WIDTH==28) return run_query<48,Mod>(query,catalog,task,options,workspace,binary_digest);
             else throw std::runtime_error("order outside campaign");

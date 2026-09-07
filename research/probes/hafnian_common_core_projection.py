@@ -55,7 +55,8 @@ def main():
             if int(configuration.get("profile", "0")):
                 raise ValueError("instrumented phase timings cannot project campaign runtime")
             configurations.add(tuple(int(configuration.get(k, "0")) for k in (
-                "hess", "boundary", "scratch", "warp_poly", "sparse_moments", "boundary_order", "threads"))
+                "hess", "boundary", "scratch", "warp_poly", "sparse_moments", "boundary_order", "threads",
+                "inverse_chain", "live_moments", "sync_clear"))
                 + (int(configuration.get("max_pool", "11")),))
             if len(configurations) > 1:
                 raise ValueError("cannot combine different A/B configurations in one projection")

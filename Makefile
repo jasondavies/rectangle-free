@@ -180,7 +180,7 @@ $(BUILD_DIR)/hafnian_int8_sign_probe: research/gpu/hafnian_int8_sign_probe.cu \
 
 $(BUILD_DIR)/hafnian_gray_update_gpu_probe: \
 		research/gpu/hafnian_gray_update_gpu_probe.cu \
-		src/hafnian/hafnian_gpu_core.cuh \
+		src/hafnian/hafnian_gpu_core.cuh src/hafnian/hafnian_inverse_chain.hpp \
 		src/hafnian/six_by_twenty_eight_catalog.hpp \
 		src/hafnian/six_by_twenty_nine_catalog.hpp src/common/sha256.hpp
 	$(NVCC) $(NVCCFLAGS) -std=c++17 -o $@ $<
@@ -375,12 +375,14 @@ hafnian-common-core-test: $(BUILD_DIR)/hafnian_common_core_test $(BUILD_DIR)/haf
 	./$(BUILD_DIR)/hafnian_common_core_bench --self-test
 
 $(BUILD_DIR)/hafnian_common_core_bench: research/probes/hafnian_common_core_bench.cpp \
+		src/hafnian/hafnian_boundary_plan.hpp \
 		research/probes/hafnian_gray_update_probe.cpp research/probes/six_by_twenty_seven_common_core.hpp \
 		src/hafnian/six_by_twenty_eight_catalog.hpp src/hafnian/six_by_twenty_nine_catalog.hpp \
 		src/hafnian/hafnian_matching_bound.hpp src/common/sha256.hpp
 	$(CXX) -O3 -march=native -std=c++17 $(OPENMP_CFLAGS) -o $@ $< $(OPENMP_LDFLAGS)
 
 $(BUILD_DIR)/hafnian_common_core_gpu: research/gpu/hafnian_common_core_gpu.cu \
+		src/hafnian/hafnian_inverse_chain.hpp src/hafnian/hafnian_boundary_plan.hpp \
 		research/probes/common_core_boundary_order.hpp \
 		research/probes/hafnian_common_core_bench.cpp research/probes/hafnian_gray_update_probe.cpp \
 		research/probes/six_by_twenty_seven_common_core.hpp \
@@ -388,6 +390,7 @@ $(BUILD_DIR)/hafnian_common_core_gpu: research/gpu/hafnian_common_core_gpu.cu \
 	$(NVCC) $(NVCCFLAGS) -Xcompiler $(OPENMP_CFLAGS) -o $@ $<
 
 $(BUILD_DIR)/hafnian_common_core_host: research/gpu/hafnian_common_core_gpu.cu \
+		src/hafnian/hafnian_inverse_chain.hpp src/hafnian/hafnian_boundary_plan.hpp \
 		research/probes/common_core_boundary_order.hpp \
 		research/probes/hafnian_common_core_bench.cpp research/probes/hafnian_gray_update_probe.cpp \
 		research/probes/six_by_twenty_seven_common_core.hpp \
@@ -397,6 +400,47 @@ $(BUILD_DIR)/hafnian_common_core_host: research/gpu/hafnian_common_core_gpu.cu \
 .PHONY: hafnian-common-core-cooperative-test
 hafnian-common-core-cooperative-test: $(BUILD_DIR)/hafnian_common_core_host
 	OMP_WAIT_POLICY=ACTIVE ./$(BUILD_DIR)/hafnian_common_core_host --self-test
+
+# The research A/B harness and maintained worker use the identical kernel.
+COMMON_CORE_HEADERS := src/hafnian/hafnian_common_core.cuh src/hafnian/hafnian_common_core_runner.cuh \
+		src/hafnian/hafnian_boundary_order.hpp src/hafnian/hafnian_boundary_plan.hpp \
+		src/hafnian/hafnian_inverse_chain.hpp src/hafnian/hafnian_common_catalog.hpp \
+		src/hafnian/hafnian_term_reference.hpp src/hafnian/hafnian_residual_engine.cuh \
+		src/hafnian/hafnian_gpu_core.cuh src/hafnian/hafnian_gray_gpu_core.cuh \
+		src/hafnian/hafnian_gray_resolvent_gpu_core.cuh
+$(BUILD_DIR)/hafnian_common_core_host $(BUILD_DIR)/hafnian_common_core_gpu: $(COMMON_CORE_HEADERS)
+$(BUILD_DIR)/hafnian_common_core_plan $(BUILD_DIR)/six_by_twenty_eight_defect_census: src/hafnian/hafnian_common_catalog.hpp
+$(BUILD_DIR)/hafnian_common_core_boundary_order_test: src/hafnian/hafnian_boundary_order.hpp
+
+$(BUILD_DIR)/hafnian_common_worker: src/hafnian/hafnian_common_worker.cu $(COMMON_CORE_HEADERS) \
+		src/hafnian/hafnian_matching_bound.hpp src/hafnian/six_by_twenty_nine_catalog.hpp src/common/sha256.hpp
+	@mkdir -p $(BUILD_DIR)
+	$(NVCC) $(NVCCFLAGS) -Xcompiler $(OPENMP_CFLAGS) -o $@ $<
+
+$(BUILD_DIR)/hafnian_common_worker_host: src/hafnian/hafnian_common_worker.cu $(COMMON_CORE_HEADERS) \
+		src/hafnian/hafnian_matching_bound.hpp src/hafnian/six_by_twenty_nine_catalog.hpp src/common/sha256.hpp
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) -x c++ -O2 -std=c++17 $(OPENMP_CFLAGS) -DCORE_HOST_EMULATION -o $@ $< $(OPENMP_LDFLAGS)
+
+.PHONY: hafnian-common-core-campaign-test
+hafnian-common-core-campaign-test: $(BUILD_DIR)/hafnian_common_worker_host $(BUILD_DIR)/hafnian_tail_reference_test
+	python3 tests/hafnian/common_core_campaign_test.py
+	python3 tests/hafnian/common_core_steady_bench_test.py
+	python3 tests/hafnian/common_core_manifest_test.py
+	python3 tests/hafnian/common_core_io_test.py
+	./$(BUILD_DIR)/hafnian_tail_reference_test
+
+$(BUILD_DIR)/hafnian_tail_reference_test: tests/hafnian/tail_reference_test.cpp \
+		src/hafnian/hafnian_term_reference.hpp src/hafnian/six_by_twenty_nine_catalog.hpp
+	$(CXX) -O2 -std=c++17 -fsanitize=undefined -fno-sanitize-recover=all -o $@ $<
+
+$(BUILD_DIR)/hafnian_inverse_chain_test: tests/hafnian/inverse_chain_test.cpp src/hafnian/hafnian_inverse_chain.hpp
+	$(CXX) -O2 -std=c++17 -o $@ $<
+
+.PHONY: hafnian-common-core-preintegration-test
+hafnian-common-core-preintegration-test: $(BUILD_DIR)/hafnian_inverse_chain_test
+	./$(BUILD_DIR)/hafnian_inverse_chain_test
+	python3 tests/hafnian/common_core_variants_test.py --preintegration
 
 .PHONY: hafnian-common-core-variants-test
 hafnian-common-core-variants-test:
@@ -414,6 +458,7 @@ hafnian-common-core-candidates-test: $(BUILD_DIR)/hafnian_common_core_boundary_o
 .PHONY: hafnian-common-core-projection-test
 hafnian-common-core-projection-test:
 	python3 tests/hafnian/common_core_projection_test.py
+	python3 tests/hafnian/common_core_cost_test.py
 
 $(BUILD_DIR)/hafnian_common_core_plan: research/probes/hafnian_common_core_plan.cpp \
 		research/probes/common_core_catalog_io.hpp research/probes/common_core_cost.hpp research/probes/six_by_twenty_seven_common_core.hpp \
@@ -443,7 +488,7 @@ $(BUILD_DIR)/six_by_thirty_hafnian: src/hafnian/six_by_thirty_hafnian.cpp src/co
 
 THIRTY_OPTIMIZED_HEADERS = src/hafnian/six_by_thirty_optimized_catalog.hpp \
 	src/hafnian/six_by_twenty_nine_catalog.hpp src/hafnian/hafnian_matching_bound.hpp \
-	src/hafnian/hafnian_residual_engine.cuh src/hafnian/hafnian_gpu_core.cuh \
+	src/hafnian/hafnian_residual_engine.cuh src/hafnian/hafnian_gpu_core.cuh src/hafnian/hafnian_inverse_chain.hpp \
 	src/hafnian/hafnian_gray_gpu_core.cuh src/hafnian/hafnian_gray_resolvent_gpu_core.cuh \
 	src/common/sha256.hpp
 
@@ -472,7 +517,7 @@ $(BUILD_DIR)/six_by_twenty_eight_catalog_test: tests/hafnian/six_by_twenty_eight
 	$(CXX) -O3 -march=native -std=c++17 -o $@ $<
 
 $(BUILD_DIR)/fixed_montgomery_arithmetic_test: \
-		tests/hafnian/fixed_montgomery_arithmetic_test.cu src/hafnian/hafnian_gpu_core.cuh
+		tests/hafnian/fixed_montgomery_arithmetic_test.cu src/hafnian/hafnian_gpu_core.cuh src/hafnian/hafnian_inverse_chain.hpp
 	$(NVCC) $(NVCCFLAGS) -std=c++17 -o $@ $<
 
 .PHONY: fixed-montgomery-arithmetic-test
@@ -490,13 +535,13 @@ $(BUILD_DIR)/six_by_twenty_nine_hafnian_gpu: src/hafnian/six_by_twenty_nine_hafn
 		src/hafnian/six_by_twenty_nine_optimized_catalog.hpp src/hafnian/hafnian_matching_bound.hpp \
 		src/hafnian/hafnian_residual_engine.cuh src/hafnian/hafnian_gray_gpu_core.cuh \
 		src/hafnian/hafnian_gray_resolvent_gpu_core.cuh \
-		src/hafnian/six_by_twenty_nine_catalog.hpp src/hafnian/hafnian_gpu_core.cuh src/common/sha256.hpp
+		src/hafnian/six_by_twenty_nine_catalog.hpp src/hafnian/hafnian_gpu_core.cuh src/hafnian/hafnian_inverse_chain.hpp src/common/sha256.hpp
 	$(NVCC) $(NVCCFLAGS) -std=c++17 -o $@ $<
 
 $(BUILD_DIR)/six_by_twenty_eight_hafnian_gpu: src/hafnian/six_by_twenty_eight_hafnian_gpu.cu \
 		src/hafnian/hafnian_residual_engine.cuh src/hafnian/hafnian_matching_bound.hpp \
 		src/hafnian/six_by_twenty_eight_catalog.hpp src/hafnian/six_by_twenty_nine_catalog.hpp \
-		src/hafnian/hafnian_gpu_core.cuh src/hafnian/hafnian_gray_gpu_core.cuh \
+		src/hafnian/hafnian_gpu_core.cuh src/hafnian/hafnian_inverse_chain.hpp src/hafnian/hafnian_gray_gpu_core.cuh \
 		src/hafnian/hafnian_gray_resolvent_gpu_core.cuh \
 		src/common/sha256.hpp
 	$(NVCC) $(NVCCFLAGS) -std=c++17 -o $@ $<
@@ -505,7 +550,7 @@ $(BUILD_DIR)/six_by_twenty_eight_runtime_montgomery_control: \
 		src/hafnian/hafnian_residual_engine.cuh src/hafnian/hafnian_matching_bound.hpp \
 		src/hafnian/six_by_twenty_eight_hafnian_gpu.cu \
 		src/hafnian/six_by_twenty_eight_catalog.hpp src/hafnian/six_by_twenty_nine_catalog.hpp \
-		src/hafnian/hafnian_gpu_core.cuh src/hafnian/hafnian_gray_gpu_core.cuh \
+		src/hafnian/hafnian_gpu_core.cuh src/hafnian/hafnian_inverse_chain.hpp src/hafnian/hafnian_gray_gpu_core.cuh \
 		src/hafnian/hafnian_gray_resolvent_gpu_core.cuh \
 		src/common/sha256.hpp
 	$(NVCC) $(NVCCFLAGS) -std=c++17 -DHAFNIAN_RUNTIME_MONTGOMERY_CONTROL=1 -o $@ $<

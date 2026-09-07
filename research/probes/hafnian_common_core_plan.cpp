@@ -75,19 +75,20 @@ void verify(const std::string& path,const std::vector<Entry>& rows,unsigned slac
 
 void build(const std::string& path,const std::vector<Entry>& rows,unsigned slack,const std::string& digest,
            unsigned cap,unsigned threads,uint64_t seed,const std::string& source,
-           const std::string& costs,unsigned anchors,unsigned max_order) {
+           const std::string& costs,unsigned anchors,unsigned max_order,const std::string& extension,bool extend_tail) {
     auto started=Clock::now();Index index(rows);std::vector<uint8_t> owned(rows.size());
     std::unique_ptr<common_cost::Model> model;
-    if(!source.empty())model=std::make_unique<common_cost::Model>(costs);
+    if(!costs.empty())model=std::make_unique<common_cost::Model>(costs);
     six_by_twenty_nine::Geometry geometry;std::vector<uint64_t> triples;
     for(const auto& s:six_by_twenty_nine::weighted_supports(geometry))if(s.excess==1)triples.push_back(s.mask);
     std::sort(triples.begin(),triples.end());
     std::vector<uint32_t> parents;
-    if(source.empty())for(size_t i=0;i<rows.size();++i){auto key=rows[i].key;unsigned e=excess(key),d=defects(key);
+    if(source.empty()||extend_tail)for(size_t i=0;i<rows.size();++i){auto key=rows[i].key;unsigned e=excess(key),d=defects(key);
         if(e+1<=2*slack&&d+1<=2*slack){unsigned child_order=60+2*slack-2*(e+1)-2*(d+1);
             // Deliberately leave the larger, unbenchmarked orders as exact
             // independent fallbacks rather than inventing their GPU cost.
-            if(child_order>=42&&child_order<=max_order)parents.push_back(uint32_t(i));}
+            if(extend_tail?(child_order==52||child_order==54):(child_order>=42&&child_order<=max_order))
+                parents.push_back(uint32_t(i));}
     }
     std::sort(parents.begin(),parents.end(),[&](uint32_t a,uint32_t b){return std::make_pair(hash(rows[a].key^seed),rows[a].key)<std::make_pair(hash(rows[b].key^seed),rows[b].key);});
     common_catalog::File out(path,true);out.put("HCPLAN01",8);out.put64(slack);out.put64(cap);out.put64(seed);out.put64(rows.size());out.put(digest.data(),64);
@@ -159,7 +160,10 @@ void build(const std::string& path,const std::vector<Entry>& rows,unsigned slack
                 std::chrono::duration<double>(Clock::now()-started).count());std::fflush(stdout);}
         };
         auto finish_family=[&]{if(!family.empty()){batch.push_back(std::move(family));family.clear();if(batch.size()==128)flush();}};
-        std::printf("CORE_REPLAN_START model_sha256=%s anchors=%u cap=%u scope=model_not_measured\n",model->digest.c_str(),anchors,cap);std::fflush(stdout);
+        if(model)std::printf("CORE_REPLAN_START model_sha256=%s anchors=%u cap=%u scope=model_not_measured\n",model->digest.c_str(),anchors,cap);
+        else if(extend_tail)std::printf("CORE_TAIL_START orders=52,54 primary_groups=preserved\n");
+        else std::printf("CORE_MERGE_START order=50 primary_groups=preserved\n");
+        std::fflush(stdout);
         for(;;){uint64_t parent=input.get64();if(parent==UINT64_MAX)break;
             uint64_t boundary=input.get64(),count=input.get64();
             if(!count||count>440)throw std::runtime_error("invalid source group count");
@@ -168,7 +172,11 @@ void build(const std::string& path,const std::vector<Entry>& rows,unsigned slack
                 if(id>=rows.size())throw std::runtime_error("source query out of range");
                 x.ids.push_back(uint32_t(id));x.group.children.push_back({removed,rows[id].key&full,uint32_t(id)});}
             ++read_groups;
-            if(count==1){finish_family();flush();emit(x.group,x.ids);continue;}
+            if(count==1){finish_family();flush();
+                unsigned n=order(rows[x.ids[0]].key,slack);
+                if(extend_tail?(n!=52&&n!=54):extension.empty())emit(x.group,x.ids);
+                continue;}
+            if(!model){emit(x.group,x.ids);continue;}
             if(!family.empty()&&(family.front().group.parent!=parent||
                 defects(rows[family.front().ids.front()].key)!=defects(rows[x.ids.front()].key)))finish_family();
             family.push_back(std::move(x));
@@ -176,11 +184,40 @@ void build(const std::string& path,const std::vector<Entry>& rows,unsigned slack
         finish_family();flush();
         if(input.get64()!=read_groups)throw std::runtime_error("source group count mismatch");
         auto source_digest=input.finish_read();
-        std::printf("CORE_REPLAN_DONE families=%llu improved=%llu source_groups=%llu output_groups=%llu estimated_groups=%llu model_before_h=%.9f model_after_h=%.9f source_sha256=%s model_sha256=%s scope=model_not_measured\n",
+        if(model)std::printf("CORE_REPLAN_DONE families=%llu improved=%llu source_groups=%llu output_groups=%llu estimated_groups=%llu model_before_h=%.9f model_after_h=%.9f source_sha256=%s model_sha256=%s scope=model_not_measured\n",
             (unsigned long long)families,(unsigned long long)improved,(unsigned long long)read_groups,
             (unsigned long long)group_count,(unsigned long long)estimated_groups,double(before)/3.6e15,double(after)/3.6e15,
             source_digest.c_str(),model->digest.c_str());
+        else std::printf("CORE_MERGE_PRIMARY source_sha256=%s groups=%llu\n",source_digest.c_str(),(unsigned long long)group_count);
     }
+    if(!extension.empty()){
+        // Import whole order-50 donor groups only when all members were
+        // singletons in the primary. Never repartition a primary group.
+        common_catalog::File input(extension,false);char magic[8],identity[64];input.get(magic,8);
+        if(std::memcmp(magic,"HCPLAN01",8)||input.get64()!=slack||input.get64()>cap)
+            throw std::runtime_error("extension header/cap mismatch");
+        input.get64();
+        if(input.get64()!=rows.size())throw std::runtime_error("extension count mismatch");
+        input.get(identity,64);if(std::string(identity,64)!=digest)throw std::runtime_error("extension catalog mismatch");
+        uint64_t read=0,added=0,queries=0;
+        for(;;){uint64_t parent=input.get64();if(parent==UINT64_MAX)break;
+            Group g;g.parent=parent;g.boundary=input.get64();uint64_t count=input.get64();
+            if(!count||count>440)throw std::runtime_error("invalid extension group");
+            std::vector<uint32_t> ids;bool available=count>1;
+            for(unsigned i=0;i<count;++i){uint64_t id=input.get64(),removed=input.get64();
+                if(id>=rows.size())throw std::runtime_error("extension query out of range");
+                ids.push_back(uint32_t(id));g.children.push_back({removed,rows[id].key&full,uint32_t(id)});
+                available&=!owned[id]&&order(rows[id].key,slack)==50;
+            }
+            if(available){emit(g,ids);++added;queries+=count;}++read;
+        }
+        if(input.get64()!=read)throw std::runtime_error("extension group count mismatch");
+        auto extension_digest=input.finish_read();
+        std::printf("CORE_MERGE_EXTENSION order=50 groups=%llu queries=%llu source_sha256=%s\n",
+            (unsigned long long)added,(unsigned long long)queries,extension_digest.c_str());
+    }
+    const uint64_t preserved_groups=group_count;
+    uint64_t added_groups=0,added_queries=0,unsupported=0;
     constexpr size_t CHUNK=1024;
     std::printf("CORE_PLAN_START queries=%zu parents=%zu cap=%u threads=%u\n",rows.size(),parents.size(),cap,threads);std::fflush(stdout);
     for(size_t begin=0;begin<parents.size();begin+=CHUNK){size_t count=std::min(CHUNK,parents.size()-begin);
@@ -197,13 +234,20 @@ void build(const std::string& path,const std::vector<Entry>& rows,unsigned slack
                 if(anchor==f.children.end())break;tried.insert(anchor->removed);
                 Group g=grow(f,anchor->removed,cap);if(g.size()<2)continue;
                 unsigned e=excess(rows[child_ids[g.children[0].id]].key),n=order(rows[child_ids[g.children[0].id]].key,slack);
+                // Larger residuals need a sufficiently wide boundary to stay
+                // inside the measured implementation's 48-vertex core limit.
+                if(extend_tail&&core_order(g,2*slack-e)>48){++unsupported;continue;}
                 validate(f,g,g.children[0].canonical,n,2*slack-e);
                 std::vector<uint32_t> ids;for(const auto& c:g.children)ids.push_back(child_ids[c.id]);emit(g,ids);
+                ++added_groups;added_queries+=ids.size();
             }
         }
         if(begin%(CHUNK*32)==0||begin+count==parents.size()){
             std::printf("CORE_PLAN_PROGRESS parents=%zu/%zu groups=%llu seconds=%.3f\n",begin+count,parents.size(),(unsigned long long)group_count,std::chrono::duration<double>(Clock::now()-started).count());std::fflush(stdout);}
     }
+    if(extend_tail)std::printf("CORE_TAIL_DONE preserved_groups=%llu added_groups=%llu added_queries=%llu unsupported_candidates=%llu scope=unmeasured\n",
+        (unsigned long long)preserved_groups,(unsigned long long)added_groups,
+        (unsigned long long)added_queries,(unsigned long long)unsupported);
     for(size_t i=0;i<rows.size();++i)if(!owned[i])emit(Group{},std::vector<uint32_t>{uint32_t(i)});
     out.put64(UINT64_MAX);out.put64(group_count);auto plan_digest=out.finish_write();
     U128 original=0,planned=0;uint64_t covered=0;
@@ -228,7 +272,7 @@ void build(const std::string& path,const std::vector<Entry>& rows,unsigned slack
 }
 }
 int main(int argc,char** argv)try {
-    std::string catalog,path,source,costs;bool audit=false,maps=false;unsigned cap=11,threads=8,anchors=0,max_order=48;uint64_t seed=478;
+    std::string catalog,path,source,costs,extension;bool audit=false,maps=false,merge=false,extend_tail=false;unsigned cap=11,threads=8,anchors=0,max_order=48;uint64_t seed=478;
     for(int i=1;i<argc;++i){std::string a=argv[i];
         if(a=="--catalog"&&i+1<argc)catalog=argv[++i];
         else if(a=="--output"&&i+1<argc)path=argv[++i];
@@ -238,19 +282,26 @@ int main(int argc,char** argv)try {
         else if(a=="--threads"&&i+1<argc)threads=std::stoul(argv[++i]);
         else if(a=="--seed"&&i+1<argc)seed=std::stoull(argv[++i]);
         else if(a=="--replan"&&i+1<argc)source=argv[++i];
+        else if(a=="--merge"&&i+1<argc){source=argv[++i];merge=true;}
+        else if(a=="--extend-tail"&&i+1<argc){source=argv[++i];extend_tail=true;}
+        else if(a=="--extension"&&i+1<argc)extension=argv[++i];
         else if(a=="--costs"&&i+1<argc)costs=argv[++i];
         else if(a=="--repair-anchors"&&i+1<argc)anchors=std::stoul(argv[++i]);
         else if(a=="--group-max-order"&&i+1<argc)max_order=std::stoul(argv[++i]);
-        else throw std::runtime_error("usage: --catalog FILE --output FILE|--verify FILE [--all-maps --cap 7|9|11 --threads N --seed N --group-max-order 48|50] [--replan PLAN --costs TABLE --repair-anchors 0..8]");}
+        else throw std::runtime_error("usage: --catalog FILE --output FILE|--verify FILE [--all-maps --cap 7|9|11 --threads N --seed N --group-max-order 48|50] [--replan PLAN --costs TABLE --repair-anchors 0..8 | --merge PLAN --extension ORDER50_PLAN | --extend-tail PLAN (52/54 research gate)]");}
     if(path.empty()||catalog.empty()||!threads||threads>16||(cap!=7&&cap!=9&&cap!=11))throw std::runtime_error("invalid plan options");
-    if(source.empty()!=costs.empty()||anchors>8||(audit&&!source.empty()))throw std::runtime_error("invalid replan options");
+    if(extend_tail){if(source.empty()||merge||!extension.empty()||!costs.empty()||anchors||audit)
+        throw std::runtime_error("invalid tail extension options");}
+    else if(merge){if(source.empty()||extension.empty()||!costs.empty()||anchors||audit)throw std::runtime_error("invalid merge options");}
+    else if(source.empty()!=costs.empty()||!extension.empty()||anchors>8||(audit&&!source.empty()))throw std::runtime_error("invalid replan options");
     if((max_order!=48&&max_order!=50)||(max_order!=48&&(!source.empty()||audit)))
         throw std::runtime_error("group order gate applies only to fresh plans");
     unsigned slack;std::string digest;auto rows=common_catalog::read(catalog,slack,digest);
     omp_set_dynamic(0);omp_set_num_threads(int(threads));
     if(audit)verify(path,rows,slack,digest,maps);else {
         if(!source.empty())verify(source,rows,slack,digest,false);
-        build(path,rows,slack,digest,cap,threads,seed,source,costs,anchors,max_order);
+        if(!extension.empty())verify(extension,rows,slack,digest,false);
+        build(path,rows,slack,digest,cap,threads,seed,source,costs,anchors,max_order,extension,extend_tail);
     }
     return 0;
 }catch(const std::exception& e){std::fprintf(stderr,"error: %s\n",e.what());return 1;}
