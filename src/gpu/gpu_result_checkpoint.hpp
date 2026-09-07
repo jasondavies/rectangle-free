@@ -7,6 +7,7 @@
 
 #include <cctype>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -22,6 +23,8 @@
 #include <unistd.h>
 
 #include "../common/sha256.hpp"
+#include "../common/parse_unsigned.hpp"
+#include "../common/durable_file.h"
 
 namespace gpu_checkpoint {
 
@@ -72,26 +75,36 @@ inline std::vector<WorkItem> read_work_manifest(const std::string& path) {
         size_t first = line.find_first_not_of(" \t\r");
         if (first == std::string::npos || line[first] == '#') continue;
         std::istringstream fields(line);
+        std::vector<std::string> tokens;
+        std::string token;
+        while (fields >> token) tokens.push_back(token);
         WorkItem item;
-        if (!(fields >> item.id >> item.path >> item.start >> item.end)) {
+        if (tokens.size() != 4 && tokens.size() != 6) {
             throw std::runtime_error("invalid manifest line " +
                                      std::to_string(line_number));
         }
-        if (fields >> item.filter_mod) {
-            if (!(fields >> item.filter_id) || !item.filter_mod ||
+        item.id = tokens[0]; item.path = tokens[1];
+        item.start = rectangle::parse_u64(tokens[2]);
+        item.end = rectangle::parse_u64(tokens[3]);
+        if (item.end && item.start > item.end)
+            throw std::runtime_error("reversed manifest range");
+        if (tokens.size() == 6) {
+            item.filter_mod = rectangle::parse_u64(tokens[4]);
+            item.filter_id = rectangle::parse_u64(tokens[5]);
+            if (!item.filter_mod ||
                 item.filter_id >= item.filter_mod) {
                 throw std::runtime_error("invalid manifest filter on line " +
                                          std::to_string(line_number));
             }
         }
-        std::string trailing;
-        if (fields >> trailing || !valid_work_id(item.id) ||
+        if (!valid_work_id(item.id) ||
             !ids.insert(item.id).second) {
             throw std::runtime_error("invalid or duplicate work id on line " +
                                      std::to_string(line_number));
         }
         items.push_back(std::move(item));
     }
+    if (input.bad()) throw std::runtime_error("work manifest read failed");
     if (items.empty()) throw std::runtime_error("work manifest is empty");
     return items;
 }
@@ -206,10 +219,10 @@ inline bool validated_result_exists(
     };
     bool identity_matches =
         require("id") == item.id && require("path") == item.path &&
-        std::stoull(require("start")) == item.start &&
-        std::stoull(require("end")) == item.end &&
-        std::stoull(require("filter_mod")) == item.filter_mod &&
-        std::stoull(require("filter_id")) == item.filter_id;
+        rectangle::parse_u64(require("start")) == item.start &&
+        rectangle::parse_u64(require("end")) == item.end &&
+        rectangle::parse_u64(require("filter_mod")) == item.filter_mod &&
+        rectangle::parse_u64(require("filter_id")) == item.filter_id;
     bool provenance_matches =
         require("geometry") == provenance.run.geometry &&
         require("token_plane_quotient") == "1" &&
@@ -232,8 +245,6 @@ inline void write_result(const fs::path& directory, const WorkItem& item,
                          const WorkProvenance& provenance,
                          const std::string& result_fields) {
     fs::path final_path = result_path(directory, item);
-    fs::path temporary_path = final_path;
-    temporary_path += ".tmp." + std::to_string(getpid());
     std::ostringstream payload;
     payload << "id " << item.id << "\n"
             << "path " << item.path << "\n"
@@ -256,25 +267,12 @@ inline void write_result(const fs::path& directory, const WorkItem& item,
     if (payload_text.empty() || payload_text.back() != '\n') {
         payload_text.push_back('\n');
     }
-    std::ofstream output(temporary_path, std::ios::trunc);
-    if (!output) {
-        throw std::runtime_error("cannot create " + temporary_path.string());
-    }
-    output << provenance.run.result_magic << " 3\n"
-           << payload_text << "result_payload_sha256 "
-           << sha256_string(payload_text) << "\n";
-    output.close();
-    if (!output) {
-        throw std::runtime_error("failed writing " + temporary_path.string());
-    }
-    std::error_code publication_error;
-    fs::create_hard_link(temporary_path, final_path, publication_error);
-    fs::remove(temporary_path);
-    if (publication_error) {
-        throw std::runtime_error("result publication refused for " +
-                                 final_path.string() + ": " +
-                                 publication_error.message());
-    }
+    std::string contents = provenance.run.result_magic + " 3\n" + payload_text +
+        "result_payload_sha256 " + sha256_string(payload_text) + "\n";
+    const RectFilePart part{contents.data(), contents.size()};
+    if (rect_publish_file(final_path.c_str(), &part, 1, 0))
+        throw std::runtime_error("durable result publication failed for " +
+                                 final_path.string() + ": " + std::strerror(errno));
 }
 
 }  // namespace gpu_checkpoint

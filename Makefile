@@ -23,7 +23,7 @@ PARTITION_POLY_8_CACHE_CFLAGS ?= -DDEFAULT_HARD_CACHE_BITS=22 -DDEFAULT_HARD_CAC
 PARTITION_POLY_8_PGO_DIR := $(abspath $(BUILD_DIR))/pgo/partition_poly_8
 PARTITION_SHARED_SRCS := src/partition/runtime.c src/partition/partitions.c src/partition/poly.c src/partition/graph.c src/partition/cache.c src/partition/main.c src/partition/solver.c src/partition/treewidth.c src/partition/aggregate.c src/partition/canon.c
 PARTITION_SHARED_SRCS += src/partition/result_io.c src/common/sha256_c.c
-PARTITION_HEADERS := $(wildcard src/partition/*.h) src/common/sha256_c.h
+PARTITION_HEADERS := $(wildcard src/partition/*.h) src/common/sha256_c.h src/common/durable_file.h
 PARTITION_SOURCE_ID := $(shell python3 tools/partition_source_id.py)
 PARTITION_TARGETS := partition_count4 partition_poly partition_poly_profile partition_poly_7 partition_poly_7_profile partition_poly_8 partition_poly_8_profile partition_poly_8_pgo
 $(addprefix $(BUILD_DIR)/,$(PARTITION_TARGETS)): $(PARTITION_HEADERS) Makefile tools/partition_source_id.py
@@ -42,6 +42,29 @@ gpu-production: twocolour_7x7_solve_gpu twocolour_7x9_solve_gpu \
 .PHONY: gpu-code-dump
 gpu-code-dump:
 	python3 tools/make_gpu_code_dump.py $(BUILD_DIR)/code-dump.txt
+
+.PHONY: publication-test
+publication-test: $(BUILD_DIR)/durable_file_test $(BUILD_DIR)/gpu_result_checkpoint_test
+	./$(BUILD_DIR)/durable_file_test
+	./$(BUILD_DIR)/gpu_result_checkpoint_test
+
+.PHONY: preparation-reuse-test
+preparation-reuse-test: $(BUILD_DIR)/gpu_sorted_batch_test $(BUILD_DIR)/preparation_reuse_test
+	./$(BUILD_DIR)/gpu_sorted_batch_test
+	./$(BUILD_DIR)/preparation_reuse_test
+
+$(BUILD_DIR)/gpu_sorted_batch_test: tests/gpu/gpu_sorted_batch_test.cpp src/gpu/gpu_sorted_batch.hpp
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) -O2 -std=c++17 -Wall -Wextra -fsanitize=undefined -o $@ $<
+
+$(BUILD_DIR)/preparation_reuse_test: tests/hafnian/preparation_reuse_test.cpp \
+		src/hafnian/hafnian_matching_bound.hpp src/hafnian/six_by_twenty_nine_catalog.hpp
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) -O2 -std=c++17 $(OPENMP_CFLAGS) -o $@ $< $(OPENMP_LDFLAGS)
+
+$(BUILD_DIR)/durable_file_test: tests/durable_file_test.cpp src/common/durable_file.h
+	mkdir -p $(BUILD_DIR)
+	$(CXX) -O2 -std=c++17 -Wall -Wextra -fsanitize=undefined -fno-sanitize-recover=all -o $@ $<
 
 $(BUILD_DIR)/gpu_result_checkpoint_test: tests/gpu/gpu_result_checkpoint_test.cpp \
 		src/gpu/gpu_result_checkpoint.hpp src/common/sha256.hpp
@@ -409,6 +432,7 @@ COMMON_CORE_HEADERS := src/hafnian/hafnian_common_core.cuh src/hafnian/hafnian_c
 		src/hafnian/hafnian_gpu_core.cuh src/hafnian/hafnian_gray_gpu_core.cuh \
 		src/hafnian/hafnian_gray_resolvent_gpu_core.cuh
 $(BUILD_DIR)/hafnian_common_core_host $(BUILD_DIR)/hafnian_common_core_gpu: $(COMMON_CORE_HEADERS)
+$(BUILD_DIR)/preparation_reuse_test: $(COMMON_CORE_HEADERS)
 $(BUILD_DIR)/hafnian_common_core_plan $(BUILD_DIR)/six_by_twenty_eight_defect_census: src/hafnian/hafnian_common_catalog.hpp
 $(BUILD_DIR)/hafnian_common_core_boundary_order_test: src/hafnian/hafnian_boundary_order.hpp
 
@@ -427,7 +451,11 @@ hafnian-common-core-campaign-test: $(BUILD_DIR)/hafnian_common_worker_host $(BUI
 	python3 tests/hafnian/common_core_campaign_test.py
 	python3 tests/hafnian/common_core_steady_bench_test.py
 	python3 tests/hafnian/common_core_manifest_test.py
+	python3 tests/hafnian/common_core_mixed_campaign_test.py
+	HAFNIAN_TEST_WORKER=$(BUILD_DIR)/hafnian_common_worker_host python3 tests/hafnian/common_core_sign_shards_test.py
 	python3 tests/hafnian/common_core_io_test.py
+	python3 tests/hafnian/common_core_snapshot_test.py
+	python3 tests/hafnian/common_core_remote_campaign_test.py
 	./$(BUILD_DIR)/hafnian_tail_reference_test
 
 $(BUILD_DIR)/hafnian_tail_reference_test: tests/hafnian/tail_reference_test.cpp \
@@ -547,13 +575,23 @@ $(BUILD_DIR)/six_by_twenty_eight_hafnian_gpu: src/hafnian/six_by_twenty_eight_ha
 	$(NVCC) $(NVCCFLAGS) -std=c++17 -o $@ $<
 
 $(BUILD_DIR)/six_by_twenty_eight_runtime_montgomery_control: \
-		src/hafnian/hafnian_residual_engine.cuh src/hafnian/hafnian_matching_bound.hpp \
 		src/hafnian/six_by_twenty_eight_hafnian_gpu.cu \
+		src/hafnian/hafnian_residual_engine.cuh src/hafnian/hafnian_matching_bound.hpp \
 		src/hafnian/six_by_twenty_eight_catalog.hpp src/hafnian/six_by_twenty_nine_catalog.hpp \
 		src/hafnian/hafnian_gpu_core.cuh src/hafnian/hafnian_inverse_chain.hpp src/hafnian/hafnian_gray_gpu_core.cuh \
 		src/hafnian/hafnian_gray_resolvent_gpu_core.cuh \
 		src/common/sha256.hpp
 	$(NVCC) $(NVCCFLAGS) -std=c++17 -DHAFNIAN_RUNTIME_MONTGOMERY_CONTROL=1 -o $@ $<
+
+# Shared publication/parsing headers are transitively included by these drivers.
+PUBLICATION_TARGETS := gpu_result_checkpoint_test twocolour_7x9_solve_gpu \
+	twocolour_7x9_four_owner_gpu twocolour_8x8_solve_gpu twocolour_6x9_prefix_gpu \
+	twocolour_6x10_prefix_gpu twocolour_6x11_prefix_gpu twocolour_6x12_prefix_gpu \
+	six_by_thirty_hafnian_gpu six_by_thirty_hafnian_gpu_control \
+	six_by_twenty_nine_hafnian_gpu six_by_twenty_eight_hafnian_gpu \
+	six_by_twenty_eight_runtime_montgomery_control hafnian_common_worker \
+	hafnian_common_core_gpu hafnian_common_core_host
+$(addprefix $(BUILD_DIR)/,$(PUBLICATION_TARGETS)): src/common/durable_file.h src/common/parse_unsigned.hpp
 
 .PHONY: six-by-twenty-nine-hafnian-test
 six-by-twenty-nine-hafnian-test: six_by_twenty_nine_hafnian_cpu
@@ -668,7 +706,7 @@ $(BUILD_DIR)/twocolour_7x9_prefix_gpu: legacy/gpu/twocolour_prefix_legacy_main.c
 		-DORBIT_ROW_BITS=9 -DORBIT_MAGIC='"R7ORB09"' -o $@ $<
 
 $(BUILD_DIR)/twocolour_7x9_solve_gpu: src/gpu/twocolour_7x9_packed_solve.cu \
-		src/gpu/twocolour_7x9_engine.cuh \
+		src/gpu/twocolour_7x9_engine.cuh src/gpu/gpu_sorted_batch.hpp \
 		src/gpu/twocolour_canonical_device.cuh \
 		src/gpu/twocolour_weight_class_join.cuh src/gpu/gpu_cuda_utils.cuh \
 		src/gpu/twocolour_prefix_core.cuh src/gpu/twocolour_prefix_algebra.cuh \
@@ -684,7 +722,7 @@ $(BUILD_DIR)/twocolour_7x9_cache_build: src/gpu/twocolour_7x9_cache_build.cu \
 	$(NVCC) $(NVCCFLAGS) -Xcompiler=-fopenmp -o $@ $<
 
 $(BUILD_DIR)/twocolour_7x9_four_owner_gpu: src/gpu/twocolour_7x9_four_owner_solve.cu \
-		src/gpu/twocolour_7x9_engine.cuh src/gpu/twocolour_canonical_device.cuh \
+		src/gpu/twocolour_7x9_engine.cuh src/gpu/gpu_sorted_batch.hpp src/gpu/twocolour_canonical_device.cuh \
 		src/gpu/twocolour_weight_class_join.cuh \
 		src/gpu/gpu_cuda_utils.cuh src/gpu/twocolour_prefix_core.cuh \
 		src/gpu/twocolour_prefix_algebra.cuh src/gpu/twocolour_gpu_common.cuh \

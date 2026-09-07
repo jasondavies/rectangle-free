@@ -16,6 +16,7 @@
 #include <unordered_set>
 
 #include "gpu_result_checkpoint.hpp"
+#include "gpu_sorted_batch.hpp"
 
 namespace fs = std::filesystem;
 
@@ -313,6 +314,85 @@ struct PackedWorkResult {
     size_t minimum_free_bytes = SIZE_MAX;
 };
 
+static std::vector<PrefixJoinDesc> plan_packed_joins(
+    const std::vector<Edge>& edges, const std::vector<uint32_t>& indices,
+    const std::vector<uint32_t>& left_ids,
+    const std::vector<PrefixKey>& right_keys,
+    const PackedSolveLayout& left, const PackedSolveLayout& right,
+    PackedWorkResult& result) {
+    double start = seconds_now();
+    std::vector<PrefixJoinDesc> joins;
+    joins.reserve(indices.size() * 2);
+    gpu_batch::visit_sorted_rights(edges, indices, right_keys,
+        [&](size_t, uint32_t edge, size_t right_id) {
+            const PrefixPair& l = left.pairs[left_ids[edge]];
+            const PrefixPair& r = right.pairs[right_id];
+            const PrefixDistribution lhs[2] = {l.selected, l.complement};
+            const PrefixDistribution rhs[2] = {r.selected, r.complement};
+            for (unsigned side = 0; side < 2; ++side) {
+                joins.push_back(PrefixJoinDesc{
+                    lhs[side].bucket_offset, rhs[side].bucket_offset,
+                    lhs[side].bucket_count, rhs[side].bucket_count});
+                result.direct_comparisons +=
+                    U128(lhs[side].entry_count) * rhs[side].entry_count;
+            }
+        });
+    result.join_plan_seconds += seconds_now() - start;
+    return joins;
+}
+
+// One batch owns its uploads until reduction finishes. Keep this lifetime (and
+// hence the memory planner's peak) unchanged when sharing the execution path.
+// Prefetch still takes place between launch() and finish() in each driver.
+class PackedJoinBatch {
+    DeviceBuffer<PrefixJoinDesc> joins_;
+    DeviceBuffer<unsigned long long> results_;
+    size_t count_;
+  public:
+    PackedJoinBatch(const std::vector<PrefixJoinDesc>& joins,
+                    PackedWorkResult& result) : count_(joins.size()) {
+        if (!count_ || count_ > UINT32_MAX)
+            throw std::runtime_error("invalid packed join grid size");
+        double start = seconds_now();
+        joins_.reserve(count_);
+        CUDA_CHECK(cudaMemcpy(joins_.get(), joins.data(),
+                              count_ * sizeof(joins[0]), cudaMemcpyHostToDevice));
+        result.join_upload_seconds += seconds_now() - start;
+        start = seconds_now();
+        results_.reserve(count_);
+        result.result_allocation_seconds += seconds_now() - start;
+    }
+    void launch(const PackedSolveLayout& left, const PackedSolveLayout& right,
+                cudaEvent_t start, cudaEvent_t end) {
+        CUDA_CHECK(cudaEventRecord(start));
+        weight_class_prefix_joins<<<unsigned(count_), THREADS>>>(
+            left.suffixes.get(), right.suffixes.get(),
+            left.buckets.get(), right.buckets.get(),
+            left.classes.get(), right.classes.get(), joins_.get(), results_.get());
+        CUDA_CHECK(cudaGetLastError());
+        CUDA_CHECK(cudaEventRecord(end));
+    }
+    std::vector<unsigned long long> finish(cudaEvent_t start, cudaEvent_t end,
+                                            PackedWorkResult& result) {
+        CUDA_CHECK(cudaEventSynchronize(end));
+        float milliseconds = 0;
+        CUDA_CHECK(cudaEventElapsedTime(&milliseconds, start, end));
+        result.gpu_seconds += milliseconds / 1000.0;
+        std::vector<unsigned long long> host(count_);
+        double download = seconds_now();
+        CUDA_CHECK(cudaMemcpy(host.data(), results_.get(),
+                              count_ * sizeof(host[0]), cudaMemcpyDeviceToHost));
+        result.result_download_seconds += seconds_now() - download;
+        return host;
+    }
+    void release(PackedWorkResult& result) {
+        double start = seconds_now();
+        results_.reset();
+        joins_.reset();
+        result.batch_buffer_free_seconds += seconds_now() - start;
+    }
+};
+
 static std::vector<PackedWorkItem> read_work_manifest(
     const std::string& path) {
     return gpu_checkpoint::read_work_manifest(path);
@@ -569,9 +649,7 @@ static PackedWorkResult solve_packed_work_item(
     }
     result.right_schedule_seconds = seconds_now() - right_schedule_start;
 
-    cudaEvent_t event_start, event_end;
-    CUDA_CHECK(cudaEventCreate(&event_start));
-    CUDA_CHECK(cudaEventCreate(&event_end));
+    CudaEvent event_start, event_end;
     double pipeline_wait_seconds = 0;
     DirectWeightClassWorkspace weight_workspace;
     auto batch_references = [&](size_t batch_index) {
@@ -641,53 +719,11 @@ static PackedWorkResult solve_packed_work_item(
         CUDA_CHECK(cudaMemGetInfo(&free_with_right, &total_device_bytes));
         result.minimum_free_bytes =
             std::min(result.minimum_free_bytes, free_with_right);
-
-
-
-        std::vector<PrefixJoinDesc> joins;
-        double join_plan_start = seconds_now();
-        joins.reserve(group_edges.size() * 2);
-        for (uint32_t edge_index : group_edges) {
-            const Edge& edge = edges[edge_index];
-            auto found = std::lower_bound(group_keys.begin(), group_keys.end(),
-                                          edge.right);
-            if (found == group_keys.end() || *found != edge.right) {
-                throw std::runtime_error("production right ownership mismatch");
-            }
-            const PrefixPair& left = left_layout.pairs[edge_left_ids[edge_index]];
-            size_t right_pair_index = size_t(found - group_keys.begin());
-            const PrefixPair& right = right_layout.pairs[right_pair_index];
-            const PrefixDistribution lhs[2] = {left.selected, left.complement};
-            const PrefixDistribution rhs[2] = {right.selected, right.complement};
-            for (int complement = 0; complement < 2; complement++) {
-                joins.push_back(PrefixJoinDesc{
-                    lhs[complement].bucket_offset, rhs[complement].bucket_offset,
-                    lhs[complement].bucket_count, rhs[complement].bucket_count});
-                result.direct_comparisons +=
-                    U128(lhs[complement].entry_count) *
-                    rhs[complement].entry_count;
-            }
-        }
-
-        result.join_plan_seconds += seconds_now() - join_plan_start;
-
-        double join_upload_start = seconds_now();
-        auto* device_joins = upload_vector(joins);
-        result.join_upload_seconds += seconds_now() - join_upload_start;
-        double result_allocation_start = seconds_now();
-        unsigned long long* device_results = nullptr;
-        CUDA_CHECK(cudaMalloc(&device_results,
-                              joins.size() * sizeof(unsigned long long)));
-        result.result_allocation_seconds +=
-            seconds_now() - result_allocation_start;
-        CUDA_CHECK(cudaEventRecord(event_start));
-        weight_class_prefix_joins<<<unsigned(joins.size()), THREADS>>>(
-            left_layout.suffixes.get(), right_layout.suffixes.get(),
-            left_layout.buckets.get(), right_layout.buckets.get(),
-            left_layout.classes.get(), right_layout.classes.get(),
-            device_joins, device_results);
-        CUDA_CHECK(cudaGetLastError());
-        CUDA_CHECK(cudaEventRecord(event_end));
+        std::vector<PrefixJoinDesc> joins = plan_packed_joins(
+            edges, group_edges, edge_left_ids, group_keys,
+            left_layout, right_layout, result);
+        PackedJoinBatch join_batch(joins, result);
+        join_batch.launch(left_layout, right_layout, event_start, event_end);
         if (!cache.device_resident &&
             batch_index + 1 < batch_right_indices.size()) {
             prefetched = prefetch_host_packed_layout(
@@ -695,17 +731,7 @@ static PackedWorkResult solve_packed_work_item(
             pipeline_max_source_entries = std::max(
                 pipeline_max_source_entries, prefetched.source_entries);
         }
-        CUDA_CHECK(cudaEventSynchronize(event_end));
-        float kernel_milliseconds = 0;
-        CUDA_CHECK(cudaEventElapsedTime(&kernel_milliseconds, event_start,
-                                        event_end));
-        result.gpu_seconds += kernel_milliseconds / 1000.0;
-        std::vector<unsigned long long> results(joins.size());
-        double result_download_start = seconds_now();
-        CUDA_CHECK(cudaMemcpy(results.data(), device_results,
-                              results.size() * sizeof(results[0]),
-                              cudaMemcpyDeviceToHost));
-        result.result_download_seconds += seconds_now() - result_download_start;
+        auto results = join_batch.finish(event_start, event_end, result);
 
         for (size_t local_edge = 0; local_edge < group_edges.size();
              local_edge++) {
@@ -739,11 +765,7 @@ static PackedWorkResult solve_packed_work_item(
                                    U128(selected) * complement;
         }
 
-        double batch_buffer_free_start = seconds_now();
-        CUDA_CHECK(cudaFree(device_results));
-        CUDA_CHECK(cudaFree(device_joins));
-        result.batch_buffer_free_seconds +=
-            seconds_now() - batch_buffer_free_start;
+        join_batch.release(result);
         double right_layout_free_start = seconds_now();
         free_packed_solve_layout(right_layout);
         result.right_layout_free_seconds += seconds_now() - right_layout_free_start;
@@ -774,8 +796,7 @@ static PackedWorkResult solve_packed_work_item(
         (unsigned long long)pipeline_max_source_entries,
         double(pipeline_max_source_entries * sizeof(uint64_t)) /
             (1024.0 * 1024.0 * 1024.0));
-    CUDA_CHECK(cudaEventDestroy(event_end));
-    CUDA_CHECK(cudaEventDestroy(event_start));
+
     free_packed_solve_layout(left_layout);
     result.total_seconds = seconds_now() - total_start;
     return result;

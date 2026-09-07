@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cinttypes>
 #include <cstdint>
+#include <cstring>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -24,6 +25,8 @@
 #include "hafnian_gray_resolvent_gpu_core.cuh"
 
 #include "../common/sha256.hpp"
+#include "../common/durable_file.h"
+#include "../common/parse_unsigned.hpp"
 
 
 namespace hafnian_residual {
@@ -75,10 +78,7 @@ bool is_prime_u32(uint32_t n) {
 }
 
 uint64_t number(const std::string& text) {
-    char* end=nullptr;
-    uint64_t value=std::strtoull(text.c_str(),&end,10);
-    if(!end||*end)throw std::runtime_error("invalid integer: "+text);
-    return value;
+    return rectangle::parse_u64(text);
 }
 
 struct Task {
@@ -116,13 +116,13 @@ Options parse_options(int argc,char** argv) {
         else if(argument=="--self-test")options.self_test=true;
         else if(argument=="--run")options.run=true;
         else if(argument=="--batch")options.batch=take();
-        else if(argument=="--query")options.task.query=unsigned(number(take()));
-        else if(argument=="--prime")options.task.prime=uint32_t(number(take()));
+        else if(argument=="--query")options.task.query=rectangle::parse_u32(take());
+        else if(argument=="--prime")options.task.prime=rectangle::parse_u32(take());
         else if(argument=="--begin")options.task.begin=number(take());
         else if(argument=="--end")options.task.end=number(take());
         else if(argument=="--chunk-terms")options.chunk_terms=number(take());
-        else if(argument=="--blocks")options.blocks=unsigned(number(take()));
-        else if(argument=="--threads")options.threads=unsigned(number(take()));
+        else if(argument=="--blocks")options.blocks=rectangle::parse_u32(take());
+        else if(argument=="--threads")options.threads=rectangle::parse_u32(take());
         else if(argument=="--output")options.task.output=take();
         else throw std::runtime_error(
             "usage: residual_hafnian_gpu [--list|--self-test|"
@@ -137,15 +137,10 @@ void write_atomic(const std::string& path,const std::string& contents) {
     std::filesystem::path target(path);
     if(!target.parent_path().empty())
         std::filesystem::create_directories(target.parent_path());
-    auto temporary=target;
-    temporary+=".tmp."+std::to_string(::getpid());
-    {
-        std::ofstream output(temporary);
-        if(!output)throw std::runtime_error("cannot open result file");
-        output<<contents;
-        if(!output)throw std::runtime_error("cannot write result file");
-    }
-    std::filesystem::rename(temporary,target);
+    const RectFilePart part{contents.data(),contents.size()};
+    if(rect_publish_file(target.c_str(),&part,1,1))
+        throw std::runtime_error("durable hafnian publication failed: "+
+                                 std::string(std::strerror(errno)));
 }
 
 std::vector<Task> read_batch(const std::string& path) {

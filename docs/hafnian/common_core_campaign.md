@@ -16,6 +16,12 @@ measured storage replay; it is not a full campaign or eight-GPU scaling result.
 Experiment 491 adds indexed plan access, one audit/worker per queue process,
 and ordered journal reduction. These reduce CPU overhead, not GPU arithmetic;
 the forecast remains unchanged. Use the freshly bound Experiment-491 manifest.
+Experiment 492 passes a concurrent two-process GPU queue/crash/snapshot rehearsal
+and locally re-reduces all 24 completed test counts identically. Both processes
+shared one GPU: this is a functional gate, not an eight-GPU scaling measurement.
+A selective-scratch-initialization candidate saved only 0.8% of weighted shared
+kernel time and was not promoted. Production arithmetic and manifest provenance
+are unchanged.
 
 The maintained components are:
 
@@ -124,7 +130,9 @@ are checked before reusing the audit. Inputs must remain immutable while used.
 The standalone single-interval `run` command still performs its own audit.
 Initial startup/audit remains outside the forecast. These scripts do not implement
 automatic result pulling, spot recovery or provider cleanup. A short supervised
-multi-worker rehearsal remains the next gate before the full campaign.
+two-process rehearsal now passes. Experiment 493 adds the remote multi-GPU
+runner and a private deployment supervisor with verified off-host publication
+and a spending guard. The production campaign is in progress, not yet certified.
 
 For a bounded queue rehearsal, invoke the emitted `common_core_manifest.py run`
 command with `--max-checkpoints 1`; when a task reaches the limit the **whole
@@ -132,6 +140,35 @@ queue stops**, rather than starting the next task. Omit that flag to resume.
 Chunk/checkpoint and transaction-batch options are also available on this queue
 command. Controller provenance remains strict: do not reuse older-controller
 journals or replace their headers just because the arithmetic is unchanged.
+
+## Supervised multi-GPU deployment
+
+`tools/common_core_remote_campaign.py --config CONFIG.json` starts one audited
+queue per physical GPU, tracks completed requests, and publishes closed
+snapshots plus checksum/coverage receipts periodically. Configuration supplies
+the manifest, worker, output directory, absolute stop deadline, and snapshot
+interval. It checks that GPU and queue counts agree. It contains no provider
+credentials or provisioning logic. The queue controller and arithmetic are
+unchanged; failures receive at most two local process retries before stopping.
+
+The private Experiment-493 supervisor runs as a local user service, polls the
+cloud and remote status, downloads receipts and checkpoint bytes, checks exact
+provenance/coverage and monotonicity, and publishes verified local copies.
+The previous verified file serves as a local delta-transfer basis; it is never
+updated in place. Spot recovery reattaches the retained OS disk in the same
+region and resumes the original journals, subject to capacity, bounded retries
+and the original budget deadline. First SSH contact waits for provisioning to
+finish; a changed pinned host key requires explicit approval.
+
+The deployment stops at the credit reserve or conservative elapsed-time guard.
+A separate remote stop/poweroff timer is a backstop, not a substitute for
+releasing the cloud allocation. **Keep the local supervising machine online**
+for pulls, cloud recovery and deletion. On normal completion, require all
+64 locally verified complete receipts and a successful whole-campaign
+`reduce --require-complete` before deleting VM and disk. Failure/budget exits
+preserve the disk and local checkpoints; they never certify a partial sum.
+Provider IDs, SSH configuration, receipts, logs and deployment state remain
+outside committed production code.
 
 ## Streaming final reduction
 
@@ -150,6 +187,54 @@ cache keyed by `(domain, unmatched, prime index)`; CRT prefix products and
 their inverses are precomputed. These change neither residues nor the v2
 journal format. An old journal can still be reduced with matching peers, but
 cannot be resumed by a changed controller.
+
+## Off-host snapshots and cleanup gate
+
+Never copy a live SQLite database as a checkpoint. Publish a closed snapshot
+through SQLite's online backup API:
+
+```sh
+python3 tools/common_core_snapshot.py --source path/to/task-0000.sqlite \
+  --output published/task-0000.sqlite --backup-timeout 60
+```
+
+The command verifies all payloads, fsyncs the file, atomically publishes it and
+fsyncs its parent directory. Its JSON receipt includes the file SHA-256 and
+group/range counts. One publisher owns a destination at a time. Updates must
+preserve every previously published group and range; a corrupt, regressing or
+timed-out backup leaves the previous snapshot intact. The timeout bounds the
+live-copy stage, not the subsequent complete payload validation.
+
+Copy **only closed published snapshots**, using checksum-aware transfer rather
+than rsync's default size/mtime shortcut. SQLite can change content without
+changing file size, including multiple updates within one mtime comparison
+interval. Download to a staging path, then verify against that publication's
+receipt before replacing a verified local copy:
+
+```sh
+python3 tools/common_core_snapshot.py --source downloaded/task-0000.sqlite \
+  --verify-sha256 SHA256_FROM_PUBLICATION_RECEIPT
+```
+
+If publication advances while pulling, retry with a matching file/receipt; a
+mismatch is not permission to accept the latest local file. A snapshot on the
+worker is not an off-host backup. Avoid rescanning/publishing every checkpoint:
+full verification is proportional to journal size, so measure a sensible
+periodic cadence and publish once more after queue completion.
+
+Before automatic VM/disk deletion, require all expected final receipts locally,
+verified file bytes and payloads, and complete assigned-work coverage. A remote
+`queue_complete` log or a successful transfer alone is insufficient. On a new
+worker, restore into fresh paths with the original manifest/controller/binary
+identities, then run the same queue. Never overwrite a live database or change
+headers to force resume. Final whole-campaign reduction must still reject gaps
+and overlapping actual ranges.
+
+`tests/hafnian/common_core_queue_gpu_test.py` provides a bounded real-catalog
+rehearsal: two queues, four groups, forced process-group termination after a
+published checkpoint, restore, idempotent resume and complete control parity.
+It requires the small 6x28 catalog/plan under `build/`. Queue 2 holds the unused
+remainder and is explicitly forbidden from running; these are not 6x27 results.
 
 ## Bounded pilot and resume
 

@@ -172,14 +172,21 @@ inline uint32_t host_power(uint32_t x,uint32_t exponent,uint32_t prime) {
     return value;
 }
 inline void set_field(Input& in,uint32_t prime) {
-    // The same tiny table is reused across every group/chunk of this field.
-    thread_local uint32_t previous=0;
-    thread_local std::array<uint32_t,49> inverse{};
-    if(previous!=prime){
-        for(unsigned j=1;j<inverse.size();++j)inverse[j]=host_power(j,prime-2,prime);
-        previous=prime;
+    // A queue alternates all four production fields between groups. Retain
+    // their tables instead of recomputing 48 inverses on every field switch.
+    // Bounded round-robin replacement also supports research prime sets.
+    struct Table { uint32_t prime=0; std::array<uint32_t,49> inverse{}; };
+    thread_local std::array<Table,4> tables{};
+    thread_local unsigned next=0;
+    Table* found=nullptr;
+    for(auto& table:tables)if(table.prime==prime){found=&table;break;}
+    if(!found){
+        found=&tables[next];next=(next+1)%tables.size();
+        for(unsigned j=1;j<found->inverse.size();++j)
+            found->inverse[j]=host_power(j,prime-2,prime);
+        found->prime=prime;
     }
-    std::copy(inverse.begin(),inverse.end(),in.inverse);
+    std::copy(found->inverse.begin(),found->inverse.end(),in.inverse);
 }
 
 template<class Problem> Input pack(const Problem& p,uint32_t prime) {

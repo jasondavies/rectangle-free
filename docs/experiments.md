@@ -17214,3 +17214,468 @@
 - Keep the **approximately 119 GPU-hour** forecast unchanged: the reduced
   final-reduction and repeated-startup costs were outside it. No GPU/cloud
   instance is launched, no production campaign runs, and no grid count is added.
+
+### Experiment 492: selective scratch A/B and concurrent recovery rehearsal
+
+- Before committing the remaining campaign budget, rent one RTX PRO 6000 spot
+  GPU for a bounded test. Prepare the 14.2 MB payload locally first and use a
+  time-limited driver with cleanup. Allocation-to-deletion-request duration is
+  327.96s at $0.945/hour (about $0.086 compute, excluding disk charges). Verify
+  both the VM and volume inventories are empty afterward. No full campaign is
+  launched; cloud identifiers and artifacts stay under ignored
+  `build/common-core-492/`.
+- Test omitting the first full shared-scratch zeroing/barrier. In the specific
+  aliased/sync-cleanup/warp-polynomial configuration, matrices, triangular
+  coefficients, moment buffers and nonempty memo states are assigned before
+  use; the empty memo polynomial is cleared separately. Test with a deliberately
+  poisoned arena, including the empty-core case. CPU and real CUDA runs each
+  pass 7,920 child/sign checks across four fields and complete small brute
+  counts. This is exact test evidence, not a general permission to remove
+  initialization from other configurations.
+- Take one representative from each of the 195 Experiment-487 strata and
+  execute two timing passes per binary, control then candidate, on the same
+  otherwise idle GPU. Use identical seed-492 Gray windows, 32,768-sign chunks
+  and up to 262,144 measured signs per sample/prime. Complete first-pass
+  archives agree on all 195 group metadata records and 535 exact residue
+  ranges. Each remote run also reports within-run repeat parity.
+- Population-weighted shared-kernel projection is 101.3602 versus 100.5151
+  hours: **0.834% less time**. The unchanged independent tail differs by 0.171%,
+  demonstrating nonzero timing variation. This is a small two-pass static
+  sample, not a confidence interval or ABBA-controlled sub-percent result.
+  Do not use its old-plan tail population or immediate-commit cloud-storage
+  overhead to replace the accepted Experiment-489/491 campaign forecast.
+  Even taking the shared gain literally saves only about 0.85 of 119 hours.
+  **Do not promote**: retain the established production kernel and manifest.
+  Archive the reproducible candidate diff as
+  `research/gpu/hafnian_common_selective_init.patch`, without a new production
+  flag or fallback. Build it with `CORE_OPT_SELECTIVE_INIT=1`; poison tests also
+  define `CORE_TEST_POISON_SCRATCH=1` in the validated production configuration.
+- Add `tools/common_core_snapshot.py`: online SQLite backup, full payload
+  validation, durable atomic publication, monotonic committed-record checks,
+  single-publisher lock, bounded live-copy stage and SHA-256 receipt. Add an
+  explicit downloaded-file verification mode. Tests cover a concurrent writer,
+  corrupt data, regressing snapshots, publisher contention, timeout and checksum
+  rejection without replacing a previous good snapshot. Integrate them into
+  the common-core test target (33 Python tests plus 288 reference checks).
+- Run two persistent queues concurrently on the **same** GPU, selecting two
+  shared groups and two independent groups from the real 6x28 catalog. Publish
+  a live checkpoint containing 32 ranges, pause the process group, pull that
+  closed snapshot off-host, kill the process group, restore to a fresh path
+  and resume. The local first-snapshot SHA-256 matches the paused publication
+  receipt. Completed queues resume idempotently, and all 24 complete counts
+  match a separate unchanged control binary. Rehearsal elapsed time is 15.34s.
+  Local reduction of all four published final journals exactly matches the
+  remote reduction. These are regression counts, not new 6x27 campaign results
+  or a multi-GPU throughput measurement.
+- The diagnostic puller exposed a real cleanup hazard: default rsync size/mtime
+  checks missed the last three ranges of the second candidate benchmark DB.
+  Complete first-pass A/B archives and both complete timing logs survived;
+  the second candidate DB is explicitly incomplete, not accepted as a complete
+  archived pass. All final rehearsal journals pass local reduction. Require
+  checksum-aware pulls, matching publication receipts and complete local
+  coverage **before deletion** in the full campaign supervisor. Do not copy
+  live DBs or infer successful backup from remote completion logs alone.
+- Remaining performance review: repeated input upload/launch-attribute setup
+  and the tiny per-prime inverse table are secondary CPU/launch opportunities,
+  not a credible order-of-magnitude gain. Further order-56 tail sharing targets
+  only about 1.6 GPU-hours before any preprocessing cost. Full snapshot checking
+  is linear in journal size and should be periodic, not per sign checkpoint.
+  Retain the approximately **119 GPU-hours / 15h on eight GPUs** forecast.
+  Next wire verified snapshot receipts, restart and spending limits into the
+  full campaign supervisor; do not treat the bounded pilot as that supervisor.
+
+### Experiment 493: full 6x27 campaign launch (in progress)
+
+- The user authorizes the full eight-GPU spot run with the approximately $168
+  balance. Keep the Experiment-491 manifest, original arithmetic binary and
+  approximately 119 GPU-hour forecast. Launch eight RTX PRO 6000 GPUs, with
+  64 whole-group tasks and exact-once ownership of 45,007,139 original queries.
+  There is no new kernel or coefficient change in this campaign.
+- Add a provider-neutral remote queue/snapshot runner and two coverage/receipt
+  tests. A private local service handles deployment, checksum-aware pulls,
+  retained-disk recovery and spending limits. Limit compute conservatively to
+  19.5 hours at $7.56/hour, reserve room for storage, and independently stop at
+  the account reserve. Arm a remote quiescence/poweroff deadline. The total
+  budget guard is approximately $150, not a guarantee of completing after
+  arbitrary interruptions or provider failures.
+- Deployment exposed startup races: SSH became reachable before provisioning
+  finished and its host key changed; the user explicitly approved the verified
+  replacement fingerprint. A missing remote configuration directory also
+  interrupted setup. Preserve the disk across released setup VMs, add bounded
+  transfer retries and wait for provider readiness before first SSH trust.
+  Private deployment logs retain the failures; no arithmetic work was lost.
+- On 2026-09-07 at 11:06 UTC, all eight queues start. Initial plan audits pass,
+  all eight GPUs produce checkpoint results, utilization is approximately
+  94–100%, and no computation process has failed or restarted in the initial
+  check. The longest independent task starts early as specified by the manifest.
+- Snapshots are scheduled every five minutes and pulled by the local service.
+  The first automatic cycle publishes and locally verifies all eight active
+  task snapshots: 13,661 group records and 29,119 committed sign ranges,
+  approximately 6 MiB. An independent local pass rechecks every downloaded
+  file against its publication SHA-256 and validates all stored payloads.
+  No snapshot errors or queue restarts are reported in this initial cycle.
+  The final cleanup gate requires matching publication checksums, local
+  provenance and complete task coverage, followed by full exact reduction.
+  Merely observing remote completion does not authorize deleting the disk.
+  Host/provider inventory and all campaign artifacts remain private under
+  `build/common-core-493/` and the external results directory. This entry is a
+  launch record, **not a completed 6x27 result or a validated runtime estimate**.
+
+### Experiment 494: production parsing, publication and preparation cleanup
+
+- Keep the running Experiment-493 campaign's binaries, manifests, controller
+  and remote configuration unchanged. All new builds and feasibility artifacts
+  are isolated under `build/review-494/` (and its Blackwell compile directory).
+  No paid GPU experiment is launched by this cleanup.
+- Add strict decimal `uint64_t`/`uint32_t` parsing. GPU manifests require
+  exactly four or six fields, reject malformed optional filters, signs,
+  partial numbers, overflow and reversed nonzero-ended ranges. END=0 and
+  range/filter intersection semantics remain unchanged. Existing result
+  identity numbers use the same parser. Hafnian CLI parsing also checks
+  narrowing before assigning query IDs, primes and launch dimensions.
+- Consolidate the GPU result, hafnian checkpoint and polynomial result
+  publishers into one POSIX helper. It uses a unique same-directory temporary,
+  checked writes/close, file fsync, link (immutable result) or rename
+  (replaceable checkpoint), then directory fsync. Existing payload/checksum
+  formats and overwrite policies remain unchanged. Parent directories must
+  already exist durably. Post-publication sync failures are errors, not success,
+  and do not delete the published file. Injected write, sync, close and publish
+  failures preserve prior results; all 17 publication cases pass.
+- Fix `six_by_twenty_eight_runtime_montgomery_control`: its first prerequisite
+  was a header, so `$<` passed a `.cuh` to nvcc rather than the CUDA entry point.
+  The corrected control builds locally with CUDA 13.3 for Ada (existing
+  control-only unused-variable warnings remain).
+- Share 7x9 selected/complement descriptor construction and batch
+  upload/launch/download/cleanup between the single- and four-owner solvers.
+  The single-owner planner now uses a monotonic right-key merge instead of
+  one binary search per edge. RAII owns device buffers and timing events.
+  Keep allocation lifetimes, prefetch placement, owner launch order, numerical
+  kernel and result ordering unchanged; this is not a new pipeline experiment.
+  A 1,000-batch randomized test agrees with the old binary-search lookup and
+  rejects missing/out-of-order ownership. The shared drivers remove a net
+  48 lines before counting the small independently tested merge header.
+- Construct the fixed 60-token matching graph once per `Geometry`; reuse
+  the 19 exact degree-bound summands. Retain four thread-local inverse tables
+  rather than only the most recent CRT field. All 36,398 genuine 6x28 bounds
+  plus 10,004 random/boundary cases match the previous computation exactly;
+  5,760 inverse checks include cache hits and eviction/revisit cases. The
+  combined bound check takes about 0.205s with the old graph construction and
+  0.0027s with reuse locally. This is a preparation microbenchmark, **not** a
+  hafnian solve speedup. The cooperative host test passes 7,920 child-sign
+  comparisons across four primes, including complete brute-force cases.
+- The publication/checkpoint tests and 40 Python partition/campaign/manifest/
+  I/O regression tests pass locally. Update the GPU dump inventory and build
+  dependencies to include the new shared headers.
+- Both 7x9 entry points compile for Ada and architecture-specific Blackwell
+  using CUDA 13.3. The latter uses explicit
+  `-gencode=arch=compute_120a,code=sm_120a`: generic `sm_120` code generation
+  rejects the existing architecture-specific NVFP4 instructions. These are
+  compile checks, not GPU execution or end-to-end A/B measurements. Persistent
+  join arenas, changed four-owner launch scheduling, and caching prepared
+  device inputs remain separate follow-ups requiring a memory/correctness
+  gate; this pass does not silently change their behavior.
+- The 8x8 production driver also compiles for Ada, and four malformed
+  hafnian CLI invocations fail before catalog/GPU setup. Twelve additional
+  endpoint-reducer/snapshot/remote-queue tests pass (52 Python tests total).
+
+### Experiment 495: complete 6x28 shared-core timing census (CPU only)
+
+- Generate a fresh full order-through-50, pool-11 assignment with the current
+  planner (two CPU threads), without changing any production campaign.
+  All 36,398 queries and coefficient sum 8,482,414,501 pass exact-once coverage
+  and the complete row-map audit. Plan SHA-256:
+  `75ca5958bf620941b9db2ed47aebaeac5d4af85f187ca183e3e63c155c29601d`.
+- There are 6,219 groups: 5,417 shared groups and 802 independent queries.
+  Original work is 1,063,130,234,880 prime/sign terms; assigned work is
+  114,098,700,288, including 103,205,044,224 independent-tail terms.
+  The ratio is not a runtime speedup: shared and independent sign terms have
+  different costs, and the independent tail cannot be omitted.
+- Export a deterministic full-catalog timing sample, seed 494, up to three
+  groups per stratum: 48 strata (41 shared, seven independent), 127 sampled
+  groups. Artifacts: `build/review-494/6x28-order50.plan` and
+  `build/review-494/6x28-sample.json`. All files remain local/private.
+- This completes the workload census, **not** the GPU cost projection. Next
+  measure these genuine 6x28 groups using the production worker, including
+  preparation, all required prime images, the independent tail, and durable
+  transactions. Do not relabel the 6x27 timing logs as 6x28 measurements or
+  quote a full-campaign time from an isolated shared-group speedup. Order-52/54
+  extension and timing-guided regrouping are separate optional plan candidates.
+
+### Experiment 496: isolated Blackwell cleanup A/B and full 6x28 projection
+
+- With a user-approved $2 ceiling, use one RTX PRO 6000 96GB spot GPU at
+  $0.945/hour. The eight-GPU 6x27 production instance, binary and controller
+  remain untouched. Local timed deletion and remote runtime/poweroff guards
+  bound allocation lifetime independently of benchmark success. Automatic
+  pulls preserve intermediate logs and journals.
+- One setup invocation mistakenly requested one timing repeat; the existing
+  harness correctly rejected it before accepting measurements. Its GPU
+  tail/reference gate had passed. The watcher pulled/verified the diagnostic
+  files and deleted that VM/disk. Retry with the required two repeats and a
+  revalidated bundle. Both benchmark VMs and OS volumes are subsequently
+  confirmed absent. Combined allocation-time compute estimate is $0.2292,
+  excluding the small storage charge (not an invoice total).
+- Compile the `6c022ea` control and the Experiment-494 working-tree candidate
+  with the same CUDA 13.3 compiler and architecture targets. A/B comparisons
+  are sequential on the otherwise idle GPU, in control/candidate/candidate/
+  control order. Provider inventory, binaries and raw measurements remain
+  private in `build/review-496/`; final verified downloads are in `download-b/`.
+
+#### Hafnian correctness and complete workload projection
+
+- The candidate passes all 252 GPU/CPU independent-tail reference checks,
+  covering four primes, low/high sign ranges and matrix orders through 66.
+  Time every Experiment-495 stratum: 48 strata, 127 actual groups and 384
+  group/prime combinations per repeat. Each of four A/B passes has two
+  repeats. Checksum-validated journal payloads agree exactly across all eight
+  repeats, including every child residue and all range/metadata identities.
+- Use 32,768-term warmups, 262,144-term measurement windows at reproducible
+  nonzero offsets (seed 496), and 32,768-term CUDA chunks. The full-catalog
+  projection includes all required CRT images, preparation, dispatch and
+  measured durable checkpoint overhead at a 1,048,576-term interval. Journals
+  in this timing harness commit individually, so the transaction allowance
+  does not claim the production batched-commit saving.
+
+| Whole 6x28 projection | Control mean | Cleanup mean |
+| --- | ---: | ---: |
+| Shared GPU kernels | 1.08045 h | 1.08004 h |
+| Independent GPU kernels | 4.18159 h | 4.17984 h |
+| Preparation/dispatch/checkpoint allowance | 0.18835 h | 0.17974 h |
+| Total | 5.45039 h | 5.43962 h |
+
+- Individual total projections are 5.47009/5.43069 control and
+  5.43743/5.44181 candidate hours. The 0.2% mean difference is smaller than
+  run-to-run variation: **no material solve-time gain or regression** is
+  established for this cleanup. The useful result is the genuine full-catalog
+  estimate of approximately **5.4 GPU-hours**, not a complete 6x28 rerun.
+  Provisioning, audit/final reduction and interruption losses are excluded;
+  sample-root variation is not a statistical confidence interval.
+- The no-defect order-64 independent query alone contributes about 1.92 hours.
+  The 706 order-52 independent queries contribute about 1.31 hours including
+  overhead. These are higher-priority targets than further shared-kernel
+  micro-tuning. Whole-query/group ownership also creates a roughly 1.9-hour
+  multi-GPU tail: do not divide 5.4 hours by the GPU count without splitting
+  this large independent sign domain into disjoint ranges first.
+
+#### 7x9 single/four-owner cleanup regression
+
+- Use four real owner corpora, taking four separated 16,384-record windows
+  from each: 262,144 records in total. Keep immutable sample identities and
+  source offsets; these partial corpora are benchmark inputs, not a production
+  result. Limit right batches to 268,435,456 entries to exercise repeated
+  batch construction/execution and verify four CPU joins per owner.
+- Rebuild the universal quotient cache once remotely: 35.3 seconds host
+  construction, then 11.8 seconds artifact publication/checksumming. Its
+  checksum matches the historical canonical artifact. Subsequent runs reuse
+  that artifact. Each process still pays its load/setup cost, which is included
+  in process wall time but excluded from the recurring solve column below.
+
+| Same 262,144-record sample | Control process wall | Cleanup process wall | Control recurring solve | Cleanup recurring solve |
+| --- | ---: | ---: | ---: | ---: |
+| Single-owner driver | 17.2379 s | 17.2381 s | 10.8097 s | 10.8545 s |
+| Four-owner driver | 20.7146 s | 20.7134 s | 14.9922 s | 15.0131 s |
+
+- All eight solves agree on exact contributions, coefficient coverage and
+  direct-comparison counts, including cross-mode agreement. Each completed
+  invocation is restarted and correctly reports ALL_COMPLETE without
+  recomputing. The single-owner descriptor planner falls from about 15.6 ms
+  to 6.15 ms (61% locally), but that stage is too small to move complete time.
+  End-to-end behavior is effectively neutral. This small four-window workload
+  is not evidence about the best production owner count or full-shard runtime.
+- Accept the consolidation on correctness/maintainability grounds; do not add
+  another fallback or claim a kernel speedup. The numerical CUDA kernels and
+  allocation/prefetch scheduling remain unchanged. Final downloaded files are
+  checked against remote SHA-256 sums before deletion, and all eight hafnian
+  journals are independently revalidated locally.
+
+## Experiment 497: independent sign-range sharding and 6×28 order-52/54 census
+
+- Scope: local implementation and exact audits only. No GPU was rented and
+  the active 6×27 campaign was not changed. Its manifest, controller/configuration
+  and production worker hashes still validate. This experiment does not replace
+  Experiment 496's measured ~5.44 GPU-hour 6×28 projection with a faster claim.
+- Added `tools/common_core_sign_shards.py`, a standalone provider-neutral
+  independent-query manifest/runner/reducer, reusing the existing worker
+  protocol, durable SQLite transactions, exclusive claims, checksums and CRT
+  normalization. One task owns a half-open sign interval across every required
+  prime; ranges can execute on separate GPUs. Complete coverage is checked
+  before normalization and reconstruction. This certifies one matching query,
+  not a complete grid result; whole-campaign queue/reducer integration remains
+  a separate gate. It cannot be silently mixed with old whole-group journals.
+- The order-64 query is query 0 / group 5417 of the Experiment 494 plan:
+  domain 2,147,483,648 signs per image, four primes, certified matching bound
+  108 bits. An eight-task manifest assigns 268,435,456 signs per image to each
+  task. The measured ~1.923-hour single-query bottleneck would ideally become
+  ~14.4 minutes per GPU, with unchanged total arithmetic. This is not a measured
+  eight-GPU wall time or a forecast for the complete campaign.
+- All 11 local sharding tests pass: uneven partitions, large unsigned indices,
+  missing ranges/primes, restart without duplicate work, duplicate snapshots,
+  mismatched provenance, checksum corruption, valid-checksum out-of-ownership
+  data, rollback, and real finite-field arithmetic. The real CPU worker checks
+  16 split-versus-unsplit order-64 windows across all four primes, including
+  high sign indices and the domain end (224 term evaluations). A bounded CLI
+  run and restart at task 7 commit disjoint three-term ranges and the reducer
+  correctly returns `partial_query`. The existing controller (11), manifest
+  (9) and steady-benchmark (4) tests also pass. CUDA kernels are unchanged;
+  a multi-GPU orchestration smoke test remains necessary.
+- Also ran the existing `--extend-tail` planner on the complete 6×28 catalog,
+  preserving all previously shared groups. Seed 497, pool cap 11, eight local
+  threads. Source plan SHA-256:
+  `75ca5958bf620941b9db2ed47aebaeac5d4af85f187ca183e3e63c155c29601d`.
+  Candidate SHA-256:
+  `449a74840478afb49ddaf001f4bea549fa5548bdf39fea0355d10a33902a0a83`.
+  Full row-map verification and exact-once coefficient coverage pass:
+  36,398 queries, coefficient sum 8,482,414,501.
+
+  | Plan metric | Order-50 baseline | Order-52/54 candidate |
+  | --- | ---: | ---: |
+  | Total groups | 6,219 | 5,629 |
+  | Independent queries | 802 | 104 |
+  | Assigned prime/sign terms | 114,098,700,288 | 41,124,102,144 |
+  | Order-52/54 groups | 744 | 154 |
+
+- Of the 744 order-52/54 independent queries, 698 now belong to 108 shared
+  groups; 46 remain independent. The original shared groups and every other
+  independent order are unchanged. The selected-order baseline needs
+  78,718,697,472 prime/sign terms; the candidate needs 5,744,099,328, including
+  4,932,501,504 independent terms. This is a 13.70× term-count reduction for
+  those orders and a 2.77× reduction across the full plan, **not** a runtime
+  factor: shared-core signs have different costs and numbers of children.
+- Prepared matched stratified benchmark inputs under `build/review-497/`:
+  baseline two strata / six sampled groups; candidate 22 strata / 46 sampled
+  groups, three samples per stratum where available. These include all required
+  CRT schedules and leave no unmeasured independent tail assigned zero cost.
+  Next gate: short isolated GPU A/B, exact residue validation, then complete
+  prime-image-weighted projection before integrating the new plan. See
+  `docs/hafnian/sign_shards.md` for the separate range-sharding workflow.
+
+## Experiment 498: measured 6×28 order-52/54 grouping and CUDA sign-shard smoke test
+
+- Isolated 1× RTX PRO 6000 Blackwell Server Edition spot VM, driver 580.126.09,
+  600 W power limit, eight OpenMP threads. Used the exact Experiment 496
+  candidate binary; **no CUDA kernel change**. A/B changes only the audited
+  grouping plan from Experiment 497. The active 6×27 worker remained isolated
+  and unchanged. Automatic teardown was armed with a 40-minute deadline and
+  a sub-$1 allowance. The run finished normally, all results were pulled and
+  SHA-256 checked, and both the test VM and OS disk were confirmed absent.
+  Approximate test cost: $0.10 including storage.
+- Before timing, generated CPU reference residues for all 52 sampled groups
+  (six control, 46 candidate), at low and high three-sign windows and every
+  required prime. CUDA matches all **312 ranges / 1,698 residues**. All
+  candidate row maps and exact-once catalog/coefficient coverage were already
+  audited in Experiment 497. These bounded arithmetic checks are not a
+  complete-query or complete-grid recalculation.
+- Timing sequence: full-plan control, selected-order A/B/B/A, full-plan
+  control. Each invocation has two repeats, independently shuffled strata,
+  the same range seed 498, 32,768-sign warmup/chunks, and 262,144-sign measured
+  windows. A/B uses the same executable and runs sequentially on one GPU.
+  Projections include all required prime images, unchanged independent work,
+  setup, dispatch and immediate FULL-sync checkpoint cost at 2²⁰ signs.
+  They do not claim the additional benefit of production batched transactions.
+
+  | Selected orders 52/54 | First projected GPU-hours | Second projected GPU-hours | Mean |
+  | --- | ---: | ---: | ---: |
+  | Independent control | 1.324012 | 1.331528 | 1.327770 |
+  | Shared-core candidate, including remaining independent queries | 0.199238 | 0.199558 | 0.199398 |
+
+- The selected-order forecast improves **6.66×**, or **84.98% less time**.
+  Candidate mean comprises ~0.107116 shared kernel hours, ~0.001221 shared
+  overhead, ~0.084405 independent kernel hours and ~0.006656 independent
+  overhead. Unlike the 13.70× sign-term reduction, these costs include the
+  extra work per shared sign. Actual sampled invocation times were ~1.265 s
+  per control and ~37.83 s per candidate: the candidate samples far more
+  groups, children and strata. Comparing those raw invocation times would
+  therefore not compare the same complete workload.
+- Fresh whole-plan baseline projections are **5.620778 / 5.437111 hours**,
+  mean **5.528945 hours**. Replacing only their audited order-52/54 strata
+  (mean 1.557205 hours) with the candidate gives **4.171137 GPU-hours**,
+  a **24.56% projected complete-time reduction**. Independently applying the
+  selected-order A/B saving to that baseline gives ~4.4006 hours. The baseline
+  full-plan and selected-order censuses use different sampled queries, and
+  checkpoint timing varies; do not interpret the narrow repeat scatter as
+  precise population accuracy. Use **roughly 4.2–4.4 GPU-hours** for planning,
+  about **20–25% below the ~5.5-hour control**. This is a sampled forecast,
+  not a completed solve, and excludes provision/transfer, final reduction,
+  interruption losses and multi-GPU contention.
+- Verified locally that the two plans select exactly the same 744 affected
+  queries with identical coefficients, and preserve all other **5,475 group
+  definitions** byte-for-byte at the decoded-record level. All 12 benchmark
+  journals pass checksum/metadata verification; repeated runs agree on
+  **13,656 stored residues**. Cross-plan bounded sums need not agree because
+  their sign domains differ; CPU-reference comparisons establish their
+  respective arithmetic, and the audited shared-core identity relates them.
+- CUDA range-sharding smoke test: for each of four primes, split a high-index
+  65,539-sign order-64 window into eight uneven ranges and recover the exact
+  unsplit sum. Then ran tasks 0 and 7 through the new journal runner, stopped
+  each after one 32,768-sign checkpoint, and resumed. Journals contain the
+  next disjoint checkpoint, not duplicate work. The partial reducer correctly
+  refuses to report a matching count with other ranges/primes absent. This
+  tests scheduling arithmetic and restart on **one** GPU, not eight-device
+  performance or complete-query CRT reconstruction.
+- Accept the order-52/54 grouping for a future 6×28 plan; do not alter the
+  live 6×27 campaign. Next engineering step is integrating independent
+  sign-range ownership into the complete campaign queue/reducer so the
+  order-64 query does not impose a ~1.9-hour one-GPU wall-time floor.
+  Private benchmark payloads, plans, logs, journals, hashes and analysis are
+  under `build/review-498/`; no provider identifiers enter production files.
+
+## Experiment 499: complete mixed-task campaign integration (local validation)
+
+- Added the opt-in `tools/common_core_mixed_campaign.py`: measured manifest
+  construction, persistent per-GPU queues, whole-group and independent
+  sign-range tasks, durable checkpoints, format-aware snapshots and a complete
+  grid reducer. No CUDA kernel change and no cloud resource provisioned.
+  The live 6×27 controller, whole-group manifest, snapshot/remote supervisor
+  files and worker binary remain unchanged; their identity checks still pass.
+- Reused the existing cost model, whole-group executor, journal/claim logic,
+  expected metadata, CRT, sign-domain/dummy-factorial normalization and final
+  coefficient formula. Extracted the standalone interval execution into
+  `solve_interval` so the standalone and integrated range runners share it.
+  A format-neutral SQLite publication helper supports the new controller;
+  the old live snapshot entry point is intentionally left unchanged. The old
+  snapshot command rejects new formats, so documentation now explicitly directs
+  mixed campaigns to their own validated `snapshot` subcommand.
+- Manifest ownership tiles every plan group exactly once. Shared groups remain
+  whole; independent groups can instead be tiled by disjoint sign intervals,
+  each covering every required prime. Validation forbids mixing whole-group
+  and range ownership of the same group, gaps, overlaps, inconsistent domains,
+  missing/duplicate queue assignments and non-independent splits. Journals bind
+  the complete manifest, task, backend, solver and controller dependencies.
+- The reducer validates each journal/task and merges ranges at group level.
+  It applies normalization/CRT only after complete per-prime coverage, then
+  applies the outer coefficient and column multiplicity exactly once per
+  completed query. A shared group's shorter-CRT child may finish independently
+  of its longer-CRT children. Partial totals cannot pass `--require-complete`.
+  Duplicate snapshots, corrupt payloads, foreign manifests and even checksummed
+  records outside their task interval are rejected.
+- Constructed a conservative eight-GPU 6×28 manifest using Experiment 498's
+  full baseline `f0` and replacement `b1`. Retained old overhead per replaced
+  child, without discounting for batched transactions. Result: **46 tasks**,
+  consisting of 28 whole-group tasks and 18 sign-range tasks. Group 5417
+  (order 64) is split eight ways; groups 5418/5419 (order 60) five ways each.
+  Total forecast **4.436599 GPU-hours**. Queue hours:
+  `0.523937, 0.513158, 0.574111, 0.578468, 0.577999, 0.513139, 0.578004, 0.577782`.
+  The largest individual task is **865.26 seconds**, rather than the entire
+  ~1.9-hour query. These **30.8–34.7 minute queue forecasts** exclude repeated
+  startup/audit, transfer, final reduction, interruption and multi-GPU effects;
+  they are not a measured campaign wall time.
+- **15 new mixed-workflow tests pass**, including 100 randomized partition
+  censuses, synthetic complete CRT/grid-count parity with the existing
+  whole-group reducer, one-versus-multi-prime children, interrupted batched
+  transactions, idempotent completed queues, provenance, corruption and
+  monotone snapshot publication. The standalone sign suite (11), old campaign
+  controller (11), old manifest (9), old snapshot (2), and steady benchmark (4)
+  also pass: **52 tests total**. Synthetic fixture counts are not grid results.
+- Real bounded CPU command-line rehearsal on the full checked 6×28 artifacts:
+  ran queues 0/1 concurrently, published live SQLite snapshots, killed both
+  process groups, verified downloaded snapshot hashes, restored to fresh
+  paths and resumed. Each queue added exactly one new disjoint checkpoint;
+  all **13 restored/new checkpoints** agreed with direct finite-field worker
+  recomputation. The full reducer correctly returned partial coverage with
+  zero completed queries. No full order-64 query or full grid was calculated.
+- The generated GPU manifest passes `verify`; command emission launches
+  nothing. Artifacts are under `build/review-499/`. User-facing workflow:
+  `docs/hafnian/mixed_campaign.md`. Remaining deployment gate: a bounded
+  multi-GPU mixed-queue rehearsal and adapting the future provider supervisor
+  to the new launch/snapshot/reduction commands. Do not point the current
+  6×27 supervisor at the new manifest or rebuild its live binary.

@@ -7,6 +7,7 @@ root = Path(__file__).resolve().parents[1]
 paths = [root / 'Makefile', Path(__file__).resolve()]
 paths += sorted((root / 'src/partition').glob('*.[ch]'))
 paths += [root / 'src/common/sha256_c.c', root / 'src/common/sha256_c.h']
+paths += [root / 'src/common/durable_file.h']
 h = hashlib.sha256()
 for path in paths:
     h.update(str(path.relative_to(root)).encode() + b'\0')

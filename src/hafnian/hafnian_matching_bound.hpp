@@ -38,26 +38,21 @@ inline uint16_t matching_bound_power(
     // rounded upward using a common exact denominator, so this deliberately
     // returns a conservative integral power-of-two bound.
     constexpr uint64_t DENOMINATOR=24504480; // lcm(2,4,...,36)
-    std::array<uint64_t,TOKENS> neighbours{};
-    for(unsigned left=0;left<TOKENS;++left) {
-        unsigned left_colour=left/PAIRS;
-        auto [a,b]=geometry.pairs[left%PAIRS];
-        for(unsigned right=0;right<TOKENS;++right) {
-            unsigned right_colour=right/PAIRS;
-            auto [c,d]=geometry.pairs[right%PAIRS];
-            if(left_colour!=right_colour&&a!=c&&a!=d&&b!=c&&b!=d)
-                neighbours[left]|=UINT64_C(1)<<right;
-        }
-    }
+    static const std::array<uint64_t,19> degree_numerator=[] {
+        std::array<uint64_t,19> table{};
+        for(unsigned degree=1;degree<table.size();++degree)
+            table[degree]=uint64_t(ceil_log2_factorial(degree))*
+                (DENOMINATOR/(2*degree));
+        return table;
+    }();
     const uint64_t remaining=((UINT64_C(1)<<TOKENS)-1)&~occupied;
     uint64_t numerator=0,scan=remaining;
     while(scan) {
         unsigned vertex=unsigned(__builtin_ctzll(scan));
         scan&=scan-1;
-        unsigned degree=unsigned(__builtin_popcountll(neighbours[vertex]&remaining));
-        if(degree)
-            numerator+=uint64_t(ceil_log2_factorial(degree))*
-                (DENOMINATOR/(2*degree));
+        unsigned degree=unsigned(__builtin_popcountll(
+            geometry.matching_neighbours[vertex]&remaining));
+        numerator+=degree_numerator[degree];
     }
     unsigned perfect_matching_power=unsigned(
         (numerator+DENOMINATOR-1)/DENOMINATOR);

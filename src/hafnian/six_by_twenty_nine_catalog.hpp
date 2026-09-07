@@ -21,12 +21,22 @@ constexpr uint16_t FULL_PAIR_MASK=(UINT16_C(1)<<PAIRS)-1;
 
 struct Geometry {
     std::array<std::pair<uint8_t,uint8_t>,PAIRS> pairs{};
+    // Fixed H = K4 x KG(6,2), shared by all residual matching bounds.
+    std::array<uint64_t,TOKENS> matching_neighbours{};
     std::vector<std::array<std::array<uint16_t,256>,2>> row_tables;
 
     Geometry() {
         unsigned next=0;
         for(unsigned i=0;i<ROWS;++i)for(unsigned j=i+1;j<ROWS;++j)
             pairs[next++]={uint8_t(i),uint8_t(j)};
+        for(unsigned left=0;left<TOKENS;++left) {
+            auto [a,b]=pairs[left%PAIRS];
+            for(unsigned right=0;right<TOKENS;++right) {
+                auto [c,d]=pairs[right%PAIRS];
+                if(left/PAIRS!=right/PAIRS&&a!=c&&a!=d&&b!=c&&b!=d)
+                    matching_neighbours[left]|=UINT64_C(1)<<right;
+            }
+        }
         auto pair_index=[&](unsigned a,unsigned b) {
             if(a>b)std::swap(a,b);
             for(unsigned p=0;p<PAIRS;++p)

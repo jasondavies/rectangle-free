@@ -50,6 +50,31 @@ int main(int argc, char** argv) {
                     items[0].start == 10 && items[0].end == 20 &&
                     items[0].filter_mod == 8 && items[0].filter_id == 3,
                 "manifest identity changed");
+        for (const char* bad : {
+                 "s x 10 20 FILTER_MOD FILTER_ID", "s x 10 20 8",
+                 "s x 10 20 18446744073709551616 0", "s x -1 20",
+                 "s x 10 +20", "s x 10 20 8 -1", "s x 10 20 8 8",
+                 "s x 10 20 0 0", "s x 10 20x", "s x 20 10",
+                 "s x 10 20 8 0 garbage", "s x 10 20 8x 0"}) {
+            { std::ofstream output(manifest); output << bad << '\n'; }
+            require_failure([&] { gpu_checkpoint::read_work_manifest(manifest.string()); },
+                            "malformed manifest accepted");
+        }
+        {
+            std::ofstream output(manifest);
+            output << "s x 10 0\nmax x 0 0 18446744073709551615 0\n";
+        }
+        auto valid = gpu_checkpoint::read_work_manifest(manifest.string());
+        require(valid.size() == 2 && valid[0].end == 0 &&
+                    valid[1].filter_mod == UINT64_MAX, "valid boundary rejected");
+        require(rectangle::parse_u64("00042") == 42, "leading zeros changed");
+        require(rectangle::parse_u32("4294967295") == UINT32_MAX,
+                "32-bit maximum rejected");
+        for (const char* bad : {"4294967296", "6442450943", "18446744073709551615"})
+            require_failure([&] { rectangle::parse_u32(bad); }, "narrowing overflow accepted");
+        for (const char* bad : {"", "-1", "+1", "1 ", " 1", "1x",
+                                "18446744073709551616"})
+            require_failure([&] { rectangle::parse_u64(bad); }, "invalid integer accepted");
         gpu_checkpoint::RunProvenance run = gpu_checkpoint::run_provenance(
             "RECT_TEST_RESULT", "8x8", argv[0], "configuration=v1",
             canonical.string());

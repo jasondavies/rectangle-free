@@ -1,0 +1,38 @@
+diff --git a/src/hafnian/hafnian_common_core.cuh b/src/hafnian/hafnian_common_core.cuh
+index d998155..37a1844 100644
+--- a/src/hafnian/hafnian_common_core.cuh
++++ b/src/hafnian/hafnian_common_core.cuh
+@@ -54,6 +54,12 @@
+ #ifndef CORE_OPT_SYNC_CLEAR
+ #define CORE_OPT_SYNC_CLEAR 0
+ #endif
++#ifndef CORE_OPT_SELECTIVE_INIT
++#define CORE_OPT_SELECTIVE_INIT 0
++#endif
++#if CORE_OPT_SELECTIVE_INIT && !(CORE_OPT_SCRATCH && CORE_OPT_SYNC_CLEAR && CORE_OPT_WARP_POLY)
++#error "Selective initialization requires the validated aliased/warp/sync layout"
++#endif
+ #if (CORE_OPT_INVERSE_CHAIN != 0 && CORE_OPT_INVERSE_CHAIN != 1) || (CORE_OPT_LIVE_MOMENTS != 0 && CORE_OPT_LIVE_MOMENTS != 1) || (CORE_OPT_SYNC_CLEAR != 0 && CORE_OPT_SYNC_CLEAR != 1)
+ #error "Kernel candidate switches must be 0 or 1"
+ #endif
+@@ -236,8 +242,20 @@ CORE_DEVICE void term(const Input& in,uint64_t signs,uint32_t* scratch,
+     uint32_t* next=power+c*nq;
+     uint32_t* memo=next+c*nq;
+ #endif
++#ifdef CORE_TEST_POISON_SCRATCH
++    // Test-only dirty arena: no correctness test may rely on fresh zero pages.
++    for(unsigned i=tid;i<in.words;i+=nt)scratch[i]=0xa5a5a5a5u;
++    CORE_SYNC();
++#endif
++#if !CORE_OPT_SELECTIVE_INIT
+     for(unsigned i=tid;i<in.words;i+=nt)scratch[i]=0;
+     CORE_SYNC();
++#endif
++    // The matrix is assigned in full below (stride padding is never read).
++    // Polynomial row i writes every coefficient 0..min(i,m) before any later
++    // row reads it; m=c/2. f, k, both moment buffers and nonempty memo states
++    // are likewise assigned before use. The empty memo polynomial is cleared
++    // explicitly at the phase transition, including c=m=0.
+     for(unsigned ij=tid;ij<c*c;ij+=nt){unsigned i=ij/c,j=ij%c;
+         bool positive=i/2==0||(signs&(UINT64_C(1)<<(i/2-1)));
+         h[i*hs+j]=in.adjacency[(i^1)*n+j]?(positive?1:P-1):0;

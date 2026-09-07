@@ -291,9 +291,7 @@ static FourOwnerSharedStats solve_four_owner_tile(
         shared.pipeline_max_source_entries = prefetched.source_entries;
     }
 
-    cudaEvent_t event_start, event_end;
-    CUDA_CHECK(cudaEventCreate(&event_start));
-    CUDA_CHECK(cudaEventCreate(&event_end));
+    CudaEvent event_start, event_end;
     DirectWeightClassWorkspace weight_workspace;
 
     for (size_t batch_index = 0; batch_index < batch_right_indices.size();
@@ -342,60 +340,11 @@ static FourOwnerSharedStats solve_four_owner_tile(
             const std::vector<uint32_t>& edge_indices =
                 batch_edges[owner_index][batch_index];
             if (edge_indices.empty()) continue;
-            double join_plan_start = seconds_now();
-            std::vector<PrefixJoinDesc> joins;
-            joins.reserve(edge_indices.size() * 2);
-            size_t group_cursor = 0;
-            for (uint32_t edge_index : edge_indices) {
-                const Edge& edge = owner.edges[edge_index];
-                while (group_cursor < group_keys.size() &&
-                       group_keys[group_cursor] < edge.right) {
-                    group_cursor++;
-                }
-                if (group_cursor == group_keys.size() ||
-                    group_keys[group_cursor] != edge.right) {
-                    throw std::runtime_error("four-owner batch ownership mismatch");
-                }
-                const PrefixPair& left = owner.left_layout.pairs[
-                    owner.edge_left_ids[edge_index]];
-                const PrefixPair& right =
-                    right_layout.pairs[group_cursor];
-                const PrefixDistribution lhs[2] = {left.selected,
-                                                   left.complement};
-                const PrefixDistribution rhs[2] = {right.selected,
-                                                   right.complement};
-                for (int complement = 0; complement < 2; complement++) {
-                    joins.push_back(PrefixJoinDesc{
-                        lhs[complement].bucket_offset,
-                        rhs[complement].bucket_offset,
-                        lhs[complement].bucket_count,
-                        rhs[complement].bucket_count});
-                    owner.result.direct_comparisons +=
-                        U128(lhs[complement].entry_count) *
-                        rhs[complement].entry_count;
-                }
-            }
-
-            double join_plan_end = seconds_now();
-            owner.result.join_plan_seconds += join_plan_end - join_plan_start;
-            double join_upload_start = seconds_now();
-            PrefixJoinDesc* device_joins = upload_vector(joins);
-            owner.result.join_upload_seconds +=
-                seconds_now() - join_upload_start;
-            unsigned long long* device_results = nullptr;
-            double allocation_start = seconds_now();
-            CUDA_CHECK(cudaMalloc(&device_results,
-                                  joins.size() * sizeof(unsigned long long)));
-            owner.result.result_allocation_seconds +=
-                seconds_now() - allocation_start;
-            CUDA_CHECK(cudaEventRecord(event_start));
-            weight_class_prefix_joins<<<unsigned(joins.size()), THREADS>>>(
-                owner.left_layout.suffixes.get(), right_layout.suffixes.get(),
-                owner.left_layout.buckets.get(), right_layout.buckets.get(),
-                owner.left_layout.classes.get(), right_layout.classes.get(),
-                device_joins, device_results);
-            CUDA_CHECK(cudaGetLastError());
-            CUDA_CHECK(cudaEventRecord(event_end));
+            std::vector<PrefixJoinDesc> joins = plan_packed_joins(
+                owner.edges, edge_indices, owner.edge_left_ids, group_keys,
+                owner.left_layout, right_layout, owner.result);
+            PackedJoinBatch join_batch(joins, owner.result);
+            join_batch.launch(owner.left_layout, right_layout, event_start, event_end);
             if (!cache.device_resident && !next_prefetch_started &&
                 batch_index + 1 < batch_right_indices.size()) {
                 prefetched = prefetch_host_packed_layout(
@@ -405,20 +354,9 @@ static FourOwnerSharedStats solve_four_owner_tile(
                     prefetched.source_entries);
                 next_prefetch_started = true;
             }
-            CUDA_CHECK(cudaEventSynchronize(event_end));
-            float kernel_milliseconds = 0;
-            CUDA_CHECK(cudaEventElapsedTime(&kernel_milliseconds, event_start,
-                                            event_end));
-            owner.result.gpu_seconds += kernel_milliseconds / 1000.0;
-            shared.gpu_seconds += kernel_milliseconds / 1000.0;
-
-            std::vector<unsigned long long> results(joins.size());
-            double download_start = seconds_now();
-            CUDA_CHECK(cudaMemcpy(results.data(), device_results,
-                                  results.size() * sizeof(results[0]),
-                                  cudaMemcpyDeviceToHost));
-            owner.result.result_download_seconds +=
-                seconds_now() - download_start;
+            double previous_gpu_seconds = owner.result.gpu_seconds;
+            auto results = join_batch.finish(event_start, event_end, owner.result);
+            shared.gpu_seconds += owner.result.gpu_seconds - previous_gpu_seconds;
             for (size_t local_edge = 0; local_edge < edge_indices.size();
                  local_edge++) {
                 const Edge& edge = owner.edges[edge_indices[local_edge]];
@@ -455,11 +393,7 @@ static FourOwnerSharedStats solve_four_owner_tile(
             }
             shared.completed_kernels += edge_indices.size();
             owner.result.right_batches++;
-            double free_start = seconds_now();
-            CUDA_CHECK(cudaFree(device_results));
-            CUDA_CHECK(cudaFree(device_joins));
-            owner.result.batch_buffer_free_seconds +=
-                seconds_now() - free_start;
+            join_batch.release(owner.result);
         }
         if (!cache.device_resident && !next_prefetch_started &&
             batch_index + 1 < batch_right_indices.size()) {
@@ -488,9 +422,6 @@ static FourOwnerSharedStats solve_four_owner_tile(
                 shared.gpu_seconds);
         }
     }
-
-    CUDA_CHECK(cudaEventDestroy(event_end));
-    CUDA_CHECK(cudaEventDestroy(event_start));
     size_t expected_kernels = 0;
     for (FourOwnerState& owner : owners) {
         expected_kernels += owner.edges.size();

@@ -9,6 +9,7 @@ import sys
 FILES = [
     "src/gpu/gpu_cuda_utils.cuh",
     "src/gpu/gpu_memory_policy.hpp",
+    "src/gpu/gpu_sorted_batch.hpp",
     "src/gpu/twocolour_gpu_common.cuh",
     "src/gpu/twocolour_7x7_engine.cuh",
     "src/gpu/twocolour_prefix_algebra.cuh",
@@ -17,6 +18,8 @@ FILES = [
     "src/gpu/twocolour_canonical_device.cuh",
     "src/gpu/gpu_result_checkpoint.hpp",
     "src/common/sha256.hpp",
+    "src/common/parse_unsigned.hpp",
+    "src/common/durable_file.h",
     "src/gpu/twocolour_7x7_gpu.cu",
     "src/gpu/twocolour_7x9_engine.cuh",
     "src/gpu/twocolour_7x9_cache_build.cu",

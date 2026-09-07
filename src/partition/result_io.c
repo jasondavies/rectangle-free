@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "partition_poly.h"
 #include "../common/sha256_c.h"
+#include "../common/durable_file.h"
 
 // Bump this when the decomposition's mathematical meaning changes.
 #define POLY_ALGORITHM "partition-structure-v2"
@@ -72,24 +73,11 @@ void write_poly_file(const char* path,const Poly* poly,const PolyFileMeta* meta)
     RectSha256 hash;char digest[65];
     rect_sha256_init(&hash);rect_sha256_update(&hash,payload,length);rect_sha256_finish(&hash,digest);
 
-    size_t path_length=strlen(path)+16;
-    char* temporary=malloc(path_length);
-    if(!temporary){free(payload);exit(1);}
-    snprintf(temporary,path_length,"%s.tmp.XXXXXX",path);
-    int fd=mkstemp(temporary);
-    FILE* f=fd<0?NULL:fdopen(fd,"wb");
-    if(!f) {
-        if(fd>=0){close(fd);unlink(temporary);}
-        perror("polynomial temporary file");free(temporary);free(payload);exit(1);
+    char trailer[80];
+    int trailer_size=snprintf(trailer,sizeof(trailer),"sha256 %s\nend\n",digest);
+    RectFilePart parts[2]={{payload,length},{trailer,(size_t)trailer_size}};
+    if(rect_publish_file(path,parts,2,1)) {
+        perror("polynomial durable write");free(payload);exit(1);
     }
-    int failed=fwrite(payload,1,length,f)!=length;
-    if(fprintf(f,"sha256 %s\nend\n",digest)<0)failed=1;
-    if(fflush(f)||fsync(fd))failed=1;
-    if(fclose(f))failed=1;
-    if(!failed && rename(temporary,path))failed=1;
-    if(failed) {
-        perror("polynomial atomic write");unlink(temporary);
-        free(temporary);free(payload);exit(1);
-    }
-    free(temporary);free(payload);
+    free(payload);
 }
