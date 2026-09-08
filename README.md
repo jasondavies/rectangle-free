@@ -90,6 +90,9 @@ count to 18 times one 58-vertex minor, using the shared optimised kernel and
 three prime images. Defect expansions reduce 6x29 to 29 residual
 hafnians (now evaluated as 33 smaller queries using a monomer decomposition)
 and 6x28 to 36,398 symmetry-quotiented residual queries.
+For 6x27, shared-core contractions reuse computation across 45,007,139 residual
+queries rather than evaluating every hafnian independently; see the
+[shared-core campaign workflow](docs/hafnian/common_core_campaign.md).
 
 See [six_by_thirty_hafnian.md](docs/hafnian/six_by_thirty_hafnian.md) and
 [six_by_twenty_nine_hafnian.md](docs/hafnian/six_by_twenty_nine_hafnian.md).
@@ -232,8 +235,8 @@ Research probes are intentionally not part of `make gpu-production`.
 - `partition_poly_8` is bounded to eight rows and eight columns.
 - The maintained GPU production targets are specialised for 6x9, 6x10,
   6x11, 6x12, 7x7, 7x9, and 8x8 distribution-join campaigns.
-- The hafnian solvers cover the 6x30 endpoint and its 6x29/6x28 low-defect
-  expansions; all three exact values are recorded in `results.txt`.
+- The hafnian solvers cover the 6x30 endpoint and its 6x29/6x28/6x27 low-defect
+  expansions; all four exact values are recorded in `results.txt`.
 
 Exact recorded values are in [results.txt](results.txt); detailed performance
 logs and experiment provenance are in
@@ -257,6 +260,7 @@ the time used by every GPU and is therefore distinct from elapsed wall time.
 | `T_4(6,30)` original solver | 8 RTX PRO 6000 GPUs | 0.79 GPU-hours | About 10 minutes |
 | `T_4(6,29)` independent check | 33 queries; 8 RTX PRO 6000 GPUs | 0.221 timed GPU-hours | 2 min 2 s solving; 2 min 40 s including validation gates |
 | `T_4(6,28)` | 8 L40S + 4 RTX PRO 6000 GPUs; interrupted and resumed | 23.43 GPU-hours | About 2 h 48 min including setup and recovery |
+| `T_4(6,27)` | 64 tasks; 8 RTX PRO 6000 GPUs | 115.74 timed GPU-hours | About 15 h 37 min including setup and validation |
 
 The exact integers are collected in [results.txt](results.txt), while the
 algorithms, validation checks, and detailed timing breakdowns are recorded in
