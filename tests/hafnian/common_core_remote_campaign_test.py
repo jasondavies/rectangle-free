@@ -6,9 +6,29 @@ import tempfile
 import unittest
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'tools'))
 import common_core_campaign as cc
+import common_core_mixed_campaign as mixed
 from common_core_remote_campaign import complete_snapshot,atomic_json
 
 class CoverageTest(unittest.TestCase):
+    def test_mixed_interval_completion_is_task_not_whole_query_completion(self):
+        with tempfile.TemporaryDirectory() as d:
+            path=Path(d)/'range.sqlite'
+            task=dict(id=0,kind='signs',group_start=2,group_end=3,begin=4,end=8,domain=16)
+            payload=dict(tasks=[task],backend='cuda',solver_binary='test')
+            j=cc.Journal(path,mixed.identity(payload,0))
+            meta=dict(domain=16,bounds=[35],primes=[2])
+            try:
+                j.put_group(2,meta)
+                j.put_range(2,0,4,8,meta,[1],0.,0.)
+                self.assertFalse(complete_snapshot(path,task,payload))
+                j.put_range(2,1,4,8,meta,[2],0.,0.)
+                self.assertTrue(complete_snapshot(path,task,payload))
+                self.assertIsNone(cc.reduce_group(meta,list(j.ordered_groups())[0][2],[0],2)[0])
+                j.put_range(2,0,0,4,meta,[3],0.,0.)
+                with self.assertRaisesRegex(ValueError,'outside sign task'):
+                    complete_snapshot(path,task,payload)
+            finally:j.close()
+
     def test_coverage_requires_all_groups_primes_and_contiguous_ranges(self):
         with tempfile.TemporaryDirectory() as d:
             path=Path(d)/'result.sqlite'

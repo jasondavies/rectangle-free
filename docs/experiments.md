@@ -17679,3 +17679,50 @@
   multi-GPU mixed-queue rehearsal and adapting the future provider supervisor
   to the new launch/snapshot/reduction commands. Do not point the current
   6×27 supervisor at the new manifest or rebuild its live binary.
+
+### Experiment 500: Mixed-task GPU recovery gate and 6×28 verification launch
+
+- Extend the provider-neutral remote supervisor to recognize mixed manifests,
+  bind their audited catalog/plan and solver binary, launch assigned queue IDs,
+  and publish validated closed mixed-task snapshots. Completion checks use the
+  task's own interval for sign shards, rather than requiring the entire sign
+  domain. The old whole-group format remains supported. Add sign-checkpoint
+  timing/progress messages; regenerate manifests to bind this source change.
+- Local tests: mixed campaign 15, remote supervisor 3, standalone sign shards
+  11 (one hardware-dependent test skipped). The new completion test distinguishes
+  a completed range task from an incomplete query and rejects out-of-task ranges.
+- Hardware gate: two physical RTX PRO 6000 Blackwell Server GPUs, driver
+  580.126.09, on a four-GPU spot node. Run a high-index independent interval and
+  a shared-group queue concurrently, back up live journals, kill both process
+  groups, restore only the published backups to fresh paths, then resume each
+  for one checkpoint. Every previously committed range survives; each queue adds
+  exactly one new range. All **757 saved/resumed ranges** match the independent
+  CPU worker. The full reducer reports partial coverage and zero complete queries.
+- Harness correction: the first attempt suspended a writer before backup and
+  could freeze it while holding a SQLite write lock. That backup timed out.
+  Use a live, unsuspended writer for the backup, then kill it. The corrected
+  rehearsal passes; no kernel arithmetic change was involved.
+- Regenerate the production manifest for four GPUs: **40 tasks**, comprising
+  28 whole-group tasks and 12 sign tasks (four intervals for each of three hot
+  independent queries). Full audited coverage: 36,398 queries, 5,629 groups,
+  104 independent queries, coefficient sum 8,482,414,501. Conservative total
+  **4.436599 GPU-hours**, with queue-hour forecasts
+  `1.125060, 1.119166, 1.123450, 1.068923`. These are projections, not measured
+  complete-campaign timings.
+- Start the full 6×28 verification campaign using the already-tested native
+  Blackwell worker. Publish closed snapshots every 60 seconds, pull/check them
+  off-host, require exact full reduction and equality with the existing 6×28
+  count before normal VM/disk deletion. A separate three-hour billing guard
+  removes compute while retaining the recovery disk if normal cleanup fails.
+  No new numerical result or completed runtime is claimed at launch.
+- Private provisioning, manifests, recovery-gate logs and monitoring artifacts:
+  `build/review-500/`. Verified journals are retained outside the repository.
+- Completed verification: all **40 tasks / 46,248 checkpoint ranges** were
+  downloaded and validated. Exact reduction completed all **36,398 queries**,
+  with zero missing shared or independent queries, reproducing the recorded
+  `T_4(6,28) = 8662754145596948538356914171803399555465889793707791404236800000000`.
+  Aggregate measured compute was **4.134105 GPU-hours**; solve wall time was
+  **65.05 minutes**, and allocation through verified cleanup was **72.15 minutes**.
+  No worker restarts or spot replacements occurred. The supervisor deleted the
+  VM and its disk after validation; both provider inventories were confirmed
+  empty. These measured totals replace the launch forecast for this campaign.

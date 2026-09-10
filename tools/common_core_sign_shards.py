@@ -149,6 +149,9 @@ def solve_interval(gid, query, meta, begin, end, records, catalog, worker, journ
                        "invalid worker result")
             journal.put_range(gid, pi, start, stop, meta, [value], seconds, time.monotonic()-started)
             completed += 1
+            print(cc.encoded(dict(checkpoint=completed,durable=not journal.db.in_transaction,
+                                  group=gid,prime=cc.PRIMES[pi],begin=start,end=stop,
+                                  compute_seconds=seconds)),flush=True)
             if max_checkpoints and completed >= max_checkpoints:
                 return False
     return True

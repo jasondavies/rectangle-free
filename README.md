@@ -93,6 +93,9 @@ and 6x28 to 36,398 symmetry-quotiented residual queries.
 For 6x27, shared-core contractions reuse computation across 45,007,139 residual
 queries rather than evaluating every hafnian independently; see the
 [shared-core campaign workflow](docs/hafnian/common_core_campaign.md).
+The latest 6x28 verification also uses shared-core contractions, with
+[mixed whole-group/sign-range queues](docs/hafnian/mixed_campaign.md)
+to distribute the largest independent queries across GPUs.
 
 See [six_by_thirty_hafnian.md](docs/hafnian/six_by_thirty_hafnian.md) and
 [six_by_twenty_nine_hafnian.md](docs/hafnian/six_by_twenty_nine_hafnian.md).
@@ -259,7 +262,7 @@ the time used by every GPU and is therefore distinct from elapsed wall time.
 | `T_4(7,9)` independent check | 128 shards; 8 L40S GPUs | 13.85 GPU-hours | About 2 hours |
 | `T_4(6,30)` original solver | 8 RTX PRO 6000 GPUs | 0.79 GPU-hours | About 10 minutes |
 | `T_4(6,29)` independent check | 33 queries; 8 RTX PRO 6000 GPUs | 0.221 timed GPU-hours | 2 min 2 s solving; 2 min 40 s including validation gates |
-| `T_4(6,28)` | 8 L40S + 4 RTX PRO 6000 GPUs; interrupted and resumed | 23.43 GPU-hours | About 2 h 48 min including setup and recovery |
+| `T_4(6,28)` independent check | 40 tasks; 4 RTX PRO 6000 GPUs | 4.13 timed GPU-hours | 65 min solving; 72 min including setup, validation and cleanup |
 | `T_4(6,27)` | 64 tasks; 8 RTX PRO 6000 GPUs | 115.74 timed GPU-hours | About 15 h 37 min including setup and validation |
 
 The exact integers are collected in [results.txt](results.txt), while the

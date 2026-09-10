@@ -94,8 +94,27 @@ actual process killing, live snapshot/download verification, restore, resume and
 direct residue recomputation. See `tests/hafnian/common_core_mixed_queue_test.py`.
 The actual grid is not recalculated by these tests.
 
-Experiment 498 separately checked the CUDA sign-range arithmetic. This integrated
-queue still needs a bounded multi-GPU rehearsal before deployment. Existing
-provider supervisors understand the old format; do not point them at `mixed.json`
-without updating their launch, snapshot and reduction commands. The current
-6×27 campaign is intentionally left on its original files and binary.
+Experiment 498 separately checked the CUDA sign-range arithmetic. Experiment
+500 passed a two-GPU mixed-task kill/backup/restore rehearsal: all 757 saved
+and resumed ranges matched CPU recomputation, and the reducer correctly refused
+to certify the incomplete grid. This is a recovery gate, not a full-grid result.
+
+`tools/common_core_remote_campaign.py` accepts both the legacy and mixed
+formats. For mixed work its private JSON config additionally needs `catalog`
+and `plan`, alongside `manifest`, `worker`, `output`, Unix-time `deadline` and
+optional `snapshot_seconds`. It starts one queue per visible GPU and publishes
+validated closed snapshots with task-completion receipts. A sign task is complete
+when its own interval covers every required prime; that is **not** sufficient to
+complete its query without the other sign tasks.
+
+Optional `queue_ids` selects a disjoint list of manifest queues for this machine,
+mapped in order to its visible GPUs. Without it, all manifest queues are assigned.
+The assignment length must equal the visible GPU count. Cross-machine queue
+ownership is the external scheduler's responsibility.
+
+The remote supervisor does not provision machines, pull results off-host, reduce
+the full campaign, or delete cloud resources. An external supervisor must download
+closed snapshots, verify their receipts and monotone coverage, run the mixed
+reducer with `--require-complete`, and retain recoverable checkpoints on failure.
+Never replace the binary, manifest dependencies or input artifacts of a running
+campaign. Old provider-specific supervisors must still be adapted explicitly.

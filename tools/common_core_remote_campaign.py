@@ -17,6 +17,7 @@ import time
 
 import common_core_campaign as cc
 import common_core_manifest as cm
+import common_core_mixed_campaign as mixed
 from common_core_snapshot import snapshot
 
 
@@ -31,49 +32,65 @@ def atomic_json(path, value):
     finally:os.close(fd)
 
 
-def complete_snapshot(path, task):
+def complete_snapshot(path, task, payload=None):
     journal=cc.Journal(path)
     try:
         cc.require(journal.identity['group_start']==task['group_start'] and
                    journal.identity['group_end']==task['group_end'], 'snapshot task ownership mismatch')
         wanted=task['group_start']
-        for gid,meta,records in journal.ordered_groups():
+        rows=(mixed.checked_groups(journal,payload,task['id']) if payload is not None else journal.ordered_groups())
+        for gid,meta,records in rows:
             if gid!=wanted:return False
             wanted+=1
             for pi in range(max(meta['primes'])):
-                end=0
+                end=task['begin'] if task.get('kind')=='signs' else 0
                 for begin,stop,_ in records[pi]:
                     if begin!=end:return False
                     end=stop
-                if end!=meta['domain']:return False
+                if end!=(task['end'] if task.get('kind')=='signs' else meta['domain']):return False
         return wanted==task['group_end']
     finally:journal.close()
 
 
 def run(config):
     manifest=Path(config['manifest']);binary=Path(config['worker'])
-    payload,digest=cm.load_manifest(manifest)
-    cc.require(cc.file_digest(binary)==payload['worker_sha256'],'wrong worker binary')
+    is_mixed=json.loads(manifest.read_text())['payload']['format']==mixed.FORMAT
+    catalog=plan=None
+    if is_mixed:
+        payload=mixed.load(manifest);digest=cc.digest(payload)
+        catalog=cc.Catalog(Path(config['catalog']));plan=cc.Plan(Path(config['plan']),catalog)
+        mixed.bind(payload,catalog,plan,plan.audit())
+    else:payload,digest=cm.load_manifest(manifest)
+    cc.require(cc.file_digest(binary)==payload['solver_binary' if is_mixed else 'worker_sha256'],'wrong worker binary')
     root=Path(config['output']);root.mkdir(parents=True,exist_ok=True)
     visible=subprocess.check_output(['nvidia-smi','--query-gpu=uuid','--format=csv,noheader'],text=True).splitlines()
-    cc.require(len(visible)==len(payload['workers']),'one physical GPU per queue required')
+    owners=config.get('queue_ids',[w['id'] for w in payload['workers']])
+    cc.require(len(owners)==len(visible) and len(set(owners))==len(owners) and
+               all(type(i) is int and 0<=i<len(payload['workers']) for i in owners),'one physical GPU per assigned queue required')
+    gpu_for={owner:i for i,owner in enumerate(owners)}
+    assigned={tid for owner in owners for tid in payload['workers'][owner]['task_ids']}
     stop=threading.Event();publish_now=threading.Event();errors=[];published={}
     processes={};handles=[];retries={};progress={};offsets={}
     def launch(owner):
-        env=dict(os.environ,CUDA_VISIBLE_DEVICES=str(owner),OMP_NUM_THREADS='2')
+        env=dict(os.environ,CUDA_VISIBLE_DEVICES=str(gpu_for[owner]),OMP_NUM_THREADS='2')
         log=open(root/f'queue-{owner}.log','a');handles.append(log)
-        command=[sys.executable,'tools/common_core_manifest.py','run','--manifest',str(manifest),
+        command=[sys.executable,'tools/common_core_mixed_campaign.py' if is_mixed else 'tools/common_core_manifest.py','run','--manifest',str(manifest),
                  '--worker-id',str(owner),'--worker',str(binary),'--journal-dir',str(root/'journals')]
+        if is_mixed:command+=['--catalog',config['catalog'],'--plan',config['plan']]
         processes[owner]=subprocess.Popen(command,env=env,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
     def publish_all():
         for task in payload['tasks']:
+            if task['id'] not in assigned:continue
             source=root/'journals'/digest/task['journal']
             if not source.exists():continue
             stamp=(source.stat().st_size,source.stat().st_mtime_ns)
             if published.get(task['id'])==stamp:continue
             destination=root/'published'/task['journal']
-            report=snapshot(source,destination,backup_timeout=60.)
-            report.update(task=task['id'],manifest=digest,complete=complete_snapshot(destination,task))
+            if is_mixed:
+                report=mixed.snapshot_io.snapshot(source,destination,
+                    lambda path:mixed.check_snapshot(path,payload,catalog,plan))
+            else:report=snapshot(source,destination,backup_timeout=60.)
+            report.update(task=task['id'],manifest=digest,complete=complete_snapshot(destination,task,payload if is_mixed else None))
             atomic_json(destination.with_suffix('.json'),report)
             published[task['id']]=stamp
     def publisher():
@@ -99,7 +116,7 @@ def run(config):
             offsets[owner]=log.tell()
         return dict(stats,pid=processes[owner].pid,exit=processes[owner].poll(),restarts=retries.get(owner,0))
     try:
-        for w in payload['workers']:launch(w['id'])
+        for owner in owners:launch(owner)
         thread.start();state='running'
         while True:
             statuses={i:progress_read(i) for i in processes}
@@ -126,6 +143,7 @@ def run(config):
         publish_all()
         if state=='complete':
             for task in payload['tasks']:
+                if task['id'] not in assigned:continue
                 receipt=json.loads((root/'published'/task['journal']).with_suffix('.json').read_text())
                 cc.require(receipt['complete'] and receipt['manifest']==digest,'incomplete final snapshot')
         atomic_json(root/'status.json',dict(state=state,time=time.time(),manifest=digest,
@@ -135,6 +153,8 @@ def run(config):
         for p in processes.values():
             if p.poll() is None:os.killpg(p.pid,signal.SIGKILL);p.wait()
         for log in handles:log.close()
+        if plan:plan.close()
+        if catalog:catalog.close()
 
 
 if __name__=='__main__':
