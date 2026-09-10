@@ -1,4 +1,27 @@
-# Shared-core residual hafnians: 6x27 research gate
+# Shared-core residual hafnians: research record
+
+## Current status
+
+The shared-core method has passed full production validation. The complete
+6×27 run evaluated 45,007,139 queries in **115.74 timed GPU-hours** on eight
+RTX PRO 6000 GPUs, with **15 h 37 min** elapsed including setup and validation.
+The later 6×28 verification completed all 36,398 queries and reproduced the exact
+grid result in **4.13 timed GPU-hours**, **65 min solving / 72 min total**, on
+four RTX PRO 6000 GPUs (Experiment 500).
+
+For current commands, use [the whole-group workflow](common_core_campaign.md)
+or [the mixed whole-group/sign-range workflow](mixed_campaign.md). Completed
+values are in [results.txt](../../results.txt), and measured campaign summaries
+are in the [README](../../README.md#selected-completed-computations).
+
+## Historical gates and projections
+
+The sections below preserve the research sequence. Statements about pending
+integration, next experiments, or unlaunched campaigns describe the stage of
+the named experiment, not today's deployment status. In particular, the
+119/142/166-hour figures are successive sampled forecasts, not additional
+completed runs. Research-only flags and artifact formats below are not the
+current production interface.
 
 Experiment 491 completes the local CPU follow-ons. Ordered-journal reduction
 passes exact A/B replay parity with 15–17% lower elapsed time on bounded local
@@ -13,9 +36,9 @@ Experiment 490 completes the local production audit and cost-balanced manifest:
 7,282,729 groups, 13,100 independent queries. The 64 work items are assigned
 to eight workers with projected loads **14.83–14.88 hours** (118.862 total).
 The manifest and generated commands bind the audited inputs and tested binary;
-all interval/queue coverage checks pass. No worker is rented or solve launched.
-Next: supervised multi-worker checkpoint/pull/reduction rehearsal, then the
-full campaign. See [the campaign instructions](common_core_campaign.md).
+all interval/queue coverage checks pass. No worker was rented or solve launched
+in Experiment 490. Its remaining rehearsal and full-campaign gates subsequently
+passed; see the current status above and [the campaign instructions](common_core_campaign.md).
 
 Experiment 489's order-52/54 extension now **passes the GPU gate**. It groups
 3,222 of 3,273 old independent queries into 447 shared groups, preserving all
@@ -134,7 +157,7 @@ download, excluding reference checks and CPU problem construction. It is
 not a production campaign command. Remaining work is all-width retuning,
 production provenance/checkpoint wiring, and a representative campaign pilot.
 
-## Latest measured configuration and remaining integration
+## Experiment 481 configuration and integration status (historical)
 
 Experiment 481 adds three opt-in research settings:
 

@@ -59,7 +59,7 @@ Manifests bind controller source bytes: regenerate them after changing the
 runner or shared controller. CPU-reference results use a separately bound
 `--cpu-reference` manifest and cannot mix with GPU results.
 
-## Validation and remaining gate
+## Validation and completed deployment
 
 ```sh
 make BUILD_DIR=build/local-check build/local-check/hafnian_common_worker_host
@@ -71,9 +71,14 @@ The local tests cover uneven splitting, 32-bit boundary values, CRT, missing
 primes, restarts, rollback, corrupt/duplicate/out-of-range results, and real
 order-64 finite-field sign sums across four primes. Experiment 498 additionally
 verified eight-way CUDA range summation under all four primes, and high/low
-task checkpoint/restart with the real runner. Those tests used one GPU; the
-integrated mixed workflow adds complete campaign queue/reduction support, but
-still needs multi-GPU validation before a production rerun. Eight ranges would
-ideally reduce the measured ~1.92-hour
-single-query bottleneck to ~14.4 minutes per GPU, excluding repeated setup and
-contention. This is a scheduling projection, not a measured speedup.
+task checkpoint/restart with the real runner. Those tests used one GPU.
+Experiment 500 subsequently passed a two-GPU mixed-task kill/backup/restore
+gate, with all 757 saved/resumed ranges matching CPU recomputation.
+
+The complete 6×28 verification then ran on four RTX PRO 6000 GPUs using the
+integrated mixed workflow: 28 whole-group tasks and 12 sign tasks, covering
+four intervals for each of three expensive independent queries. All 36,398
+queries reproduced the existing exact result in 4.13 timed GPU-hours and
+65 minutes of solving. This validates the shared interval executor in a full
+campaign; standalone single-query journals still use their own format and
+must not be mixed into a grid reduction.

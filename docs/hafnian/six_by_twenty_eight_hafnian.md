@@ -1,5 +1,16 @@
 # Exact `T_4(6,28)` defect-hafnian campaign
 
+The latest completed verification uses [shared-core contractions](common_core_campaign.md)
+and [mixed whole-group/sign-range queues](mixed_campaign.md): **4.13 timed
+GPU-hours on four RTX PRO 6000 GPUs**, **65 min solving / 72 min including
+setup, validation and cleanup**. The full 36,398-query reduction matches the recorded result
+(Experiment 500). Use the mixed workflow for this optimized campaign path.
+
+The mathematics below also underlies the original independent-query solver.
+Its commands and kernel timings are retained as a separate implementation,
+not as the current shared-core campaign recipe. Their checkpoint formats and
+sign summands are not interchangeable.
+
 The 60 row-pair/colour tokens form the graph
 `H = K4 x KG(6,2)`.  Relative to the saturated 30-column endpoint, a
 28-column colouring has slack four.  Enumerate a pairwise-disjoint collection
@@ -14,7 +25,7 @@ Canonical orbit propagation under `S6 x S4` reduces all defect collections to
 36,398 residual queries.  A matching with `4-e` unmatched vertices is evaluated
 as an augmented even-order hafnian; the GPU orders range from 48 to 64.
 
-Every term contains `28! * 2^24`, so production reconstructs
+Every term contains `28! * 2^24`, so the independent-query solver reconstructs
 
 ```text
 Q = T_4(6,28) / (28! * 2^24)
@@ -22,6 +33,8 @@ Q = T_4(6,28) / (28! * 2^24)
 
 before restoring the common factor.  Exact per-query degree bounds require
 three 31-bit primes for 36,395 queries and four primes for only three queries.
+
+## Independent-query implementation
 
 Build and test the maintained CPU components with:
 
@@ -71,9 +84,9 @@ eight terms.  Deficient, unaligned, larger-order, and other architectures keep
 the established Gray backend.  Ada uses a separately measured 14-CTA launch
 bound; Blackwell retains its order- and arithmetic-specific bounds.  Dense dot
 products share one exact modular reduction across two or four residue
-products.  On one RTX PRO 6000, the exact workload projects to approximately
-15 GPU-hours, excluding campaign interruptions and final independent
-validation.
+products. The historical independent-query workload projection was approximately
+15 GPU-hours on one RTX PRO 6000, excluding interruptions and final independent
+validation. It is not the cost of the completed shared-core verification above.
 
 The independent finite-field Glynn/trace/Hessenberg fallback is shared with
 the 6x29 and 6x30 solvers.  The Gray-chain core and the geometry-specific

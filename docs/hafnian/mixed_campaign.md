@@ -10,6 +10,15 @@ with each task responsible for every required prime over its half-open range.
 Shared-core groups remain indivisible. Other groups are packed into contiguous
 tasks. Longest-estimated tasks are assigned first to the least-loaded queue.
 
+## Completed validation
+
+Experiment 500 completed the full **6×28 verification** on four RTX PRO 6000
+GPUs: **40 tasks**, **36,398 queries**, and **46,248 verified checkpoint ranges**.
+The exact result matches [results.txt](../../results.txt). Measured compute was
+**4.13 GPU-hours**, with **65 minutes solving / 72 minutes including setup,
+validation and cleanup**. No worker restarts or spot replacements occurred;
+all results were pulled and checked before the VM and disk were deleted.
+
 ## Prepare a measured manifest
 
 Use a full baseline timing sample/projection and an audited replacement plan's
@@ -26,12 +35,13 @@ python3 tools/common_core_mixed_campaign.py build \
   --workers 8 --target-shards 64 --output mixed.json
 ```
 
-`--target-shards` is a sizing target, not a promised task count. The measured
-6×28 plan in Experiment 499 produces 46 tasks: 28 whole-group tasks and 18
+`--target-shards` is a sizing target, not a promised task count. The eight-GPU
+6×28 plan generated in Experiment 499 produced 46 tasks: 28 whole-group tasks and 18
 sign tasks covering the order-64 query and two order-60 queries. Its conservative
 total is 4.44 GPU-hours, with queues at 30.8–34.7 minutes. These exclude repeated
 startup, transfer/audit, final reduction, interruptions and multi-GPU contention;
-they are not measured campaign wall times.
+they are not measured campaign wall times. The completed four-GPU campaign
+used a separately generated 40-task manifest, not this eight-GPU assignment.
 
 ## Run and resume
 
@@ -41,7 +51,8 @@ CUDA_VISIBLE_DEVICES=0 python3 tools/common_core_mixed_campaign.py run \
   --worker TESTED_CUDA_WORKER --worker-id 0 --journal-dir journals
 ```
 
-Run queue IDs 0–7 on separate GPUs. One persistent worker process is retained
+For the eight-worker example, run queue IDs 0–7 on separate GPUs. One persistent
+worker process is retained
 across a queue's tasks. Restart the same command to resume. Results live under
 `journals/MANIFEST_SHA/task-NNNN.sqlite`; each file has an exclusive local claim.
 Separate machines must have distinct queue assignments. `commands` emits an

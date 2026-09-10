@@ -1,27 +1,24 @@
 # Checkpointed shared-core campaign runner
 
-The measured Experiment-484 shared-core kernel and the independent tail now
-use one checkpoint/reduction workflow. Experiment 486 passed a bounded CUDA
-stop/resume pilot on one RTX PRO 6000: ten shared children plus one independent
-query match all 33 archived production residues. CUDA memcheck and synccheck
-pass. Experiment 487 then measured the full workload's strata and tail.
-Experiment 488 enables bounded durable transaction batching and repeats the
-eleven-count/33-residue GPU pilot. Experiment 489 extends sharing to the
-order-52/54 tail and passes six further complete-count checks (18 residues).
-The current forecast is **about 119 RTX PRO 6000 GPU-hours**. Experiment 490
-audits the accepted plan and produces 64 whole-group work items, balanced over
-eight workers at **14.83–14.88 hours each** before startup/audit, transfer,
-reduction and interruption allowances. This combines sampled computation and
-measured storage replay; it is not a full campaign or eight-GPU scaling result.
-Experiment 491 adds indexed plan access, one audit/worker per queue process,
-and ordered journal reduction. These reduce CPU overhead, not GPU arithmetic;
-the forecast remains unchanged. Use the freshly bound Experiment-491 manifest.
-Experiment 492 passes a concurrent two-process GPU queue/crash/snapshot rehearsal
-and locally re-reduces all 24 completed test counts identically. Both processes
-shared one GPU: this is a functional gate, not an eight-GPU scaling measurement.
-A selective-scratch-initialization candidate saved only 0.8% of weighted shared
-kernel time and was not promoted. Production arithmetic and manifest provenance
-are unchanged.
+Shared-core groups and independent residual queries use one checkpoint/reduction
+workflow. The complete **6×27 campaign is validated**: 64 tasks on eight RTX PRO
+6000 GPUs completed all 45,007,139 queries in **115.74 timed GPU-hours**, with
+**15 h 37 min** elapsed including setup and validation. Results are recorded in
+[results.txt](../../results.txt); the worker and disks were deleted after all
+results were downloaded and validated.
+
+The **6×28 verification** subsequently used the [mixed campaign workflow](mixed_campaign.md)
+to split expensive independent queries across GPUs. All 36,398 queries completed,
+reproducing the existing grid result: **4.13 timed GPU-hours**, **65 min solving / 72 min including
+setup, validation and cleanup**, on four RTX PRO 6000 GPUs (Experiment 500).
+
+This page documents the whole-group runner used for 6×27. Historical forecasts
+and bounded tests below are not additional completed campaigns. The accepted
+production configuration includes durable transaction batching, order-52/54
+sharing, indexed plan access, persistent queue workers and ordered reduction.
+Earlier research gates are preserved in [common_core_gate.md](common_core_gate.md).
+Generate fresh manifests bound to the actual inputs and binary for new runs;
+do not resume archived journals with changed controller sources.
 
 The maintained components are:
 
@@ -132,7 +129,8 @@ Initial startup/audit remains outside the forecast. These scripts do not impleme
 automatic result pulling, spot recovery or provider cleanup. A short supervised
 two-process rehearsal now passes. Experiment 493 adds the remote multi-GPU
 runner and a private deployment supervisor with verified off-host publication
-and a spending guard. The production campaign is in progress, not yet certified.
+and a spending guard. That 6×27 campaign completed with all 64 tasks validated,
+zero missing queries, and verified off-host results before resource deletion.
 
 For a bounded queue rehearsal, invoke the emitted `common_core_manifest.py run`
 command with `--max-checkpoints 1`; when a task reaches the limit the **whole
@@ -362,7 +360,7 @@ A complete local reference run of 6×28 group zero covers ten children and
 524,288 shared signs in each of three primes. It was stopped after its first
 65,536-sign checkpoint and resumed. All ten exact matching counts and all
 thirty normalized residues match the archived independent production GPU
-results. To repeat that comparison once the complete journal exists:
+results. To repeat that comparison using the archived complete journal:
 
 ```sh
 python3 tests/hafnian/common_core_campaign_test.py --archived-parity \
@@ -391,15 +389,16 @@ Ada and Blackwell builds compile; this new runtime pilot was Blackwell only.
 Logs and journals are retained under `build/common-core-486/`; the temporary
 spot VM and OS volume were deleted after pulling the results.
 
-Experiment 487 subsequently measured the integrated workload: **about 166
+Experiment 487's historical integrated-workload projection was **about 166
 RTX PRO 6000 GPU-hours**, including 101 shared-compute hours, 39 independent
 hours and 26 preparation/checkpoint hours. Two repeated stratified sweeps give
 165.74 and 165.94 hours. Approximately 21 hours on eight work-balanced GPUs is
 an ideal scaling estimate, before setup, audit/final reduction and interruption
 allowances; multi-GPU storage contention is unmeasured. The earlier 102.35-hour
 figure excluded independent work and production overhead. Roughly 25 hours
-now come from durable journal operations, making bounded transaction batching
-the next practical optimization. No full campaign has been launched.
+were attributed to durable journal operations. Experiment 488 subsequently
+addressed this with bounded transaction batching; the completed campaign
+measurement at the top of this page supersedes the forecast.
 
 The Experiment-489 order-52/54 extension is accepted for **fresh campaign
 plans** after CPU coverage/embedding checks, GPU A/B, and complete-query parity.
@@ -427,9 +426,10 @@ The measured selected-order projection is 1.12 compute GPU-hours versus 25.09
 for the independent control on the same RTX PRO 6000. All six complete counts
 (18 prime residues) agree. Seventeen sampled narrow-pool groups also beat
 their own 54 independent children, with a minimum 1.76x projected compute
-gain. The new full-campaign estimate is **about 119 GPU-hours**, conservatively
-retaining old overhead and all untested-order costs. This is not a full solve;
-fresh plan hashes and normal campaign audit/checkpoint checks remain required.
+gain. The resulting pre-campaign estimate was **about 119 GPU-hours**, conservatively
+retaining old overhead and all untested-order costs. The completed 6×27 run
+measured 115.74 timed GPU-hours. Fresh plan hashes and normal campaign
+audit/checkpoint checks remain required for reruns.
 
 ## Reproducible steady-state timing
 
