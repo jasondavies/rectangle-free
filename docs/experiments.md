@@ -17726,3 +17726,1178 @@
   No worker restarts or spot replacements occurred. The supervisor deleted the
   VM and its disk after validation; both provider inventories were confirmed
   empty. These measured totals replace the launch forecast for this campaign.
+
+### Experiment 501: Bounded exact model-counting gate for 9×9
+
+- Test a distinct computation graph: count satisfying assignments of rectangle
+  constraints using clause learning and component caching, without an outer-mask
+  corpus. This is a CPU feasibility probe, not a production solver or a 9×9
+  runtime estimate. Two parsimonious encodings have no auxiliary assignments:
+  two bits per cell, or four one-hot variables with exactly-one constraints.
+  At 9×9 their sizes are respectively **162 variables / 5,184 clauses** and
+  **324 variables / 5,751 clauses**, before anchoring. Fixing the first cell's
+  colour to zero restores an exact factor of four, not 24.
+- Pin SharpSAT-TD at `0c234c11b77115bad89484e80e1d2fc95dd42317` and original
+  sharpSAT at `edfbde3424ce17d72d7f8d8f5b8681f2247f4932`. Build locally with
+  GCC 13.3 in Release mode; development dependencies stay under ignored build
+  storage. The original source needs `-include cstdint`. Upstream SharpSAT-TD
+  compares only a 128-bit component hash: the retained patch adds ownership and
+  comparison of the complete variable/clause key and accounts for its memory.
+  Original sharpSAT already compares packed component contents. A C++ test
+  forces equal hashes for unequal keys and verifies they remain distinct.
+  These checks are not a formal audit of either external counter.
+- Add `research/probes/grid_model_count_probe.py` and its adjacent reproduction
+  guide. The runner enforces wall/CPU/address-space limits, records input and
+  binary SHA-256 plus raw logs, and rejects partial/ambiguous outputs. Eight
+  Python tests pass, including exhaustive small colouring/encoding comparisons,
+  anchoring, random larger rectangles, and timeout-output rejection. **24 known
+  count checks** across counter/encoding/anchor configurations pass through
+  4×4, reproducing `T_4(4,4) = 2545607472`. Representative unanchored two-bit
+  4×4 wall times: original 1.85 s, TD 0.96 s. The latter uses the upstream
+  trivial-decomposition mode; do not compare it directly with timed FlowCutter
+  runs. An early harness regex mistook a logged `timeout` shell command for a
+  solver timeout; the parser and regression test were corrected and those
+  small anchored tests repeated successfully.
+- Primary scaling gate: first-cell anchor, **60 seconds per case**, 1 GiB
+  component cache and 4 GiB address-space cap. TD receives a real one-second
+  FlowCutter budget. Run two encodings concurrently, at most two counters at a
+  time, on the local eight-physical-core Ryzen 7 9700X. All **12 cases time out**:
+
+  | Counter | Encoding | 5×5 | 6×6 | 7×7 |
+  | --- | --- | --- | --- | --- |
+  | SharpSAT-TD, full cache keys | Two-bit | >60 s | >60 s | >60 s |
+  | SharpSAT-TD, full cache keys | One-hot | >60 s | >60 s | >60 s |
+  | Original sharpSAT | Two-bit | >60 s | >60 s | >60 s |
+  | Original sharpSAT | One-hot | >60 s | >60 s | >60 s |
+
+  TD peak RSS is 1.25–1.41 GiB; original sharpSAT is 0.59–1.77 GiB. These are
+  wall-limit terminations, not address-space failures. Cache rebuilding is
+  visible in TD logs. Concurrent cases are a bounded screening experiment,
+  not isolated throughput measurements or estimates of completion times.
+- Follow up with an **isolated anchored two-bit 5×5** TD run: 4 GiB cache,
+  8 GiB address-space limit, five-second FlowCutter budget and 180-second wall
+  limit. It still times out at **180.16 s**, with **5.51 GiB peak RSS**. Its last
+  periodic report, around 123 solver seconds, records 57,727,779 decisions and
+  31,469 conflicts; these are not final counters. Increasing cache and time
+  therefore does not rescue even this small gate within the tested budget.
+- Structural explanation: any two cells lie in a rectangle when both dimensions
+  are at least two. The two-bit CNF primal graph is complete; after substituting
+  the anchored cell, the remaining `2rn−2` variables still form a clique. Its
+  exact treewidth is **2rn−3**: 47, 69 and 95 for 5×5, 6×6 and 7×7, agreeing
+  with TD output; 9×9 would have width 159. Tests verify all clique edges through
+  9×9. The one-hot heuristic finds widths 59, 87 and 119; those are not claims
+  of minimum treewidth. A small CNF does not imply a small separator or search.
+- **Decision:** do not GPU-port or scale this drop-in #SAT baseline. It supplies
+  no evidence for affordable 9×9. This is not a lower bound for adaptive search,
+  other encodings, stronger symmetry handling or all model-counting methods.
+  No 5×5-or-larger count completed, no result table changed, and no cloud/GPU
+  resources were provisioned. Artifacts: `build/review-501/`; external sources
+  are not vendored. Per-run reports bind binaries with SHA-256:
+  TD `611bef6ed7f0dfe4e220f7fb6287543a63e193103f1f2d0ca127674ca1e33f9f`,
+  original `98290d172dacfa61b313d612929b6bc1738ffb6e762e14c3960398c5cedba867`.
+
+### Experiment 502: Shared last-column response contraction
+
+- Test a demand-driven intermediate, rather than the complete universal state
+  rejected by earlier rank/DD gates. For a fixed seven-column outer core
+  `A|B`, with widths 4+3, define `F_s(W)` as the number of binary assignments
+  on a final active-row set `s` whose tokens avoid `W`. Then exactly
+  `C(A|B|s) = sum_{U & V = 0} D_A(U) D_B(V) F_s(U | V)`.
+  Contract the core halves once and accumulate responses for every requested
+  extension. Repeat for the complemented core/extension. This does not change
+  the outer coefficients or claim another colour-symmetry factor.
+- New isolated CPU probe: `research/probes/shared_column_response_probe.cpp`,
+  adjacent algorithm/reproduction note, and `make shared-column-response-test`.
+  The response vector has only 256 unsigned-128-bit entries at eight rows.
+  A ternary row search (absent / colour zero / colour one), pruned by forbidden
+  row pairs and a prebuilt demand trie, computes the responses. It never
+  materializes the complete seven-column distribution. Test both direct
+  streaming and a bounded union cache. Cached keys normalize the union under
+  plane exchange; their weights are total contributions, not per-mask weights.
+  The join restores left orbit size and both distinct right orientations.
+- Exactness: exhaust all two-column cores at two/three rows and all last-column
+  masks, with cache caps 0, 1, 7 and 1,000. Compare against unquotiented DP plus
+  direct increment scans, and reproduce complete labelled counts
+  `T_4(2,3)=3912`, `T_4(3,3)=228984`. Further sparse fixtures through eight rows
+  check all extensions against full-support references. Four Python harness
+  tests cover these checks, bounded-failure rejection, family row relabelling,
+  checked orbit-file headers/lengths and invalid limits. ASan/UBSan self-tests
+  pass. Capped methods discard their answer vectors; partial counters are not
+  numerical results.
+- Actual reuse census: read complete transpose-quotient shards
+  `s0000,s0256,s0512,s0768`. Remove physical column seven, then sort rows by
+  `(core pattern, removed bit)` to obtain a common gauge. Exact within-shard
+  counts are:
+
+  | Shard | Records | Common-core families | Records/family |
+  | --- | ---: | ---: | ---: |
+  | s0000 | 3,819,929 | 2,521,445 | 1.515 |
+  | s0256 | 3,752,501 | 2,340,464 | 1.603 |
+  | s0512 | 3,270,588 | 2,312,555 | 1.414 |
+  | s0768 | 3,602,978 | 2,441,158 | 1.476 |
+
+  Across these separate censuses, **14,445,996 records** occupy 9,615,622
+  family occurrences. There are 7,182,735 singleton families. Families with
+  at least eight extensions cover 1,028,533 records (7.12%); at least twenty
+  cover 247,407 (1.71%). These are record counts, **not GPU-time coverage**.
+  Families are not merged across shards or under core column permutations,
+  and other removable columns are not searched. Do not treat these numbers
+  as a global limit on every possible family grouping.
+- CPU gate: choose two high-reuse cores with 26–30 active cells and two
+  low-reuse cores from each census's emitted examples: eight families with
+  20–39 requested extensions, eight with one/two. This is a purposive sample,
+  not a workload-weighted sample. All 16 complete family computations agree
+  exactly with independent prefix-pruned 4+4 joins: **233 requested outer
+  masks / 466 selected/complement counts**. The control reuses its common
+  left half; both methods include their required half construction. GCC 13.3,
+  `-O3 -std=c++17`, one local CPU process at a time, no GPU. Per-method limits:
+  10 billion counted operations, 20 seconds, one million DP states per map.
+  No case in the main measured set hits a cap. Earlier 50-million-operation
+  screening runs did hit caps and are not included in these timings.
+
+  | CPU family set | Independent | Shared, 100k cache | Shared, no cache |
+  | --- | ---: | ---: | ---: |
+  | Eight high-reuse families | 4.746 s | 2.598 s | 2.303 s |
+  | Eight low-reuse families | 1.137 s | 1.847 s | 1.288 s |
+
+  The independent repeats accompanying the no-cache runs total 4.757 s and
+  1.133 s respectively. Thus high-reuse streaming is **2.07× faster on this
+  CPU sample**, while low-reuse streaming is about **14% slower**. Construction
+  in the cached high-reuse run accounts for 0.621 s of the independent total
+  versus 0.013 s shared: excluding it gives about 1.60×, not a GPU measurement.
+- Union deduplication is usually modest: the cached high-reuse set evaluates
+  2,383,383 responses from 2,522,592 compatible core pairs; low reuse evaluates
+  8,670,079 from 8,934,645. Streaming normally avoids unhelpful hash work.
+  An important exception is core `1974750805758` in s0768, with 28 demanded
+  extensions. Caching reduces 175,103 compatible pairs to 57,159 union keys:
+  complete CPU time falls from **0.690 s to 0.0788 s (8.76×)**, versus
+  0.180 s for streaming. A one-million-entry cap gives essentially the same
+  result (0.0793 s); its largest side uses only 31,520 union keys.
+- Optimistic reuse control: request all 256 extensions of that same core.
+  Both selected/complement sides match independently for all 512 counts.
+  CPU time is **6.226 s independent versus 0.288 s shared (21.64×)**. This is
+  an artificial upper-reuse family, not 256 observed records or a campaign
+  speedup. It demonstrates the algebraic opportunity when sufficient queries
+  share a favourable core, rather than establishing how often that happens.
+- GPU qualification: for the eight high-reuse families the baseline has
+  34,662,224 modeled padded weight-class BMMA tiles, whereas cached responses
+  visit 1,026,807,485 search nodes in addition to core predicates and caching.
+  These are different primitives, not a timing equivalence. The tile model's
+  accounting time is excluded from CPU times. BMMA returns aggregate predicate
+  counts, not the union masks this response algorithm needs. Neither CPU
+  speedup nor reduced Cartesian pair count proves a GPU win.
+- **Decision:** retain as a selective shared-contraction candidate, not a
+  blanket replacement or an established 9×9 breakthrough. The small response
+  vector avoids one previously feared large intermediate, but construction,
+  actual family reuse and GPU response evaluation remain the gates. Next
+  measure production-work-weighted coverage and broader exact core grouping
+  before renting hardware. No nine-row backend, complete new grid count,
+  corpus rewrite or production integration was attempted. Artifacts stay in
+  ignored `build/review-502/`; no cloud resources were used.
+
+### Experiment 503: Work-weighted coverage and canonical deletion families
+
+- Follow Experiment 502 with actual join-work accounting and broader exact
+  core grouping. Add the isolated `shared_column_family_census` CPU target,
+  its adjacent mathematical/reproduction note and regression tests. No GPU
+  or production solver changes. Import the maintained distribution and half
+  canonicalisation code directly from `twocolour_gpu_common.cuh`.
+- Model each sampled record in its **original production row layout**:
+  canonicalize its four selected/complement halves, build their distributions,
+  quotient token planes in canonical coordinates, then apply production's row
+  maps. Preserve those chosen representatives rather than minimizing them
+  again in labelled coordinates. Count padded 16×8 weight-class tiles under
+  the seven production prefix coordinates and both distinct right orientations.
+  This tightens Experiment 502's research-layout model; it is still not an
+  instruction trace, device runtime, producer-cost or tail-latency model.
+  Orbit coefficients do not multiply execution work.
+- Scan all **14,445,996 records** in complete transpose-quotient shards
+  `s0000,s0256,s0512,s0768`, merging groups across these four files. At a fixed
+  physical last-column boundary, row-only normalization gives **9,516,998**
+  families; full row/column canonicalisation of the remaining 8×7 incidence
+  graph gives **8,662,643**. Both retain 14,445,996 distinct extension queries.
+  Thus this broader fixed-boundary canonicalisation reduces families by about
+  9%, not by an order of magnitude.
+- Work sample: **1,024 pseudorandom stratified records per shard**, 4,096 total,
+  seed 503. Build the exact production-layout tile model for every draw and
+  weight it by its stratum's record population. No sample is dropped or capped.
+  Original orbit coefficients are deliberately excluded. Fixed-boundary
+  families with at least 20 observed extensions cover only **0.1333%** of
+  modeled work under row normalization and **0.1651%** under row/column
+  normalization. The corresponding coverage for at least eight extensions
+  is 1.0291% and 1.7835%. Record-count coverage had overstated this opportunity.
+- A different grouping is needed before rejecting shared contractions:
+  **assign every outer orbit an invariant deletion parent**. Normalize to at
+  most 32 cells; consider both square orientations, and at exactly 32 cells
+  also both complements, matching production's existing midpoint-complement
+  quotient. Delete each of eight columns from each eligible image, canonicalize
+  the 8×7 core under row/column permutations, and choose the minimum core key.
+  This uses nauty 2.8.8 with row and column vertices in separate colour classes.
+  It does not add a new outer symmetry or change orbit coefficients.
+- For each sampled parent, enumerate all 256 possible final columns, retain
+  children with at most 32 cells whose chosen parent is this core, and
+  deduplicate their full row/column/transpose/midpoint-complement orbit IDs.
+  This gives the **exact global assigned family**, not just occupancy in the
+  four loaded shards. Every assigned orbit has a representative extending the
+  canonical parent, so it is enumerated; the invariant minimum assigns it to
+  only one parent; full child-orbit deduplication resolves deletion ties and
+  stabilizers. This avoids both assuming all 256 extensions are needed and
+  counting an orbit in several overlapping candidate families.
+- Evaluate this rule for all **4,096 workload draws**, covering 4,094 distinct
+  parents. Every sampled orbit is found in its assigned family. Fanouts seen
+  by sampled records range from **1 to 236**, with median **70** and p90 **155**.
+  These are record-sampled, size-biased statistics, not the median or mean over
+  all parents. The inherited tile-work weights give:
+
+  | Grouping | Work in families ≥8 | Work in families ≥20 |
+  | --- | ---: | ---: |
+  | Fixed boundary, row gauge, four-file occupancy | 1.03% | 0.13% |
+  | Fixed boundary, full core isomorphism, four-file occupancy | 1.78% | 0.17% |
+  | Invariant deletion parent, complete global family | **95.23%** | **87.63%** |
+
+  The last row changes both the deletion rule and the scope from observed
+  occupancy to complete assigned families; it is not an isolated effect of
+  column canonicalisation. Per-shard ≥20 work coverage is 86.58%, 87.28%,
+  89.28%, and 87.47%. All percentages estimate workload coverage from samples;
+  the four chosen shards are not a random sample of the entire campaign.
+- Correctness checks: canonical core/extension row maps reconstruct the
+  original incidence matrix under explicit permutations; random row/column
+  relabellings preserve core IDs; the parent is invariant under moving any
+  column, transposition and the retained complement convention. Enumerated
+  families contain their sampled input orbit, and every stored query
+  reconstructs its child ID. The empty core has exactly nine assigned child
+  orbits, independently known from column sizes 0–8. Production canonical
+  halves expand back to independently built full labelled distributions.
+  Three new Python tests plus the four response tests pass; ASan/UBSan
+  self-tests also pass. A preliminary parent prototype omitted the existing
+  balanced-complement convention; it was corrected and tested before the
+  final 4,096-record parent census. Do not use that preliminary 512-record log
+  as the final production-orbit census.
+- Local costs: GCC 13.3, `-O3 -std=c++17`, one CPU process. Full four-file
+  grouping takes **29.51 s**, grouping plus 4,096 tile models **84.39 s**,
+  with **1.34 GiB peak RSS**. Global assigned-family enumeration takes a
+  further **14.55 s**, about **24 MiB peak RSS**. The first run has a 300-second
+  external deadline and 16 GiB address-space cap; the parent run has a
+  180-second deadline. Both complete normally. Artifacts, complete markers,
+  sample TSV and raw logs are under ignored `build/review-503/`.
+- **Decision: the canonical deletion partition clears the reuse gate.**
+  This is substantially more promising than merely caching the stored
+  last-column cores. It is not yet a GPU speedup or a 9×9 runtime estimate.
+  The new parent gauge and query sets differ from Experiment 502; its CPU
+  speedups cannot be multiplied into these coverage figures. Next benchmark
+  complete assigned families, including parent construction and response
+  evaluation, and ultimately compare with a warmed production GPU control.
+  A future corpus transformation must preserve and audit all original exact
+  coefficients. No new full-grid result, new corpus, GPU rental or production
+  integration was performed.
+
+### Experiment 504: Complete assigned-family response timing gate
+
+- **Question:** does Experiment 503's global deletion-family reuse turn into
+  cheaper complete computations, rather than merely large fanout? Extend the
+  research family census with `family`, `model-parent`, and
+  `check-production-keys` modes. Add a bounded sequential Python timing runner
+  and a small C bridge importing the actual 8×8 corpus representative rules.
+  Production solvers and generators are unchanged.
+- Select eight families **before timing**, using the 50th and 90th
+  sampled-record tile-cost quantiles within fanout bands 1–7, 8–19, 20–79,
+  and 80–256 of the completed 4,096-record Experiment 503 parent census.
+  This is a purposive cost/fanout panel, not a random family sample, unbiased
+  campaign estimate, or ranking by measured speedup. Enumerate every assigned
+  child orbit of each chosen parent; do not use only children from the sampled
+  shards or assume all 256 extensions are required.
+- For each family and each selected/complement side, run an independent CPU
+  4+4 reference, a shared 4+3 response with a 100,000-entry union cache, a
+  streamed response without that cache, and a second independent reference.
+  All methods use the same new parent gauge. Include half-distribution
+  construction and response evaluation; exclude and separately time the
+  instrument-only BMMA tile accounting. Parent assignment costs a further
+  **0.025707 s** over all eight families and is charged once per shared-family
+  calculation. These are cold local distribution builds, **not warmed GPU
+  cache timings**.
+- **Exactness:** all eight complete families finish without operation, time,
+  or distribution-size caps. Their **396 distinct outer orbits** require
+  **792 selected/complement counts**. Both shared variants and the repeated
+  independent control match all counts exactly: 2,376 equality checks. These
+  are individual child counts, not a new coefficient-weighted grid result.
+
+  | Parent key | Children | Independent CPU s | Cached response s | Streamed response s |
+  | --- | ---: | ---: | ---: | ---: |
+  | `57383535649701152` | 4 | 0.200 | 0.195 | 0.140 |
+  | `40663528609782260` | 3 | 0.482 | 1.474 | 1.056 |
+  | `39401097128064035` | 19 | 0.941 | 1.211 | 0.997 |
+  | `14900339063206496` | 12 | 1.048 | 2.829 | 2.317 |
+  | `21695310254508064` | 69 | 3.031 | 0.175 | 0.163 |
+  | `14776773176269296` | 46 | 8.600 | 12.039 | 10.588 |
+  | `7664012742113648` | 110 | 5.447 | 2.398 | 2.108 |
+  | `19469589500464701` | 133 | 16.691 | 16.215 | 13.618 |
+  | **Total** | **396** | **36.441** | **36.537** | **30.986** |
+
+  The table excludes the separately reported assignment cost. Adding it makes
+  streaming **31.012 s**, a **1.175× CPU speedup / 14.9% elapsed-time reduction**
+  versus independent joins. Cached response plus assignment takes 36.562 s,
+  effectively parity/slightly worse. Repeated independent controls total
+  **36.501 s**, 0.17% above the first controls. Streaming wins in four of the
+  eight complete families; fanout alone does not predict a win.
+- Construction drops from **2.070 s** in independent controls to **0.0383 s**
+  with streaming. Excluding construction from both methods reduces the
+  aggregate CPU speedup to about **1.11×**. Independent controls perform
+  **33,294,454,454** scalar disjointness predicates. Sharing needs only
+  **87,226,778** core predicates, but emits **28,159,802** compatible union
+  contributions and visits **14,401,152,068** ternary-response nodes. Thus
+  eliminating repeated core joins has moved the work into response
+  evaluation; the core predicate reduction alone greatly overstates the win.
+  At the tested 100,000-entry capacity, caching reduces response evaluations
+  by only **3,402 (0.0121%)** and adds overhead. This does not measure global
+  deduplication with an unlimited cache.
+- **Control-gauge correction:** the CPU reference in the new parent gauge is
+  not the original production workload. For each of the 396 children, obtain
+  the real corpus representative using the existing generator's
+  canonicalization, balanced-complement normalization, and transpose rule.
+  Build the production canonical half representatives and count padded
+  ordinary/swapped weight-class BMMA tiles in both gauges. The bridge
+  reproduces **all 4,096 original sampled corpus keys exactly**; all eight
+  original sampled tile costs also match, and every reconstructed child stays
+  in its original full orbit.
+  - Complete families total **268,679,053** production-representative tiles
+    versus **313,055,610** tiles with production half representatives in the
+    new parent gauge (16.5% more). The CPU probe's label-minimized quotient
+    gives a third, slightly different model, 313,858,268 tiles; do not mix
+    these representation conventions.
+  - The most impressive CPU family (69 children, **18.29×** streamed speedup
+    after assignment) has **38,660,316** parent-gauge tiles but only
+    **5,905,188** original-production tiles: **6.55× gauge inflation**. Its
+    CPU ratio cannot be advertised as a production GPU improvement.
+  - The 110-child family has **45,724,428** parent-gauge versus **44,254,910**
+    production tiles (3.3% inflation), and gives **2.58×** CPU speedup after
+    assignment. It is a less-confounded candidate for a selective GPU probe.
+  - These are operation-count models, not measured GPU throughput. The
+    existing aggregate BMMA join returns a weighted count, whereas the new
+    method must recover union-dependent responses. It cannot simply use the
+    smaller core tile count as its runtime estimate.
+- Bounds/provenance: one local Ryzen 7 9700X CPU process, GCC 13.3 `-O3
+  -std=c++17`, 8 GiB address-space limit, at most 100 billion counted steps
+  and 30 seconds per method-side, with a 360-second external family deadline.
+  The complete timing panel takes **143.61 s**, including repeated controls
+  and its parent-gauge instrumentation; a subsequent all-child production
+  gauge comparison takes about seven seconds. Selection, source sample and
+  binary hashes, raw logs, completion markers and summary are retained under
+  ignored `build/review-504/`. Preserve `panel-binary` for the measured build;
+  the production-key bridge/model modes were added after the CPU timing run
+  without changing its response arithmetic. An earlier single-family pilot
+  hit its smaller 10-billion-step reference cap; its censored times are **not**
+  included in the eight-family table or parity totals.
+- Tests: five family-census tests, four response tests and eight model-count
+  tests pass. New tests cover complete-family parity, cap-induced answer
+  discard, invalid limits, production-key idempotence/orbit preservation,
+  and supplementary model completion. ASan/UBSan self-tests pass, as does
+  `git diff --check`.
+- **Decision: no blanket integration or major GPU speedup claim.** The exact
+  global reuse gate from Experiment 503 remains valid, but this straightforward
+  response implementation yields only a modest aggregate CPU gain and is
+  slower on half the panel. Preserve it as a selective research path. The
+  next meaningful gate is an efficient union-response GPU primitive, tested
+  on complete families against their **original, warmed production** joins,
+  including union recovery, response accumulation, construction and any
+  regrouping costs. Prefer the 110-child case as a less gauge-confounded
+  positive control and include negative controls. No new 9×9 runtime estimate,
+  cloud spend, corpus rewrite, production change or full-grid result.
+
+### Experiment 505: Reuse-budgeted 8×8 column-cut selection
+
+- **Question:** can cuts be chosen jointly, rather than independently per
+  record, to retain part of Experiment 369's arithmetic saving without its
+  explosion in left layouts? This is separate from shared-family response
+  evaluation. All contractions remain the existing exact 4+4 weighted joins.
+- Add a bounded CPU candidate exporter, a Python joint selector and regression
+  tests. The exporter reuses the production canonical-half/quotient model
+  introduced in Experiment 503. Candidate zero is the literal input split and
+  row gauge. Alternatives are column permutations and optional transposition,
+  each with both choices of resident side; selected and complement share a
+  cut. Original record identities and coefficients are retained. No corpus
+  is rewritten and no new GPU arithmetic is implemented.
+- **Population:** sample complete left groups, not isolated records. For each
+  of `s0000,s0256,s0512,s0768`, choose one left group uniformly within fanout
+  bands 8–31, 64–255 and 256–1023, using seed 505. This gives 12 complete groups
+  and **2,946 records**. Separate-shard validation on
+  `s0064,s0320,s0576,s0960`, seed 1505, gives 12 groups and **2,947 records**.
+  These are bounded stratified panels, not unbiased campaign work samples:
+  singleton groups and the very large groups above 1023 children are omitted.
+  The first inspected full shard has 12,705 left identities, with fanouts
+  ranging from one to 124,554. Do not extrapolate from sampled group sizes as
+  though they describe the whole campaign.
+- Start with four fixed historical cuts, chosen before this experiment:
+  `V:0x0f,H:0x0f,H:0x17,V:0x17`. Then expand to **all 70 unordered vertical /
+  horizontal cuts, each in both execution directions**, on the complete
+  groups below 256 records: **687 records / eight groups** initially and
+  **572 records / eight groups** in validation. The wider-menu gate is a
+  subset of the large panels, not a further independent sample.
+- **Budget and objective:** minimize padded ordinary/swapped weight-class
+  BMMA tile count. Charge unique labelled left and right layouts by output
+  bytes: 8 per suffix, 12 per bucket, 16 per class, and 48 per selected /
+  complement pair descriptor. Cap each side's identity count too. Start with
+  every baseline layout reserved; a bundle opening one new left layout may
+  move many records, charging that left once and each new right once. Greedily
+  choose improving bundles by gain relative to normalized new bytes and IDs.
+  Never release baseline reservations or exceed either side's bounds. This
+  is a feasible conservative heuristic, not an exact facility-location solver.
+  Right-layout volume is pooled across the panel; actual streaming batches
+  can rebuild a layout and incur additional cost. Output-byte totals are
+  neither peak VRAM nor complete builder-scratch estimates.
+- **Strict budget results — reduction in modeled tiles:**
+
+  | Candidate menu / panel | +25% bytes and IDs | +50% | +100% |
+  | --- | ---: | ---: | ---: |
+  | Four cuts, 2,946 records | 2.14% | 3.97% | 7.04% |
+  | Four cuts, 2,947 validation records | 3.27% | 4.30% | 5.65% |
+  | All 70, 687 records | 5.12% | 7.63% | 11.26% |
+  | All 70, 572 validation records | 9.21% | 13.01% | 17.01% |
+
+  No-growth selection leaves the production baseline unchanged. A matched
+  four-cut run on the same 687 records saves 2.34%, 4.74%, and 8.33%, so the
+  wider menu's improvement is not merely a difference in sampled records.
+- **Optimistic bounds:** give right layouts for free, sum per-new-left gains
+  while allowing overlapping gains to be counted repeatedly, and take the
+  tighter identity-count and fractional-byte-knapsack bounds. A second bound
+  gives all baseline left layouts for free and permits the whole final left
+  budget in new identities; this also bounds selectors that retire unused
+  baseline layouts. Clip both by the unrestricted per-record oracle.
+  - On the initial all-70 panel, the reserved-baseline upper bounds at the
+    three budgets are 5.12%, 8.39%, and 13.57%. The +25% feasible result
+    attains its bound. The retirement relaxation gives 15.95%, 18.23%, and
+    22.60%: lack of a cleverer reserved-baseline heuristic does not explain
+    an arbitrarily large missing saving there.
+  - Validation bounds are much looser: 12.22%, 21.69%, and 38.10% with
+    reservations. These bounds therefore do **not** close all better joint
+    selectors. They apply only to the stated sampled population, menu and
+    layout-identity model, not globally to 8×8.
+- **Do not mistake the identity cap for a RAM limit.** Run a byte-only
+  diagnostic that relaxes identity caps while retaining the same byte budgets.
+  This recovers a more useful operating point:
+
+  | All-70 panel | +25% bytes | +50% bytes | +100% bytes |
+  | --- | ---: | ---: | ---: |
+  | Initial: tile saving | 9.38% | 13.85% | **20.73%** |
+  | Initial: reserved left IDs, baseline 8 | 14 | 20 | **33** |
+  | Validation: tile saving | 13.34% | 17.96% | **22.42%** |
+  | Validation: reserved left IDs, baseline 8 | 14 | 19 | **27** |
+
+  At the largest byte budget, initial left output grows from 3,041,128 to
+  6,078,348 bytes, right reserved output from 126,306,460 to 170,333,652 bytes;
+  tiles fall from 609,993,136 to **483,512,806**. Validation left output grows
+  from 3,264,848 to 6,526,880 bytes, right reserved output from 102,411,192 to
+  124,722,968 bytes; tiles fall from 500,977,069 to **388,640,897**. More small
+  layouts still incur metadata, planning and construction costs. These are
+  different operating points from the strict identity-budget results, not
+  results hidden inside a 2×-identity cap.
+- **Comparison with independent choice:** the unrestricted all-70 tile oracle
+  saves 49.51% initially but uses 453 left identities / 110,958,428 bytes
+  rather than eight / 3,041,128 bytes. Validation saves 43.41% with 344 left
+  identities / 90,322,048 bytes rather than eight / 3,264,848 bytes. The
+  byte-budgeted joint selector retains roughly 42–52% of these arithmetic
+  savings with about 2× left bytes rather than 28–36×. The useful cuts are
+  not the same across panels; a small globally fixed menu is not established
+  as a replacement for all-cut scoring.
+- **Validation and limits:** inverse-transform tests cover every four-column
+  choice on 64 deterministic grids, plus complement and transpose identities.
+  The literal baseline reconstructs every original key. Export completion,
+  record uniqueness and layout references are checked before selection.
+  Synthetic tests verify once-only opening charges, byte/ID caps, free reuse,
+  monotonic tile cost, complete-group sampling and capped-versus-byte-only
+  modes. Exhaustive tiny instances check both optimistic bounds against every
+  feasible selection. Repeated all-70 selection is deterministic. Eight new
+  tests and 17 existing research tests pass; ASan/UBSan passes the inverse
+  tests and a real two-record candidate export. `git diff --check` passes.
+- Local census times are 62.61 s and 77.51 s for the two four-cut panels,
+  259.01 s and 278.32 s for the all-70 subsets. Some census jobs overlap on
+  separate CPU cores; these are setup costs, not A/B solver timings. Each
+  exporter has a 600-second deadline and an 8 GiB address-space cap. All
+  complete normally. Artifacts, inputs, selected groups, source indices,
+  hashes, all choices and raw logs remain under ignored `build/review-505/`.
+- **Decision: a modest positive structural gate, not a production speedup.**
+  Joint selection does improve the reuse/arithmetic tradeoff, especially
+  with byte rather than rigid identity budgets. The reproducible 20.7–22.4%
+  tile reduction warrants keeping this direction open, but does not justify
+  a full corpus rewrite or a campaign runtime estimate. Next require cheap
+  candidate shortlisting / shared scoring on production-sized groups, then
+  a matched warmed GPU A/B charging all layout builds, batching, reownership
+  and offline selection. The intentionally expensive exact all-cut census
+  must not be assumed free or scalable over billions of records. No GPU was
+  rented, no production solver changed, and no full-grid result was computed.
+
+### Experiment 506: Cheap support/reuse shortlists for budgeted 8×8 cuts
+
+- **Question:** can cached half-support counts shortlist two to four cuts,
+  retaining most of Experiment 505's byte-budgeted saving without exact
+  all-cut scoring? Extend validation to complete left groups above 1023
+  records. CPU only; no production change or cloud allocation.
+- Add `cut_support_counts.cpp`, `cut_shortlist.py`, filtered candidate export,
+  explicit sampler fanout bands, and `cut-shortlist-test`. The cheap pass
+  enumerates all 70 unordered vertical/horizontal cuts but only looks up
+  selected/complement quotient support counts. Canonical counts are cached
+  lazily and raw halves are memoized; sorted row multisets avoid redundant
+  canonicalization. This does not construct labelled bucket layouts or count
+  BMMA tiles. Its small research cache is structurally checked, but is not a
+  checksummed production artifact or a complete universal source census.
+- Rank by raw support product as a control. The reuse-aware rule instead
+  divides positive predicted product saving by amortized new support entries,
+  using baseline membership and distinct-record candidate frequencies on
+  each side. A mixed control reserves one raw-product choice. No exact
+  prefix/class/byte/tile data enters ranking. Always retain literal baseline
+  slot zero plus both directions of two or four other cuts: **5 or 9 scored
+  alternatives instead of 140**. Discarded candidates are skipped before
+  expensive layout construction. Then run the existing exact-size/tile,
+  reserved-baseline joint selector with 2× byte budgets and relaxed identity
+  caps. This is a feasible greedy selector, not a global optimum.
+- **Training/held-out protocol:** use the previous 687-record training and
+  572-record separate-shard all-cut panels. On training, product-only saves
+  13.04% / 15.05% with two/four cuts; mixed saves 16.99% / 19.81%; reuse saves
+  17.19% / 19.93%. Choose reuse-four on training before evaluating it on the
+  held-out panel and larger groups. Reuse-two is a lower-scoring-cost control.
+
+  | Panel | All-70 reference saving | Two-cut shortlist | Four-cut shortlist | Four-cut retention |
+  | --- | ---: | ---: | ---: | ---: |
+  | Training, 687 records | 20.73% | 17.19% | **19.93%** | **96.13%** |
+  | Held out, 572 records | 22.42% | 18.87% | **20.22%** | **90.16%** |
+
+  Retention means saved tiles divided by the all-menu **heuristic's** saved
+  tiles, not fraction of an exact optimum. Two-cut retention is 82.91% and
+  84.13%. Both clear an 80% retention gate on these panels. Every one of the
+  1,259 filtered records reproduces the corresponding archived all-cut
+  candidate tuples and exact tile counts; every exported layout size agrees.
+  All 80,694 raw-half support-count comparisons across the two panels agree
+  with the separately constructed labelled layouts.
+- **Preprocessing costs:** the first count cache builds 12,712 canonical
+  sources in 11.85 seconds (11.95-second pass). Held-out enumeration adds
+  3,312 sources in 2.97 seconds; its complete process takes 3.08 seconds.
+  Warm training enumeration takes 0.072 seconds including cache loading;
+  ranking takes about 0.09 seconds and the four-cut joint selector 0.12 seconds.
+  Exact four-cut shortlisted scoring takes **19.26 / 18.01 seconds**, versus
+  **259.01 / 278.32 seconds** for the archived all-menu passes. It constructs
+  4,003 / 3,459 labelled half-pair summaries rather than 41,530 / 39,164.
+  Two-cut scoring takes 11.32 / 10.10 seconds, with 2,421 / 2,051 summaries.
+  These are local research-process costs; some jobs ran concurrently on
+  separate CPU cores, not controlled GPU or end-to-end solver A/B timings.
+- **Where the time remains:** an instrumented four-cut training repeat takes
+  19.34 seconds: **18.45 seconds in layout-summary construction (95.4%)** and
+  **0.87 seconds in tile counting**. Construction includes canonical DP/cache
+  work, row-map transformations and prefix/weight-class histograms. The
+  shared research model has a small, clearing canonical-entry cache; these
+  costs must not be confused with a warmed production factory or attributed
+  entirely to intrinsic histogram cost. Cheap scoring of fewer alternatives
+  works, but the existing exact metadata producer remains unsuitable for a
+  naïve billions-record offline pass.
+- **Larger complete-group test:** preselect one group uniformly in fanout
+  band 1024–4095 from each of s0064, s0320, s0576 and s0960, seed 2506. Sizes
+  are **1,978, 1,693, 2,636 and 1,944**: all **8,251** records are retained.
+  This is a separate larger-group stress panel, not an unbiased campaign
+  work sample. The fixed rule scans 287,761 raw halves and grows the canonical
+  count cache to 19,994 sources. Partial-warm counting takes 3.45 seconds;
+  fully warm counting takes **0.36 seconds** and ranking **1.52 seconds**.
+  Exact shortlisted scoring takes **222.64 seconds**, building 36,704
+  labelled summaries. No full-70 exact control is run on this larger panel.
+
+  | Larger-panel selector, 2× byte caps | Modeled tiles | Saving |
+  | --- | ---: | ---: |
+  | Original split | 7,804,776,814 | — |
+  | Historical fixed four-cut menu | 7,528,057,559 | 3.55% |
+  | Reuse two-cut shortlist | 6,869,732,465 | 11.98% |
+  | Reuse four-cut shortlist | **6,854,613,686** | **12.17%** |
+
+  The four-cut solution opens 19 left identities rather than four; reserved
+  left output grows from 1,881,608 to **3,762,996 bytes** and right output
+  from 2,106,915,360 to **2,559,656,728 bytes**, both within their caps.
+  At 1.25× / 1.5× byte budgets its saving is 6.41% / 9.28%. The two-cut
+  diagnostic reuses a subset of the already scored four-cut alternatives;
+  it is not a separately timed larger-panel exporter run. The historical
+  menu's exact census takes 177.20 seconds. Without the full-menu large-group
+  control, we cannot distinguish lost shortlist quality from lower achievable
+  savings under these budgets. Do not extrapolate the small-panel 20% saving.
+- **Validation:** two new test methods cover cache cold/warm parity, count
+  agreement with labelled layouts, all three ranking rules at both menu sizes,
+  deterministic paired directions, baseline retention, filtered-export
+  equality, malformed/missing filters and cache records, completion markers,
+  and an untruncated 1,200-record group. These and the 25 existing research
+  tests pass. Existing cut-inverse/complement/transpose tests still pass.
+  Artifacts, choices, input group metadata, cache files, source hashes and
+  logs are under ignored `build/review-506/`; inputs are read-only. Census
+  runs use 180–300-second deadlines where specified; all finish normally.
+- **Decision: shortlist-quality gate passes; production-cost gate remains
+  open.** A tiny count table preserves 90–96% of the small-panel all-cut
+  saving, and the same rule gives a useful 12.2% reduction on larger groups.
+  This is not a measured GPU speedup. Next optimize/cache the exact histogram
+  metadata producer (including avoiding repeated canonical DP builds), rather
+  than spend time tuning the already cheap support ranking or tile summation.
+  Only then consider a matched GPU A/B charging preparation, real batches,
+  reownership, scratch/peak memory and all layout construction. No full-grid
+  result, campaign projection, GPU spend or production integration is claimed.
+
+### Experiment 507: Cached projected histograms for 8×8 cut scoring
+
+- **Question:** remove Experiment 506's dominant metadata-construction cost
+  before considering any GPU experiment. Keep the shortlist, byte budgets,
+  production token-plane convention and tile-count model unchanged. CPU only.
+- Add a research-only `CutHistogramModel` and cold/warm exporter driver.
+  Reuse the existing candidate exporter through an optional shared-model
+  argument; its default reference implementation and all production solvers
+  remain unchanged. Add a cache-only control to distinguish source retention
+  from histogram implementation improvements.
+- **Source retention:** build each required canonical quotient distribution
+  once per process. Sort its exact `(weight, orbit size)` alphabet and pack
+  each entry as a 56-bit canonical mask plus class ordinal. Guard the 32-class
+  limit, support-mask width, histogram count overflow and a 300-million-entry
+  research cache ceiling. There is no silent eviction/rebuilding. The old
+  reference model clears its source cache at two million entries; the new
+  ceiling is about 2.4 GB packed payload, not a bound on total process memory.
+- **Projected histograms:** compose the actual canonical-to-labelled row map
+  with prefix extraction once per layout. Seven 256-entry `uint16_t` byte
+  lookup tables map each canonical mask straight to its 14 prefix bits.
+  Do not construct the full transformed 56-bit mask or scan suffix coordinates.
+  Use a reusable dense prefix/class count array, record touched slots, sort
+  those slots to preserve reference bucket/class order, emit counts and clear
+  only touched slots. Weight/orbit class ordinals are stable under the row
+  permutation; do not re-choose token-plane representatives in the labelled
+  gauge. The cache-only control uses these same packed sources but retains
+  the reference full-mask transformation and nested ordered-map histogram.
+- **Warm means only canonical sources are reused.** Both passes rebuild all
+  labelled histograms, export all choices and enumerate their tile costs.
+  No previously computed labelled metadata, tile count or selected answer is
+  reused. Cold/warm outputs are separate completed files and existing output
+  paths are refused. Times below cover the exact candidate-export/scoring
+  pass; support-only shortlist ranking and the later joint selector are
+  separate unchanged stages from Experiment 506.
+
+  | Panel | Old scorer | Projected cold | Projected warm | Warm improvement |
+  | --- | ---: | ---: | ---: | ---: |
+  | Training: 687 records | 19.34 s | 4.44 s | **1.12 s** | **17.2×** |
+  | Held out: 572 records | 18.01 s | 4.84 s | **1.44 s** | **12.6×** |
+  | Large: 8,251 records | 222.64 s | 32.45 s | **19.62 s** | **11.3×** |
+
+  These are local CPU research-process measurements, not GPU solver A/B
+  results. Old times are the archived matching Experiment 506 exports.
+  The training cache-only control takes 16.23 seconds cold / 12.86 seconds
+  warm: retaining sources alone does not explain the new speedup. Its
+  histogram stage takes 12.00 / 11.98 seconds, versus **0.250 / 0.255 seconds**
+  with projection/flat bins (about 47×). Source DP/packing takes about 3.3
+  seconds in either cold version and zero in both warm versions.
+- Training retains 3,622 sources / 41,036,710 packed entries; held-out retains
+  3,499 / 40,411,353. Large-panel retention is **12,122 / 153,076,035**.
+  Large cold DP/packing takes 12.84 seconds; projected histograms take
+  2.61 seconds cold / 2.69 seconds warm; canonicalization takes 0.094 seconds.
+  Peak process RSS is about 486 MiB on training, 478 MiB held out and
+  **2,791,776 KiB (2.66 GiB)** on the large panel, including labelled metadata.
+  No process reaches the cache ceiling. The complete cold+warm driver runs
+  under its 180/240-second deadlines.
+- **Bottleneck moved, not removed:** large warm tile enumeration costs
+  **16.66 of 19.62 seconds (84.9%)**. Warm layout summaries cost 2.85 seconds
+  including histogram output and ancillary bookkeeping. The source cache
+  and projected metadata solve the previous immediate problem, but a naïve
+  billions-record exact tile-scoring pass is still not proven affordable.
+  This result does not measure production GPU layout construction or change
+  any of the modeled savings from Experiment 506.
+- **Exactness:** compare every layout and record in training cached cold/warm,
+  training projected cold/warm, held-out projected cold/warm and large
+  projected cold/warm against the corresponding original exports. All agree
+  exactly: raw half identities, byte/entry totals, original keys/coefficients,
+  candidate directions and tile counts. Thus the same deterministic selector
+  sees identical inputs and retains the prior 12.17% large-panel tile saving.
+  A separate self-test checks individual prefix/class counts and orbit sizes
+  on 130 deterministic random/empty/full half-masks in both new modes, rather
+  than checking only aggregate tile sums. Two new Python tests cover these
+  checks, cold/warm export parity, no warm source builds and refusal to
+  overwrite exports. All 29 research tests pass; ASan/UBSan self-tests pass.
+- Sources, raw exports, cold/warm metrics and `/usr/bin/time -v` logs remain
+  under ignored `build/review-507/`. Input corpora and production code are
+  unchanged; no GPU was rented and no full-grid result was computed.
+- **Decision:** accept the projected cached producer for further research
+  scoring. Next investigate the exact tile-cost estimator, now the dominant
+  preprocessing stage, before claiming a scalable selector or paying for a
+  full GPU A/B. A production decision still needs real batching/reownership,
+  peak scratch/output memory and all offline costs charged. No campaign
+  runtime extrapolation or GPU speedup follows from these CPU timings.
+
+### Experiment 508: Exact compatible-prefix and subset-sum tile scoring
+
+- **Question:** accelerate the tile-cost estimator that now dominates the
+  projected-histogram preprocessing pass. Preserve every candidate cost and
+  selector input. This concerns the CPU **cost model**, not evaluation of
+  the weighted suffix-disjointness join or a new GPU kernel.
+- Add two research backends to the existing cold/warm driver. `indexed`
+  builds rounded class counts and a two-level prefix occupancy index per
+  labelled distribution. The low six prefix bits select a bit in a word;
+  the high eight select one of 256 words. Small exact compatibility tables
+  intersect occupied words/bits with the ordinary-or-swapped relation before
+  loading class pairs. Rank within the occupied word gives the physical
+  bucket. Union the orientation masks to avoid duplicate bucket visits, but
+  retain both contributions for a doubly compatible size-two right class.
+  Fixed right orbits never receive a swapped contribution. Index construction
+  and rounded counts are charged to metadata preparation.
+- **Stronger reusable query:** for right class rounded size
+  `b8=ceil(count/8)`, its `b16=ceil(b8/2)` is determined. For each left prefix
+  `p`, sum `min(left16*b8, b16*left8)` over its classes, then perform a 14-bit
+  subset-sum transform of that histogram. Querying the complement of right
+  prefix `q` returns the complete ordinary tile cost; querying the complement
+  of `swap(q)` adds the swapped cost for a size-two right orbit. This
+  preserves 16×8 padding, orientation minimization and distinct weight-class
+  contributions exactly. Actual class weights are irrelevant to **tile
+  counts**, so classes with equal rounded size can reuse the same query
+  table. This does not permit merging their weights in the production join.
+- The `zeta` backend constructs tables lazily. Final gates require four
+  uses of the left layout, eight queries of the rounded right size and
+  cumulative `queries × left_class_count >= 32768`. Cap table payload at
+  **2,048 × 16,384 × 8 bytes = 256 MiB**; cold/unprofitable/capped queries
+  retain the exact indexed fallback. Remove table-covered classes and fully
+  covered buckets from fallback work. These are measured heuristic gates,
+  not a theorem that every table amortizes its construction. All query tables
+  and reuse histories are cleared before each cold/warm pass. Only canonical
+  support sources remain warm; index and query-table construction are charged
+  again in both passes.
+- **Training development:** an initial very conservative threshold produced
+  only 41 tables and little improvement. An earlier aggressive variant
+  without the four-left-use gate filled all 2,048 tables on training. Add
+  that reuse gate to avoid spending the bounded cache on one-off left layouts:
+  the final training panel builds 760 tables and held-out builds 836. Freeze
+  this rule before the final held-out/large comparison. The initial indexed
+  pilot was only modestly faster; use the matched final controls below rather
+  than treating that pilot as a universal speed estimate.
+- **Same-binary final comparisons:** same input records, fixed four-cut
+  shortlists, layouts, source factory, export order and exact tile formula.
+  Each backend runs its cold and warm passes consecutively. These are timed
+  CPU export/scoring regions; support-only ranking, joint selection, fixed
+  initialization and teardown are not folded into these numbers. Driver wall
+  time and peak RSS are retained separately in the raw logs.
+
+  | Panel | Projected reference warm | Indexed warm | Indexed + zeta warm |
+  | --- | ---: | ---: | ---: |
+  | Training: 687 records | 1.306 s | 1.117 s | **0.982 s** |
+  | Held out: 572 records | 1.648 s | 1.375 s | **1.170 s** |
+  | Large: 8,251 records | 23.506 s | 16.461 s | **15.522 s** |
+
+  Warm reductions versus the matched reference are 24.8%, 29.0%, and 34.0%.
+  On the large panel, compatibility indexing delivers most of the gain;
+  zeta gives a further 5.7% reduction versus indexed scoring. Final cold times
+  are 4.636/4.338 seconds (reference/zeta) on training, 4.979/4.491 seconds
+  held out, and **35.987/28.049 seconds** on the large panel. Cold canonical
+  source construction is unchanged and limits the total gain.
+- **Do not conceal timing variation:** Experiment 507 recorded 19.623 seconds
+  for large warm projected scoring, whereas this final same-binary reference
+  takes 23.506 seconds. Against that older measurement the new 15.522 seconds
+  is a 20.9% reduction, not 34.0%. These are local CPU research timings with
+  no affinity/frequency pinning; compilation/testing elsewhere on the host
+  can affect them. Do not translate either percentage into a GPU speedup.
+- Repeat the large reference and zeta drivers sequentially after compilation
+  and the other benchmark jobs finish. Warm times are **23.310 versus
+  15.509 seconds (33.5% lower)**; cold times are 36.026 versus 28.110 seconds.
+  Every repeat export also matches the original exactly. This corroborates
+  the same-build comparison but does not erase the difference from the older
+  Experiment 507 measurement or turn these CPU costs into GPU timings.
+- Large warm tile evaluation itself falls from 20.575 to **12.416 seconds**;
+  indexed metadata raises layout time from 2.816 to about 3.0 seconds. The
+  large panel reaches its 2,048-table budget; table construction costs
+  **0.055 seconds**, and 2,314,620 right-class evaluations use tables.
+  Indexed fallback still visits 1,984,261,396 compatible physical bucket
+  pairs. Peak RSS grows from **2,792,384 KiB** for projected scoring to
+  **3,772,392 KiB** indexed and **4,104,892 KiB (3.91 GiB)** with zeta. This
+  includes bucket/class indexes, memo bookkeeping and canonical/labelled
+  metadata; the 256 MiB cap is not a total-memory limit.
+- **Exactness/tests:** all final cold/warm exports from the three backends
+  reproduce the archived reference layouts, record identities, coefficients,
+  candidate directions and tile counts on all 9,510 panel records. No cuts,
+  budget assumptions or modeled savings changed. Extend the regression suite
+  to all four research modes. A dedicated synthetic test compares indexed,
+  table and budget-exhausted fallback costs against Cartesian enumeration:
+  twelve prefix families, ordinary/swapped/fixed orbit cases, empty inputs,
+  64-bit-word and prefix-plane boundaries, 7/8/9 and 15/16/17 size boundaries,
+  repeated table reuse and maximum supported 32-bit class counts. ASan/UBSan
+  passes both the tile and histogram self-tests. All 30 research tests pass.
+- Inputs remain read-only. Source/input hashes, raw cold/warm exports,
+  candidate parity checks, threshold pilots, metrics and `/usr/bin/time -v`
+  logs are retained under ignored `build/review-508/`. No cloud resource,
+  production solver change, full-grid result or Git commit.
+- **Decision:** a useful additional CPU preprocessing improvement, not an
+  order-of-magnitude solver breakthrough. Exact prefix indexing is the main
+  large-panel win; bounded subset-sum tables add a smaller gain. For further
+  preprocessing work, grouping cost queries by left layout could improve
+  table reuse and avoid an order-dependent global cache filling with earlier
+  layouts. Whole-corpus scalability and real GPU batching/reownership costs
+  remain unverified. Do not extrapolate a campaign runtime from this panel.
+
+### Experiment 509: Left-grouped, demand-planned exact tile-cost queries
+
+- **Question:** improve reuse of Experiment 508's subset-sum cost tables
+  without allowing early layouts to fill a global cache and exclude later
+  ones. Preserve exact tile costs, candidate choices and production code.
+- Add deferred scoring to the research exporter. Build canonical sources and
+  labelled metadata in the original input order, then group candidate costs
+  by raw left-half identity. Process selected and complement distributions
+  as separate groups. Write costs back to their original record/choice slots
+  and emit records in the original order. No record, coefficient or logical
+  query is merged. The 16,384-record research input bound is unchanged.
+- **Scheduling-only control (`grouped`):** retain the existing lazy eligibility
+  rule, but release all query tables/history after each left-distribution
+  group. The cap remains 2,048 live tables, now reusable by the next group.
+  Keep cumulative table builds and peak-live table counts separate. Metadata
+  and score plans remain resident; only query caches are group-local.
+- **Demand-planned version (`planned`):** count all right-class size queries
+  in the complete group before its first score. A table that qualifies using
+  that known demand can benefit the first query too. Retain the existing
+  four-left-use, eight-size-query and 32,768 cumulative class-work gates;
+  do not use exact tile results to decide eligibility. Empty distributions
+  are handled explicitly. Planning is charged, query counters are not counted
+  twice, and both passes rebuild all schedules and tables. Only canonical
+  source supports survive from cold to warm.
+- **Pilot decomposition:** on training, grouping alone takes 0.961 seconds
+  warm and planned grouping 0.903 seconds. On the 8,251-record large panel,
+  grouping alone takes **12.029 seconds**, and planning reduces that to
+  **10.568 seconds**. The schedule-only case builds the same 14,824 tables as
+  planning, but uses them for 8,974,890 right-class evaluations rather than
+  12,537,870: avoiding the initial eligibility warmup is useful.
+- **Matched final run:** one binary, same records and four-cut shortlists,
+  sequential reference/planned driver runs after compilation/testing. Each
+  driver performs a cold pass followed by a canonical-source-warm pass. All
+  histogram/index construction, scheduling, planning, cost-table construction,
+  queries and table release are charged in the export/scoring region.
+  Support-only ranking and the later joint selector are unchanged separate
+  stages; these are not complete solver or GPU timings.
+
+  | Panel | Reference cold | Planned cold | Reference warm | Planned warm | Warm reduction |
+  | --- | ---: | ---: | ---: | ---: | ---: |
+  | Training: 687 records | 4.472 s | 4.331 s | 0.993 s | **0.889 s** | 10.5% |
+  | Held out: 572 records | 4.598 s | 4.457 s | 1.169 s | **1.048 s** | 10.3% |
+  | Large: 8,251 records | 28.386 s | **23.281 s** | 15.474 s | **10.411 s** | **32.7%** |
+
+  The large cold reduction is 18.0%; its unchanged canonical source builds
+  still cost about 12.9 seconds. Group-plan construction costs 0.0072 seconds.
+  Large warm cost evaluation, including demand planning and table lifecycle,
+  falls from 12.362 to **7.396 seconds**. Metadata costs about 2.915 seconds.
+  Times are local CPU measurements with no affinity/frequency pinning, not
+  evidence of an equivalent change to GPU join throughput.
+- **Reuse/memory:** the old global reference reaches 2,048 tables and then
+  falls back for later eligible sources. Grouped planning builds **14,824**
+  tables over 57,250 selected/complement groups but needs only **60 live
+  tables (7.5 MiB payload)**. All table construction costs 0.323 seconds warm.
+  Training builds 760 tables with peak 17; held-out builds 836 with peak 36.
+  Large indexed fallback visits 1,166,230,714 compatible bucket pairs rather
+  than 1,984,261,396. Its 12,537,870 table-served class evaluations replace
+  the reference's 2,314,620. Peak **total process RSS** drops from
+  4,104,632 KiB (3.91 GiB) to **3,788,076 KiB (3.61 GiB)**; the source and
+  labelled caches are still much larger than the live query-table payload.
+- **Exactness:** all final cold/warm reference and planned exports match the
+  archived layouts, original record order, identities, coefficients,
+  candidate directions and tile costs on all 9,510 panel records. The pilot
+  grouped/planned exports on training and large panels also match. Thus the
+  same deterministic selector retains its prior 12.17% modeled tile saving
+  on the large panel; this experiment does not increase that saving.
+- Extend the tile self-test to planned full-group demand, repeated queries,
+  group cache release and cumulative-versus-live accounting. The original
+  empty/fixed/swapped/rounding/maximum-count/cap tests remain in place. Add a
+  regression with interleaved left identities to verify that deferred
+  grouping restores original record order and exact cold/warm results.
+  All 31 research tests pass, and ASan/UBSan passes histogram/tile self-tests.
+- Source/input hashes, pilots, raw exports, metrics, parity checks and
+  `/usr/bin/time -v` logs remain under ignored `build/review-509/`. No input
+  corpus, production solver or full-grid result changed. No cloud allocation
+  or Git commit.
+- **Decision:** accept grouped demand planning for further CPU scoring work.
+  It improves both time and live table storage, particularly where the
+  previous global cache exhausted its budget. Full-corpus scalability remains
+  unproven. One remaining targeted gate is whether the old four-join minimum
+  is unnecessarily conservative now that complete class-query demand and
+  group-local storage are known; evaluate that against charged construction
+  work rather than assuming more tables are always beneficial. Do not infer
+  a GPU or campaign speedup from the preprocessing result.
+
+### Experiment 510: Work-based eligibility for complete cost-query groups
+
+- **Question:** is the four-join minimum still useful once the whole group's
+  class-query demand is known and tables are released locally? A single
+  logical join can contain enough repeated class queries to amortize a table.
+  Change this one gate; keep all arithmetic, metadata, cuts and budgets fixed.
+- Add the research `demand` mode, using the same grouped complete plan as
+  `planned`. Relax the four-join requirement **only for a complete planned
+  source**. Retain both `size_queries >= 8` and
+  `size_queries × left_class_count >= 32768`, the 2,048-live-table limit and
+  the exact indexed fallback. Unplanned/streaming sources keep the original
+  four-join requirement. Add `short_group_tables` accounting for tables
+  built in groups with fewer than four nonempty logical joins.
+- No threshold sweep: the initial training result is positive, then evaluate
+  the unchanged rule on the held-out and larger panels. Within each panel,
+  run reference and candidate sequentially from the same binary; each driver
+  performs a cold pass followed by a canonical-source-warm pass. Rebuild all
+  labelled histograms, indexes, group plans and query tables in both passes.
+  Construction, query and release costs are included in the export/scoring
+  region. Support-only ranking and joint cut selection remain separate,
+  unchanged stages. These are local CPU timings, not GPU solver timings.
+
+  | Panel | Four-join cold | Demand cold | Four-join warm | Demand warm | Warm reduction |
+  | --- | ---: | ---: | ---: | ---: | ---: |
+  | Training: 687 records | 4.281 s | 4.189 s | 0.933 s | **0.771 s** | 17.4% |
+  | Held out: 572 records | 4.408 s | 4.113 s | 1.055 s | **0.809 s** | 23.3% |
+  | Large: 8,251 records | 23.065 s | **20.450 s** | 10.469 s | **7.759 s** | **25.9%** |
+
+  Large cold improvement is 11.3%, limited by the unchanged roughly
+  12.6-second canonical DP/packing stage. Large warm metadata time is
+  2.911 seconds, scheduling 0.0073 seconds and tile evaluation, including
+  group planning/table lifecycle, **4.747 seconds** versus 7.456 seconds.
+  No affinity/frequency pinning or whole-campaign projection is claimed.
+- **Construction pays for itself on these panels:** large table builds rise
+  from 14,824 to **47,062**, including **32,238 short-group tables**. Their
+  warm construction costs **1.051 seconds rather than 0.331 seconds**. Despite
+  that extra cost, indexed fallback visits fall from 1,166,230,714 to
+  **504,909,885 compatible bucket pairs**, and table-served right-class
+  evaluations rise from 12,537,870 to **21,370,300**. These are cost-model
+  operations, not eliminated production suffix comparisons.
+- **Memory is unchanged:** peak live tables stay at 17, 36 and **60** on the
+  training, held-out and large panels. The largest live payload remains
+  **7.5 MiB**. Large peak process RSS is 3,788,128 KiB for the reference and
+  3,788,132 KiB for demand mode (about **3.61 GiB**). More tables are built
+  sequentially, not retained concurrently. Training builds 2,705 tables
+  versus 760; held-out 4,108 versus 836. None reaches the live table cap.
+- **Exactness:** every layout, ordered record, key, coefficient, candidate
+  direction and tile cost in all twelve cold/warm exports agrees with the
+  archived reference on all 9,510 records. The selector therefore sees the
+  same inputs and retains the prior 12.17% large-panel modeled tile saving;
+  this gate does not increase that saving or change the colouring count.
+- Add a dedicated eligibility-boundary self-test. A single planned join
+  with 4,096 left classes and eight right-size queries reaches the 32,768
+  threshold and builds a table; 4,095×8 does not. An 8,192×7 case does not
+  bypass the eight-query gate. Check each case with/without complete planning,
+  relaxed eligibility and exhausted table budgets, always against Cartesian
+  cost enumeration. Existing empty, fixed/swapped, count-rounding, maximum
+  count, group-release and original-record-order regressions remain enabled.
+  All **32 research tests** pass; ASan/UBSan passes demand, tile and histogram
+  self-tests. Production solvers remain unchanged.
+- Source/input hashes, raw exports, metrics, parity checks and
+  `/usr/bin/time -v` logs are retained under ignored `build/review-510/`.
+  No cloud allocation, corpus rewrite, full-grid result or Git commit.
+- **Decision:** accept complete-demand eligibility for further research
+  scoring. Four logical joins were a poor proxy for the work actually
+  amortizing a table. Retain the remaining work/query guards and exact
+  fallback; these samples do not prove every newly eligible table pays for
+  itself on other populations. The scorer is materially cheaper, but full
+  corpus scalability, GPU reownership/batching and end-to-end solve gains
+  still need validation. Do not equate this preprocessing speedup with a
+  production GPU speedup.
+
+### 511. Larger adaptive-cut gate with independent owners and bounded batches
+
+- **Question:** does the reuse-four adaptive-cut saving survive complete
+  higher-fanout groups, separate owner budgets and finite right-output batches?
+  Stop optimizing the estimator for this gate. Use Experiment 510's accepted
+  `demand` scorer unchanged; no GPU allocation or production changes.
+- Add `research/probes/cut_batch_gate.py` and five accounting/reconstruction
+  tests. Process one owner panel at a time, with at most 16,384 input records
+  per exporter. For owner files `s0000`, `s0064`, `s0256`, `s0320`, `s0512`,
+  `s0576`, `s0768`, `s0960`, predeclare seeds 511–518 and choose one complete
+  left group uniformly in each fanout band 64–255, 256–1023, 1024–4095 and
+  4096–8191. None of the selected groups appeared in Experiments 505–510.
+  Total: **73,228 records in 32 groups**, versus 8,251 records / four groups
+  in the preceding large panel. These remain sampled owner subsets, not
+  complete multi-million-record shards.
+- Each owner independently runs the support-only reuse-four shortlist
+  (nine candidate directions), exact tile export and joint greedy 2× byte-only
+  selector. No left or right budget is borrowed from another owner. Baseline
+  layouts remain reserved during selection, even if not used by its final
+  choices. Source support-count caches are carried between panels, starting
+  from Experiment 506's 19,994-source cache. Each exact-scoring process starts
+  its canonical support arrays cold and then performs one warm pass. No tile
+  query table or labelled metadata survives between passes.
+
+  | Owner | Records | Modeled tile saving | Chosen left layouts | Cold / warm exact scoring |
+  | --- | ---: | ---: | ---: | ---: |
+  | s0000 | 9,513 | 14.41% | 17 | 21.11 / 7.91 s |
+  | s0064 | 8,045 | 12.36% | 11 | 16.88 / 6.11 s |
+  | s0256 | 10,310 | 7.81% | 11 | 19.62 / 8.04 s |
+  | s0320 | 6,336 | 26.27% | 16 | 15.78 / 5.45 s |
+  | s0512 | 8,041 | 12.08% | 16 | 15.32 / 4.93 s |
+  | s0576 | 9,180 | 16.52% | 15 | 18.02 / 6.77 s |
+  | s0768 | 10,811 | 21.11% | 15 | 19.44 / 7.06 s |
+  | s0960 | 10,992 | 12.28% | 18 | 22.16 / 8.36 s |
+
+- **Aggregate exact modeled tiles:** 42,075,986,345 → **35,551,386,973**, a
+  **15.5067% reduction**, summing unweighted work across actual records rather
+  than averaging percentages or multiplying work by orbit coefficients.
+  Every owner improves. This is a new sample, not an extra improvement over
+  the preceding panel's 12.17%. By original-group fanout, savings are 0%,
+  10.93%, 13.06% and **18.27%** for the four bands. These are outcomes of the
+  joint owner selector; they are not independently optimized band results.
+- **Output construction census:** sum per-owner physical layouts, charging
+  layouts again if they occur in another owner. Chosen left identities rise
+  **32 → 119**; left output bytes rise 9,239,008 → **18,462,004** (1.998×),
+  still within every owner's cap. Right identities fall 72,504 → **70,443**.
+  Right output bytes fall 18,217,816,908 → **16,646,258,228** (**8.63%**), and
+  right support entries fall 2,206,273,946 → **2,007,613,760** (**9.00%**).
+  Left support entries rise 1,055,657 → 2,037,622. Byte counts are the existing
+  suffix/bucket/class/pair-descriptor output model, not measured transfers or
+  total GPU memory. The right totals describe final chosen layouts, not the
+  selector's larger reserved baseline-plus-candidate union.
+- **Bounded batches:** production already sorts by right identity and never
+  splits a right group. Use that same policy for both alternatives, keeping
+  each owner's chosen left layouts resident. At 64 / 256 / 1024 MiB right
+  output caps, with at most 4,096 records per batch, baseline needs
+  **277 / 72 / 24 batches**, candidate **252 / 65 / 22**. No right group
+  exceeds either limit. Every record appears exactly once and batch tile sums
+  equal the selector totals. A right output is built once per owner even with
+  small batches; artificial input-order flushing would incorrectly penalize
+  the baseline. Cross-owner reuse is never assumed. These are **output-only
+  caps**, excluding canonical cache, builder scratch, independent allocation
+  high-water marks, join descriptors/results and CUDA reserves. The production
+  structural memory planner and real layout/kernel timings still need a GPU
+  A/B; do not call these measured GPU batch counts or VRAM requirements.
+- **Preparation:** measured serial stage totals are 0.90 s sampling, 6.11 s
+  cached/incrementally populated support counting (including output), 20.98 s
+  shortlist subprocesses (12.88 s ranking alone), **54.64 s warm exact
+  scoring**, 9.01 s selection and 0.65 s output-batch planning. Their warm-stage
+  subtotal is **92.29 s**, excluding cold cache construction, validation and
+  some process/pass plumbing; it is not a directly measured warm end-to-end
+  solver run. Independent cold scoring totals 148.34 s; the eight cold+warm
+  scoring subprocesses together take 208.57 s. Input/cold-warm/reconstruction
+  validation takes another 9.24 s. Scorer peak RSS is **4,432,924 KiB
+  (4.23 GiB)**; no multi-owner labelled metadata is retained at once. CPU
+  preparation remains material and is not yet a scalable corpus materializer.
+- **Sampling limitation:** the eight files contain 29,289,738 records and
+  101,310 left groups. The sampled fanout bands contain **67.84%** of these
+  records; groups below 64 contribute 3.32%, and groups above 8,191 contribute
+  **28.84%**. Maximum observed fanout is 239,419. Sampling is uniform over
+  groups within bands, not over records or tile work, and overrepresents the
+  4096–8191 band. Do not extrapolate the measured saving or preprocessing rate
+  directly to a full 8×8 campaign. In particular the largest groups still
+  need a bounded implementation rather than increasing the exporter limit.
+- **Exactness and tests:** all cold/warm layout metadata and all **659,052
+  candidate choices** agree, preserving every original source/index/key and
+  coefficient. An independent Python bit-extraction check reconstructs every
+  cut, transpose and execution direction. Separately select the largest
+  baseline-tile record from each group and compare all nine choices against
+  the older Cartesian exporter: **32 records / 288 candidates**, all exact.
+  This validates tile metadata, not new colouring counts. All **37 research
+  tests** pass, including byte/edge boundaries, duplicate-right accounting,
+  separate-owner charges, empty input, reconstruction and population census.
+- Raw inputs/shortlists/choices, cold/warm exports, per-batch accounting,
+  subprocess timing/RSS logs, reference checks, input SHA-256 digests and source
+  hashes are retained under ignored `build/review-511/`. No corpus rewrite,
+  GPU/cloud spend, production changes, full-grid result or Git commit.
+- **Decision:** the local gate supports a **small warmed GPU A/B**, charging
+  left construction, right construction, full structural memory/batching and
+  join time, while reporting offline preparation separately. Tile work and
+  right output both improve under independent owner budgets, so this is more
+  credible than an unconstrained per-record cut oracle. It is still a modest
+  candidate, not an order-of-magnitude win or production-ready integration.
+
+### 512. Production GPU adaptive-cut A/B: 7.5% recurring gain, not universal
+
+- Prepare a bounded GPU A/B for all eight Experiment 511 panels using
+  `research/probes/cut_gpu_gate.py`. Baseline and adaptive inputs preserve
+  all 73,228 records, their coefficients and minority-side complement factors.
+  Adaptive records assemble the selected left/right halves after the already
+  checked row/column transformations. These are **research probe inputs**,
+  not newly certified canonical orbit corpora or a campaign rewrite.
+- Both variants use exactly the same unchanged production solver binary and
+  a 92,173-record union seed for the shared canonical cache. Build locally with
+  CUDA 13.3, `-O3 -std=c++17 -lineinfo`, OpenMP, and
+  `-gencode arch=compute_120a,code=sm_120a`; native Blackwell compilation passes.
+  Payload including executable and inputs is about 5.77 MB. Three new tests
+  pass for half assembly, binary input encoding and result checksum rejection.
+- Planned protocol: separate two-edge CPU checks for baseline/adaptive on
+  every panel; then two warm-up items and four alternating A/B–B/A rounds
+  (64 timed work items). Retain canonical cache across each manifest, rebuild
+  actual left and right layouts per work item, use the production structural
+  memory planner and a 4,096-edge batching target. Record full solver phase
+  timings and externally timestamp consecutive durable checkpoints. The
+  latter intervals include the preceding item's left release, rather than
+  isolating it perfectly. Report cold setup and offline cut preparation
+  separately; do not mistake join-only time for recurring solve time.
+- The result checker binds binary/seed/input hashes, verifies v3 payload
+  checksums and record/coefficient coverage, requires identical exact
+  contributions for both cuts and every repeat, and rejects cold initialization
+  or scalar-validation time in timed samples. The initial CC-worker attempt
+  below did not reach a GPU result; the standard-worker retry subsequently
+  completed the protocol without changes to the solver or selected cuts.
+- Verda authentication was refreshed successfully. The ordinary single-GPU
+  FIN-02 spot slot disappeared before provisioning (HTTP 503, insufficient
+  resources). A single `1RTXPRO6000.30V.CC` spot worker in FIN-03 was obtained
+  at $0.9348/hour, with Ubuntu 26.04 and driver 595.58.03. It exposed one RTX
+  PRO 6000 Blackwell Server Edition / 600 W GPU, but the first CUDA allocation
+  failed with **"system not yet initialized"**. Read-only diagnostics reported
+  **CC State: ON; CC GPUs Ready State: Not Ready**. This is a readiness gate,
+  not an adaptive-cut correctness or performance result. No readiness override,
+  security-mode change or attestation bypass was attempted.
+- Pull the failed-run logs and hardware diagnostics, then delete that worker
+  with its newly created disk. Verda subsequently reports **no instances and
+  no volumes**. Cancel the 30-minute compute safety timer after cleanup.
+  Payloads, build output, private provisioning metadata and diagnostics remain
+  locally under ignored `build/review-512/`. Production sources and corpora
+  remain unchanged; no Git commit.
+- **Successful retry:** obtain the standard `1RTXPRO6000.30V` in FIN-02 at
+  $0.9165/hour, Ubuntu 24.04, driver **580.126.09**, one RTX PRO 6000 Blackwell
+  Server Edition / 600 W. The same native `sm_120a` production binary runs
+  successfully. Use 16 OpenMP threads, one GPU and no concurrent compute jobs.
+  Both manifests complete: 32 scalar join checks pass, then all 64 timed
+  results reproduce their corresponding exact baseline panel contributions.
+  Record counts, labelled/coefficient coverage, payload checksums and
+  binary/seed/input provenance all validate locally after pulling.
+- **Measured recurring solve:** sum each panel's median over four repeats;
+  do not average panel speedup percentages. Startup cache creation/upload and
+  scalar verification are excluded, but recurring ingestion, canonical-ref
+  resolution, left/right layout construction, planning and joins are included.
+
+  | Phase, summed panel medians | Baseline | Adaptive | Time reduction |
+  | --- | ---: | ---: | ---: |
+  | Solver recurring total | 2.776514 s | **2.568036 s** | **7.51%** |
+  | GPU join | 2.456156 s | 2.259921 s | 7.99% |
+  | Right-layout construction | 0.277907 s | 0.262902 s | 5.40% |
+  | Left-layout construction | 0.015003 s | 0.016783 s | -11.87% |
+  | External checkpoint intervals | 2.814935 s | 2.604785 s | 7.47% |
+
+  Solver totals end before durable result publication and left-layout release;
+  the external intervals include publication and the preceding item's release.
+  They corroborate the recurring improvement rather than hiding those costs.
+  The four complete rounds individually reduce solver total by 7.86%, 7.55%,
+  7.52% and 7.50%. This is about **1.081×** recurring speed, not a 15.5% GPU
+  improvement or an order-of-magnitude win. Native Blackwell NVFP4 execution
+  is measured here; no Ada/L40S speedup is established.
+- **Not a universal improvement:** panel totals are:
+
+  | Owner panel | Baseline median | Adaptive median | Time reduction |
+  | --- | ---: | ---: | ---: |
+  | s0000 | 0.470073 s | 0.456807 s | 2.82% |
+  | s0064 | 0.224800 s | 0.219106 s | 2.53% |
+  | s0256 | 0.294860 s | 0.337559 s | **-14.48%** |
+  | s0320 | 0.314341 s | 0.234352 s | 25.45% |
+  | s0512 | 0.241889 s | 0.226757 s | 6.26% |
+  | s0576 | 0.618022 s | 0.537623 s | 13.01% |
+  | s0768 | 0.262416 s | 0.236684 s | 9.81% |
+  | s0960 | 0.350113 s | 0.319149 s | 8.84% |
+
+  On s0256, the modeled tiles fall 7.81% but GPU join time rises from
+  0.257297 to **0.299439 s**. The regression is in the join, not simply extra
+  left construction. Tile count alone does not model native orientation
+  packing, prefix screening or scheduling/tails; this gate does not isolate
+  which causes the regression. Do not integrate a selector that assumes
+  every modeled tile reduction implies a runtime improvement.
+- **Preparation matters:** the first benchmark warm-up reports 1.72347 s
+  canonical-factory construction and 0.736332 s upload; both are shared across
+  the manifest, with zero factory/upload time on every timed work item.
+  The complete validation process takes 18.94 s; the benchmark process,
+  including setup, warm-ups and all four rounds, takes 25.51 s. Separately,
+  Experiment 511's local warm preparation-stage subtotal remains **92.29 s**
+  for these cuts. Recurring savings for one traversal are only **0.20848 s**.
+  Comparing those measured stage totals requires roughly **443 identical
+  traversals** to amortize that preparation in serial wall-time terms, before
+  omitted setup costs; this is neither a campaign forecast nor a CPU/GPU
+  dollar-cost comparison. The current exact research materializer is not a
+  practical end-to-end optimization for a single verification run.
+- The bounded watcher pulls all **82 result files** (16 validation, two
+  warm-ups, 64 timed), independently verifies the required comparisons and
+  deletes the standard worker with its disk immediately after success.
+  Confirm empty instance and volume inventories and cancel the safety timer.
+  Creation-to-delete-request elapsed time is about **136 seconds**, roughly
+  **$0.035 compute** at the quoted rate, excluding storage/billing rounding
+  and the earlier failed CC attempt. Standard-worker raw results, external
+  interval timestamps, hardware metadata, verified summaries and cleanup
+  receipts are under `build/review-512/standard/`; no active cloud resources.
+- **Decision:** a valid modest recurring gain, but keep this research-only.
+  Before production, the selector needs a much cheaper implementation and a
+  runtime-aware guard against regressions. Inspect the s0256 join discrepancy
+  before further estimator tuning; retain the largest-group sampling caveat
+  from Experiment 511. No new full-grid result, campaign rewrite, production
+  solver change or Git commit.
