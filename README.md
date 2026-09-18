@@ -64,10 +64,11 @@ The production pipeline:
 2. splits each binary half-grid into two column blocks;
 3. builds or reuses sparse distributions of row-pair tokens;
 4. joins the two distributions by exact weighted set disjointness; and
-5. performs the dominant predicate work with binary tensor-core MMA.
+5. performs the dominant predicate work with exact tensor-core operations:
+   binary MMA on Ada, and NVFP4 MMA on supported Blackwell GPUs.
 
 Every maintained distribution uses the global inner-bit token-plane quotient.
-The 7x9 and 8x8 solvers share the grouped-layout builder, BMMA join,
+The 7x9 and 8x8 solvers share the grouped-layout builder, architecture-specific join,
 checkpoint format, and provider-neutral reducer.
 
 See [gpu_algorithm.md](docs/gpu_algorithm.md) for the mathematics and

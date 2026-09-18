@@ -21,18 +21,7 @@
 #include <vector>
 #include <nauty/nauty.h>
 
-#define GRID_ROWS 8
-#define GRID_COLUMNS 8
-#define LEFT_COLUMNS 4
-#define RIGHT_COLUMNS 4
-#define ORBIT_ROW_BITS 8
-#define ORBIT_MAGIC "R8ORB01"
-#include "../../src/gpu/twocolour_gpu_common.cuh"
-
-#define SHARED_COLUMN_RESPONSE_NO_MAIN
-namespace response {
-#include "shared_column_response_probe.cpp"
-}
+#include "cut_reference_model.hpp"
 extern "C" uint64_t shared_column_production_key(uint64_t);
 
 namespace {
@@ -70,12 +59,6 @@ static CoreRef canonical_bipartite(uint64_t key,unsigned width) {
     return ref;
 }
 static CoreRef canonical_core(uint64_t key){return canonical_bipartite(key,7);}
-static uint64_t transpose(uint64_t key) {
-    uint64_t result=0;
-    for(unsigned r=0;r<8;++r)for(unsigned c=0;c<8;++c)
-        result|=((key>>((7-r)*8+c))&1)<<((7-c)*8+r);
-    return result;
-}
 static uint64_t move_last(uint64_t key,unsigned column) {
     uint64_t result=0;
     for(unsigned r=0;r<8;++r) {
@@ -162,50 +145,8 @@ struct File {
     }
 };
 struct Sample {size_t file;uint64_t index,key=0,stratum=0,weight=0;};
-struct CostModel {
-    response::Engine engine{8};
-    std::unordered_map<uint64_t,std::vector<Entry>> cache;
-    uint64_t cached_entries=0,builds=0,hits=0;
-    response::Dist layout(uint64_t raw) {
-        const CanonicalForm form=canonical_prefix(raw,4);
-        auto it=cache.find(form.key);
-        if(it==cache.end()) {
-            auto d=quotient_token_planes(build_distribution(form.key,4,false));
-            if(cached_entries+d.entries.size()>2000000){cache.clear();cached_entries=0;}
-            cached_entries+=d.entries.size();++builds;
-            it=cache.emplace(form.key,std::move(d.entries)).first;
-        } else ++hits;
-        std::map<unsigned,std::map<std::pair<uint64_t,unsigned>,uint64_t>> sizes;
-        for(auto entry:it->second) {
-            uint64_t mask=transform_pair_mask(entry.mask,form.row_map);
-            // Preserve the representative chosen in canonical coordinates.
-            ++sizes[engine.prefix(mask)][{entry.weight,engine.orbit(mask)}];
-        }
-        response::Dist out;
-        for(const auto& [p,classes]:sizes) {
-            response::Bucket b{p,{},{}};
-            for(auto [key,n]:classes)b.classes.push_back({n,key.second});
-            out.push_back(std::move(b));
-        }
-        return out;
-    }
-    uint64_t cost(uint64_t key) {
-        uint64_t total=0;
-        for(unsigned side=0;side<2;++side) {
-            uint64_t k=side?~key:key,left=0,right=0;
-            for(unsigned r=0;r<8;++r){unsigned row=unsigned(k>>((7-r)*8))&255;
-                left=(left<<4)|(row&15);right=(right<<4)|(row>>4);}
-            auto a=layout(left),b=layout(right);
-            response::Budget budget(100000000000ull,300);
-            engine.tile_model(a,b,budget);total+=budget.modeled_tiles;
-        }
-        return total;
-    }
-};
-
 static void self_test() {
     nauty_check(WORDSIZE,SETWORDSNEEDED(15),15,NAUTYVERSIONID);
-    response::self_test();
     for(unsigned t=0;t<100;++t) {
         uint64_t key=t<2?(t?~uint64_t(0):0):mix64(t);
         uint64_t production=shared_column_production_key(key);
@@ -446,7 +387,6 @@ static void parent_census(const std::string& path,unsigned limit,uint64_t seed) 
     std::cout<<"]}"<<std::endl;
 }
 } // namespace
-#ifndef SHARED_COLUMN_FAMILY_CENSUS_NO_MAIN
 int main(int argc,char** argv) try {
     nauty_check(WORDSIZE,SETWORDSNEEDED(16),16,NAUTYVERSIONID);
     initialise_tables();
@@ -475,4 +415,3 @@ int main(int argc,char** argv) try {
     if(files.empty())throw std::runtime_error("no files");
     run(files,samples,std::stoull(argv[4]));
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
-#endif

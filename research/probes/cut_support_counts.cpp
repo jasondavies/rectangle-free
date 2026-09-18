@@ -1,6 +1,6 @@
 // Cheap candidate scores without constructing labelled prefix layouts or tiles.
-#define REUSE_BUDGET_CUT_NO_MAIN
-#include "reuse_budget_cut_census.cpp"
+#include "cut_geometry.hpp"
+#include "response_model.hpp"
 
 int main(int argc,char** argv) try {
     if(argc!=3&&argc!=4)throw std::runtime_error("usage: INPUT_TSV OUTPUT_CACHE [INPUT_CACHE]");

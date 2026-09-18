@@ -748,7 +748,11 @@ $(BUILD_DIR)/column_flip_8x8_census: research/probes/column_flip_8x8_census.cpp 
 column-flip-parity-test: $(BUILD_DIR)/column_flip_8x8_census
 	./$(BUILD_DIR)/column_flip_8x8_census --self-test
 
-$(BUILD_DIR)/shared_column_response_probe: research/probes/shared_column_response_probe.cpp
+CUT_RESEARCH_HEADERS := research/probes/cut_geometry.hpp research/probes/response_model.hpp \
+		research/probes/cut_reference_model.hpp research/probes/cut_histogram_model.hpp \
+		research/probes/cut_tile_index.hpp research/probes/cut_export.hpp
+
+$(BUILD_DIR)/shared_column_response_probe: research/probes/shared_column_response_probe.cpp research/probes/response_model.hpp
 	$(CXX) -O3 -std=c++17 -Wall -Wextra -o $@ $<
 
 .PHONY: shared-column-response-test
@@ -759,7 +763,7 @@ $(BUILD_DIR)/shared_column_production_key.o: research/probes/shared_column_produ
 	$(CC) -O3 -std=c11 -c -o $@ $<
 
 $(BUILD_DIR)/shared_column_family_census: research/probes/shared_column_family_census.cpp \
-		research/probes/shared_column_response_probe.cpp src/gpu/twocolour_gpu_common.cuh \
+		$(CUT_RESEARCH_HEADERS) src/gpu/twocolour_gpu_common.cuh \
 		$(BUILD_DIR)/shared_column_production_key.o
 	$(CXX) -O3 -std=c++17 -o $@ $< $(BUILD_DIR)/shared_column_production_key.o -lnauty
 
@@ -768,34 +772,38 @@ shared-column-family-test: $(BUILD_DIR)/shared_column_family_census
 	python3 tests/shared_column_family_census_test.py $(BUILD_DIR)/shared_column_family_census
 
 $(BUILD_DIR)/reuse_budget_cut_census: research/probes/reuse_budget_cut_census.cpp \
-		research/probes/shared_column_family_census.cpp research/probes/shared_column_response_probe.cpp \
-		src/gpu/twocolour_gpu_common.cuh $(BUILD_DIR)/shared_column_production_key.o | $(BUILD_DIR)
-	$(CXX) -O3 -std=c++17 -o $@ $< $(BUILD_DIR)/shared_column_production_key.o -lnauty
+		$(CUT_RESEARCH_HEADERS) src/gpu/twocolour_gpu_common.cuh | $(BUILD_DIR)
+	$(CXX) -O3 -std=c++17 -o $@ $<
 
 .PHONY: reuse-budget-cut-test
 reuse-budget-cut-test: $(BUILD_DIR)/reuse_budget_cut_census
 	python3 tests/reuse_budget_cut_test.py $(BUILD_DIR)/reuse_budget_cut_census
 
 $(BUILD_DIR)/cut_support_counts: research/probes/cut_support_counts.cpp \
-		research/probes/reuse_budget_cut_census.cpp research/probes/shared_column_family_census.cpp \
-		research/probes/shared_column_response_probe.cpp src/gpu/twocolour_gpu_common.cuh \
-		$(BUILD_DIR)/shared_column_production_key.o | $(BUILD_DIR)
-	$(CXX) -O3 -std=c++17 -o $@ $< $(BUILD_DIR)/shared_column_production_key.o -lnauty
+		research/probes/cut_geometry.hpp research/probes/response_model.hpp \
+		src/gpu/twocolour_gpu_common.cuh | $(BUILD_DIR)
+	$(CXX) -O3 -std=c++17 -o $@ $<
 
 .PHONY: cut-shortlist-test
 cut-shortlist-test: $(BUILD_DIR)/cut_support_counts $(BUILD_DIR)/reuse_budget_cut_census
 	python3 tests/cut_shortlist_test.py
 
 $(BUILD_DIR)/cut_histogram_census: research/probes/cut_histogram_census.cpp \
-		research/probes/cut_tile_index.hpp \
-		research/probes/cut_histogram_model.hpp research/probes/reuse_budget_cut_census.cpp \
-		research/probes/shared_column_family_census.cpp research/probes/shared_column_response_probe.cpp \
-		src/gpu/twocolour_gpu_common.cuh $(BUILD_DIR)/shared_column_production_key.o | $(BUILD_DIR)
-	$(CXX) -O3 -std=c++17 -o $@ $< $(BUILD_DIR)/shared_column_production_key.o -lnauty
+		$(CUT_RESEARCH_HEADERS) src/gpu/twocolour_gpu_common.cuh | $(BUILD_DIR)
+	$(CXX) -O3 -std=c++17 -o $@ $<
 
 .PHONY: cut-histogram-test
 cut-histogram-test: $(BUILD_DIR)/cut_histogram_census $(BUILD_DIR)/reuse_budget_cut_census
 	python3 tests/cut_histogram_test.py
+
+$(BUILD_DIR)/cut_join_features: research/probes/cut_join_features.cpp \
+		$(CUT_RESEARCH_HEADERS) src/gpu/twocolour_gpu_common.cuh | $(BUILD_DIR)
+	$(CXX) -O3 -std=c++17 -o $@ $<
+
+.PHONY: cut-join-features-test
+cut-join-features-test: $(BUILD_DIR)/cut_join_features
+	./$(BUILD_DIR)/cut_join_features --self-test
+	python3 tests/cut_join_features_test.py
 
 .PHONY: cut-batch-gate-test
 cut-batch-gate-test:

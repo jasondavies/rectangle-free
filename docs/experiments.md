@@ -18901,3 +18901,78 @@
   before further estimator tuning; retain the largest-group sampling caveat
   from Experiment 511. No new full-grid result, campaign rewrite, production
   solver change or Git commit.
+
+### 513. Shared validation, probe consolidation, and adaptive-cut work census
+
+- Extract the strict v3 checkpoint reader into `tools/gpu_result_v3.py`.
+  Both the production campaign reducer and the research GPU gate now use
+  it. The gate additionally checks uniform solver-configuration provenance,
+  manifest range/filter identity, mandatory transpose quotient, and finite
+  nonnegative timing fields. Its standalone payload includes and hashes the
+  shared reader. Revalidate the saved Experiment 512 results with the stricter
+  checker: unchanged exact contributions and recurring-time summary.
+- Separate the Experiment 512 benchmark preset from the reusable runner:
+  retain four alternating rounds, 4,096-edge batches, 16 threads and the
+  original timeouts by default, but accept any nonempty panel set rather than
+  requiring exactly eight panels. Add complete-summary rejection tests and
+  an isolated-import test for the standalone payload.
+- Replace nested whole-CLI `.cpp` includes with self-contained research
+  headers: `response_model.hpp`, `cut_geometry.hpp`,
+  `cut_reference_model.hpp`, and `cut_export.hpp`. Keep the independent
+  reference distribution/scorer and every historical scoring mode. The
+  exporter now selects its model with a C++ template, not inclusion-order
+  macros. Cut support/histogram/export binaries no longer link nauty or the
+  production orbit-key bridge; the family-canonicalisation driver still does.
+  Document Ada BMMA versus supported Blackwell NVFP4 in the README.
+- Add `cut_join_features.{cpp,py}`, a bounded CPU census of exactly the same
+  input records as the GPU A/B. Reuse occupied-prefix enumeration from the
+  scorer, verify it against Cartesian enumeration, and retain original class
+  counts for exact tile-padding and fragment-construction counts. Count
+  physical prefix pairs analytically; enumerate only compatible pairs on CPU.
+  These are source-level operation counts, not GPU profiler measurements.
+- Run both variants for **all 10,310 records of s0256** and **all 6,336 records
+  of s0320**, the regressing and a winning panel. Inputs are bound to the
+  Experiment 512 payload hashes. All four tile totals agree exactly with
+  Experiment 511, including both selected/complement joins per record:
+  s0256 **4,236,923,062 -> 3,906,182,245**; s0320
+  **4,385,717,558 -> 3,233,611,912**. The four CPU passes take respectively
+  **6.78, 7.40, 6.31, 6.76 seconds**, including canonical/layout construction;
+  no GPU resources or provider services are used. Raw per-join counters,
+  input/binary hashes and summaries are under ignored `build/review-513/`.
+
+  | Structural work, adaptive versus baseline | s0256 | s0320 |
+  | --- | ---: | ---: |
+  | Tensor tiles | -7.81% | -26.27% |
+  | Physical prefix pairs screened | **+25.35%** | -23.03% |
+  | Compatible prefix pairs | +16.55% | -18.29% |
+  | Weight-class pairs visited | **+16.09%** | -18.39% |
+  | Outer A-fragment constructions | **+11.05%** | -31.33% |
+  | Inner B-fragment constructions | -8.03% | -26.87% |
+  | Swapped-fragment constructions | -5.00% | -33.23% |
+  | Useful tile occupancy | 88.36% -> 86.20% | 85.80% -> 86.12% |
+  | Previously measured recurring GPU-solver time (Exp 512) | +14.48% | -25.45% |
+
+- On s0256, screening grows **1.346 -> 1.687 billion** prefix pairs and
+  class visits grow **201.991 -> 234.498 million**, despite fewer tensor
+  tiles. This is a concrete omission in the old tile-only objective and a
+  credible explanation for the observed regression, not a causal timing
+  decomposition. The native dual path shares loads/packing but still issues
+  **two** tensor operations; the census does not claim a fictitious halving
+  of tensor instruction count.
+- Tile-tail statistics do not show an obvious worsening: s0256's p99 join
+  drops **1,602,453 -> 1,465,660 tiles**, its maximum remains **3,924,241**,
+  and top-1% tile share changes only **9.43% -> 9.53%**. The maximum bucket
+  stays 23,328 tiles. This does **not** rule out device scheduling or
+  batch-specific tails, which require actual timing traces.
+- **Decision:** accept validation/consolidation, but keep adaptive cuts
+  research-only. The next selector gate should account for screening and
+  class/fragment overhead (or conservatively reject candidates increasing
+  those costs), then test on held-out panels. Do not fit a runtime model from
+  these two panels or claim a new speedup. The offline-preparation cost and
+  omitted largest-group sampling caveats from Experiments 511–512 remain.
+- Validation: **60 Python tests pass**, including production reducer tests,
+  standalone gate import, complete-summary rejection cases, all seven
+  scorer modes, and independently compilable/double-included research
+  headers. The native feature self-test also passes Cartesian/indexed and
+  reference-tile parity, class-size boundaries and orbit cases. `git diff
+  --check` passes. Production CUDA sources are unchanged; no Git commit.

@@ -1,6 +1,8 @@
+#pragma once
+#include "response_model.hpp"
 // Exact CPU cost-model acceleration, not a distribution join implementation.
 struct CutTileIndex {
-    struct Class {uint64_t n8,n16;unsigned orbit;};
+    struct Class {uint64_t n8,n16;unsigned orbit;uint64_t count;};
     struct Bucket {unsigned prefix,begin,end;};
     std::vector<Bucket> buckets;
     std::vector<Class> classes;
@@ -15,7 +17,7 @@ struct CutTileIndex {
             for(auto c:b.classes) {
                 if(!c.count||c.count>UINT32_MAX||(c.orbit!=1&&c.orbit!=2))
                     throw std::runtime_error("invalid class count/orbit");
-                classes.push_back({(c.count+7)/8,(c.count+15)/16,c.orbit});
+                classes.push_back({(c.count+7)/8,(c.count+15)/16,c.orbit,c.count});
             }
             out.end=classes.size();buckets.push_back(out);
             occupied[b.prefix/64]|=uint64_t(1)<<(b.prefix%64);
@@ -58,6 +60,33 @@ struct CutTileScorer {
             if(!(p&q))low[p]|=uint64_t(1)<<q;
         for(unsigned p=0;p<256;++p)for(unsigned q=0;q<256;++q)
             if(!(p&q))high[p][q/64]|=uint64_t(1)<<(q%64);
+    }
+    // Visit the union of ordinary and swapped compatible occupied prefixes.
+    // Optional occupancy masks skip classes already handled by subset tables.
+    template<class F> void visit_pairs(const CutTileIndex& a,const CutTileIndex& b,F callback,
+            const std::array<uint64_t,256>* occupied=nullptr,
+            const std::array<uint64_t,4>* words=nullptr) {
+        if(!occupied)occupied=&b.occupied;
+        if(!words)words=&b.words;
+        for(auto x:a.buckets) {
+            unsigned p=x.prefix,swapped=((p&127)<<7)|(p>>7);
+            for(unsigned block=0;block<4;++block) {
+                uint64_t live=(*words)[block]&(high[p>>6][block]|high[swapped>>6][block]);
+                while(live) {
+                    unsigned w=64*block+__builtin_ctzll(live);live&=live-1;++word_visits;
+                    uint64_t forward=(p>>6)&w?0:low[p&63];
+                    uint64_t reverse=(swapped>>6)&w?0:low[swapped&63];
+                    uint64_t candidates=(*occupied)[w]&(forward|reverse);
+                    while(candidates) {
+                        unsigned bit=__builtin_ctzll(candidates);candidates&=candidates-1;++pair_visits;
+                        unsigned j=b.base[w]+__builtin_popcountll(b.occupied[w]&((uint64_t(1)<<bit)-1));
+                        auto y=b.buckets[j];
+                        unsigned f=(forward>>bit)&1,s=(reverse>>bit)&1;
+                        callback(x,y,bool(f),bool(s));
+                    }
+                }
+            }
+        }
     }
     uint64_t score(const CutTileIndex& a,const CutTileIndex& b) {
         ++calls;uint64_t total=0;
@@ -116,30 +145,14 @@ struct CutTileScorer {
             }
             occupied=&active_occupied;words=&active_words;
         }
-        for(auto x:a.buckets) {
-            unsigned p=x.prefix,swapped=((p&127)<<7)|(p>>7);
-            for(unsigned block=0;block<4;++block) {
-                uint64_t live=(*words)[block]&(high[p>>6][block]|high[swapped>>6][block]);
-                while(live) {
-                    unsigned w=64*block+__builtin_ctzll(live);live&=live-1;++word_visits;
-                    uint64_t forward=(p>>6)&w?0:low[p&63];
-                    uint64_t reverse=(swapped>>6)&w?0:low[swapped&63];
-                    uint64_t candidates=(*occupied)[w]&(forward|reverse);
-                    while(candidates) {
-                        unsigned bit=__builtin_ctzll(candidates);candidates&=candidates-1;++pair_visits;
-                        unsigned j=b.base[w]+__builtin_popcountll(b.occupied[w]&((uint64_t(1)<<bit)-1));
-                        auto y=b.buckets[j];
-                        unsigned f=(forward>>bit)&1,s=(reverse>>bit)&1;
-                        for(unsigned i=x.begin;i<x.end;++i)for(unsigned k=y.begin;k<y.end;++k) {
-                            if(!covered.empty()&&covered[k])continue;
-                            auto l=a.classes[i],r=b.classes[k];
-                            uint64_t tiles=std::min(l.n16*r.n8,r.n16*l.n8);
-                            total+=tiles*(f+(s&&r.orbit==2));
-                        }
-                    }
-                }
+        visit_pairs(a,b,[&](auto x,auto y,bool f,bool s) {
+            for(unsigned i=x.begin;i<x.end;++i)for(unsigned k=y.begin;k<y.end;++k) {
+                if(!covered.empty()&&covered[k])continue;
+                auto l=a.classes[i],r=b.classes[k];
+                uint64_t tiles=std::min(l.n16*r.n8,r.n16*l.n8);
+                total+=tiles*(f+(s&&r.orbit==2));
             }
-        }
+        },occupied,words);
         return total;
     }
 };

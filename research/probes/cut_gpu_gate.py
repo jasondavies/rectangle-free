@@ -10,7 +10,17 @@ import shutil
 import statistics
 import struct
 import subprocess
+import sys
 import time
+
+TOOLS = Path(__file__).resolve().parents[2] / 'tools'
+if not Path(__file__).with_name('gpu_result_v3.py').is_file() and TOOLS.is_dir():
+    sys.path.insert(0, str(TOOLS))
+import gpu_result_v3
+
+# Reproducible preset, not restrictions on the reusable benchmark machinery.
+EXPERIMENT_512 = dict(rounds=4, batch_edges=4096, threads=16,
+                      check_timeout=300, work_timeout=900)
 
 
 def digest(path):
@@ -39,9 +49,9 @@ def prepare(source, output, binary):
     (output/'inputs').mkdir()
     seed = set()
     config = dict(kind='research-only matched cuts, not a canonical orbit corpus',
-                  rounds=4, batch_edges=4096, panels=[])
+                  **EXPERIMENT_512, panels=[])
     for i, panel in enumerate(sorted(source.glob('owner-*'))):
-        layouts, records = cut.load(panel/'cost.warm.jsonl')
+        _, records = cut.load(panel/'cost.warm.jsonl')
         batch.validate_records(records, panel/'records.tsv')
         selected = json.loads((panel/'result.json').read_text())
         if selected['input_sha256'] != digest(panel/'records.tsv'):
@@ -68,8 +78,8 @@ def prepare(source, output, binary):
                                       selection_sha256=digest(panel/'result.json'),
                                       labelled_weight=sum(w for _, w in baseline),
                                       covered_weight=sum(w*(2 if k.bit_count()<32 else 1) for k,w in baseline)))
-    if len(config['panels']) != 8:
-        raise ValueError('this gate requires the eight Experiment 511 panels')
+    if not config['panels']:
+        raise ValueError('no owner panels found')
     # Same superset seed in both variants. Its weights are irrelevant to the
     # canonical factory, and it is never treated as a solve work item.
     write_orbits(output/'inputs/seed.orbits', [(k, 1) for k in sorted(seed)])
@@ -87,29 +97,26 @@ def prepare(source, output, binary):
                     f.write(f"r{rep}-p{p['id']:02d}-{variant} inputs/p{p['id']:02d}-{variant}.orbits 0 0\n")
     shutil.copy2(binary, output/'solver')
     shutil.copy2(Path(__file__), output/'gate.py')
+    shutil.copy2(Path(gpu_result_v3.__file__), output/'gpu_result_v3.py')
     config['files'] = {str(p.relative_to(output)):digest(p) for p in sorted(output.rglob('*')) if p.is_file()}
     (output/'config.json').write_text(json.dumps(config, indent=2)+'\n')
     print(json.dumps(dict(records=sum(p['records'] for p in config['panels']),
                           seed_records=len(seed), payload_bytes=sum(p.stat().st_size for p in output.rglob('*') if p.is_file()))))
 
 
-def parse_result(path):
-    lines = path.read_text().splitlines(keepends=True)
-    if not lines or lines[0] != 'RECT8X8_PREFIX_RESULT 3\n' or not lines[-1].startswith('result_payload_sha256 '):
-        raise ValueError('invalid v3 result framing')
-    if hashlib.sha256(''.join(lines[1:-1]).encode()).hexdigest() != lines[-1].split()[1]:
-        raise ValueError('result payload checksum mismatch')
-    fields = {}
-    for line in lines:
-        key, *rest = line.rstrip('\n').split(maxsplit=1)
-        if key in fields:
-            raise ValueError('duplicate result field')
-        fields[key] = rest[0] if rest else ''
-    return fields
+def parse_result(path, identifier, input_path):
+    return gpu_result_v3.read_result(
+        path, magic='RECT8X8_PREFIX_RESULT', geometry='8x8', transpose_quotient=True,
+        identity=dict(id=identifier, path=input_path, start='0', end='0',
+                      filter_mod='0', filter_id='0'))
 
 
 def summarize(root):
     config = json.loads((root/'config.json').read_text())
+    if (type(config['rounds']) is not int or config['rounds'] < 1 or
+        not config['panels'] or
+        len({p['id'] for p in config['panels']}) != len(config['panels'])):
+        raise ValueError('invalid benchmark rounds or panels')
     for file, expected in config['files'].items():
         if digest(root/file) != expected:
             raise ValueError('payload hash mismatch: '+file)
@@ -117,6 +124,7 @@ def summarize(root):
     measures = ['total_seconds', 'gpu_seconds', 'left_layout_seconds',
                 'right_layout_seconds', 'canonical_resolve_seconds', 'load_seconds']
     checks = 0
+    configuration = config.get('solver_configuration_sha256')
     for p in config['panels']:
         i = p['id']
         expected = None
@@ -124,8 +132,13 @@ def summarize(root):
         for variant in ('baseline', 'adaptive'):
             rows = []
             for prefix, directory in [('check', 'check-results'), *[(f'r{r}', 'results') for r in range(config['rounds'])]]:
-                row = parse_result(root/directory/f'{prefix}-p{i:02d}-{variant}.result')
                 expected_path = f'inputs/p{i:02d}-{variant}.orbits'
+                identifier = f'{prefix}-p{i:02d}-{variant}'
+                row = parse_result(root/directory/f'{identifier}.result', identifier, expected_path)
+                if configuration is None:
+                    configuration = row['solver_configuration_sha256']
+                if row['solver_configuration_sha256'] != configuration:
+                    raise ValueError('mixed solver configuration provenance')
                 if (row['id'] != f'{prefix}-p{i:02d}-{variant}' or row['path'] != expected_path or
                     row['solver_binary_sha256'] != config['files']['solver'] or
                     row['canonical_cache_sha256'] != config['files']['inputs/seed.orbits'] or
@@ -151,6 +164,8 @@ def summarize(root):
             variants[variant] = dict(samples=rows, median={k:statistics.median(float(r[k]) for r in rows) for k in measures})
         panels.append(dict(panel=i, contribution=str(expected), **variants))
     totals = {v:{k:sum(p[v]['median'][k] for p in panels) for k in measures} for v in ('baseline','adaptive')}
+    if totals['baseline']['total_seconds'] <= 0:
+        raise ValueError('baseline total time must be positive')
     result = dict(exact=True, cpu_join_checks=checks, panels=panels, sums_of_panel_medians=totals,
                   recurring_time_reduction_percent=100*(1-totals['adaptive']['total_seconds']/totals['baseline']['total_seconds']))
     return result
@@ -164,9 +179,12 @@ def run(root):
     for file, expected in config['files'].items():
         if digest(Path(file)) != expected:
             raise ValueError('payload hash mismatch')
-    env = dict(os.environ, OMP_NUM_THREADS='16')
+    preset = EXPERIMENT_512 | config
+    env = dict(os.environ, OMP_NUM_THREADS=str(preset['threads']))
     # Verify separately, so scalar reference work never pollutes timed samples.
-    for manifest, directory, verify, limit in [('check.tsv','check-results',2,300), ('work.tsv','results',0,900)]:
+    for manifest, directory, verify, limit in [
+        ('check.tsv','check-results',2,preset['check_timeout']),
+        ('work.tsv','results',0,preset['work_timeout'])]:
         start = time.monotonic()
         intervals = []
         last = start

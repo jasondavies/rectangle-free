@@ -1,4 +1,7 @@
-// Research-only exact prefix/class summaries. Included after the common model.
+#pragma once
+#include "cut_geometry.hpp"
+#include "response_model.hpp"
+// Research-only exact prefix/class summaries.
 // Never re-choose a token-plane representative after applying the row map.
 #include "cut_tile_index.hpp"
 struct CutHistogramModel {

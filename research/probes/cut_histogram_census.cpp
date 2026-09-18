@@ -1,7 +1,5 @@
 // Cold/warm A/B exporter; each pass rebuilds labelled metadata and scores tiles.
-#define REUSE_CUT_HISTOGRAM_MODEL
-#define REUSE_BUDGET_CUT_NO_MAIN
-#include "reuse_budget_cut_census.cpp"
+#include "cut_export.hpp"
 
 static void histogram_self_test() {
     initialise_tables();CostModel reference;CutHistogramModel candidate;

@@ -419,3 +419,44 @@ Moreover the preceding 92.29-second CPU preparation subtotal dwarfs the
 0.208-second recurring saving for one traversal of this sample. Keep the
 method research-only pending a cheaper, runtime-aware selector; neither
 one-run end-to-end benefit nor Ada/L40S gains have been established.
+
+## Shared components and structural census (Experiment 513)
+
+The research CLIs no longer include one another's `.cpp` files. Shared pieces:
+
+- `response_model.hpp`: independent distribution/response oracle.
+- `cut_geometry.hpp`: fixed eight-row geometry and reversible cut mappings.
+- `cut_reference_model.hpp`: simple reference layout/cost model.
+- `cut_histogram_model.hpp` / `cut_tile_index.hpp`: accelerated metadata/scoring.
+- `cut_export.hpp`: common bounded exporter with a compile-time model policy.
+
+The cut-only executables do not require nauty. Family canonicalisation still
+does. Headers are tested independently and can be included twice. Historical
+scorers remain regression controls, not production fallbacks.
+
+`cut_gpu_gate.py` and the campaign reducer share `tools/gpu_result_v3.py`.
+Prepared standalone payloads copy and hash that reader. The Experiment 512
+defaults remain unchanged, but a gate may now contain any nonempty panel set.
+Run the **current** gate's `summarize` command against old saved payloads to
+apply the strengthened identity/configuration/timing validation.
+
+```sh
+make cut-gpu-gate-test cut-join-features-test
+python3 research/probes/cut_join_features.py \
+  build/review-512/standard/collected build/cut-join-features \
+  --panels 2 3 --seconds 120
+```
+
+This local census binds inputs to the saved GPU payload hashes and records
+the census binary hash. It checks completion before producing a summary.
+Its counters describe the current 8x8 class/FP4 loop structure, not SASS
+instructions, cache traffic or a predicted GPU runtime. `useful_pairs` counts
+unpadded suffix predicates, **not** successful disjointness matches.
+
+The s0256 regression now has a concrete structural explanation candidate:
+**7.81% fewer tiles, but 25.35% more prefix screening, 16.09% more class-pair
+visits and 11.05% more outer fragment construction**. The winning s0320 panel
+reduces all those costs. P99 tile work decreases in both; maximum tile work
+is unchanged. Next test a screening/class-aware conservative selector on
+held-out panels, while retaining the existing memory/reuse budgets. No new
+GPU speedup or production integration is implied by this census.
